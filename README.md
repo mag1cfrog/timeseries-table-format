@@ -36,11 +36,12 @@ flowchart TD
         CUR["CURRENT (latest version)"]
     end
 
-    subgraph Meta["Core metadata & state (timeseries-table-core)"]
+    subgraph Meta["Metadata & state"]
         TMETA["TableMeta (TableKind::TimeSeries + TimeIndexSpec)"]
         STATE["TableState (version, segments)"]
         OCC["Version-guard OCC (commit_with_expected_version)"]
         COV["Coverage bitmaps (Roaring)"]
+        CORE["timeseries-table-core crate"]
     end
 
     subgraph API["APIs & integrations"]
