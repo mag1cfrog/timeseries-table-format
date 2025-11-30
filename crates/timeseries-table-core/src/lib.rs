@@ -21,3 +21,11 @@ pub mod coverage;
 pub mod fs;
 pub mod log;
 pub mod table;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn smoke_test_compiles() {
+        assert_eq!(2 + 2, 4);
+    }
+}
