@@ -1,5 +1,6 @@
 # timeseries-table-format
 
+![License](https://img.shields.io/badge/license-MIT-informational)
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
 <p align="center">
