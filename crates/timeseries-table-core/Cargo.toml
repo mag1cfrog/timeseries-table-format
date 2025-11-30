@@ -1,0 +1,11 @@
+[package]
+name = "timeseries-table-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mag1cfrog/timeseries-table-format"
+description = "Core engine for a Rust-native log-structured time-series table format (metadata log + coverage bitmaps)."
+
+[dependencies]
+serde = "1.0.228"
+serde_json = "1.0.145"
