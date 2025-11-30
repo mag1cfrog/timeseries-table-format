@@ -1,14 +1,16 @@
-
 # timeseries-table-format
 
-`timeseries-table-format` is a Rust-native, log-structured **time-series table format**.
+Time-series data deserves something better than “just more Parquet files.”
 
-The core crate, `timeseries-table-core`, focuses on:
+`timeseries-table-format` is a Rust-native, log-structured **time-series table format and table abstraction** that treats time as a first-class index, making it easier to run serious backtests and analytics without drowning in ad-hoc Parquet files. At a glance, it gives you:
 
-- A Delta-inspired, **append-only metadata log** with versioned commits,
-- **Optimistic concurrency control** via version guards (no silent overwrites),
-- **RoaringBitmap-based coverage tracking** over time buckets,
-- A clean foundation for integration with query engines like DataFusion and higher-level backtesting tools.
+- A log-structured, **append-only metadata layer** with versioned commits and optimistic concurrency  
+  (inspired by modern open table formats like **Delta Lake** and **Apache Iceberg**),
+- A `TimeSeriesTable` abstraction over Parquet segments (not just file paths),
+- **RoaringBitmap-based coverage indexes** for gaps, coverage ratios, and “fully covered” windows,
+- A clean foundation for integration with engines like DataFusion and backtesting tools.
+
+The core crate, `timeseries-table-core`, implements these pieces and is intended to be reused by higher-level crates.
 
 ---
 
@@ -41,7 +43,6 @@ flowchart TD
         STATE["TableState (version, segments)"]
         OCC["Version-guard OCC (commit_with_expected_version)"]
         COV["Coverage bitmaps (Roaring)"]
-        CORE["timeseries-table-core crate"]
     end
 
     subgraph API["APIs & integrations"]
