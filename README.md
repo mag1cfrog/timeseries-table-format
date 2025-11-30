@@ -1,5 +1,6 @@
 # timeseries-table-format
 
+[![Rust](https://img.shields.io/badge/Developed%20in-Rust-orange?logo=rust)](https://www.rust-lang.org)
 ![License](https://img.shields.io/badge/license-MIT-informational)
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
