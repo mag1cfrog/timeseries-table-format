@@ -1,5 +1,9 @@
 # timeseries-table-format
 
+<p align="center">
+  <img src="docs/ferris-timeseries.png" alt="Ferris with timeseries-table-format" width="1920" />
+</p>
+
 Time-series data deserves something better than “just more Parquet files.”
 
 `timeseries-table-format` is a Rust-native, log-structured **time-series table format and table abstraction** that treats time as a first-class index, making it easier to run serious backtests and analytics without drowning in ad-hoc Parquet files. At a glance, it gives you:
