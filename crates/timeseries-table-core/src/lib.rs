@@ -17,5 +17,6 @@
 //! tools, or a CLI) are expected to depend on this core crate rather than
 //! re-implementing the storage and metadata logic.
 #![deny(missing_docs)]
+pub mod coverage;
 pub mod log;
 pub mod table;
