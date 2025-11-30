@@ -13,6 +13,9 @@ concurrency:
 
 jobs:
   detect-rust-changes:
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
