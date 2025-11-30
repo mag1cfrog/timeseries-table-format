@@ -18,3 +18,4 @@
 //! re-implementing the storage and metadata logic.
 #![deny(missing_docs)]
 pub mod log;
+pub mod table;
