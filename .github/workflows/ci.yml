@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}   # manual run
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-rust-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - '**/*.rs'
+              - 'Cargo.toml'
+  
+  rust-quality-gate:
+    runs-on: ubuntu-latest
+    needs: [detect-rust-changes]
+    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    defaults:
+      run:
+        working-directory: .
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+      
+      - run: rustc -Vv && cargo -V && cargo clippy -V
+      
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      
+      - name: test
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+  ci-summary:
+    # The only job you mark as "required" in branch protection.
+    runs-on: ubuntu-latest
+    needs: [detect-rust-changes, rust-quality-gate]
+    if: ${{ always() }}
+    steps:
+      - name: Summarize outcome
+        run: |
+          if [ "${{ needs['detect-rust-changes'].outputs.code }}" = "true" ]; then
+            echo "Code changed; heavy job result: ${{ needs['rust-quality-gate'].result }}"
+            [ "${{ needs['rust-quality-gate'].result }}" = "success" ] || exit 1
+          else
+            echo "No code changes; skipping heavy checks."
+          fi
