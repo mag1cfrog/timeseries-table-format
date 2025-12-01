@@ -63,6 +63,8 @@
 //! does not know about query engines; it only provides the persisted metadata
 //! and an API for committing changes safely.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, Snafu};
@@ -100,6 +102,49 @@ pub enum CommitError {
         backtrace: Backtrace,
     },
 }
+
+/// Helper for reading and writing the commit log under a table root.
+///
+/// Layout:
+///   <root>/_timeseries_log/0000000001.json
+///   <root>/_timeseries_log/0000000002.json
+///   <root>/_timeseries_log/CURRENT
+#[derive(Debug, Clone)]
+pub struct LogStore {
+    root: PathBuf,
+}
+
+impl LogStore {
+    /// Name of the subdirectory containing the commit log.
+    pub const LOG_DIR_NAME: &str = "_timeseries_log";
+    /// Name of the file that stores the current version pointer.
+    pub const CURRENT_FILE_NAME: &str = "CURRENT";
+    /// Number of digits used in zero-padded commit file names.
+    pub const COMMIT_FILENAME_DIGITS: usize = 10;
+
+    /// Create a new LogStore rooted at a table directory.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn log_dir(&self) -> PathBuf {
+        self.root.join(Self::LOG_DIR_NAME)
+    }
+
+    fn current_path(&self) -> PathBuf {
+        self.log_dir().join(Self::CURRENT_FILE_NAME)
+    }
+
+    fn commit_path(&self, version: u64) -> PathBuf {
+        let file_name = format!(
+            "{:0width$}.json",
+            version,
+            width = Self::COMMIT_FILENAME_DIGITS
+        );
+        self.log_dir().join(file_name)
+    }
+}
+
 /// Granularity for time buckets used by coverage/bitmap logic.
 ///
 /// This does not affect physical storage directly, but describes how the time
