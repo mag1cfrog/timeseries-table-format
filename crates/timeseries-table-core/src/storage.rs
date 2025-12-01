@@ -4,8 +4,8 @@
 //! `timeseries-table-core`. It is responsible for mapping a table root
 //! directory to the locations of:
 //!
-//! - The metadata log directory (for example, `<root>/log/`).
-//! - Individual commit files (for example, `<root>/log/0000000001.json`).
+//! - The metadata log directory (for example, `<root>/_timeseries_log/`).
+//! - Individual commit files (for example, `<root>/_timeseries_log/0000000001.json`).
 //! - The `CURRENT` pointer that records the latest committed version.
 //! - Data segments (for example, Parquet files) and any directory
 //!   structure used to organize them.
