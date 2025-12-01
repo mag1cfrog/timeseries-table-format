@@ -65,7 +65,41 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use snafu::{Backtrace, Snafu};
 
+/// Errors that can occur while reading or writing the commit log.
+#[derive(Debug, Snafu)]
+pub enum CommitError {
+    /// The caller's expected_version does not match the CURRENT pointer.
+    #[snafu(display("Commit conflict: expected version {expected}, but CURRENT is {found}"))]
+    Conflict {
+        /// The version the caller expected to be current.
+        expected: u64,
+        /// The actual current version found.
+        found: u64,
+        /// Backtrace for debugging.
+        backtrace: Backtrace,
+    },
+    /// Underlying I/O error while working with the log or CURRENT file.
+    #[snafu(display("I/O error at version {version:?}: {source}"))]
+    Io {
+        /// The commit version involved in the error, if known.
+        version: Option<u64>,
+        /// The underlying I/O error.
+        source: std::io::Error,
+        /// Backtrace for debugging.
+        backtrace: Backtrace,
+    },
+
+    /// The log or CURRENT file is in an unexpected / malformed state.
+    #[snafu(display("Corrupt log state: {msg}"))]
+    CorruptState {
+        /// A description of the corrupt state.
+        msg: String,
+        /// Backtrace for debugging.
+        backtrace: Backtrace,
+    },
+}
 /// Granularity for time buckets used by coverage/bitmap logic.
 ///
 /// This does not affect physical storage directly, but describes how the time
