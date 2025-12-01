@@ -1,7 +1,11 @@
 # timeseries-table-format
 
+[![Rust](https://img.shields.io/badge/Developed%20in-Rust-orange?logo=rust)](https://www.rust-lang.org)
+![License](https://img.shields.io/badge/license-MIT-informational)
+[![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
+
 <p align="center">
-  <img src="docs/ferris-timeseries.png" alt="Ferris with timeseries-table-format" width="1920" />
+  <img src="docs/ferris-timeseries-2.png" alt="Ferris with timeseries-table-format" width="1920" />
 </p>
 
 Time-series data deserves something better than “just more Parquet files.”
