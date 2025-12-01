@@ -50,7 +50,8 @@
 //!         "path": "data/nvda_1h_0001.parquet",
 //!         "ts_min": "2020-01-01T00:00:00Z",
 //!         "ts_max": "2020-01-02T00:00:00Z",
-//!         "row_count": 1024
+//!         "row_count": 1024,
+//!         "format": "parquet"
 //!       }
 //!     }
 //!   ]
@@ -201,7 +202,7 @@ pub enum FileFormat {
 
 /// Metadata about a single physical segment.
 ///
-/// In v0.1, a "segment" corresponds to a single data file on disk
+/// In v0.1, a "segment" corresponds to a single data file on disk.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SegmentMeta {
     /// Logical identifier for this segment.
