@@ -269,3 +269,199 @@ pub struct Commit {
     /// Ordered list of actions that describe how table state changes in this commit.
     pub actions: Vec<LogAction>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json;
+
+    #[test]
+    fn commit_json_roundtrip() {
+        let ts0 = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let ts1 = Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+
+        let time_index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string()],
+            bucket: TimeBucket::Minutes(60),
+            timezone: Some("UTC".to_string()),
+        };
+
+        let table_meta = TableMeta {
+            kind: TableKind::TimeSeries(time_index),
+            logical_schema: Some(LogicalSchema {
+                columns: vec![
+                    LogicalColumn {
+                        name: "ts".to_string(),
+                        data_type: "timestamp[us]".to_string(),
+                        nullable: false,
+                    },
+                    LogicalColumn {
+                        name: "symbol".to_string(),
+                        data_type: "utf8".to_string(),
+                        nullable: false,
+                    },
+                ],
+            }),
+            created_at: ts0,
+            format_version: 1,
+        };
+
+        let seg_meta = SegmentMeta {
+            segment_id: SegmentId("seg-0001".to_string()),
+            path: "data/nvda_1h_0001.parquet".to_string(),
+            format: FileFormat::Parquet,
+            ts_min: ts0,
+            ts_max: ts1,
+            row_count: 1024,
+        };
+
+        let commit = Commit {
+            version: 1,
+            base_version: 0,
+            timestamp: ts1,
+            actions: vec![
+                LogAction::UpdateTableMeta(table_meta),
+                LogAction::AddSegment(seg_meta),
+            ],
+        };
+
+        // Serialize to JSON.
+        let json = serde_json::to_string_pretty(&commit).expect("serialize commit");
+        // println!("{json}");
+
+        // Deserialize back.
+        let decoded: Commit = serde_json::from_str(&json).expect("deserialize commit");
+
+        // Round-trip equality.
+        assert_eq!(commit, decoded);
+    }
+
+    #[test]
+    fn time_index_spec_defaults() {
+        // JSON with optional fields omitted.
+        let json = r#"{
+            "timestamp_column": "ts",
+            "bucket": { "Hours": 1 }
+        }"#;
+
+        let spec: TimeIndexSpec = serde_json::from_str(json).expect("deserialize");
+
+        assert_eq!(spec.timestamp_column, "ts");
+        assert_eq!(spec.entity_columns, Vec::<String>::new()); // default
+        assert_eq!(spec.bucket, TimeBucket::Hours(1));
+        assert_eq!(spec.timezone, None); // default
+    }
+
+    #[test]
+    fn time_index_spec_skips_none_timezone_on_serialize() {
+        let spec = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec![],
+            bucket: TimeBucket::Seconds(30),
+            timezone: None,
+        };
+
+        let json = serde_json::to_string(&spec).expect("serialize");
+
+        // "timezone" key should be absent.
+        assert!(!json.contains("timezone"));
+    }
+
+    #[test]
+    fn logical_column_nullable_defaults_to_false() {
+        let json = r#"{ "name": "price", "data_type": "f64" }"#;
+
+        let col: LogicalColumn = serde_json::from_str(json).expect("deserialize");
+
+        assert_eq!(col.name, "price");
+        assert_eq!(col.data_type, "f64");
+        assert!(!col.nullable); // default is false
+    }
+
+    #[test]
+    fn table_kind_generic_roundtrip() {
+        let kind = TableKind::Generic;
+        let json = serde_json::to_string(&kind).expect("serialize");
+        let decoded: TableKind = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(kind, decoded);
+        assert_eq!(json, r#""Generic""#);
+    }
+
+    #[test]
+    fn all_time_bucket_variants_roundtrip() {
+        let buckets = vec![
+            TimeBucket::Seconds(15),
+            TimeBucket::Minutes(5),
+            TimeBucket::Hours(24),
+            TimeBucket::Days(7),
+        ];
+
+        for bucket in buckets {
+            let json = serde_json::to_string(&bucket).expect("serialize");
+            let decoded: TimeBucket = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(bucket, decoded);
+        }
+    }
+
+    #[test]
+    fn file_format_serializes_lowercase() {
+        let format = FileFormat::Parquet;
+        let json = serde_json::to_string(&format).expect("serialize");
+
+        assert_eq!(json, r#""parquet""#);
+
+        // Also verify round-trip.
+        let decoded: FileFormat = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(format, decoded);
+    }
+
+    #[test]
+    fn file_format_default_is_parquet() {
+        assert_eq!(FileFormat::default(), FileFormat::Parquet);
+    }
+
+    #[test]
+    fn remove_segment_action_roundtrip() {
+        let action = LogAction::RemoveSegment {
+            segment_id: SegmentId("seg-to-remove".to_string()),
+        };
+
+        let json = serde_json::to_string(&action).expect("serialize");
+        let decoded: LogAction = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(action, decoded);
+    }
+
+    #[test]
+    fn commit_with_empty_actions() {
+        let ts = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+
+        let commit = Commit {
+            version: 1,
+            base_version: 0,
+            timestamp: ts,
+            actions: vec![],
+        };
+
+        let json = serde_json::to_string(&commit).expect("serialize");
+        let decoded: Commit = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(commit, decoded);
+        assert!(decoded.actions.is_empty());
+    }
+
+    #[test]
+    fn segment_id_transparent_serialization() {
+        let id = SegmentId("my-segment".to_string());
+        let json = serde_json::to_string(&id).expect("serialize");
+
+        // Should be a plain string, not {"0": "my-segment"}.
+        assert_eq!(json, r#""my-segment""#);
+
+        let decoded: SegmentId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(id, decoded);
+    }
+}
