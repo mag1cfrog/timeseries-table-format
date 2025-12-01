@@ -63,11 +63,15 @@
 //! does not know about query engines; it only provides the persisted metadata
 //! and an API for committing changes safely.
 
-use std::path::PathBuf;
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use snafu::{Backtrace, Snafu};
+use snafu::{Backtrace, prelude::*};
 
 /// Errors that can occur while reading or writing the commit log.
 #[derive(Debug, Snafu)]
@@ -142,6 +146,26 @@ impl LogStore {
             width = Self::COMMIT_FILENAME_DIGITS
         );
         self.log_dir().join(file_name)
+    }
+
+    /// Write bytes to `path` atomically via a temporary file + rename.
+    fn write_atomic(&self, path: &Path, contents: &[u8]) -> Result<(), CommitError> {
+        // Ensure parent directory exists.
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).context(IoSnafu { version: None })?;
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        {
+            let mut file = File::create(&tmp_path).context(IoSnafu { version: None })?;
+            file.write_all(contents)
+                .context(IoSnafu { version: None })?;
+            // Best-effort durability: ensure bytes hit disk before rename.
+            file.sync_all().context(IoSnafu { version: None })?;
+        }
+
+        fs::rename(&tmp_path, path).context(IoSnafu { version: None })?;
+        Ok(())
     }
 }
 
