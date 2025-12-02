@@ -178,3 +178,120 @@ pub async fn read_to_string(location: &TableLocation, rel_path: &Path) -> Storag
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[tokio::test]
+    async fn write_atomic_creates_file_with_contents() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let rel_path = Path::new("test.txt");
+        let contents = b"hello world";
+
+        write_atomic(&location, rel_path, contents).await?;
+
+        // Verify file exists and has correct contents.
+        let abs = tmp.path().join(rel_path);
+        let read_back = tokio::fs::read_to_string(&abs).await?;
+        assert_eq!(read_back, "hello world");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_atomic_creates_parent_directories() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let rel_path = Path::new("nested/deep/dir/file.txt");
+        let contents = b"nested content";
+
+        write_atomic(&location, rel_path, contents).await?;
+
+        let abs = tmp.path().join(rel_path);
+        assert!(abs.exists());
+        let read_back = tokio::fs::read_to_string(&abs).await?;
+        assert_eq!(read_back, "nested content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_atomic_overwrites_existing_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("overwrite.txt");
+
+        // Write initial content.
+        write_atomic(&location, rel_path, b"original").await?;
+
+        // Overwrite with new content.
+        write_atomic(&location, rel_path, b"updated").await?;
+
+        let abs = tmp.path().join(rel_path);
+        let read_back = tokio::fs::read_to_string(&abs).await?;
+        assert_eq!(read_back, "updated");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_atomic_no_leftover_tmp_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("clean.txt");
+
+        write_atomic(&location, rel_path, b"data").await?;
+
+        // The .tmp file should not remain after successful write.
+        let tmp_path = tmp.path().join("clean.tmp");
+        assert!(!tmp_path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_to_string_returns_file_contents() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("readable.txt");
+
+        // Create a file directly.
+        let abs = tmp.path().join(rel_path);
+        tokio::fs::write(&abs, "file contents").await?;
+
+        let result = read_to_string(&location, rel_path).await?;
+        assert_eq!(result, "file contents");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_to_string_returns_not_found_for_missing_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("does_not_exist.txt");
+
+        let result = read_to_string(&location, rel_path).await;
+
+        assert!(result.is_err());
+        let err = result.expect_err("expected NotFound error");
+        assert!(matches!(err, StorageError::NotFound { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_then_read_roundtrip() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("roundtrip.txt");
+
+        let original = "roundtrip content 🎉";
+        write_atomic(&location, rel_path, original.as_bytes()).await?;
+
+        let read_back = read_to_string(&location, rel_path).await?;
+        assert_eq!(read_back, original);
+        Ok(())
+    }
+}
