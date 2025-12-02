@@ -24,3 +24,132 @@
 //! the local filesystem yet, but the API should be designed so that
 //! future adapters (for example, object storage) can be introduced
 //! without rewriting the log and table logic.
+
+use snafu::{Backtrace, prelude::*};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
+use tokio::{fs, io::AsyncWriteExt};
+
+/// General result type used by storage operations.
+///
+/// This aliases `Result<T, StorageError>` so functions in this module can
+/// return a concise result type while still communicating storage-specific
+/// error information via `StorageError`.
+pub type StorageResult<T> = Result<T, StorageError>;
+
+/// Represents the location of a timeseries table.
+///
+/// This enum abstracts over different storage backends, currently supporting
+/// local filesystem paths with potential future support for object storage.
+#[derive(Clone, Debug)]
+pub enum TableLocation {
+    /// A table stored on the local filesystem at the given path.
+    Local(PathBuf),
+    // Future:
+    // S3 { bucket: string, prefix: string },
+}
+
+impl TableLocation {
+    /// Creates a new `TableLocation` for a local filesystem path.
+    pub fn local(root: impl Into<PathBuf>) -> Self {
+        TableLocation::Local(root.into())
+    }
+}
+
+/// Errors that can occur during storage operations.
+#[derive(Debug, Snafu)]
+pub enum StorageError {
+    /// The specified path was not found.
+    #[snafu(display("Path not found: {path}"))]
+    /// The path that was not found.
+    NotFound {
+        /// The path that was not found.
+        path: String,
+        /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
+    },
+
+    /// An I/O error occurred on the local filesystem.
+    #[snafu(display("Local I/O error at {path}: {source}"))]
+    LocalIo {
+        /// The path where the I/O error occurred.
+        path: String,
+        /// The underlying I/O error.
+        source: io::Error,
+        /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
+    },
+}
+
+/// Join a table location with a relative path into an absolute local path.
+///
+/// v0.1: only Local is supported.
+fn join_local(location: &TableLocation, rel: &Path) -> PathBuf {
+    match location {
+        TableLocation::Local(root) => root.join(rel),
+    }
+}
+
+async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).await.context(LocalIoSnafu {
+            path: parent.display().to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+/// Write `contents` to `rel_path` inside `location` using an atomic write.
+///
+/// This performs a write-then-rename sequence on the local filesystem:
+/// it writes the payload to a temporary file next to the target path,
+/// syncs the file, and then renames it into place to provide an atomic
+/// replacement. Currently only `TableLocation::Local` is supported.
+///
+/// # Parameters
+///
+/// - `location`: the table root location to resolve the relative path.
+/// - `rel_path`: the relative path (under `location`) to write the file to.
+/// - `contents`: the bytes to write.
+///
+/// # Errors
+///
+/// Returns `StorageError::LocalIo` when filesystem I/O fails; other internal
+/// helpers may add context to the returned error.
+pub async fn write_atomic(
+    location: &TableLocation,
+    rel_path: &Path,
+    contents: &[u8],
+) -> StorageResult<()> {
+    match location {
+        TableLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+
+            create_parent_dir(&abs).await?;
+
+            let tmp_path = abs.with_extension("tmp");
+
+            {
+                let mut file = fs::File::create(&tmp_path).await.context(LocalIoSnafu {
+                    path: tmp_path.display().to_string(),
+                })?;
+
+                file.write_all(contents).await.context(LocalIoSnafu {
+                    path: tmp_path.display().to_string(),
+                })?;
+
+                file.sync_all().await.context(LocalIoSnafu {
+                    path: tmp_path.display().to_string(),
+                })?;
+            }
+
+            fs::rename(&tmp_path, &abs).await.context(LocalIoSnafu {
+                path: abs.display().to_string(),
+            })?;
+
+            Ok(())
+        }
+    }
+}
