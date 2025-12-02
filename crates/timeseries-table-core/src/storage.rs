@@ -30,7 +30,10 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{
+    fs::{self, OpenOptions},
+    io::AsyncWriteExt,
+};
 
 /// General result type used by storage operations.
 ///
@@ -180,6 +183,54 @@ pub async fn read_to_string(location: &TableLocation, rel_path: &Path) -> Storag
                     path: abs.display().to_string(),
                 }),
             }
+        }
+    }
+}
+
+/// Create a *new* file at `rel_path` and write `contents`, failing if the file
+/// already exists.
+///
+/// This is used for commit files where we want per-version uniqueness.
+pub async fn write_new(
+    location: &TableLocation,
+    rel_path: &Path,
+    contents: &[u8],
+) -> StorageResult<()> {
+    match location {
+        TableLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+            create_parent_dir(&abs).await?;
+
+            // Atomic "create only if not exists" on the target path.
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&abs)
+                .await
+                .map_err(|e| {
+                    if e.kind() == io::ErrorKind::AlreadyExists {
+                        StorageError::AlreadyExists {
+                            path: abs.display().to_string(),
+                            backtrace: Backtrace::capture(),
+                        }
+                    } else {
+                        StorageError::LocalIo {
+                            path: abs.display().to_string(),
+                            source: e,
+                            backtrace: Backtrace::capture(),
+                        }
+                    }
+                })?;
+
+            file.write_all(contents).await.context(LocalIoSnafu {
+                path: abs.display().to_string(),
+            })?;
+
+            file.sync_all().await.context(LocalIoSnafu {
+                path: abs.display().to_string(),
+            })?;
+
+            Ok(())
         }
     }
 }
