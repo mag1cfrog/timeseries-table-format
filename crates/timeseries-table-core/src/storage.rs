@@ -77,7 +77,12 @@ pub enum StorageError {
     /// The specified path already exists when creation was requested with
     /// create-new semantics.
     #[snafu(display("Path already exists: {path}"))]
-    AlreadyExists { path: String, backtrace: Backtrace },
+    AlreadyExists {
+        /// The path that was found to already exist.
+        path: String,
+        /// The backtrace captured when the error occurred.
+        backtrace: Backtrace,
+    },
 
     /// An I/O error occurred on the local filesystem.
     #[snafu(display("Local I/O error at {path}: {source}"))]
