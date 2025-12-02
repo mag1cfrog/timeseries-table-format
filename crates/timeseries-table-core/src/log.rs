@@ -194,6 +194,76 @@ impl LogStore {
 
         Ok(version)
     }
+
+    /// Commit a new version with an optimistic concurrency guard.
+    ///
+    /// Steps:
+    /// - Load CURRENT.
+    /// - If CURRENT != expected, return CommitError::Conflict.
+    /// - Compute version = expected + 1 (with overflow check).
+    /// - Build a Commit.
+    /// - Serialize to JSON.
+    /// - Create commit file `_timeseries_log/<zero-padded>.json` using
+    ///   "create only if not exists" semantics.
+    /// - Update `_timeseries_log/CURRENT` with the new version (e.g. "1 ").
+    pub async fn commit_with_expected_version(
+        &self,
+        expected: u64,
+        actions: Vec<LogAction>,
+    ) -> Result<u64, CommitError> {
+        // 1) Guard on CURRENT
+        let current = self.load_current_version().await?;
+        if current != expected {
+            return ConflictSnafu {
+                expected,
+                found: current,
+            }
+            .fail();
+        }
+
+        // 2) Compute next version with overflow guard
+        let version = expected.checked_add(1).context(CorruptStateSnafu {
+            msg: "version counter overflow".to_string(),
+        })?;
+
+        // 3) Build commit payload
+        let commit = Commit {
+            version,
+            base_version: expected,
+            timestamp: Utc::now(),
+            actions,
+        };
+
+        let json = serde_json::to_vec(&commit).map_err(|e| CommitError::CorruptState {
+            msg: format!("failed to serialize commit {version}: {e}"),
+            backtrace: Backtrace::capture(),
+        })?;
+
+        // 4) Attempt to create the commit file *only if it does not already exist*.
+        let commit_rel = Self::commit_rel_path(version);
+        if let Err(source) = storage::write_new(&self.location, &commit_rel, &json).await {
+            match &source {
+                // If the commit file for this version already exists, someone else
+                // committed first. Map to a conflict, using CURRENT to report `found`.
+                StorageError::AlreadyExists { .. } => {
+                    let found = self.load_current_version().await?;
+                    return ConflictSnafu { expected, found }.fail();
+                }
+                _ => {
+                    return Err(CommitError::Storage { source });
+                }
+            }
+        }
+
+        // 5) Update CURRENT via atomic write (temp + rename).
+        let current_rel = Self::current_rel_path();
+        // Spec exampl use "1 "(trailing space); we follow that.
+        let current_contents = format!("{version}\n");
+        self.write_atomic_rel(&current_rel, current_contents.as_bytes())
+            .await?;
+
+        Ok(version)
+    }
 }
 
 /// Granularity for time buckets used by coverage/bitmap logic.
