@@ -355,4 +355,55 @@ mod tests {
         assert_eq!(read_back, original);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn write_new_creates_file_with_contents() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("new_file.txt");
+
+        write_new(&location, rel_path, b"new content").await?;
+
+        let abs = tmp.path().join(rel_path);
+        let read_back = tokio::fs::read_to_string(&abs).await?;
+        assert_eq!(read_back, "new content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_new_fails_if_file_exists() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("existing.txt");
+
+        // Create the file first.
+        write_new(&location, rel_path, b"first").await?;
+
+        // Second write should fail with AlreadyExists.
+        let result = write_new(&location, rel_path, b"second").await;
+
+        assert!(result.is_err());
+        let err = result.expect_err("expected AlreadyExists error");
+        assert!(matches!(err, StorageError::AlreadyExists { .. }));
+
+        // Original content should be unchanged.
+        let read_back = read_to_string(&location, rel_path).await?;
+        assert_eq!(read_back, "first");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_new_creates_parent_directories() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("nested/path/new_file.txt");
+
+        write_new(&location, rel_path, b"nested new").await?;
+
+        let abs = tmp.path().join(rel_path);
+        assert!(abs.exists());
+        let read_back = tokio::fs::read_to_string(&abs).await?;
+        assert_eq!(read_back, "nested new");
+        Ok(())
+    }
 }
