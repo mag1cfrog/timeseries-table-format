@@ -66,7 +66,6 @@ impl TableLocation {
 pub enum StorageError {
     /// The specified path was not found.
     #[snafu(display("Path not found: {path}"))]
-    /// The path that was not found.
     NotFound {
         /// The path that was not found.
         path: String,
