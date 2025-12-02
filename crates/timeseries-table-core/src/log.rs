@@ -73,6 +73,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
+use crate::storage::{self, StorageError, TableLocation};
+
 /// Errors that can occur while reading or writing the commit log.
 #[derive(Debug, Snafu)]
 pub enum CommitError {
@@ -86,15 +88,15 @@ pub enum CommitError {
         /// Backtrace for debugging.
         backtrace: Backtrace,
     },
-    /// Underlying I/O error while working with the log or CURRENT file.
-    #[snafu(display("I/O error at version {version:?}: {source}"))]
-    Io {
-        /// The commit version involved in the error, if known.
-        version: Option<u64>,
-        /// The underlying I/O error.
-        source: std::io::Error,
-        /// Backtrace for debugging.
-        backtrace: Backtrace,
+
+    /// Underlying storage error while working with the log or CURRENT file.
+    ///
+    /// Backtraces are delegated to the inner StorageError.
+    #[snafu(display("Storage error while accessing commit log: {source}"))]
+    Storage {
+        /// Underlying storage error returned by the storage backend.
+        #[snafu(backtrace)]
+        source: StorageError,
     },
 
     /// The log or CURRENT file is in an unexpected / malformed state.
@@ -115,7 +117,7 @@ pub enum CommitError {
 ///   <root>/_timeseries_log/CURRENT
 #[derive(Debug, Clone)]
 pub struct LogStore {
-    root: PathBuf,
+    location: TableLocation,
 }
 
 impl LogStore {
@@ -127,45 +129,70 @@ impl LogStore {
     pub const COMMIT_FILENAME_DIGITS: usize = 10;
 
     /// Create a new LogStore rooted at a table directory.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new(location: TableLocation) -> Self {
+        Self { location }
     }
 
-    fn log_dir(&self) -> PathBuf {
-        self.root.join(Self::LOG_DIR_NAME)
+    fn log_rel_dir() -> PathBuf {
+        PathBuf::from(Self::LOG_DIR_NAME)
     }
 
-    fn current_path(&self) -> PathBuf {
-        self.log_dir().join(Self::CURRENT_FILE_NAME)
+    fn current_rel_path() -> PathBuf {
+        Self::log_rel_dir().join(Self::CURRENT_FILE_NAME)
     }
 
-    fn commit_path(&self, version: u64) -> PathBuf {
+    fn commit_rel_path(version: u64) -> PathBuf {
         let file_name = format!(
             "{:0width$}.json",
             version,
             width = Self::COMMIT_FILENAME_DIGITS
         );
-        self.log_dir().join(file_name)
+        Self::log_rel_dir().join(file_name)
     }
 
-    /// Write bytes to `path` atomically via a temporary file + rename.
-    fn write_atomic(&self, path: &Path, contents: &[u8]) -> Result<(), CommitError> {
-        // Ensure parent directory exists.
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context(IoSnafu { version: None })?;
-        }
-
-        let tmp_path = path.with_extension("tmp");
-        {
-            let mut file = File::create(&tmp_path).context(IoSnafu { version: None })?;
-            file.write_all(contents)
-                .context(IoSnafu { version: None })?;
-            // Best-effort durability: ensure bytes hit disk before rename.
-            file.sync_all().context(IoSnafu { version: None })?;
-        }
-
-        fs::rename(&tmp_path, path).context(IoSnafu { version: None })?;
+    async fn write_atomic_rel(&self, rel: &Path, contents: &[u8]) -> Result<(), CommitError> {
+        storage::write_atomic(&self.location, rel, contents)
+            .await
+            .context(StorageSnafu)?;
         Ok(())
+    }
+
+    async fn read_to_string_rel(&self, rel: &Path) -> Result<String, CommitError> {
+        match storage::read_to_string(&self.location, rel).await {
+            Ok(s) => Ok(s),
+            Err(source) => Err(CommitError::Storage { source }),
+        }
+    }
+
+    /// Load the CURRENT version pointer.
+    ///
+    /// Behavior:
+    /// - If CURRENT does not exist, treat as a fresh table and return 0.
+    /// - If CURRENT contains invalid or empty content, return CorruptState.
+    pub async fn load_current_version(&self) -> Result<u64, CommitError> {
+        let rel = Self::current_rel_path();
+
+        let contents = match storage::read_to_string(&self.location, &rel).await {
+            Ok(s) => s,
+            Err(StorageError::NotFound { .. }) => return Ok(0),
+            Err(source) => return Err(CommitError::Storage { source }),
+        };
+
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
+            return CorruptStateSnafu {
+                msg: format!("CURRENT has empty content at {rel:?}",),
+            }
+            .fail();
+        }
+        let version = trimmed
+            .parse::<u64>()
+            .map_err(|e| CommitError::CorruptState {
+                msg: format!("CURRENT has invalid content {trimmed:?}: {e}"),
+                backtrace: Backtrace::capture(),
+            })?;
+
+        Ok(version)
     }
 }
 
