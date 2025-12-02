@@ -186,15 +186,45 @@ impl LogStore {
 
     /// Commit a new version with an optimistic concurrency guard.
     ///
-    /// Steps:
-    /// - Load CURRENT.
-    /// - If CURRENT != expected, return CommitError::Conflict.
-    /// - Compute version = expected + 1 (with overflow check).
-    /// - Build a Commit.
-    /// - Serialize to JSON.
-    /// - Create commit file `_timeseries_log/<zero-padded>.json` using
-    ///   "create only if not exists" semantics.
-    /// - Update `_timeseries_log/CURRENT` with the new version (e.g. "1 ").
+    /// ## Concurrency semantics
+    ///
+    /// - The check on CURRENT is advisory/best-effort and subject to races.
+    ///   Two writers may both read the same CURRENT value and attempt to commit
+    ///   the same next version. The actual concurrency guard is the atomic
+    ///   creation of the commit file using "create only if not exists" semantics.
+    /// - If another writer wins the race and creates the commit file first,
+    ///   this operation will fail with `StorageError::AlreadyExists`.
+    /// - Callers must be prepared to handle `StorageError::AlreadyExists` and
+    ///   implement retry logic (e.g., reload CURRENT and retry the commit).
+    ///
+    /// ## Crash recovery
+    ///
+    /// If this method succeeds in creating the commit file but fails while
+    /// updating CURRENT (e.g., due to a crash or I/O error), the system will
+    /// be left in a state where:
+    /// - The commit file `_timeseries_log/<version>.json` exists.
+    /// - CURRENT still points to the previous version.
+    ///
+    /// This is a known edge case. The orphaned commit file is harmless because
+    /// readers only consider commits up to the version in CURRENT. Recovery
+    /// can detect this situation by scanning for commit files with versions
+    /// higher than CURRENT and either:
+    /// - Completing the commit by updating CURRENT, or
+    /// - Treating the orphaned file as an incomplete transaction to ignore.
+    ///
+    /// A future version may implement automatic recovery during table
+    /// initialization.
+    ///
+    /// ## Steps
+    ///
+    /// 1. Load CURRENT (advisory check).
+    /// 2. If CURRENT != expected, return `CommitError::Conflict`.
+    /// 3. Compute version = expected + 1 (with overflow check).
+    /// 4. Build a `Commit` struct.
+    /// 5. Serialize to JSON.
+    /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
+    ///    "create only if not exists" semantics (atomic guard).
+    /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
     pub async fn commit_with_expected_version(
         &self,
         expected: u64,
