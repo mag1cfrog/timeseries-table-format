@@ -229,20 +229,14 @@ impl LogStore {
         })?;
 
         // 4) Attempt to create the commit file *only if it does not already exist*.
+        //    If the file already exists (AlreadyExists error), we propagate it as-is
+        //    rather than converting to Conflict. This allows higher-level code to
+        //    implement automatic conflict resolution (e.g., retrying with rebased
+        //    changes if the operations don't actually conflict, like Delta Lake).
         let commit_rel = Self::commit_rel_path(version);
-        if let Err(source) = storage::write_new(&self.location, &commit_rel, &json).await {
-            match &source {
-                // If the commit file for this version already exists, someone else
-                // committed first. Map to a conflict, using CURRENT to report `found`.
-                StorageError::AlreadyExists { .. } => {
-                    let found = self.load_current_version().await?;
-                    return ConflictSnafu { expected, found }.fail();
-                }
-                _ => {
-                    return Err(CommitError::Storage { source });
-                }
-            }
-        }
+        storage::write_new(&self.location, &commit_rel, &json)
+            .await
+            .map_err(|source| CommitError::Storage { source })?;
 
         // 5) Update CURRENT via atomic write (temp + rename).
         let current_rel = Self::current_rel_path();
@@ -464,6 +458,11 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use serde_json;
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // ==================== Serialization tests ====================
 
     #[test]
     fn commit_json_roundtrip() {
@@ -652,5 +651,230 @@ mod tests {
 
         let decoded: SegmentId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(id, decoded);
+    }
+
+    // ==================== LogStore tests ====================
+
+    fn create_test_log_store() -> (TempDir, LogStore) {
+        let tmp = TempDir::new().expect("create temp dir");
+        let location = TableLocation::local(tmp.path());
+        let store = LogStore::new(location);
+        (tmp, store)
+    }
+
+    #[tokio::test]
+    async fn load_current_version_returns_zero_when_no_current_file() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+
+        let version = store.load_current_version().await?;
+
+        assert_eq!(version, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_current_version_returns_version_from_file() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        // Manually create CURRENT file with version 5.
+        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        tokio::fs::create_dir_all(&log_dir).await?;
+        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        tokio::fs::write(&current_path, "5\n").await?;
+
+        let version = store.load_current_version().await?;
+
+        assert_eq!(version, 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_current_version_handles_whitespace() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        tokio::fs::create_dir_all(&log_dir).await?;
+        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        tokio::fs::write(&current_path, "  42  \n").await?;
+
+        let version = store.load_current_version().await?;
+
+        assert_eq!(version, 42);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_current_version_returns_corrupt_state_for_empty_file() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        tokio::fs::create_dir_all(&log_dir).await?;
+        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        tokio::fs::write(&current_path, "").await?;
+
+        let result = store.load_current_version().await;
+
+        assert!(result.is_err());
+        let err = result.expect_err("expected CorruptState");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_current_version_returns_corrupt_state_for_invalid_content() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        tokio::fs::create_dir_all(&log_dir).await?;
+        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        tokio::fs::write(&current_path, "not-a-number").await?;
+
+        let result = store.load_current_version().await;
+
+        assert!(result.is_err());
+        let err = result.expect_err("expected CorruptState");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_first_version_succeeds() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        let version = store.commit_with_expected_version(0, vec![]).await?;
+
+        assert_eq!(version, 1);
+
+        // Verify CURRENT was updated.
+        let current_version = store.load_current_version().await?;
+        assert_eq!(current_version, 1);
+
+        // Verify commit file was created.
+        let commit_path = tmp
+            .path()
+            .join(LogStore::LOG_DIR_NAME)
+            .join("0000000001.json");
+        assert!(commit_path.exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_subsequent_versions_succeeds() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+
+        // Commit versions 1, 2, 3.
+        let v1 = store.commit_with_expected_version(0, vec![]).await?;
+        let v2 = store.commit_with_expected_version(1, vec![]).await?;
+        let v3 = store.commit_with_expected_version(2, vec![]).await?;
+
+        assert_eq!(v1, 1);
+        assert_eq!(v2, 2);
+        assert_eq!(v3, 3);
+
+        let current = store.load_current_version().await?;
+        assert_eq!(current, 3);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_with_wrong_expected_version_returns_conflict() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+
+        // Commit version 1.
+        store.commit_with_expected_version(0, vec![]).await?;
+
+        // Try to commit with expected=0 again (stale).
+        let result = store.commit_with_expected_version(0, vec![]).await;
+
+        assert!(result.is_err());
+        let err = result.expect_err("expected Conflict");
+        match err {
+            CommitError::Conflict {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, 0);
+                assert_eq!(found, 1);
+            }
+            _ => panic!("expected Conflict error, got {err:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_creates_valid_json_file() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        let action = LogAction::RemoveSegment {
+            segment_id: SegmentId("test-seg".to_string()),
+        };
+
+        store.commit_with_expected_version(0, vec![action]).await?;
+
+        // Read and parse the commit file.
+        let commit_path = tmp
+            .path()
+            .join(LogStore::LOG_DIR_NAME)
+            .join("0000000001.json");
+        let contents = tokio::fs::read_to_string(&commit_path).await?;
+        let commit: Commit = serde_json::from_str(&contents)?;
+
+        assert_eq!(commit.version, 1);
+        assert_eq!(commit.base_version, 0);
+        assert_eq!(commit.actions.len(), 1);
+        assert!(matches!(
+            &commit.actions[0],
+            LogAction::RemoveSegment { segment_id } if segment_id.0 == "test-seg"
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_current_file_contains_version_with_newline() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+
+        store.commit_with_expected_version(0, vec![]).await?;
+
+        let current_path = tmp
+            .path()
+            .join(LogStore::LOG_DIR_NAME)
+            .join(LogStore::CURRENT_FILE_NAME);
+        let contents = tokio::fs::read_to_string(&current_path).await?;
+
+        assert_eq!(contents, "1\n");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_returns_already_exists_when_commit_file_already_exists() -> TestResult {
+        // Simulates a race condition where another writer created the commit file first.
+        // We expect AlreadyExists (not Conflict) so higher-level code can implement
+        // automatic conflict resolution (retry with rebased changes if non-conflicting).
+        let (tmp, store) = create_test_log_store();
+
+        // Manually create the commit file that version 1 would use
+        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        tokio::fs::create_dir_all(&log_dir).await?;
+        let commit_file = log_dir.join("0000000001.json");
+        tokio::fs::write(&commit_file, b"{}").await?;
+
+        // Now try to commit at version 1 - should fail with Storage(AlreadyExists)
+        let result = store.commit_with_expected_version(0, vec![]).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(CommitError::Storage {
+                    source: StorageError::AlreadyExists { .. }
+                })
+            ),
+            "expected Storage(AlreadyExists) error, got: {result:?}",
+        );
+
+        Ok(())
     }
 }
