@@ -10,3 +10,9 @@ description = "Core engine for a Rust-native log-structured time-series table fo
 chrono = { version = "0.4.42", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+snafu = { version = "0.8.9", features = ["backtrace"] }
+tokio = { version = "1.48.0", features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.48.0", features = ["macros", "rt"] }
