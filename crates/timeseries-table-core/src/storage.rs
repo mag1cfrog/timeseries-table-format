@@ -113,6 +113,34 @@ async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
     Ok(())
 }
 
+/// Guard that removes a temporary file on drop unless disarmed.
+/// Used to ensure cleanup on error paths during atomic writes.
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Disarm the guard so the file is NOT removed on drop.
+    /// Call this after a successful rename.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best-effort cleanup; ingore errors since we're likely already handling another error.
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Write `contents` to `rel_path` inside `location` using an atomic write.
 ///
 /// This performs a write-then-rename sequence on the local filesystem:
@@ -142,6 +170,7 @@ pub async fn write_atomic(
             create_parent_dir(&abs).await?;
 
             let tmp_path = abs.with_extension("tmp");
+            let mut guard = TempFileGuard::new(tmp_path.clone());
 
             {
                 let mut file = fs::File::create(&tmp_path).await.context(LocalIoSnafu {
@@ -160,6 +189,9 @@ pub async fn write_atomic(
             fs::rename(&tmp_path, &abs).await.context(LocalIoSnafu {
                 path: abs.display().to_string(),
             })?;
+
+            // Success - don't remove the temp file (it's been renamed)
+            guard.disarm();
 
             Ok(())
         }
