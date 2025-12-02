@@ -153,3 +153,28 @@ pub async fn write_atomic(
         }
     }
 }
+
+/// Read the file at `rel_path` within the given `location` and return its
+/// contents as a `String`.
+///
+/// Currently only `TableLocation::Local` is supported. On success this returns
+/// the file contents; if the file cannot be found a `StorageError::NotFound` is
+/// returned, while other filesystem problems produce `StorageError::LocalIo`.
+pub async fn read_to_string(location: &TableLocation, rel_path: &Path) -> StorageResult<String> {
+    match location {
+        TableLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+
+            match fs::read_to_string(&abs).await {
+                Ok(s) => Ok(s),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => NotFoundSnafu {
+                    path: abs.display().to_string(),
+                }
+                .fail(),
+                Err(e) => Err(e).context(LocalIoSnafu {
+                    path: abs.display().to_string(),
+                }),
+            }
+        }
+    }
+}
