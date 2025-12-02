@@ -63,11 +63,7 @@
 //! does not know about query engines; it only provides the persisted metadata
 //! and an API for committing changes safely.
 
-use std::{
-    fs::{self, File},
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -155,13 +151,6 @@ impl LogStore {
             .await
             .context(StorageSnafu)?;
         Ok(())
-    }
-
-    async fn read_to_string_rel(&self, rel: &Path) -> Result<String, CommitError> {
-        match storage::read_to_string(&self.location, rel).await {
-            Ok(s) => Ok(s),
-            Err(source) => Err(CommitError::Storage { source }),
-        }
     }
 
     /// Load the CURRENT version pointer.
