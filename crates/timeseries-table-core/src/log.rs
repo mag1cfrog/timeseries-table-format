@@ -257,7 +257,6 @@ impl LogStore {
 
         // 5) Update CURRENT via atomic write (temp + rename).
         let current_rel = Self::current_rel_path();
-        // Spec exampl use "1 "(trailing space); we follow that.
         let current_contents = format!("{version}\n");
         self.write_atomic_rel(&current_rel, current_contents.as_bytes())
             .await?;
