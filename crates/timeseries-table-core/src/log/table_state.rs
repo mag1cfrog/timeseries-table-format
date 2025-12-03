@@ -65,7 +65,7 @@ impl LogStore {
             for action in commit.actions {
                 match action {
                     LogAction::AddSegment(meta) => {
-                        // Insert or replace the segment; lastest info wins.
+                        // Insert or replace the segment; latest info wins.
                         segments.insert(meta.segment_id.clone(), meta);
                     }
                     LogAction::RemoveSegment { segment_id } => {
