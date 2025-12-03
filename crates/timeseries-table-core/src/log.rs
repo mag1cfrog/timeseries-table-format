@@ -67,8 +67,11 @@ pub mod log_store;
 pub mod segments;
 pub mod table_metadata;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+pub use actions::{Commit, LogAction};
+pub use log_store::LogStore;
+pub use segments::{FileFormat, SegmentId, SegmentMeta};
+pub use table_metadata::*;
+
 use snafu::{Backtrace, prelude::*};
 
 use crate::storage::StorageError;
@@ -109,8 +112,9 @@ pub enum CommitError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::TimeZone;
+    use crate::log::*;
+
+    use chrono::{TimeZone, Utc};
     use serde_json;
 
     // ==================== Serialization tests ====================
