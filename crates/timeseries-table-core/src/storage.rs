@@ -286,9 +286,15 @@ pub struct FileHeadTail4 {
 /// within the given `location`.
 ///
 /// Semantics:
-/// - On missing file: StorageError::NotFound.
-/// - On other I/O problems: StorageError::LocalIo.
+/// - On missing file: `StorageError::NotFound`.
+/// - On other I/O problems: `StorageError::LocalIo`.
 /// - Only `TableLocation::Local` is supported in v0.1.
+///
+/// For files shorter than 4 bytes, both `head` and `tail` remain zero-filled.
+/// For files between 4 and 7 bytes, `head` contains the first 4 bytes but
+/// `tail` remains zero-filled since reading both without overlap is not
+/// possible. Callers that need distinct head/tail (e.g., Parquet magic
+/// validation) should check `len >= 8` before inspecting `tail`.
 pub async fn read_head_tail_4(
     location: &TableLocation,
     rel_path: &Path,
