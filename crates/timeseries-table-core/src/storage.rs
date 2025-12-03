@@ -27,12 +27,12 @@
 
 use snafu::{Backtrace, prelude::*};
 use std::{
-    io,
+    io::{self, SeekFrom},
     path::{Path, PathBuf},
 };
 use tokio::{
     fs::{self, OpenOptions},
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
 /// General result type used by storage operations.
@@ -267,6 +267,79 @@ pub async fn write_new(
             })?;
 
             Ok(())
+        }
+    }
+}
+
+/// Small probe structure used by higher-level code (e.g. segment validators)
+/// to inspect a file's length and its first/last 4 bytes.
+pub struct FileHeadTail4 {
+    /// Length of the file in bytes.
+    pub len: u64,
+    /// First 4 bytes of the file (zero-filled if the file is shorter).
+    pub head: [u8; 4],
+    /// Last 4 bytes of the file (zero-filled if the file is shorter).
+    pub tail: [u8; 4],
+}
+
+/// Read the length, first 4 bytes, and last 4 bytes of a file at `rel_path`
+/// within the given `location`.
+///
+/// Semantics:
+/// - On missing file: StorageError::NotFound.
+/// - On other I/O problems: StorageError::LocalIo.
+/// - Only `TableLocation::Local` is supported in v0.1.
+pub async fn read_head_tail_4(
+    location: &TableLocation,
+    rel_path: &Path,
+) -> StorageResult<FileHeadTail4> {
+    match location {
+        TableLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+            let path_str = abs.display().to_string();
+
+            // Metadata: we speical-case NotFound like read_to_string does.
+            let meta = match fs::metadata(&abs).await {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return NotFoundSnafu { path: path_str }.fail();
+                }
+                Err(e) => {
+                    return Err(e).context(LocalIoSnafu { path: path_str });
+                }
+            };
+
+            if !meta.is_file() {
+                // Treat non-files as NotFound for higher layres.
+                return NotFoundSnafu { path: path_str }.fail();
+            }
+
+            let len = meta.len();
+
+            let mut file = fs::File::open(&abs).await.context(LocalIoSnafu {
+                path: path_str.clone(),
+            })?;
+
+            let mut head = [0u8; 4];
+            let mut tail = [0u8; 4];
+
+            // Only attempt to read the header if file is at least 4 bytes.
+            if len >= 4 {
+                file.read_exact(&mut head).await.context(LocalIoSnafu {
+                    path: path_str.clone(),
+                })?;
+            }
+
+            // Only attempt to read the footer if file is at least 8 bytes.
+            if len >= 8 {
+                file.seek(SeekFrom::End(-4)).await.context(LocalIoSnafu {
+                    path: path_str.clone(),
+                })?;
+                file.read_exact(&mut tail).await.context(LocalIoSnafu {
+                    path: path_str.clone(),
+                })?;
+            }
+            Ok(FileHeadTail4 { len, head, tail })
         }
     }
 }
