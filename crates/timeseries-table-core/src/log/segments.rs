@@ -11,6 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
+use crate::storage::{self, StorageError, TableLocation};
+
 /// Identifier for a physical segment (e.g. a Parquet file or group).
 ///
 /// This is a logical ID used by the metadata; the actual file path is stored
@@ -115,3 +117,93 @@ pub enum SegmentMetaError {
 }
 
 type SegmentResult<T> = Result<T, SegmentMetaError>;
+
+fn map_storage_error(err: StorageError) -> SegmentMetaError {
+    match err {
+        StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile {
+            path,
+            backtrace: Backtrace::capture(),
+        },
+        StorageError::LocalIo { path, source, .. } => SegmentMetaError::Io {
+            path,
+            source,
+            backtrace: Backtrace::capture(),
+        },
+        StorageError::AlreadyExists { path, .. } => SegmentMetaError::Io {
+            path,
+            // Shouldn't really happen on reads, but we map it generically.
+            source: io::Error::other("unexpected AlreadyExists while validating segment"),
+            backtrace: Backtrace::capture(),
+        },
+    }
+}
+
+impl SegmentMeta {
+    /// Construct a validated Parquet SegmentMeta for a file.
+    ///
+    /// - `location` describes where the table lives (e.g. local root).
+    /// - `path` is the logical path stored in the log (e.g. "data/seg1.parquet"
+    ///   or an absolute path).
+    ///
+    /// This is a v0.1 local-filesystem helper: it relies on `storage::read_head_tail_4`
+    /// which currently only supports `TableLocation::Local`.
+    pub async fn for_parquet(
+        location: &TableLocation,
+        segment_id: SegmentId,
+        path: &str,
+        ts_min: DateTime<Utc>,
+        ts_max: DateTime<Utc>,
+        row_count: u64,
+    ) -> SegmentResult<Self> {
+        // Use storage layer to get len + first/last 4 bytes.
+        let probe = storage::read_head_tail_4(location, std::path::Path::new(path))
+            .await
+            .map_err(map_storage_error)?;
+
+        if probe.len < 8 {
+            return TooShortSnafu {
+                path: path.to_string(),
+            }
+            .fail();
+        }
+
+        const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
+
+        if &probe.head != PARQUET_MAGIC || &probe.tail != PARQUET_MAGIC {
+            return InvalidMagicSnafu {
+                path: path.to_string(),
+            }
+            .fail();
+        }
+
+        Ok(SegmentMeta {
+            segment_id,
+            path: path.to_string(),
+            format: FileFormat::Parquet,
+            ts_min,
+            ts_max,
+            row_count,
+        })
+    }
+
+    /// Format-dispatching constructor that can grow in future versions.
+    ///
+    /// v0.1: only `FileFormat::Parquet` is supported and validated via
+    /// `for_parquet`.
+    pub async fn new_validated(
+        location: &TableLocation,
+        segment_id: SegmentId,
+        path: &str,
+        format: FileFormat,
+        ts_min: DateTime<Utc>,
+        ts_max: DateTime<Utc>,
+        row_count: u64,
+    ) -> SegmentResult<Self> {
+        match format {
+            FileFormat::Parquet => {
+                SegmentMeta::for_parquet(location, segment_id, path, ts_min, ts_max, row_count)
+                    .await
+            } // other => UnsupportedFormatSnafu { format: other }.fail(),
+        }
+    }
+}
