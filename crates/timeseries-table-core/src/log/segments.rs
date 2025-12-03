@@ -75,17 +75,6 @@ pub enum SegmentMetaError {
         backtrace: Backtrace,
     },
 
-    /// File extension doesn't match the expected format (e.g. parquet).
-    #[snafu(display("Invalid extension for path {path} and format {format:?}"))]
-    InvalidExtension {
-        /// The relative path reported for the segment.
-        path: String,
-        /// The expected or declared file format.
-        format: FileFormat,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
-    },
-
     /// The file is missing or not a regular file.
     #[snafu(display("Segment file missing or not a regular file: {path}"))]
     MissingFile {
