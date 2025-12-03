@@ -66,6 +66,7 @@ pub mod actions;
 pub mod log_store;
 pub mod segments;
 pub mod table_metadata;
+pub mod table_state;
 
 pub use actions::{Commit, LogAction};
 pub use log_store::LogStore;
