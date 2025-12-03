@@ -120,7 +120,10 @@ mod tests {
                 timezone: None,
             }),
             logical_schema: None,
-            created_at: chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            created_at: chrono::Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid sample table metadata timestamp"),
             format_version: 1,
         }
     }
@@ -130,8 +133,14 @@ mod tests {
             segment_id: SegmentId(id.to_string()),
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
-            ts_min: chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-            ts_max: chrono::Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap(),
+            ts_min: chrono::Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid sample segment ts_min"),
+            ts_max: chrono::Utc
+                .with_ymd_and_hms(2025, 1, 1, 1, 0, 0)
+                .single()
+                .expect("valid sample segment ts_max"),
             row_count: 42,
         }
     }
