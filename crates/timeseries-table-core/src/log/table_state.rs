@@ -90,3 +90,165 @@ impl LogStore {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::{
+        FileFormat, LogAction, LogStore, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
+        TimeIndexSpec,
+    };
+    use crate::storage::{StorageError, TableLocation};
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn create_test_log_store() -> (TempDir, LogStore) {
+        let tmp = TempDir::new().expect("create temp dir");
+        let location = TableLocation::local(tmp.path());
+        let store = LogStore::new(location);
+        (tmp, store)
+    }
+
+    fn sample_table_meta() -> TableMeta {
+        TableMeta {
+            kind: TableKind::TimeSeries(TimeIndexSpec {
+                timestamp_column: "ts".to_string(),
+                entity_columns: vec!["symbol".to_string()],
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            }),
+            logical_schema: None,
+            created_at: chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            format_version: 1,
+        }
+    }
+
+    fn sample_segment(id: &str) -> SegmentMeta {
+        SegmentMeta {
+            segment_id: SegmentId(id.to_string()),
+            path: format!("data/{id}.parquet"),
+            format: FileFormat::Parquet,
+            ts_min: chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            ts_max: chrono::Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap(),
+            row_count: 42,
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_happy_path() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+        let seg1 = sample_segment("seg1");
+        let seg2 = sample_segment("seg2");
+
+        let v1 = store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+        let v2 = store
+            .commit_with_expected_version(
+                v1,
+                vec![
+                    LogAction::AddSegment(seg1.clone()),
+                    LogAction::AddSegment(seg2.clone()),
+                ],
+            )
+            .await?;
+        let v3 = store
+            .commit_with_expected_version(
+                v2,
+                vec![LogAction::RemoveSegment {
+                    segment_id: seg1.segment_id.clone(),
+                }],
+            )
+            .await?;
+
+        let state = store.rebuild_table_state().await?;
+        assert_eq!(state.version, v3);
+        assert_eq!(state.table_meta, meta);
+        assert!(state.segments.contains_key(&seg2.segment_id));
+        assert!(!state.segments.contains_key(&seg1.segment_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_errors_when_current_zero() {
+        let (_tmp, store) = create_test_log_store();
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("expected error");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_errors_when_no_table_meta() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let seg = sample_segment("seg");
+
+        store
+            .commit_with_expected_version(0, vec![LogAction::AddSegment(seg.clone())])
+            .await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("expected error");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_fails_on_corrupt_commit_payload() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
+        let commit_path = tmp
+            .path()
+            .join(LogStore::LOG_DIR_NAME)
+            .join("0000000001.json");
+        tokio::fs::write(&commit_path, b"not-json").await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("expected error");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_fails_when_commit_missing() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
+        let commit_path = tmp
+            .path()
+            .join(LogStore::LOG_DIR_NAME)
+            .join("0000000001.json");
+        tokio::fs::remove_file(&commit_path).await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("expected error");
+        match err {
+            CommitError::Storage { source } => match source {
+                StorageError::NotFound { .. } => {}
+                other => panic!("unexpected storage error: {other:?}"),
+            },
+            other => panic!("expected storage error, got {other:?}"),
+        }
+        Ok(())
+    }
+}
