@@ -66,6 +66,30 @@ impl LogStore {
         Ok(())
     }
 
+    /// Helper: read a log-relative file and map storage errors into CommitError.
+    async fn read_to_string_rel(&self, rel: &Path) -> Result<String, CommitError> {
+        match storage::read_to_string(&self.location, rel).await {
+            Ok(s) => Ok(s),
+            Err(source) => Err(CommitError::Storage { source }),
+        }
+    }
+
+    /// Load a single commit by version.
+    ///
+    /// - On storage-layer failures, returns `CommitError::Storage`.
+    /// - On JSON parse failures, returns `CommitError::CorruptState`.
+    pub async fn load_commit(&self, version: u64) -> Result<Commit, CommitError> {
+        let rel = Self::commit_rel_path(version);
+        let json = self.read_to_string_rel(&rel).await?;
+
+        let commit = serde_json::from_str(&json).map_err(|e| CommitError::CorruptState {
+            msg: format!("failed to parse commit {version}: {e}"),
+            backtrace: Backtrace::capture(),
+        })?;
+
+        Ok(commit)
+    }
+
     /// Load the CURRENT version pointer.
     ///
     /// Behavior:
