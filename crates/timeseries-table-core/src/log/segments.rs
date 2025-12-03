@@ -207,3 +207,160 @@ impl SegmentMeta {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, TimeZone};
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn utc_datetime(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid UTC timestamp")
+    }
+
+    async fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, bytes).await
+    }
+
+    fn into_boxed(err: SegmentMetaError) -> Box<dyn std::error::Error> {
+        Box::new(err)
+    }
+
+    #[tokio::test]
+    async fn parquet_segment_validation_succeeds() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = "data/valid.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_bytes(&abs_path, b"PAR1PAR1").await?;
+
+        let ts_min = utc_datetime(2025, 1, 1, 0, 0, 0);
+        let ts_max = utc_datetime(2025, 1, 1, 1, 0, 0);
+
+        let meta = SegmentMeta::for_parquet(
+            &location,
+            SegmentId("seg-001".to_string()),
+            rel_path,
+            ts_min,
+            ts_max,
+            1_234,
+        )
+        .await
+        .map_err(into_boxed)?;
+
+        assert_eq!(meta.path, rel_path);
+        assert_eq!(meta.segment_id, SegmentId("seg-001".to_string()));
+        assert_eq!(meta.format, FileFormat::Parquet);
+        assert_eq!(meta.ts_min, ts_min);
+        assert_eq!(meta.ts_max, ts_max);
+        assert_eq!(meta.row_count, 1_234);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parquet_segment_missing_file_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let result = SegmentMeta::for_parquet(
+            &location,
+            SegmentId("missing".to_string()),
+            "data/missing.parquet",
+            utc_datetime(2025, 1, 1, 0, 0, 0),
+            utc_datetime(2025, 1, 1, 1, 0, 0),
+            42,
+        )
+        .await;
+
+        assert!(matches!(result, Err(SegmentMetaError::MissingFile { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parquet_segment_too_short_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = "data/short.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_bytes(&abs_path, b"PAR1").await?;
+
+        let result = SegmentMeta::for_parquet(
+            &location,
+            SegmentId("short".to_string()),
+            rel_path,
+            utc_datetime(2025, 1, 1, 0, 0, 0),
+            utc_datetime(2025, 1, 1, 1, 0, 0),
+            10,
+        )
+        .await;
+
+        assert!(matches!(result, Err(SegmentMetaError::TooShort { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parquet_segment_invalid_magic_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = "data/invalid_magic.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_bytes(&abs_path, b"PAR1NOPE").await?;
+
+        let result = SegmentMeta::for_parquet(
+            &location,
+            SegmentId("bad".to_string()),
+            rel_path,
+            utc_datetime(2025, 1, 1, 0, 0, 0),
+            utc_datetime(2025, 1, 1, 1, 0, 0),
+            10,
+        )
+        .await;
+
+        assert!(matches!(result, Err(SegmentMetaError::InvalidMagic { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn new_validated_delegates_to_parquet_constructor() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = "data/delegate.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_bytes(&abs_path, b"PAR1PAR1").await?;
+
+        let ts_min = utc_datetime(2025, 1, 1, 0, 0, 0);
+        let ts_max = utc_datetime(2025, 1, 1, 1, 0, 0);
+
+        let meta = SegmentMeta::new_validated(
+            &location,
+            SegmentId("delegate".to_string()),
+            rel_path,
+            FileFormat::Parquet,
+            ts_min,
+            ts_max,
+            5,
+        )
+        .await
+        .map_err(into_boxed)?;
+
+        assert_eq!(meta.path, rel_path);
+        assert_eq!(meta.format, FileFormat::Parquet);
+        assert_eq!(meta.row_count, 5);
+        Ok(())
+    }
+}
