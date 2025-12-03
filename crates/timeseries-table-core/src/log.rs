@@ -71,7 +71,10 @@ pub mod table_state;
 pub use actions::{Commit, LogAction};
 pub use log_store::LogStore;
 pub use segments::{FileFormat, SegmentId, SegmentMeta};
-pub use table_metadata::*;
+pub use table_metadata::{
+    LogicalColumn, LogicalSchema, TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,
+};
+pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};
 
