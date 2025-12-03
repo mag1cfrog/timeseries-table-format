@@ -298,7 +298,7 @@ pub async fn read_head_tail_4(
             let abs = join_local(location, rel_path);
             let path_str = abs.display().to_string();
 
-            // Metadata: we speical-case NotFound like read_to_string does.
+            // Metadata: we special-case NotFound like read_to_string does.
             let meta = match fs::metadata(&abs).await {
                 Ok(m) => m,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -310,7 +310,7 @@ pub async fn read_head_tail_4(
             };
 
             if !meta.is_file() {
-                // Treat non-files as NotFound for higher layres.
+                // Treat non-files as NotFound for higher layers.
                 return NotFoundSnafu { path: path_str }.fail();
             }
 
