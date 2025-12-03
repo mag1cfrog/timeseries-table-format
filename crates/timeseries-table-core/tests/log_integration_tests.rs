@@ -5,7 +5,7 @@
 //! - Conflict handling via version guards,
 //! - Robust handling of missing/malformed metadata.
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 use timeseries_table_core::log::{
     CommitError, FileFormat, LogAction, LogStore, LogicalColumn, LogicalSchema, SegmentId,
@@ -57,7 +57,7 @@ fn sample_table_meta() -> TableMeta {
                 },
             ],
         }),
-        created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
         format_version: 1,
     }
 }
@@ -67,10 +67,23 @@ fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
         segment_id: SegmentId(id.to_string()),
         path: format!("data/{id}.parquet"),
         format: FileFormat::Parquet,
-        ts_min: Utc.with_ymd_and_hms(2025, 1, 1, ts_hour, 0, 0).unwrap(),
-        ts_max: Utc.with_ymd_and_hms(2025, 1, 1, ts_hour + 1, 0, 0).unwrap(),
+        ts_min: utc_datetime(2025, 1, 1, ts_hour, 0, 0),
+        ts_max: utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0),
         row_count: 1000,
     }
+}
+
+fn utc_datetime(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+        .single()
+        .expect("valid UTC timestamp")
 }
 
 // =============================================================================
@@ -154,7 +167,11 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
 
     // Verify logical schema was preserved
     assert!(state.table_meta.logical_schema.is_some());
-    let schema = state.table_meta.logical_schema.as_ref().unwrap();
+    let schema = state
+        .table_meta
+        .logical_schema
+        .as_ref()
+        .expect("logical schema must be present");
     assert_eq!(schema.columns.len(), 3);
 
     Ok(())
@@ -548,7 +565,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
             timezone: None,
         }),
         logical_schema: None,
-        created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
         format_version: 1,
     };
 
@@ -560,7 +577,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
             timezone: Some("UTC".to_string()),
         }),
         logical_schema: None,
-        created_at: Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap(),
+        created_at: utc_datetime(2025, 6, 1, 0, 0, 0),
         format_version: 2,
     };
 
@@ -601,8 +618,8 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
         segment_id: SegmentId("seg-001".to_string()),
         path: "data/seg-001-v1.parquet".to_string(),
         format: FileFormat::Parquet,
-        ts_min: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-        ts_max: Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap(),
+        ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
+        ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
         row_count: 100,
     };
 
@@ -610,9 +627,9 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
         segment_id: SegmentId("seg-001".to_string()), // Same ID
         path: "data/seg-001-v2.parquet".to_string(),  // Different path
         format: FileFormat::Parquet,
-        ts_min: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-        ts_max: Utc.with_ymd_and_hms(2025, 1, 1, 2, 0, 0).unwrap(), // Different ts_max
-        row_count: 200,                                             // Different row_count
+        ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
+        ts_max: utc_datetime(2025, 1, 1, 2, 0, 0), // Different ts_max
+        row_count: 200,                            // Different row_count
     };
 
     // Commit 1: Add seg_v1
@@ -637,7 +654,7 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
     let seg = state
         .segments
         .get(&SegmentId("seg-001".to_string()))
-        .unwrap();
+        .expect("segment should be present after replacement");
     assert_eq!(seg.path, "data/seg-001-v2.parquet");
     assert_eq!(seg.row_count, 200);
 
