@@ -5,7 +5,7 @@
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
 <p align="center">
-  <img src="docs/ferris-timeseries-2.png" alt="Ferris with timeseries-table-format" width="1920" />
+  <img src="docs/ferris-timeseries-3.png" alt="Ferris with timeseries-table-format" width="1920" />
 </p>
 
 Time-series data deserves something better than “just more Parquet files.”
