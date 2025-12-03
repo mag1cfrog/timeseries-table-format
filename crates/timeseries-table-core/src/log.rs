@@ -118,15 +118,28 @@ pub enum CommitError {
 mod tests {
     use crate::log::*;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde_json;
 
     // ==================== Serialization tests ====================
 
+    fn utc_datetime(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid UTC timestamp")
+    }
+
     #[test]
     fn commit_json_roundtrip() {
-        let ts0 = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let ts1 = Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+        let ts0 = utc_datetime(2025, 1, 1, 0, 0, 0);
+        let ts1 = utc_datetime(2025, 1, 1, 1, 0, 0);
 
         let time_index = TimeIndexSpec {
             timestamp_column: "ts".to_string(),
@@ -284,7 +297,7 @@ mod tests {
 
     #[test]
     fn commit_with_empty_actions() {
-        let ts = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let ts = utc_datetime(2025, 6, 15, 12, 0, 0);
 
         let commit = Commit {
             version: 1,
