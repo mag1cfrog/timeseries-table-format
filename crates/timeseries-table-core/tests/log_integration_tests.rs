@@ -7,11 +7,11 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
-use timeseries_table_core::log::{
+use timeseries_table_core::storage::{StorageError, TableLocation};
+use timeseries_table_core::transaction_log::{
     CommitError, FileFormat, LogAction, LogStore, LogicalColumn, LogicalSchema, SegmentId,
     SegmentMeta, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
 };
-use timeseries_table_core::storage::{StorageError, TableLocation};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

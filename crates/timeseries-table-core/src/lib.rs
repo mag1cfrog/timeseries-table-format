@@ -18,9 +18,9 @@
 //! re-implementing the storage and metadata logic.
 #![deny(missing_docs)]
 pub mod coverage;
-pub mod log;
 pub mod storage;
 pub mod table;
+pub mod transaction_log;
 
 #[cfg(test)]
 mod tests {

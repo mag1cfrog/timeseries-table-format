@@ -94,11 +94,11 @@ impl LogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
         FileFormat, LogAction, LogStore, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
         TimeIndexSpec,
     };
-    use crate::storage::{StorageError, TableLocation};
     use chrono::TimeZone;
     use tempfile::TempDir;
 
