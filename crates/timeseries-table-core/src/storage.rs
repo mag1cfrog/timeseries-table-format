@@ -350,6 +350,31 @@ pub async fn read_head_tail_4(
     }
 }
 
+/// Read the full contents of a file at `rel_path` within `location` and return
+/// them as a Vec<u8>.
+///
+/// Only `TableLocation::Local` is supported in this crate version.
+///
+/// Errors:
+/// - If the file does not exist this returns `StorageError::NotFound`.
+/// - On any other I/O error this returns `StorageError::LocalIo`.
+pub async fn read_all_bytes(location: &TableLocation, rel_path: &Path) -> StorageResult<Vec<u8>> {
+    match location {
+        TableLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+            let path_str = abs.display().to_string();
+
+            match fs::read(&abs).await {
+                Ok(bytes) => Ok(bytes),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    NotFoundSnafu { path: path_str }.fail()
+                }
+                Err(e) => Err(e).context(LocalIoSnafu { path: path_str }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
