@@ -116,7 +116,7 @@ pub enum SegmentMetaError {
     },
 }
 
-type SegmentResult<T> = Result<T, SegmentMetaError>;
+pub type SegmentResult<T> = Result<T, SegmentMetaError>;
 
 fn map_storage_error(err: StorageError) -> SegmentMetaError {
     match err {
