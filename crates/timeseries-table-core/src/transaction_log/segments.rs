@@ -5,7 +5,6 @@
 //! paths, timestamp bounds, and row counts, and [`FileFormat`] tracks the
 //! on-disk encoding. They are used by `LogAction::AddSegment` and related
 //! reader logic to rebuild the live segment map.
-use std::io;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -109,31 +108,25 @@ pub enum SegmentMetaError {
     Io {
         /// The path to the file that caused the I/O error.
         path: String,
-        /// The underlying I/O error.
-        source: io::Error,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
+        #[snafu(source, backtrace)]
+        source: StorageError,
     },
 }
 
 pub type SegmentResult<T> = Result<T, SegmentMetaError>;
 
 fn map_storage_error(err: StorageError) -> SegmentMetaError {
-    match err {
+    match &err {
         StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile {
-            path,
+            path: path.clone(),
             backtrace: Backtrace::capture(),
         },
-        StorageError::LocalIo { path, source, .. } => SegmentMetaError::Io {
-            path,
-            source,
-            backtrace: Backtrace::capture(),
-        },
-        StorageError::AlreadyExists { path, .. } => SegmentMetaError::Io {
-            path,
-            // Shouldn't really happen on reads, but we map it generically.
-            source: io::Error::other("unexpected AlreadyExists while validating segment"),
-            backtrace: Backtrace::capture(),
+
+        // For everything else, preserve the full StorageError as the source.
+        StorageError::AlreadyExists { path, .. }
+        | StorageError::OtherIo { path, .. } => SegmentMetaError::Io {
+            path: path.clone(),
+            source: err, // move the full StorageError in
         },
     }
 }
