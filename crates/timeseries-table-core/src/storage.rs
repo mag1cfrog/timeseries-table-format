@@ -27,8 +27,7 @@
 
 use snafu::{Backtrace, prelude::*};
 use std::{
-    io::{self, SeekFrom},
-    path::{Path, PathBuf},
+    error::Error, fmt, io::{self, SeekFrom}, path::{Path, PathBuf}
 };
 use tokio::{
     fs::{self, OpenOptions},
@@ -61,6 +60,27 @@ impl TableLocation {
     }
 }
 
+#[derive(Debug)]
+pub enum BackendError {
+    Local(io::Error),
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendError::Local(e) => write!(f, "local I/O error: {e}"),
+        }
+    }
+}
+
+impl Error for BackendError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            BackendError::Local(e) => Some(e)
+        }
+    }
+}
+
 /// Errors that can occur during storage operations.
 #[derive(Debug, Snafu)]
 pub enum StorageError {
@@ -69,6 +89,7 @@ pub enum StorageError {
     NotFound {
         /// The path that was not found.
         path: String,
+        source: BackendError,
         /// The backtrace at the time the error occurred.
         backtrace: Backtrace,
     },
@@ -79,17 +100,17 @@ pub enum StorageError {
     AlreadyExists {
         /// The path that was found to already exist.
         path: String,
+        source: BackendError,
         /// The backtrace captured when the error occurred.
         backtrace: Backtrace,
     },
 
     /// An I/O error occurred on the local filesystem.
     #[snafu(display("Local I/O error at {path}: {source}"))]
-    LocalIo {
+    OtherIo {
         /// The path where the I/O error occurred.
         path: String,
-        /// The underlying I/O error.
-        source: io::Error,
+        source: BackendError,
         /// The backtrace at the time the error occurred.
         backtrace: Backtrace,
     },
@@ -106,7 +127,7 @@ fn join_local(location: &TableLocation, rel: &Path) -> PathBuf {
 
 async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
     if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent).await.context(LocalIoSnafu {
+        fs::create_dir_all(parent).await.map_err(BackendError::Local).context(OtherIoSnafu {
             path: parent.display().to_string(),
         })?;
     }
@@ -173,20 +194,20 @@ pub async fn write_atomic(
             let mut guard = TempFileGuard::new(tmp_path.clone());
 
             {
-                let mut file = fs::File::create(&tmp_path).await.context(LocalIoSnafu {
+                let mut file = fs::File::create(&tmp_path).await.map_err(BackendError::Local).context(OtherIoSnafu {
                     path: tmp_path.display().to_string(),
                 })?;
 
-                file.write_all(contents).await.context(LocalIoSnafu {
+                file.write_all(contents).await.map_err(BackendError::Local).context(OtherIoSnafu {
                     path: tmp_path.display().to_string(),
                 })?;
 
-                file.sync_all().await.context(LocalIoSnafu {
+                file.sync_all().await.map_err(BackendError::Local).context(OtherIoSnafu {
                     path: tmp_path.display().to_string(),
                 })?;
             }
 
-            fs::rename(&tmp_path, &abs).await.context(LocalIoSnafu {
+            fs::rename(&tmp_path, &abs).await.map_err(BackendError::Local).context(OtherIoSnafu {
                 path: abs.display().to_string(),
             })?;
 
@@ -211,11 +232,8 @@ pub async fn read_to_string(location: &TableLocation, rel_path: &Path) -> Storag
 
             match fs::read_to_string(&abs).await {
                 Ok(s) => Ok(s),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => NotFoundSnafu {
-                    path: abs.display().to_string(),
-                }
-                .fail(),
-                Err(e) => Err(e).context(LocalIoSnafu {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Err(e).map_err(BackendError::Local).context(NotFoundSnafu { path: abs.display().to_string()}),
+                Err(e) => Err(e).map_err(BackendError::Local).context(OtherIoSnafu {
                     path: abs.display().to_string(),
                 }),
             }
@@ -237,32 +255,40 @@ pub async fn write_new(
             let abs = join_local(location, rel_path);
             create_parent_dir(&abs).await?;
 
+            let path_str = abs.display().to_string();
+
             // Atomic "create only if not exists" on the target path.
-            let mut file = OpenOptions::new()
+            let open_result = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&abs)
-                .await
-                .map_err(|e| {
-                    if e.kind() == io::ErrorKind::AlreadyExists {
-                        StorageError::AlreadyExists {
-                            path: abs.display().to_string(),
-                            backtrace: Backtrace::capture(),
-                        }
-                    } else {
-                        StorageError::LocalIo {
-                            path: abs.display().to_string(),
-                            source: e,
-                            backtrace: Backtrace::capture(),
-                        }
-                    }
-                })?;
+                .await;
 
-            file.write_all(contents).await.context(LocalIoSnafu {
+            // Atomic "create only if not exists" on the target path.
+            let mut file = match open_result{
+                Ok(f) => f,
+                Err(e) => {
+                    let backend = BackendError::Local(e);
+                    // Classify AlreadyExists vs "other I/O"
+                    let storage_err = match &backend {
+                        BackendError::Local(inner) if inner.kind() == io::ErrorKind::AlreadyExists =>{
+                            StorageError::AlreadyExists { path: path_str, source: backend, backtrace: Backtrace::capture() }
+                        }
+                        _ => {
+                            StorageError::OtherIo { path: path_str, source: backend, backtrace: Backtrace::capture() }
+                        },
+                    };
+                    return Err(storage_err)
+                }
+            };
+                
+                
+
+            file.write_all(contents).await.map_err(BackendError::Local).context(OtherIoSnafu {
                 path: abs.display().to_string(),
             })?;
 
-            file.sync_all().await.context(LocalIoSnafu {
+            file.sync_all().await.map_err(BackendError::Local).context(OtherIoSnafu {
                 path: abs.display().to_string(),
             })?;
 
@@ -308,21 +334,27 @@ pub async fn read_head_tail_4(
             let meta = match fs::metadata(&abs).await {
                 Ok(m) => m,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    return NotFoundSnafu { path: path_str }.fail();
+                    return Err(e).map_err(BackendError::Local).context(NotFoundSnafu { path: path_str });
                 }
                 Err(e) => {
-                    return Err(e).context(LocalIoSnafu { path: path_str });
+                    return Err(e).map_err(BackendError::Local).context(OtherIoSnafu { path: path_str });
                 }
             };
 
+            // 2) Non-regular file: treat as semantic "NotFound" (no real OS error).
             if !meta.is_file() {
-                // Treat non-files as NotFound for higher layers.
-                return NotFoundSnafu { path: path_str }.fail();
+                let synthetic = io::Error::new(io::ErrorKind::Other, "not a regular file");
+                let backend = BackendError::Local(synthetic);
+                return Err(StorageError::NotFound {
+                    path: path_str,
+                    source: backend,
+                    backtrace: Backtrace::capture(),
+                });
             }
 
             let len = meta.len();
 
-            let mut file = fs::File::open(&abs).await.context(LocalIoSnafu {
+            let mut file = fs::File::open(&abs).await.map_err(BackendError::Local).context(OtherIoSnafu {
                 path: path_str.clone(),
             })?;
 
@@ -331,17 +363,17 @@ pub async fn read_head_tail_4(
 
             // Only attempt to read the header if file is at least 4 bytes.
             if len >= 4 {
-                file.read_exact(&mut head).await.context(LocalIoSnafu {
+                file.read_exact(&mut head).await.map_err(BackendError::Local).context(OtherIoSnafu {
                     path: path_str.clone(),
                 })?;
             }
 
             // Only attempt to read the footer if file is at least 8 bytes.
             if len >= 8 {
-                file.seek(SeekFrom::End(-4)).await.context(LocalIoSnafu {
+                file.seek(SeekFrom::End(-4)).await.map_err(BackendError::Local).context(OtherIoSnafu {
                     path: path_str.clone(),
                 })?;
-                file.read_exact(&mut tail).await.context(LocalIoSnafu {
+                file.read_exact(&mut tail).await.map_err(BackendError::Local).context(OtherIoSnafu {
                     path: path_str.clone(),
                 })?;
             }
@@ -366,10 +398,8 @@ pub async fn read_all_bytes(location: &TableLocation, rel_path: &Path) -> Storag
 
             match fs::read(&abs).await {
                 Ok(bytes) => Ok(bytes),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    NotFoundSnafu { path: path_str }.fail()
-                }
-                Err(e) => Err(e).context(LocalIoSnafu { path: path_str }),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Err(e).map_err(BackendError::Local).context(NotFoundSnafu { path: path_str }),
+                Err(e) => Err(e).map_err(BackendError::Local).context(OtherIoSnafu { path: path_str }),
             }
         }
     }
