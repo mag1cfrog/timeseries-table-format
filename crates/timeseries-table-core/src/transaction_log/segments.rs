@@ -7,6 +7,7 @@
 //! reader logic to rebuild the live segment map.
 
 use chrono::{DateTime, Utc};
+use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
@@ -111,11 +112,38 @@ pub enum SegmentMetaError {
         #[snafu(source, backtrace)]
         source: StorageError,
     },
+
+    /// Parquet reader / metadata failure.
+    #[snafu(display("Error reading Parquet metadata for segment at {path}: {source}"))]
+    ParquetRead {
+        path: String,
+        source: ParquetError,
+        backtrace: Backtrace,
+    },
+
+    /// The requested time column is not present in the Parquet schema.
+    #[snafu(display("Time column {column} not found in Parquet schema for segment at {path}"))]
+    MissingTimeColumn {
+        path: String,
+        column: String,
+        backtrace: Backtrace,
+    },
+
+    /// We found the time column but don't understand its physical type.
+    #[snafu(display(
+        "Unsupported physical type for time column {column} in segment at {path}: {physical}"
+    ))]
+    UnsupportedTimeType {
+        path: String,
+        column: String,
+        physical: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type SegmentResult<T> = Result<T, SegmentMetaError>;
 
-fn map_storage_error(err: StorageError) -> SegmentMetaError {
+pub fn map_storage_error(err: StorageError) -> SegmentMetaError {
     match &err {
         StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile {
             path: path.clone(),
@@ -123,11 +151,12 @@ fn map_storage_error(err: StorageError) -> SegmentMetaError {
         },
 
         // For everything else, preserve the full StorageError as the source.
-        StorageError::AlreadyExists { path, .. }
-        | StorageError::OtherIo { path, .. } => SegmentMetaError::Io {
-            path: path.clone(),
-            source: err, // move the full StorageError in
-        },
+        StorageError::AlreadyExists { path, .. } | StorageError::OtherIo { path, .. } => {
+            SegmentMetaError::Io {
+                path: path.clone(),
+                source: err, // move the full StorageError in
+            }
+        }
     }
 }
 
