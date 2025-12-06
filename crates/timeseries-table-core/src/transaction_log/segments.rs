@@ -139,6 +139,9 @@ pub enum SegmentMetaError {
         physical: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to decode Parquet row group statistics for {path}: {detail}"))]
+    ParquetStatsShape { path: String, detail: String },
 }
 
 pub type SegmentResult<T> = Result<T, SegmentMetaError>;
