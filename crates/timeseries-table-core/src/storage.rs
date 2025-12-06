@@ -294,7 +294,6 @@ pub async fn write_new(
                 .open(&abs)
                 .await;
 
-            // Atomic "create only if not exists" on the target path.
             let mut file = match open_result {
                 Ok(f) => f,
                 Err(e) => {
@@ -443,7 +442,7 @@ pub async fn read_head_tail_4(
 ///
 /// Errors:
 /// - If the file does not exist this returns `StorageError::NotFound`.
-/// - On any other I/O error this returns `StorageError::LocalIo`.
+/// - On any other I/O error this returns `StorageError::OtherIo`.
 pub async fn read_all_bytes(location: &TableLocation, rel_path: &Path) -> StorageResult<Vec<u8>> {
     match location {
         TableLocation::Local(_) => {
