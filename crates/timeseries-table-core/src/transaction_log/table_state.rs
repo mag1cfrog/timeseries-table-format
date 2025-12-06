@@ -8,7 +8,7 @@
 //! version.
 use std::collections::HashMap;
 
-use crate::log::*;
+use crate::transaction_log::*;
 
 /// In-memory view of table metadata and live segments, reconstructed from the log.
 ///
@@ -94,11 +94,11 @@ impl LogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log::{
+    use crate::storage::{StorageError, TableLocation};
+    use crate::transaction_log::{
         FileFormat, LogAction, LogStore, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
         TimeIndexSpec,
     };
-    use crate::storage::{StorageError, TableLocation};
     use chrono::TimeZone;
     use tempfile::TempDir;
 

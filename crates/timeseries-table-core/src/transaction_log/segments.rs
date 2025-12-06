@@ -5,9 +5,9 @@
 //! paths, timestamp bounds, and row counts, and [`FileFormat`] tracks the
 //! on-disk encoding. They are used by `LogAction::AddSegment` and related
 //! reader logic to rebuild the live segment map.
-use std::io;
 
 use chrono::{DateTime, Utc};
+use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
@@ -73,8 +73,6 @@ pub enum SegmentMetaError {
     UnsupportedFormat {
         /// The offending file format.
         format: FileFormat,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// The file is missing or not a regular file.
@@ -82,8 +80,6 @@ pub enum SegmentMetaError {
     MissingFile {
         /// The path to the missing or invalid file.
         path: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// The file is too short to be a valid Parquet file.
@@ -91,8 +87,6 @@ pub enum SegmentMetaError {
     TooShort {
         /// The path to the file that was too short.
         path: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// Magic bytes at the start / end of file don't match the Parquet spec.
@@ -100,8 +94,6 @@ pub enum SegmentMetaError {
     InvalidMagic {
         /// The path to the file with invalid magic bytes.
         path: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// Generic I/O error while validating the segment.
@@ -109,32 +101,98 @@ pub enum SegmentMetaError {
     Io {
         /// The path to the file that caused the I/O error.
         path: String,
-        /// The underlying I/O error.
-        source: io::Error,
+        /// Underlying storage error that caused this I/O failure.
+        #[snafu(source, backtrace)]
+        source: StorageError,
+    },
+
+    /// Parquet reader / metadata failure.
+    #[snafu(display("Error reading Parquet metadata for segment at {path}: {source}"))]
+    ParquetRead {
+        /// The path to the file that caused the Parquet read failure.
+        path: String,
+        /// Underlying parquet error that caused this failure.
+        source: ParquetError,
         /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },
+
+    /// The requested time column is not present in the Parquet schema.
+    #[snafu(display("Time column {column} not found in Parquet schema for segment at {path}"))]
+    MissingTimeColumn {
+        /// The path to the file missing the requested time column.
+        path: String,
+        /// The requested time column name that was not found.
+        column: String,
+    },
+
+    /// We found the time column but don't understand its physical type.
+    #[snafu(display(
+        "Unsupported physical type for time column {column} in segment at {path}: {physical}"
+    ))]
+    UnsupportedTimeType {
+        /// The path to the file with an unsupported time column physical type.
+        path: String,
+        /// The column name for the time column.
+        column: String,
+        /// The physical type encountered for the time column.
+        physical: String,
+        /// The logical type encountered for the time column.
+        logical: String,
+    },
+
+    /// Statistics exist but are not well-shaped (wrong length / unexpected type).
+    #[snafu(display(
+        "Parquet statistics shape invalid for {column} in segment at {path}: {detail}"
+    ))]
+    ParquetStatsShape {
+        /// The path to the file with malformed Parquet statistics.
+        path: String,
+        /// The column whose statistics are malformed.
+        column: String,
+        /// Details about how the statistics are malformed.
+        detail: String,
+    },
+
+    /// No usable statistics for the time column; v0.1 may fall back to a scan.
+    #[snafu(display("Parquet statistics missing for {column} in segment at {path}"))]
+    ParquetStatsMissing {
+        /// The path to the file missing statistics for the column.
+        path: String,
+        /// The column missing statistics.
+        column: String,
+    },
 }
 
-type SegmentResult<T> = Result<T, SegmentMetaError>;
+impl SegmentMetaError {
+    /// Construct a `SegmentMetaError::Io` from a lower-level `StorageError` and
+    /// the associated path so the storage error can be preserved as the source.
+    pub fn from_storage(err: StorageError, path: String) -> Self {
+        SegmentMetaError::Io { path, source: err }
+    }
+}
 
-fn map_storage_error(err: StorageError) -> SegmentMetaError {
-    match err {
-        StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile {
-            path,
-            backtrace: Backtrace::capture(),
-        },
-        StorageError::LocalIo { path, source, .. } => SegmentMetaError::Io {
-            path,
-            source,
-            backtrace: Backtrace::capture(),
-        },
-        StorageError::AlreadyExists { path, .. } => SegmentMetaError::Io {
-            path,
-            // Shouldn't really happen on reads, but we map it generically.
-            source: io::Error::other("unexpected AlreadyExists while validating segment"),
-            backtrace: Backtrace::capture(),
-        },
+/// Convenience alias for results returned by segment metadata operations.
+#[allow(clippy::result_large_err)]
+pub type SegmentResult<T> = Result<T, SegmentMetaError>;
+
+/// Convert a lower-level `StorageError` into the corresponding `SegmentMetaError`.
+///
+/// - `StorageError::NotFound` is mapped to `SegmentMetaError::MissingFile` with a fresh
+///   backtrace.
+/// - All other storage errors are wrapped in `SegmentMetaError::Io`, preserving the original
+///   `StorageError` as the source for diagnostics.
+pub fn map_storage_error(err: StorageError) -> SegmentMetaError {
+    match &err {
+        StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile { path: path.clone() },
+
+        // For everything else, preserve the full StorageError as the source.
+        StorageError::AlreadyExists { path, .. } | StorageError::OtherIo { path, .. } => {
+            SegmentMetaError::Io {
+                path: path.clone(),
+                source: err, // move the full StorageError in
+            }
+        }
     }
 }
 

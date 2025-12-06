@@ -11,9 +11,9 @@
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the
 //! caller.
-use crate::log::actions::{Commit, LogAction};
-use crate::log::*;
 use crate::storage::{self, StorageError, TableLocation};
+use crate::transaction_log::actions::{Commit, LogAction};
+use crate::transaction_log::*;
 use chrono::Utc;
 use snafu::{Backtrace, prelude::*};
 use std::path::{Path, PathBuf};
@@ -217,7 +217,7 @@ impl LogStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::log::segments::SegmentId;
+    use crate::transaction_log::segments::SegmentId;
 
     use super::*;
     use serde_json;

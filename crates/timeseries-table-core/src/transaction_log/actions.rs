@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::log::{
+use crate::transaction_log::{
     segments::{SegmentId, SegmentMeta},
     table_metadata::TableMetaDelta,
 };

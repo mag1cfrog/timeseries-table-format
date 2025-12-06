@@ -18,14 +18,7 @@
 //! re-implementing the storage and metadata logic.
 #![deny(missing_docs)]
 pub mod coverage;
-pub mod log;
+pub mod helpers;
 pub mod storage;
 pub mod table;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn smoke_test_compiles() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub mod transaction_log;

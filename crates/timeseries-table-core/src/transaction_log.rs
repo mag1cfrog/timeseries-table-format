@@ -116,7 +116,7 @@ pub enum CommitError {
 
 #[cfg(test)]
 mod tests {
-    use crate::log::*;
+    use crate::transaction_log::*;
 
     use chrono::{DateTime, TimeZone, Utc};
     use serde_json;
