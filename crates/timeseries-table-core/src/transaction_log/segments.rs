@@ -109,6 +109,7 @@ pub enum SegmentMetaError {
     Io {
         /// The path to the file that caused the I/O error.
         path: String,
+        /// Underlying storage error that caused this I/O failure.
         #[snafu(source, backtrace)]
         source: StorageError,
     },
@@ -116,16 +117,22 @@ pub enum SegmentMetaError {
     /// Parquet reader / metadata failure.
     #[snafu(display("Error reading Parquet metadata for segment at {path}: {source}"))]
     ParquetRead {
+        /// The path to the file that caused the Parquet read failure.
         path: String,
+        /// Underlying parquet error that caused this failure.
         source: ParquetError,
+        /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },
 
     /// The requested time column is not present in the Parquet schema.
     #[snafu(display("Time column {column} not found in Parquet schema for segment at {path}"))]
     MissingTimeColumn {
+        /// The path to the file missing the requested time column.
         path: String,
+        /// The requested time column name that was not found.
         column: String,
+        /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },
 
@@ -134,10 +141,15 @@ pub enum SegmentMetaError {
         "Unsupported physical type for time column {column} in segment at {path}: {physical}"
     ))]
     UnsupportedTimeType {
+        /// The path to the file with an unsupported time column physical type.
         path: String,
+        /// The column name for the time column.
         column: String,
+        /// The physical type encountered for the time column.
         physical: String,
+        /// The logical type encountered for the time column.
         logical: String,
+        /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },
 
@@ -146,29 +158,45 @@ pub enum SegmentMetaError {
         "Parquet statistics shape invalid for {column} in segment at {path}: {detail}"
     ))]
     ParquetStatsShape {
+        /// The path to the file with malformed Parquet statistics.
         path: String,
+        /// The column whose statistics are malformed.
         column: String,
+        /// Details about how the statistics are malformed.
         detail: String,
+        /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },
 
     /// No usable statistics for the time column; v0.1 may fall back to a scan.
     #[snafu(display("Parquet statistics missing for {column} in segment at {path}"))]
     ParquetStatsMissing {
+        /// The path to the file missing statistics for the column.
         path: String,
+        /// The column missing statistics.
         column: String,
+        /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },
 }
 
 impl SegmentMetaError {
+    /// Construct a `SegmentMetaError::Io` from a lower-level `StorageError` and
+    /// the associated path so the storage error can be preserved as the source.
     pub fn from_storage(err: StorageError, path: String) -> Self {
         SegmentMetaError::Io { path, source: err }
     }
 }
 
+/// Convenience alias for results returned by segment metadata operations.
 pub type SegmentResult<T> = Result<T, SegmentMetaError>;
 
+/// Convert a lower-level `StorageError` into the corresponding `SegmentMetaError`.
+///
+/// - `StorageError::NotFound` is mapped to `SegmentMetaError::MissingFile` with a fresh
+///   backtrace.
+/// - All other storage errors are wrapped in `SegmentMetaError::Io`, preserving the original
+///   `StorageError` as the source for diagnostics.
 pub fn map_storage_error(err: StorageError) -> SegmentMetaError {
     match &err {
         StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile {
