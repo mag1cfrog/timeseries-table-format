@@ -73,8 +73,6 @@ pub enum SegmentMetaError {
     UnsupportedFormat {
         /// The offending file format.
         format: FileFormat,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// The file is missing or not a regular file.
@@ -82,8 +80,6 @@ pub enum SegmentMetaError {
     MissingFile {
         /// The path to the missing or invalid file.
         path: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// The file is too short to be a valid Parquet file.
@@ -91,8 +87,6 @@ pub enum SegmentMetaError {
     TooShort {
         /// The path to the file that was too short.
         path: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// Magic bytes at the start / end of file don't match the Parquet spec.
@@ -100,8 +94,6 @@ pub enum SegmentMetaError {
     InvalidMagic {
         /// The path to the file with invalid magic bytes.
         path: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// Generic I/O error while validating the segment.
@@ -132,8 +124,6 @@ pub enum SegmentMetaError {
         path: String,
         /// The requested time column name that was not found.
         column: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// We found the time column but don't understand its physical type.
@@ -149,8 +139,6 @@ pub enum SegmentMetaError {
         physical: String,
         /// The logical type encountered for the time column.
         logical: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// Statistics exist but are not well-shaped (wrong length / unexpected type).
@@ -164,8 +152,6 @@ pub enum SegmentMetaError {
         column: String,
         /// Details about how the statistics are malformed.
         detail: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 
     /// No usable statistics for the time column; v0.1 may fall back to a scan.
@@ -175,8 +161,6 @@ pub enum SegmentMetaError {
         path: String,
         /// The column missing statistics.
         column: String,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
     },
 }
 
@@ -189,6 +173,7 @@ impl SegmentMetaError {
 }
 
 /// Convenience alias for results returned by segment metadata operations.
+#[allow(clippy::result_large_err)]
 pub type SegmentResult<T> = Result<T, SegmentMetaError>;
 
 /// Convert a lower-level `StorageError` into the corresponding `SegmentMetaError`.
@@ -199,10 +184,7 @@ pub type SegmentResult<T> = Result<T, SegmentMetaError>;
 ///   `StorageError` as the source for diagnostics.
 pub fn map_storage_error(err: StorageError) -> SegmentMetaError {
     match &err {
-        StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile {
-            path: path.clone(),
-            backtrace: Backtrace::capture(),
-        },
+        StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile { path: path.clone() },
 
         // For everything else, preserve the full StorageError as the source.
         StorageError::AlreadyExists { path, .. } | StorageError::OtherIo { path, .. } => {
