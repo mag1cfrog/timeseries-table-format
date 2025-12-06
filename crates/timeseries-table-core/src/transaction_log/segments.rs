@@ -137,6 +137,7 @@ pub enum SegmentMetaError {
         path: String,
         column: String,
         physical: String,
+        logical: String,
         backtrace: Backtrace,
     },
 
