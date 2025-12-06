@@ -21,9 +21,8 @@ use std::path::Path;
 
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
-use parquet::basic::Type as PhysicalType;
+use parquet::basic::{LogicalType, TimeUnit, Type as PhysicalType};
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::RowAccessor;
 use snafu::Backtrace;
 
 use crate::storage::{self, TableLocation};
@@ -78,39 +77,33 @@ enum TimestampUnit {
     Nanos,
 }
 
-fn choose_timestamp_unit(
+fn choose_timestamp_unit_from_logical(
     path: &str,
     column: &str,
     physical: PhysicalType,
-    logical_desc: &str,
+    logical: Option<&LogicalType>,
 ) -> Result<TimestampUnit, SegmentMetaError> {
-    match physical {
-        PhysicalType::INT64 => match logical_desc {
-            "timestamp_millis" | "TIMESTAMP_MILLIS" => Ok(TimestampUnit::Millis),
-            "timestamp_micros" | "TIMESTAMP_MICROS" => Ok(TimestampUnit::Micros),
-            "timestamp_nanos" | "TIMESTAMP_NANOS" => Ok(TimestampUnit::Nanos),
-            other => Err(SegmentMetaError::UnsupportedTimeType {
-                path: path.to_string(),
-                column: column.to_string(),
-                physical: format!("{physical:?}",),
-                logical: other.to_string(),
-            }),
+    if physical != PhysicalType::INT64 {
+        return Err(SegmentMetaError::UnsupportedTimeType {
+            path: path.to_string(),
+            column: column.to_string(),
+            physical: format!("{physical:?}"),
+            logical: format!("{logical:?}"),
+        });
+    }
+
+    match logical {
+        Some(LogicalType::Timestamp { unit, .. }) => match unit {
+            TimeUnit::MILLIS => Ok(TimestampUnit::Millis),
+            TimeUnit::MICROS => Ok(TimestampUnit::Micros),
+            TimeUnit::NANOS => Ok(TimestampUnit::Nanos),
         },
         other => Err(SegmentMetaError::UnsupportedTimeType {
             path: path.to_string(),
             column: column.to_string(),
-            physical: format!("{physical:?}",),
-            logical: other.to_string(),
+            physical: format!("{physical:?}"),
+            logical: format!("{other:?}"),
         }),
-    }
-}
-
-/// Best-effort description of the logical type for debugging / error messages.
-fn logical_type_description(col_descr: &parquet::schema::types::ColumnDescriptor) -> String {
-    if let Some(logical) = col_descr.logical_type_ref() {
-        format!("{logical:?}")
-    } else {
-        format!("{:?}", col_descr.converted_type())
     }
 }
 
@@ -175,6 +168,8 @@ fn min_max_from_scan(
     time_idx: usize,
     reader: &SerializedFileReader<Bytes>,
 ) -> Result<(i64, i64), SegmentMetaError> {
+    use parquet::record::Field;
+
     let iter = reader
         .get_row_iter(None)
         .map_err(|source| SegmentMetaError::ParquetRead {
@@ -193,13 +188,22 @@ fn min_max_from_scan(
             backtrace: Backtrace::capture(),
         })?;
 
-        let v = row
-            .get_long(time_idx)
-            .map_err(|e| SegmentMetaError::ParquetRead {
-                path: path.to_string(),
-                source: e,
-                backtrace: Backtrace::capture(),
-            })?;
+        // Get raw field and extract i64 value from any timestamp type
+        let field = row.get_column_iter().nth(time_idx).map(|(_, f)| f);
+        let v = match field {
+            Some(Field::Long(val)) => *val,
+            Some(Field::TimestampMillis(val)) => *val,
+            Some(Field::TimestampMicros(val)) => *val,
+            _ => {
+                return Err(SegmentMetaError::ParquetRead {
+                    path: path.to_string(),
+                    source: parquet::errors::ParquetError::General(format!(
+                        "Cannot read timestamp from field at index {time_idx}"
+                    )),
+                    backtrace: Backtrace::capture(),
+                });
+            }
+        };
 
         min_val = Some(match min_val {
             Some(prev) => prev.min(v),
@@ -270,10 +274,10 @@ pub async fn segment_meta_from_parquet_location(
     // Optionally sanity-check the physical type.
     let col_descr = &schema.column(time_idx);
     let physical = col_descr.physical_type();
-    let logical_desc = logical_type_description(col_descr);
+    let logical = col_descr.logical_type_ref();
 
     // 5) Decide which timestamp unit we support for this column.
-    let unit = choose_timestamp_unit(&path_str, time_column, physical, &logical_desc)?;
+    let unit = choose_timestamp_unit_from_logical(&path_str, time_column, physical, logical)?;
 
     // 6) Try fast path: min/max from row-group stats.
     let stats_min_max = min_max_from_stats(&path_str, time_column, time_idx, &reader)?;
@@ -299,4 +303,379 @@ pub async fn segment_meta_from_parquet_location(
         ts_max,
         row_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parquet::basic::{LogicalType, Repetition, TimeUnit};
+    use parquet::column::writer::ColumnWriter;
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use std::fs::File;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn write_parquet_file(
+        path: &Path,
+        time_column: &str,
+        logical: Option<&str>,
+        physical: PhysicalType,
+        values: &[i64],
+        stats_enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut builder = Type::primitive_type_builder(time_column, physical)
+            .with_repetition(Repetition::REQUIRED);
+
+        if let Some(l) = logical {
+            let lt = match l {
+                "TIMESTAMP_MILLIS" => LogicalType::Timestamp {
+                    is_adjusted_to_u_t_c: true,
+                    unit: TimeUnit::MILLIS,
+                },
+                "TIMESTAMP_MICROS" => LogicalType::Timestamp {
+                    is_adjusted_to_u_t_c: true,
+                    unit: TimeUnit::MICROS,
+                },
+                "TIMESTAMP_NANOS" => LogicalType::Timestamp {
+                    is_adjusted_to_u_t_c: true,
+                    unit: TimeUnit::NANOS,
+                },
+                other => return Err(format!("unsupported logical for test: {other}").into()),
+            };
+            builder = builder.with_logical_type(Some(lt));
+        }
+
+        let col = Arc::new(builder.build()?);
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![col])
+                .build()?,
+        );
+
+        let props = if stats_enabled {
+            WriterProperties::builder().build()
+        } else {
+            WriterProperties::builder()
+                .set_statistics_enabled(EnabledStatistics::None)
+                .build()
+        };
+
+        let file = File::create(path)?;
+        let mut writer = SerializedFileWriter::new(file, schema, Arc::new(props))?;
+
+        let mut row_group_writer = writer.next_row_group()?;
+        while let Some(mut col_writer) = row_group_writer.next_column()? {
+            match col_writer.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => {
+                    typed.write_batch(values, None, None)?;
+                }
+                ColumnWriter::Int32ColumnWriter(typed) => {
+                    let downcast: Vec<i32> = values.iter().map(|v| *v as i32).collect();
+                    typed.write_batch(&downcast, None, None)?;
+                }
+                _ => return Err("unexpected column writer type".into()),
+            }
+            col_writer.close()?;
+        }
+        row_group_writer.close()?;
+        writer.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn le_bytes_to_i64_rejects_wrong_length() {
+        let err = le_bytes_to_i64("path", "ts", "min", &[1, 2, 3]).unwrap_err();
+        assert!(matches!(err, SegmentMetaError::ParquetStatsShape { .. }));
+    }
+
+    #[test]
+    fn ts_from_i64_out_of_range_is_error() {
+        let err = ts_from_i64(TimestampUnit::Millis, i64::MAX).unwrap_err();
+        assert!(matches!(err, SegmentMetaError::ParquetStatsShape { .. }));
+    }
+
+    #[test]
+    fn choose_timestamp_unit_rejects_wrong_logical() {
+        // No logical type (None) should fail
+        let err = choose_timestamp_unit_from_logical("path", "ts", PhysicalType::INT64, None)
+            .unwrap_err();
+        assert!(matches!(err, SegmentMetaError::UnsupportedTimeType { .. }));
+    }
+
+    #[test]
+    fn choose_timestamp_unit_rejects_wrong_physical() {
+        let lt = LogicalType::Timestamp {
+            is_adjusted_to_u_t_c: true,
+            unit: TimeUnit::MILLIS,
+        };
+        let err = choose_timestamp_unit_from_logical("path", "ts", PhysicalType::INT32, Some(&lt))
+            .unwrap_err();
+        assert!(matches!(err, SegmentMetaError::UnsupportedTimeType { .. }));
+    }
+
+    #[tokio::test]
+    async fn segment_meta_happy_path_uses_stats() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/ts.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        write_parquet_file(
+            &abs,
+            "ts",
+            Some("TIMESTAMP_MILLIS"),
+            PhysicalType::INT64,
+            &[10, 20, 30],
+            true,
+        )?;
+
+        let meta = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-1".to_string()),
+            "ts",
+        )
+        .await?;
+
+        assert_eq!(meta.ts_min.timestamp_millis(), 10);
+        assert_eq!(meta.ts_max.timestamp_millis(), 30);
+        assert_eq!(meta.row_count, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn segment_meta_falls_back_to_scan_when_stats_missing() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/no_stats.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        write_parquet_file(
+            &abs,
+            "ts",
+            Some("TIMESTAMP_MILLIS"),
+            PhysicalType::INT64,
+            &[5, 7],
+            false,
+        )?;
+
+        let meta = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-scan".to_string()),
+            "ts",
+        )
+        .await?;
+
+        assert_eq!(meta.ts_min.timestamp_millis(), 5);
+        assert_eq!(meta.ts_max.timestamp_millis(), 7);
+        assert_eq!(meta.row_count, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn segment_meta_errors_when_no_rows_and_no_stats() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/empty.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        write_parquet_file(
+            &abs,
+            "ts",
+            Some("TIMESTAMP_MILLIS"),
+            PhysicalType::INT64,
+            &[],
+            false,
+        )?;
+
+        let result = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-empty".to_string()),
+            "ts",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SegmentMetaError::ParquetStatsMissing { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn segment_meta_supports_micro_and_nano_units() -> TestResult {
+        let tmp = TempDir::new()?;
+
+        // Micros
+        let rel_micro = Path::new("data/micro.parquet");
+        let abs_micro = tmp.path().join(rel_micro);
+        write_parquet_file(
+            &abs_micro,
+            "ts",
+            Some("TIMESTAMP_MICROS"),
+            PhysicalType::INT64,
+            &[1_000, 2_000],
+            true,
+        )?;
+
+        let meta_micro = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_micro,
+            SegmentId("seg-micro".to_string()),
+            "ts",
+        )
+        .await?;
+        assert_eq!(
+            meta_micro.ts_min.timestamp_nanos_opt().map(|n| n / 1_000),
+            Some(1_000)
+        );
+        assert_eq!(
+            meta_micro.ts_max.timestamp_nanos_opt().map(|n| n / 1_000),
+            Some(2_000)
+        );
+
+        // Nanos
+        let rel_nano = Path::new("data/nano.parquet");
+        let abs_nano = tmp.path().join(rel_nano);
+        write_parquet_file(
+            &abs_nano,
+            "ts",
+            Some("TIMESTAMP_NANOS"),
+            PhysicalType::INT64,
+            &[3_000, 9_000],
+            true,
+        )?;
+
+        let meta_nano = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_nano,
+            SegmentId("seg-nano".to_string()),
+            "ts",
+        )
+        .await?;
+        assert_eq!(meta_nano.ts_min.timestamp_nanos_opt(), Some(3_000));
+        assert_eq!(meta_nano.ts_max.timestamp_nanos_opt(), Some(9_000));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_time_column_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/no_time.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        // Write a parquet file with a different column name.
+        write_parquet_file(
+            &abs,
+            "other",
+            Some("TIMESTAMP_MILLIS"),
+            PhysicalType::INT64,
+            &[1, 2],
+            true,
+        )?;
+
+        let result = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-missing".to_string()),
+            "ts",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SegmentMetaError::MissingTimeColumn { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_time_type_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/unsupported_time.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        // INT32 with timestamp logical is unsupported.
+        write_parquet_file(&abs, "ts", None, PhysicalType::INT32, &[1, 2], true)?;
+
+        let result = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-bad".to_string()),
+            "ts",
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SegmentMetaError::UnsupportedTimeType { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bad_parquet_file_returns_parquet_read_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/corrupt.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        // Valid magic bytes but invalid body so the parquet reader fails.
+        tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
+        tokio::fs::write(&abs, b"PAR1PAR1garbage").await?;
+
+        let result = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-corrupt".to_string()),
+            "ts",
+        )
+        .await;
+
+        assert!(matches!(result, Err(SegmentMetaError::ParquetRead { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_file_returns_missing_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/missing.parquet");
+
+        let result = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-missing".to_string()),
+            "ts",
+        )
+        .await;
+
+        assert!(matches!(result, Err(SegmentMetaError::MissingFile { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn too_short_file_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/short.parquet");
+        let abs = tmp.path().join(rel_path);
+        tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
+        tokio::fs::write(&abs, b"short").await?;
+
+        let result = segment_meta_from_parquet_location(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            SegmentId("seg-short".to_string()),
+            "ts",
+        )
+        .await;
+
+        assert!(matches!(result, Err(SegmentMetaError::TooShort { .. })));
+        Ok(())
+    }
 }
