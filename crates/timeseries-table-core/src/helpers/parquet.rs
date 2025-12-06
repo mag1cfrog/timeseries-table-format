@@ -54,8 +54,8 @@ fn ts_from_i64(unit: TimestampUnit, value: i64) -> Result<DateTime<Utc>, Segment
         TimestampUnit::Millis => Utc.timestamp_millis_opt(value),
         TimestampUnit::Micros => Utc.timestamp_micros(value),
         TimestampUnit::Nanos => {
-            let secs = value / 1_000_000_000;
-            let nanos = (value % 1_000_000_000) as u32;
+            let secs = value.div_euclid(1_000_000_000);
+            let nanos = value.rem_euclid(1_000_000_000) as u32;
             Utc.timestamp_opt(secs, nanos)
         }
     };
