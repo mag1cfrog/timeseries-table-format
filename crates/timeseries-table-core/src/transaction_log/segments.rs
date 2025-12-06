@@ -140,8 +140,30 @@ pub enum SegmentMetaError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to decode Parquet row group statistics for {path}: {detail}"))]
-    ParquetStatsShape { path: String, detail: String },
+    /// Statistics exist but are not well-shaped (wrong length / unexpected type).
+    #[snafu(display(
+        "Parquet statistics shape invalid for {column} in segment at {path}: {detail}"
+    ))]
+    ParquetStatsShape {
+        path: String,
+        column: String,
+        detail: String,
+        backtrace: Backtrace,
+    },
+
+    /// No usable statistics for the time column; v0.1 may fall back to a scan.
+    #[snafu(display("Parquet statistics missing for {column} in segment at {path}"))]
+    ParquetStatsMissing {
+        path: String,
+        column: String,
+        backtrace: Backtrace,
+    },
+}
+
+impl SegmentMetaError {
+    pub fn from_storage(err: StorageError, path: String) -> Self {
+        SegmentMetaError::Io { path, source: err }
+    }
 }
 
 pub type SegmentResult<T> = Result<T, SegmentMetaError>;
