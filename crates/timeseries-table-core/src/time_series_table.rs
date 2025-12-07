@@ -93,17 +93,22 @@ impl TimeSeriesTable {
     pub async fn open(location: TableLocation) -> Result<Self, TableError> {
         let log = TransactionLogStore::new(location.clone());
 
+        // Early return for tables with no commits so we surface TableError::EmptyTable
+        // instead of a lower-level corrupt state error.
+        let current_version = log
+            .load_current_version()
+            .await
+            .context(TransactionLogSnafu)?;
+
+        if current_version == 0 {
+            return EmptyTableSnafu.fail();
+        }
+
         // Rebuild the snapshot of state from the log.
         let state = log
             .rebuild_table_state()
             .await
             .context(TransactionLogSnafu)?;
-
-        // For now we treat "no commits" as an error; `create` should have written
-        // at least one metadata commit.
-        if state.version == 0 {
-            return EmptyTableSnafu.fail();
-        }
 
         // Extract the time index spec from TableMeta.kind.
         let index = match &state.table_meta.kind {
