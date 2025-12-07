@@ -19,5 +19,5 @@
 pub mod coverage;
 pub mod helpers;
 pub mod storage;
-pub mod table;
+pub mod time_series_table;
 pub mod transaction_log;
