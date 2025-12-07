@@ -16,7 +16,10 @@ use snafu::prelude::*;
 
 use crate::{
     storage::TableLocation,
-    transaction_log::{CommitError, TableKind, TableState, TimeIndexSpec, TransactionLogStore},
+    transaction_log::{
+        CommitError, LogAction, TableKind, TableMeta, TableState, TimeIndexSpec,
+        TransactionLogStore,
+    },
 };
 
 /// Errors from high-level time-series table operations.
@@ -113,6 +116,69 @@ impl TimesSeriesTable {
             }
         };
 
+        Ok(Self {
+            location,
+            log,
+            state,
+            index,
+        })
+    }
+
+    /// Create a new time-series table at the given location.
+    ///
+    /// This:
+    /// - Requires `table_meta.kind` to be `TableKind::TimeSeries`,
+    /// - Verifies that there are no existing commits (version must be 0),
+    /// - Writes an initial commit with `UpdateTableMeta(table_meta.clone())`,
+    /// - Returns a `TimeSeriesTable` with a fresh `TableState`.
+    pub async fn create(
+        location: TableLocation,
+        table_meta: TableMeta,
+    ) -> Result<Self, TableError> {
+        // 1) Extract the time index spec from the provided metadata
+        // and ensure this is actually a time-series table.
+        let index = match &table_meta.kind {
+            TableKind::TimeSeries(spec) => spec.clone(),
+            other => {
+                return NotTimeSeriesSnafu {
+                    kind: other.clone(),
+                }
+                .fail();
+            }
+        };
+
+        let log = TransactionLogStore::new(location.clone());
+
+        // 2) Check that there are no existing commits. This keeps `create`
+        // from sliently appending to a pre-existing table.
+        let current_version = log
+            .load_current_version()
+            .await
+            .context(TransactionLogSnafu)?;
+
+        if current_version != 0 {
+            return AlreadyExistsSnafu { current_version }.fail();
+        }
+
+        // 3) Write the initial metadata commit at version 1.
+        //
+        // `TableMetaDelta` is an alias for `TableMeta` in v0.1, so we can
+        // pass `table_meta.clone()` directly into `UpdateTableMeta`.
+        let actions = vec![LogAction::UpdateTableMeta(table_meta.clone())];
+
+        let new_version = log
+            .commit_with_expected_version(0, actions)
+            .await
+            .context(TransactionLogSnafu)?;
+
+        debug_assert_eq!(new_version, 1);
+
+        // 4) Rebuild state from the log so that `state` is guaranteed to be
+        //    consistent with what is on disk.
+        let state = log
+            .rebuild_table_state()
+            .await
+            .context(TransactionLogSnafu)?;
         Ok(Self {
             location,
             log,
