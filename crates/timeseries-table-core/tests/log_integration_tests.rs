@@ -4,6 +4,7 @@
 //! - Happy path commit sequences with TableState reconstruction,
 //! - Conflict handling via version guards,
 //! - Robust handling of missing/malformed metadata.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
