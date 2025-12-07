@@ -26,7 +26,7 @@ pub struct TableState {
     pub segments: HashMap<SegmentId, SegmentMeta>,
 }
 
-impl LogStore {
+impl TransactionLogStore {
     /// Rebuild the current TableState by replaying all commits up to CURRENT.
     ///
     /// v0.1 behavior:
@@ -96,18 +96,18 @@ mod tests {
     use super::*;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
-        FileFormat, LogAction, LogStore, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
-        TimeIndexSpec,
+        FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
+        TimeIndexSpec, TransactionLogStore,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn create_test_log_store() -> (TempDir, LogStore) {
+    fn create_test_log_store() -> (TempDir, TransactionLogStore) {
         let tmp = TempDir::new().expect("create temp dir");
         let location = TableLocation::local(tmp.path());
-        let store = LogStore::new(location);
+        let store = TransactionLogStore::new(location);
         (tmp, store)
     }
 
@@ -220,7 +220,7 @@ mod tests {
 
         let commit_path = tmp
             .path()
-            .join(LogStore::LOG_DIR_NAME)
+            .join(TransactionLogStore::LOG_DIR_NAME)
             .join("0000000001.json");
         tokio::fs::write(&commit_path, b"not-json").await?;
 
@@ -243,7 +243,7 @@ mod tests {
 
         let commit_path = tmp
             .path()
-            .join(LogStore::LOG_DIR_NAME)
+            .join(TransactionLogStore::LOG_DIR_NAME)
             .join("0000000001.json");
         tokio::fs::remove_file(&commit_path).await?;
 

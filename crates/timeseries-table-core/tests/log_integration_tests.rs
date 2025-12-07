@@ -4,13 +4,14 @@
 //! - Happy path commit sequences with TableState reconstruction,
 //! - Conflict handling via version guards,
 //! - Robust handling of missing/malformed metadata.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 use timeseries_table_core::storage::{StorageError, TableLocation};
 use timeseries_table_core::transaction_log::{
-    CommitError, FileFormat, LogAction, LogStore, LogicalColumn, LogicalSchema, SegmentId,
-    SegmentMeta, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+    CommitError, FileFormat, LogAction, LogicalColumn, LogicalSchema, SegmentId, SegmentMeta,
+    TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -19,10 +20,10 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 // Test Helpers
 // =============================================================================
 
-fn create_test_log_store() -> (TempDir, LogStore) {
+fn create_test_log_store() -> (TempDir, TransactionLogStore) {
     let tmp = TempDir::new().expect("create temp dir");
     let location = TableLocation::local(tmp.path());
-    let store = LogStore::new(location);
+    let store = TransactionLogStore::new(location);
     (tmp, store)
 }
 
@@ -125,7 +126,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     // Verify commit file exists
     let commit_1_path = tmp
         .path()
-        .join(LogStore::LOG_DIR_NAME)
+        .join(TransactionLogStore::LOG_DIR_NAME)
         .join("0000000001.json");
     assert!(
         commit_1_path.exists(),
@@ -141,7 +142,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     // Verify commit file exists
     let commit_2_path = tmp
         .path()
-        .join(LogStore::LOG_DIR_NAME)
+        .join(TransactionLogStore::LOG_DIR_NAME)
         .join("0000000002.json");
     assert!(
         commit_2_path.exists(),
@@ -344,9 +345,9 @@ async fn corrupt_current_file_returns_corrupt_state() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
     // Create corrupt CURRENT file
-    let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+    let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
     tokio::fs::create_dir_all(&log_dir).await?;
-    let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+    let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
     tokio::fs::write(&current_path, "not-a-number").await?;
 
     let result = store.load_current_version().await;
@@ -363,9 +364,9 @@ async fn corrupt_current_file_returns_corrupt_state() -> TestResult {
 async fn empty_current_file_returns_corrupt_state() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
-    let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+    let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
     tokio::fs::create_dir_all(&log_dir).await?;
-    let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+    let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
     tokio::fs::write(&current_path, "").await?;
 
     let result = store.load_current_version().await;
@@ -392,7 +393,7 @@ async fn corrupt_commit_file_returns_corrupt_state() -> TestResult {
     // Corrupt the commit file
     let commit_path = tmp
         .path()
-        .join(LogStore::LOG_DIR_NAME)
+        .join(TransactionLogStore::LOG_DIR_NAME)
         .join("0000000001.json");
     tokio::fs::write(&commit_path, "{ invalid json }}}").await?;
 
@@ -428,7 +429,7 @@ async fn missing_commit_file_returns_storage_not_found() -> TestResult {
     // Delete the commit file
     let commit_path = tmp
         .path()
-        .join(LogStore::LOG_DIR_NAME)
+        .join(TransactionLogStore::LOG_DIR_NAME)
         .join("0000000001.json");
     tokio::fs::remove_file(&commit_path).await?;
 
@@ -464,7 +465,7 @@ async fn leftover_tmp_files_are_ignored() -> TestResult {
         .await?;
 
     // Create leftover .tmp files that might be from crashed writes
-    let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+    let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
     tokio::fs::write(log_dir.join("0000000002.json.tmp"), b"garbage").await?;
     tokio::fs::write(log_dir.join(".tmp_random_file"), b"more garbage").await?;
     tokio::fs::write(log_dir.join("temp_commit.tmp"), b"even more garbage").await?;
@@ -499,7 +500,7 @@ async fn missing_intermediate_commit_fails_rebuild() -> TestResult {
     // Delete commit 1 (intermediate)
     let commit_1_path = tmp
         .path()
-        .join(LogStore::LOG_DIR_NAME)
+        .join(TransactionLogStore::LOG_DIR_NAME)
         .join("0000000001.json");
     tokio::fs::remove_file(&commit_1_path).await?;
 

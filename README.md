@@ -38,30 +38,9 @@ While experimenting with backtests and custom indicators (moving averages, volat
 
 ## High-level architecture
 
-```mermaid
-flowchart TD
-    subgraph Disk["On-disk layout"]
-        SEG["Parquet segments"]
-        LOG["log/ (JSON commits)"]
-        CUR["CURRENT (latest version)"]
-    end
-
-    subgraph Meta["Metadata & state"]
-        TMETA["TableMeta (TableKind::TimeSeries + TimeIndexSpec)"]
-        STATE["TableState (version, segments)"]
-        OCC["Version-guard OCC (commit_with_expected_version)"]
-        COV["Coverage bitmaps (Roaring)"]
-    end
-
-    subgraph API["APIs & integrations"]
-        TSTBL["TimeSeriesTable abstraction"]
-        DF["(Future) DataFusion integration"]
-        BT["(Future) Backtest tooling / CLI"]
-    end
-
-    Disk --> Meta
-    Meta --> API
-```
+<p align="center">
+  <img src="docs/high-level-architecture.png" alt="high level architecture" width="1920" />
+</p>
 
 At a high level, a time-series table in this project looks like:
 
@@ -134,7 +113,7 @@ Future crates (not in v0.1 yet) might include:
 Early **MVP** work in progress:
 
 - [x] Workspace + core crate scaffolding  
-- [ ] Log-based metadata layer with version-guard OCC  
+- [x] Log-based metadata layer with version-guard OCC  
 - [ ] Time-series table abstraction + basic range scans  
 - [ ] Coverage helpers and simple gap/coverage metrics  
 - [ ] Small end-to-end example (synthetic time-series data)
