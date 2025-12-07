@@ -160,7 +160,7 @@ impl TimeSeriesTable {
         let log = TransactionLogStore::new(location.clone());
 
         // 2) Check that there are no existing commits. This keeps `create`
-        // from sliently appending to a pre-existing table.
+        // from silently appending to a pre-existing table.
         let current_version = log
             .load_current_version()
             .await
