@@ -69,7 +69,7 @@ pub mod table_metadata;
 pub mod table_state;
 
 pub use actions::{Commit, LogAction};
-pub use log_store::LogStore;
+pub use log_store::TransactionLogStore;
 pub use segments::{FileFormat, SegmentId, SegmentMeta};
 pub use table_metadata::{
     LogicalColumn, LogicalSchema, TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,

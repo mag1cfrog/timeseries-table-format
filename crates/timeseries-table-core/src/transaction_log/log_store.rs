@@ -25,11 +25,11 @@ use std::path::{Path, PathBuf};
 ///   <root>/_timeseries_log/0000000002.json
 ///   <root>/_timeseries_log/CURRENT
 #[derive(Debug, Clone)]
-pub struct LogStore {
+pub struct TransactionLogStore {
     location: TableLocation,
 }
 
-impl LogStore {
+impl TransactionLogStore {
     /// Name of the subdirectory containing the commit log.
     pub const LOG_DIR_NAME: &str = "_timeseries_log";
     /// Name of the file that stores the current version pointer.
@@ -37,7 +37,7 @@ impl LogStore {
     /// Number of digits used in zero-padded commit file names.
     pub const COMMIT_FILENAME_DIGITS: usize = 10;
 
-    /// Create a new LogStore rooted at a table directory.
+    /// Create a new TransactionLogStore rooted at a table directory.
     pub fn new(location: TableLocation) -> Self {
         Self { location }
     }
@@ -227,10 +227,10 @@ mod tests {
 
     // ==================== LogStore tests ====================
 
-    fn create_test_log_store() -> (TempDir, LogStore) {
+    fn create_test_log_store() -> (TempDir, TransactionLogStore) {
         let tmp = TempDir::new().expect("create temp dir");
         let location = TableLocation::local(tmp.path());
-        let store = LogStore::new(location);
+        let store = TransactionLogStore::new(location);
         (tmp, store)
     }
 
@@ -249,9 +249,9 @@ mod tests {
         let (tmp, store) = create_test_log_store();
 
         // Manually create CURRENT file with version 5.
-        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
-        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
         tokio::fs::write(&current_path, "5\n").await?;
 
         let version = store.load_current_version().await?;
@@ -264,9 +264,9 @@ mod tests {
     async fn load_current_version_handles_whitespace() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
-        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
-        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
         tokio::fs::write(&current_path, "  42  \n").await?;
 
         let version = store.load_current_version().await?;
@@ -279,9 +279,9 @@ mod tests {
     async fn load_current_version_returns_corrupt_state_for_empty_file() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
-        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
-        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
         tokio::fs::write(&current_path, "").await?;
 
         let result = store.load_current_version().await;
@@ -296,9 +296,9 @@ mod tests {
     async fn load_current_version_returns_corrupt_state_for_invalid_content() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
-        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
-        let current_path = log_dir.join(LogStore::CURRENT_FILE_NAME);
+        let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
         tokio::fs::write(&current_path, "not-a-number").await?;
 
         let result = store.load_current_version().await;
@@ -324,7 +324,7 @@ mod tests {
         // Verify commit file was created.
         let commit_path = tmp
             .path()
-            .join(LogStore::LOG_DIR_NAME)
+            .join(TransactionLogStore::LOG_DIR_NAME)
             .join("0000000001.json");
         assert!(commit_path.exists());
 
@@ -388,7 +388,7 @@ mod tests {
         // Read and parse the commit file.
         let commit_path = tmp
             .path()
-            .join(LogStore::LOG_DIR_NAME)
+            .join(TransactionLogStore::LOG_DIR_NAME)
             .join("0000000001.json");
         let contents = tokio::fs::read_to_string(&commit_path).await?;
         let commit: Commit = serde_json::from_str(&contents)?;
@@ -412,8 +412,8 @@ mod tests {
 
         let current_path = tmp
             .path()
-            .join(LogStore::LOG_DIR_NAME)
-            .join(LogStore::CURRENT_FILE_NAME);
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join(TransactionLogStore::CURRENT_FILE_NAME);
         let contents = tokio::fs::read_to_string(&current_path).await?;
 
         assert_eq!(contents, "1\n");
@@ -429,7 +429,7 @@ mod tests {
         let (tmp, store) = create_test_log_store();
 
         // Manually create the commit file that version 1 would use
-        let log_dir = tmp.path().join(LogStore::LOG_DIR_NAME);
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
         let commit_file = log_dir.join("0000000001.json");
         tokio::fs::write(&commit_file, b"{}").await?;
