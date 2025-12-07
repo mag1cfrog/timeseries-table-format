@@ -83,6 +83,11 @@ impl TimeSeriesTable {
         &self.location
     }
 
+    /// Return the transaction log store handle.
+    pub fn log_store(&self) -> &TransactionLogStore {
+        &self.log
+    }
+
     /// Open an existing time-series table at the given location.
     ///
     /// Steps:
