@@ -60,14 +60,14 @@ pub enum TableError {
 /// - what the current committed state is,
 /// - and the extracted time index spec.
 #[derive(Debug)]
-pub struct TimesSeriesTable {
+pub struct TimeSeriesTable {
     location: TableLocation,
     log: TransactionLogStore,
     state: TableState,
     index: TimeIndexSpec,
 }
 
-impl TimesSeriesTable {
+impl TimeSeriesTable {
     /// Return the current committed table state.
     pub fn state(&self) -> &TableState {
         &self.state
@@ -185,5 +185,135 @@ impl TimesSeriesTable {
             state,
             index,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::TableLocation;
+    use crate::transaction_log::{
+        LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        TransactionLogStore,
+    };
+    use chrono::{TimeZone, Utc};
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn utc_datetime(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid UTC timestamp")
+    }
+
+    fn make_basic_table_meta() -> TableMeta {
+        let index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string()],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        };
+
+        let logical_schema = LogicalSchema {
+            columns: vec![
+                LogicalColumn {
+                    name: "ts".to_string(),
+                    data_type: "timestamp[millis]".to_string(),
+                    nullable: false,
+                },
+                LogicalColumn {
+                    name: "symbol".to_string(),
+                    data_type: "utf8".to_string(),
+                    nullable: false,
+                },
+                LogicalColumn {
+                    name: "price".to_string(),
+                    data_type: "float64".to_string(),
+                    nullable: false,
+                },
+            ],
+        };
+
+        TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: Some(logical_schema),
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_initializes_log_and_state() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let meta = make_basic_table_meta();
+        let table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        // State should be at version 1 with no segments.
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+
+        // Verify that the log layout exists on disk.
+        let root = match table.location() {
+            TableLocation::Local(p) => p.clone(),
+        };
+
+        let log_dir = root.join(TransactionLogStore::LOG_DIR_NAME);
+        assert!(log_dir.is_dir());
+
+        let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
+        let current_contents = tokio::fs::read_to_string(&current_path).await?;
+        assert_eq!(current_contents.trim(), "1");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_round_trip_after_create() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let meta = make_basic_table_meta();
+        let created = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let reopened = TimeSeriesTable::open(location.clone()).await?;
+
+        assert_eq!(created.state().version, reopened.state().version);
+        assert_eq!(created.index_spec(), reopened.index_spec());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_empty_root_errors() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        // There is no CURRENT and no commits, so opening should fail.
+        let result = TimeSeriesTable::open(location).await;
+        assert!(matches!(result, Err(TableError::EmptyTable)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_fails_if_table_already_exists() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let meta = make_basic_table_meta();
+        let _first = TimeSeriesTable::create(location.clone(), meta.clone()).await?;
+
+        // Second create should detect existing commits and fail.
+        let result = TimeSeriesTable::create(location.clone(), meta).await;
+        assert!(matches!(result, Err(TableError::AlreadyExists { .. })));
+        Ok(())
     }
 }
