@@ -169,8 +169,10 @@ pub enum SegmentMetaError {
     /// Failed to derive a valid LogicalSchema from the Parquet file.
     #[snafu(display("Invalid logical schema derived from Parquet at {path}: {source}"))]
     LogicalSchemaInvalid {
+        /// The path to the file without a valid LogicalSchema
         path: String,
         #[snafu(source)]
+        /// Underlying logical schema error that triggered this failure.
         source: LogicalSchemaError,
     },
 }
