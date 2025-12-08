@@ -73,6 +73,7 @@ pub enum LogicalDataType {
     Binary,
     FixedBinary,
     Utf8,
+    Int96,
 
     Timestamp {
         unit: LogicalTimestampUnit,
@@ -103,6 +104,7 @@ impl fmt::Display for LogicalDataType {
             LogicalDataType::Binary => write!(f, "binary"),
             LogicalDataType::FixedBinary => write!(f, "fixed_binary"),
             LogicalDataType::Utf8 => write!(f, "utf8"),
+            LogicalDataType::Int96 => write!(f, "int96"),
 
             LogicalDataType::Timestamp { unit, timezone } => match timezone {
                 Some(tz) => write!(f, "timestamp[{}]({})", unit, tz),
