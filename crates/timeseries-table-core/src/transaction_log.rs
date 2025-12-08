@@ -117,7 +117,10 @@ pub enum CommitError {
 
 #[cfg(test)]
 mod tests {
-    use crate::transaction_log::*;
+    use crate::transaction_log::{
+        table_metadata::{LogicalDataType, LogicalTimestampUnit},
+        *,
+    };
 
     use chrono::{DateTime, TimeZone, Utc};
     use serde_json;
@@ -155,12 +158,15 @@ mod tests {
                 LogicalSchema::new(vec![
                     LogicalColumn {
                         name: "ts".to_string(),
-                        data_type: "timestamp[us]".to_string(),
+                        data_type: LogicalDataType::Timestamp {
+                            unit: LogicalTimestampUnit::Nanos,
+                            timezone: None,
+                        },
                         nullable: false,
                     },
                     LogicalColumn {
                         name: "symbol".to_string(),
-                        data_type: "utf8".to_string(),
+                        data_type: LogicalDataType::Utf8,
                         nullable: false,
                     },
                 ])
@@ -205,12 +211,18 @@ mod tests {
         let dup = LogicalSchema::new(vec![
             LogicalColumn {
                 name: "ts".to_string(),
-                data_type: "timestamp[us]".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: None,
+                },
                 nullable: false,
             },
             LogicalColumn {
                 name: "ts".to_string(),
-                data_type: "timestamp[us]".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: None,
+                },
                 nullable: false,
             },
         ]);
@@ -252,12 +264,12 @@ mod tests {
 
     #[test]
     fn logical_column_nullable_defaults_to_false() {
-        let json = r#"{ "name": "price", "data_type": "f64" }"#;
+        let json = r#"{ "name": "price", "data_type": "float64" }"#;
 
         let col: LogicalColumn = serde_json::from_str(json).expect("deserialize");
 
         assert_eq!(col.name, "price");
-        assert_eq!(col.data_type, "f64");
+        assert_eq!(col.data_type, LogicalDataType::Float64);
         assert!(!col.nullable); // default is false
     }
 
