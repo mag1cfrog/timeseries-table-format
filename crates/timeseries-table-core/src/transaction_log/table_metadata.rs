@@ -4,7 +4,7 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,63 @@ pub struct TableMeta {
 /// versions (for example, partial updates or additive fields).
 pub type TableMetaDelta = TableMeta;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogicalTimestampUnit {
+    Millis,
+    Micros,
+    Nanos,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogicalDataType {
+    Bool,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    Binary,
+    FixedBinary,
+    Utf8,
+
+    Timestamp {
+        unit: LogicalTimestampUnit,
+        timezone: Option<String>, // keep Option for future TZ support
+    },
+
+    Other(String),
+}
+
+impl fmt::Display for LogicalTimestampUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalTimestampUnit::Millis => write!(f, "ms"),
+            LogicalTimestampUnit::Micros => write!(f, "us"),
+            LogicalTimestampUnit::Nanos => write!(f, "ns"),
+        }
+    }
+}
+
+impl fmt::Display for LogicalDataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalDataType::Bool => write!(f, "bool"),
+            LogicalDataType::Int32 => write!(f, "int32"),
+            LogicalDataType::Int64 => write!(f, "int64"),
+            LogicalDataType::Float32 => write!(f, "float32"),
+            LogicalDataType::Float64 => write!(f, "float64"),
+            LogicalDataType::Binary => write!(f, "binary"),
+            LogicalDataType::FixedBinary => write!(f, "fixed_binary"),
+            LogicalDataType::Utf8 => write!(f, "utf8"),
+
+            LogicalDataType::Timestamp { unit, timezone } => match timezone {
+                Some(tz) => write!(f, "timestamp[{}]({})", unit, tz),
+                None => write!(f, "timestamp[{}]", unit),
+            },
+
+            LogicalDataType::Other(s) => write!(f, "{s}"),
+        }
+    }
+}
 /// A minimal logical schema representation.
 ///
 /// This is intentionally simple in v0.1: it records column names, types as
@@ -66,7 +123,7 @@ pub struct LogicalColumn {
     /// Column name as it appears in the data.
     pub name: String,
     /// Logical data type as a free-form string (e.g. `"int64"`, `"timestamp[us]"`).
-    pub data_type: String,
+    pub data_type: LogicalDataType,
     /// Whether the column may contain NULLs.
     #[serde(default)]
     pub nullable: bool,

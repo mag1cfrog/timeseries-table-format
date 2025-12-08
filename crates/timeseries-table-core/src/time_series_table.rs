@@ -12,13 +12,16 @@
 //! - `create` bootstraps a fresh table with an initial metadata commit.
 //!   Later issues will add append APIs, coverage, and scanning.
 
+use std::path::Path;
+
 use snafu::prelude::*;
 
 use crate::{
+    helpers::parquet::segment_meta_from_parquet_location,
     storage::TableLocation,
     transaction_log::{
-        CommitError, LogAction, TableKind, TableMeta, TableState, TimeIndexSpec,
-        TransactionLogStore,
+        CommitError, LogAction, SegmentId, TableKind, TableMeta, TableState, TimeIndexSpec,
+        TransactionLogStore, segments::SegmentMetaError,
     },
 };
 
@@ -49,6 +52,13 @@ pub enum TableError {
     AlreadyExists {
         /// Current transaction log version that indicates the table already exists.
         current_version: u64,
+    },
+
+    /// Segment-level metadata / Parquet error during append.
+    #[snafu(display("Segment metadata error while appending: {source}"))]
+    SegmentMeta {
+        #[snafu(source, backtrace)]
+        source: SegmentMetaError,
     },
 }
 
@@ -196,12 +206,31 @@ impl TimeSeriesTable {
             index,
         })
     }
+    pub async fn append_parquet_segment(
+        &mut self,
+        segment_id: SegmentId,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<u64, TableError> {
+        let rel_path = Path::new(relative_path);
+
+        // 1) Build SegmentMeta from Parquet (ts_min, ts_max, row_count, basic validation).
+        let segment_data =
+            segment_meta_from_parquet_location(&self.location, rel_path, segment_id, time_column)
+                .await
+                .context(SegmentMetaSnafu)?;
+
+        // 2) Derive the segment's LogcialSchema from the same Parquet file.
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::TableLocation;
+    use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
         LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
         TransactionLogStore,
@@ -235,17 +264,20 @@ mod tests {
         let logical_schema = LogicalSchema::new(vec![
             LogicalColumn {
                 name: "ts".to_string(),
-                data_type: "timestamp[millis]".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
                 nullable: false,
             },
             LogicalColumn {
                 name: "symbol".to_string(),
-                data_type: "utf8".to_string(),
+                data_type: LogicalDataType::Utf8,
                 nullable: false,
             },
             LogicalColumn {
                 name: "price".to_string(),
-                data_type: "float64".to_string(),
+                data_type: LogicalDataType::Float64,
                 nullable: false,
             },
         ])
