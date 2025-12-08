@@ -276,4 +276,37 @@ mod tests {
         let err = require_table_schema(&meta).unwrap_err();
         assert!(matches!(err, SchemaCompatibilityError::MissingTableSchema));
     }
+
+    #[test]
+    fn empty_schemas_match() {
+        let table = schema(vec![]);
+        let seg = schema(vec![]);
+
+        ensure_schema_exact_match(&table, &seg, &index("ts")).expect("empty schemas should match");
+    }
+
+    #[test]
+    fn column_names_are_case_sensitive() {
+        let table = schema(vec![("Price", "f64", false)]);
+        let seg = schema(vec![("price", "f64", false)]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::MissingColumn { column } if column == "Price")
+        );
+    }
+
+    #[test]
+    fn require_table_schema_returns_schema_when_present() {
+        let schema = schema(vec![("ts", "timestamp[us]", false)]);
+        let meta = TableMeta {
+            kind: crate::transaction_log::TableKind::Generic,
+            logical_schema: Some(schema.clone()),
+            created_at: chrono::Utc::now(),
+            format_version: 1,
+        };
+
+        let result = require_table_schema(&meta).expect("should return schema");
+        assert_eq!(result, &schema);
+    }
 }
