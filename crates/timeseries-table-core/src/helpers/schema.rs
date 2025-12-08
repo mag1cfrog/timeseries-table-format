@@ -3,8 +3,7 @@
 //! v0.1 rule: **no schema evolution**.
 //! Every appended segment must have a LogicalSchema that matches the table's
 //! LogicalSchema exactly:
-//! - same column count
-//! - same column names in the same order
+//! - same column set (order-insensitive in v0.1)
 //! - same `data_type` string (including timestamp unit/tz encoding)
 //! - same `nullable` flag.
 
@@ -161,4 +160,120 @@ pub fn ensure_schema_exact_match(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction_log::TimeBucket;
+
+    fn schema(cols: Vec<(&str, &str, bool)>) -> LogicalSchema {
+        LogicalSchema {
+            columns: cols
+                .into_iter()
+                .map(|(name, dtype, nullable)| LogicalColumn {
+                    name: name.to_string(),
+                    data_type: dtype.to_string(),
+                    nullable,
+                })
+                .collect(),
+        }
+    }
+
+    fn index(ts_col: &str) -> TimeIndexSpec {
+        TimeIndexSpec {
+            timestamp_column: ts_col.to_string(),
+            entity_columns: vec![],
+            bucket: TimeBucket::Seconds(1),
+            timezone: None,
+        }
+    }
+
+    #[test]
+    fn schemas_match_ok() {
+        let table = schema(vec![
+            ("ts", "timestamp[us]", false),
+            ("price", "f64", false),
+        ]);
+        let seg = schema(vec![
+            ("price", "f64", false),
+            ("ts", "timestamp[us]", false),
+        ]);
+
+        ensure_schema_exact_match(&table, &seg, &index("ts")).expect("schemas should match");
+    }
+
+    #[test]
+    fn missing_column_errors() {
+        let table = schema(vec![
+            ("ts", "timestamp[us]", false),
+            ("price", "f64", false),
+        ]);
+        let seg = schema(vec![("ts", "timestamp[us]", false)]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::MissingColumn { column } if column == "price")
+        );
+    }
+
+    #[test]
+    fn extra_column_errors() {
+        let table = schema(vec![("ts", "timestamp[us]", false)]);
+        let seg = schema(vec![
+            ("ts", "timestamp[us]", false),
+            ("price", "f64", false),
+        ]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::ExtraColumn { column } if column == "price")
+        );
+    }
+
+    #[test]
+    fn type_mismatch_errors() {
+        let table = schema(vec![("price", "f64", false)]);
+        let seg = schema(vec![("price", "i64", false)]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TypeMismatch { column, .. } if column == "price")
+        );
+    }
+
+    #[test]
+    fn nullability_mismatch_errors() {
+        let table = schema(vec![("price", "f64", false)]);
+        let seg = schema(vec![("price", "f64", true)]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TypeMismatch { column, .. } if column == "price")
+        );
+    }
+
+    #[test]
+    fn time_index_type_mismatch_errors() {
+        let table = schema(vec![("ts", "timestamp[us]", false)]);
+        let seg = schema(vec![("ts", "timestamp[ms]", false)]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TimeIndexTypeMismatch { column, .. } if column == "ts")
+        );
+    }
+
+    #[test]
+    fn require_table_schema_errors_when_missing() {
+        let meta = TableMeta {
+            kind: crate::transaction_log::TableKind::Generic,
+            logical_schema: None,
+            created_at: chrono::Utc::now(),
+            format_version: 1,
+        };
+
+        let err = require_table_schema(&meta).unwrap_err();
+        assert!(matches!(err, SchemaCompatibilityError::MissingTableSchema));
+    }
 }
