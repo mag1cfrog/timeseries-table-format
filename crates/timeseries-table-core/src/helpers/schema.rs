@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use snafu::prelude::*;
 
 use crate::transaction_log::{
-    LogicalColumn, LogicalSchema, TableMeta, TimeIndexSpec, table_metadata::LogicalDataType,
+    LogicalColumn, LogicalSchema, LogicalSchemaError, TableMeta, TimeIndexSpec,
+    table_metadata::LogicalDataType,
 };
 
 /// Errors raised when a segment's schema is not compatible with the table.
@@ -65,6 +66,12 @@ pub enum SchemaCompatibilityError {
         table_type: LogicalDataType,
         /// The type in the segment schema.
         segment_type: LogicalDataType,
+    },
+
+    #[snafu(display("Logical schema is invalid: {source}"))]
+    LogicalSchema {
+        #[snafu(source)]
+        source: LogicalSchemaError,
     },
 }
 
