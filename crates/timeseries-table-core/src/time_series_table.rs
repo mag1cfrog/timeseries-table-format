@@ -17,7 +17,10 @@ use std::path::Path;
 use snafu::prelude::*;
 
 use crate::{
-    helpers::parquet::segment_meta_from_parquet_location,
+    helpers::{
+        parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
+        schema::{SchemaCompatibilityError, ensure_schema_exact_match},
+    },
     storage::TableLocation,
     transaction_log::{
         CommitError, LogAction, SegmentId, TableKind, TableMeta, TableState, TimeIndexSpec,
@@ -57,8 +60,25 @@ pub enum TableError {
     /// Segment-level metadata / Parquet error during append.
     #[snafu(display("Segment metadata error while appending: {source}"))]
     SegmentMeta {
+        /// Underlying segment metadata error.
         #[snafu(source, backtrace)]
         source: SegmentMetaError,
+    },
+
+    /// Schema compatibility error when appending a segment with incompatible schema.
+    #[snafu(display("Schema compatibility error: {source}"))]
+    SchemaCompatibility {
+        /// Underlying schema compatibility error.
+        #[snafu(source)]
+        source: SchemaCompatibilityError,
+    },
+
+    /// Table has progressed past the initial metadata commit but still lacks
+    /// a canonical logical schema. That’s an invariant violation for v0.1.
+    #[snafu(display("Table has no logical_schema at version {version}; cannot append in v0.1"))]
+    MissingCanonicalSchema {
+        /// The transaction log version missing a canonical logical schema.
+        version: u64,
     },
 }
 
@@ -206,6 +226,20 @@ impl TimeSeriesTable {
             index,
         })
     }
+
+    /// Append a new Parquet segment, registering it in the transaction log.
+    ///
+    /// v0.1 behavior:
+    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
+    /// - Derive the segment logical schema from the Parquet file.
+    /// - If the table has no logical_schema yet, adopt this segment schema
+    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
+    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
+    /// - Commit with OCC on the current version.
+    /// - Update in-memory TableState on success.
+    ///
+    /// v0.1: duplicates (same segment_id/path) are allowed; they’ll just be
+    /// treated as distinct segments. We can tighten that later.
     pub async fn append_parquet_segment(
         &mut self,
         segment_id: SegmentId,
@@ -215,14 +249,77 @@ impl TimeSeriesTable {
         let rel_path = Path::new(relative_path);
 
         // 1) Build SegmentMeta from Parquet (ts_min, ts_max, row_count, basic validation).
-        let segment_data =
+        let segment_meta =
             segment_meta_from_parquet_location(&self.location, rel_path, segment_id, time_column)
                 .await
                 .context(SegmentMetaSnafu)?;
 
-        // 2) Derive the segment's LogcialSchema from the same Parquet file.
+        // 2) Derive the segment's LogicalSchema from the same Parquet file.
+        let segment_schema = logical_schema_from_parquet_location(&self.location, rel_path)
+            .await
+            .context(SegmentMetaSnafu)?;
 
-        Ok(())
+        let expected_version = self.state.version;
+        let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
+        // 3) Decide schema behavior based on both schema *and* version:
+        //
+        // - logical_schema == None && version == 1:
+        //     first append after create() — adopt this segment’s schema.
+        // - logical_schema == None && version != 1:
+        //     table is in a bad state for v0.1 → error.
+        // - logical_schema == Some(..):
+        //     enforce “no schema evolution” via ensure_schema_exact_match.
+        let (actions, new_table_meta) = match maybe_table_schema {
+            None if expected_version == 1 => {
+                // Bootstrap case: adopt this segment’s schema as canonical in the
+                // same commit that adds the segment.
+                let mut updated_meta = self.state.table_meta.clone();
+                updated_meta.logical_schema = Some(segment_schema.clone());
+
+                let actions = vec![
+                    LogAction::UpdateTableMeta(updated_meta.clone()),
+                    LogAction::AddSegment(segment_meta.clone()),
+                ];
+
+                (actions, Some(updated_meta))
+            }
+
+            None => {
+                return MissingCanonicalSchemaSnafu {
+                    version: expected_version,
+                }
+                .fail();
+            }
+
+            Some(table_schema) => {
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)?;
+
+                let actions = vec![LogAction::AddSegment(segment_meta.clone())];
+
+                (actions, None)
+            }
+        };
+
+        // 4) Commit with OCC. Conflict → CommitError::Conflict → TableError::TransactionLog.
+        let new_version = self
+            .log
+            .commit_with_expected_version(expected_version, actions)
+            .await
+            .context(TransactionLogSnafu)?;
+
+        // 5) Update in-memory state.
+        self.state.version = new_version;
+
+        if let Some(updated_meta) = new_table_meta {
+            self.state.table_meta = updated_meta
+        }
+
+        self.state
+            .segments
+            .insert(segment_meta.segment_id.clone(), segment_meta);
+
+        Ok(new_version)
     }
 }
 
