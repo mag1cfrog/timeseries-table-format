@@ -305,7 +305,7 @@ mod tests {
         let table = schema(vec![(
             "ts",
             LogicalDataType::Timestamp {
-                unit: LogicalTimestampUnit::Nanos,
+                unit: LogicalTimestampUnit::Micros,
                 timezone: None,
             },
             false,
@@ -313,7 +313,7 @@ mod tests {
         let seg = schema(vec![(
             "ts",
             LogicalDataType::Timestamp {
-                unit: LogicalTimestampUnit::Nanos,
+                unit: LogicalTimestampUnit::Millis,
                 timezone: None,
             },
             false,
