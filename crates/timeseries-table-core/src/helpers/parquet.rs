@@ -314,33 +314,53 @@ fn map_parquet_col_to_logical_type(
     physical: PhysicalType,
     logical: Option<&LogicalType>,
 ) -> LogicalDataType {
-    match logical {
-        Some(LogicalType::Timestamp {
-            is_adjusted_to_u_t_c: _,
-            unit,
-        }) => {
-            let unit = match unit {
-                TimeUnit::MILLIS => LogicalTimestampUnit::Millis,
-                TimeUnit::MICROS => LogicalTimestampUnit::Micros,
-                TimeUnit::NANOS => LogicalTimestampUnit::Nanos,
-            };
-
-            // No capture of timezone for now.
-            LogicalDataType::Timestamp {
+    // First: look at logical annotation when present
+    if let Some(logical) = logical {
+        match logical {
+            LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: _,
                 unit,
-                timezone: None,
+            } => {
+                let unit = match unit {
+                    TimeUnit::MILLIS => LogicalTimestampUnit::Millis,
+                    TimeUnit::MICROS => LogicalTimestampUnit::Micros,
+                    TimeUnit::NANOS => LogicalTimestampUnit::Nanos,
+                };
+
+                // No capture of timezone for now.
+                return LogicalDataType::Timestamp {
+                    unit,
+                    timezone: None,
+                };
             }
+            LogicalType::String => {
+                // Semantically a UTF-8 string, even though it's BYTE_ARRAY underneath
+                return LogicalDataType::Utf8;
+            }
+            LogicalType::Map
+            | LogicalType::List
+            | LogicalType::Enum
+            | LogicalType::Decimal {
+                scale: _,
+                precision: _,
+            } => {
+                // For now, treat “complex” logical types as Other – v0.1 doesn’t need to fully support them.
+                return LogicalDataType::Other(format!("parquet::{logical:?}"));
+            }
+
+            _ => {}
         }
-        _ => match physical {
-            PhysicalType::BOOLEAN => LogicalDataType::Bool,
-            PhysicalType::INT32 => LogicalDataType::Int32,
-            PhysicalType::INT64 => LogicalDataType::Int64,
-            PhysicalType::FLOAT => LogicalDataType::Float32,
-            PhysicalType::DOUBLE => LogicalDataType::Float64,
-            PhysicalType::BYTE_ARRAY => LogicalDataType::Binary,
-            PhysicalType::FIXED_LEN_BYTE_ARRAY => LogicalDataType::FixedBinary,
-            PhysicalType::INT96 => LogicalDataType::Int96,
-        },
+    }
+    // Second: fall back to physical type when no (or unsupported) logical annotation
+    match physical {
+        PhysicalType::BOOLEAN => LogicalDataType::Bool,
+        PhysicalType::INT32 => LogicalDataType::Int32,
+        PhysicalType::INT64 => LogicalDataType::Int64,
+        PhysicalType::FLOAT => LogicalDataType::Float32,
+        PhysicalType::DOUBLE => LogicalDataType::Float64,
+        PhysicalType::BYTE_ARRAY => LogicalDataType::Binary,
+        PhysicalType::FIXED_LEN_BYTE_ARRAY => LogicalDataType::FixedBinary,
+        PhysicalType::INT96 => LogicalDataType::Int96,
     }
 }
 
