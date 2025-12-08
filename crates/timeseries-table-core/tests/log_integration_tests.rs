@@ -9,6 +9,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 use timeseries_table_core::storage::{StorageError, TableLocation};
+use timeseries_table_core::transaction_log::table_metadata::{
+    LogicalDataType, LogicalTimestampUnit,
+};
 use timeseries_table_core::transaction_log::{
     CommitError, FileFormat, LogAction, LogicalColumn, LogicalSchema, SegmentId, SegmentMeta,
     TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
@@ -43,17 +46,20 @@ fn sample_table_meta() -> TableMeta {
             LogicalSchema::new(vec![
                 LogicalColumn {
                     name: "ts".to_string(),
-                    data_type: "timestamp[us]".to_string(),
+                    data_type: LogicalDataType::Timestamp {
+                        unit: LogicalTimestampUnit::Micros,
+                        timezone: None,
+                    },
                     nullable: false,
                 },
                 LogicalColumn {
                     name: "symbol".to_string(),
-                    data_type: "utf8".to_string(),
+                    data_type: LogicalDataType::Utf8,
                     nullable: false,
                 },
                 LogicalColumn {
                     name: "price".to_string(),
-                    data_type: "f64".to_string(),
+                    data_type: LogicalDataType::Float64,
                     nullable: true,
                 },
             ])

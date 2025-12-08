@@ -4,7 +4,7 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,83 @@ pub struct TableMeta {
 /// versions (for example, partial updates or additive fields).
 pub type TableMetaDelta = TableMeta;
 
+/// Units for logical timestamps recorded in the table metadata.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogicalTimestampUnit {
+    /// Millisecond precision timestamps.
+    Millis,
+    /// Microsecond precision timestamps.
+    Micros,
+    /// Nanosecond precision timestamps.
+    Nanos,
+}
+
+/// Logical data types that can be stored in the table schema metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogicalDataType {
+    /// Boolean value.
+    Bool,
+    /// 32-bit signed integer.
+    Int32,
+    /// 64-bit signed integer.
+    Int64,
+    /// 32-bit floating point.
+    Float32,
+    /// 64-bit floating point.
+    Float64,
+    /// Variable-length binary data.
+    Binary,
+    /// Fixed-length binary data.
+    FixedBinary,
+    /// UTF-8 encoded string.
+    Utf8,
+    /// Legacy 96-bit integer (primarily for Parquet compatibility).
+    Int96,
+
+    /// Timestamp value with a precision unit and optional timezone.
+    Timestamp {
+        /// Timestamp precision unit (millis, micros, nanos).
+        unit: LogicalTimestampUnit,
+        /// Optional IANA timezone identifier.
+        timezone: Option<String>, // keep Option for future TZ support
+    },
+
+    /// Catch-all logical data type referenced by name.
+    Other(String),
+}
+
+impl fmt::Display for LogicalTimestampUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalTimestampUnit::Millis => write!(f, "ms"),
+            LogicalTimestampUnit::Micros => write!(f, "us"),
+            LogicalTimestampUnit::Nanos => write!(f, "ns"),
+        }
+    }
+}
+
+impl fmt::Display for LogicalDataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalDataType::Bool => write!(f, "bool"),
+            LogicalDataType::Int32 => write!(f, "int32"),
+            LogicalDataType::Int64 => write!(f, "int64"),
+            LogicalDataType::Float32 => write!(f, "float32"),
+            LogicalDataType::Float64 => write!(f, "float64"),
+            LogicalDataType::Binary => write!(f, "binary"),
+            LogicalDataType::FixedBinary => write!(f, "fixed_binary"),
+            LogicalDataType::Utf8 => write!(f, "utf8"),
+            LogicalDataType::Int96 => write!(f, "int96"),
+
+            LogicalDataType::Timestamp { unit, timezone } => match timezone {
+                Some(tz) => write!(f, "timestamp[{}]({})", unit, tz),
+                None => write!(f, "timestamp[{}]", unit),
+            },
+
+            LogicalDataType::Other(s) => write!(f, "{s}"),
+        }
+    }
+}
 /// A minimal logical schema representation.
 ///
 /// This is intentionally simple in v0.1: it records column names, types as
@@ -65,8 +142,8 @@ pub type TableMetaDelta = TableMeta;
 pub struct LogicalColumn {
     /// Column name as it appears in the data.
     pub name: String,
-    /// Logical data type as a free-form string (e.g. `"int64"`, `"timestamp[us]"`).
-    pub data_type: String,
+    /// Logical data type as a strongly-typed enum (e.g. `LogicalDataType::Int64`, `LogicalDataType::Timestamp { ... }`).
+    pub data_type: LogicalDataType,
     /// Whether the column may contain NULLs.
     #[serde(default)]
     pub nullable: bool,

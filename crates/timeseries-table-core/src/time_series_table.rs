@@ -12,13 +12,19 @@
 //! - `create` bootstraps a fresh table with an initial metadata commit.
 //!   Later issues will add append APIs, coverage, and scanning.
 
+use std::path::Path;
+
 use snafu::prelude::*;
 
 use crate::{
+    helpers::{
+        parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
+        schema::{SchemaCompatibilityError, ensure_schema_exact_match},
+    },
     storage::TableLocation,
     transaction_log::{
-        CommitError, LogAction, TableKind, TableMeta, TableState, TimeIndexSpec,
-        TransactionLogStore,
+        CommitError, LogAction, SegmentId, TableKind, TableMeta, TableState, TimeIndexSpec,
+        TransactionLogStore, segments::SegmentMetaError,
     },
 };
 
@@ -49,6 +55,30 @@ pub enum TableError {
     AlreadyExists {
         /// Current transaction log version that indicates the table already exists.
         current_version: u64,
+    },
+
+    /// Segment-level metadata / Parquet error during append.
+    #[snafu(display("Segment metadata error while appending: {source}"))]
+    SegmentMeta {
+        /// Underlying segment metadata error.
+        #[snafu(source, backtrace)]
+        source: SegmentMetaError,
+    },
+
+    /// Schema compatibility error when appending a segment with incompatible schema.
+    #[snafu(display("Schema compatibility error: {source}"))]
+    SchemaCompatibility {
+        /// Underlying schema compatibility error.
+        #[snafu(source)]
+        source: SchemaCompatibilityError,
+    },
+
+    /// Table has progressed past the initial metadata commit but still lacks
+    /// a canonical logical schema. That’s an invariant violation for v0.1.
+    #[snafu(display("Table has no logical_schema at version {version}; cannot append in v0.1"))]
+    MissingCanonicalSchema {
+        /// The transaction log version missing a canonical logical schema.
+        version: u64,
     },
 }
 
@@ -196,20 +226,229 @@ impl TimeSeriesTable {
             index,
         })
     }
+
+    /// Append a new Parquet segment, registering it in the transaction log.
+    ///
+    /// v0.1 behavior:
+    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
+    /// - Derive the segment logical schema from the Parquet file.
+    /// - If the table has no logical_schema yet, adopt this segment schema
+    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
+    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
+    /// - Commit with OCC on the current version.
+    /// - Update in-memory TableState on success.
+    ///
+    /// v0.1: duplicates (same segment_id/path) are allowed; they’ll just be
+    /// treated as distinct segments. We can tighten that later.
+    pub async fn append_parquet_segment(
+        &mut self,
+        segment_id: SegmentId,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<u64, TableError> {
+        let rel_path = Path::new(relative_path);
+
+        // 1) Build SegmentMeta from Parquet (ts_min, ts_max, row_count, basic validation).
+        let segment_meta =
+            segment_meta_from_parquet_location(&self.location, rel_path, segment_id, time_column)
+                .await
+                .context(SegmentMetaSnafu)?;
+
+        // 2) Derive the segment's LogicalSchema from the same Parquet file.
+        let segment_schema = logical_schema_from_parquet_location(&self.location, rel_path)
+            .await
+            .context(SegmentMetaSnafu)?;
+
+        let expected_version = self.state.version;
+        let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
+        // 3) Decide schema behavior based on both schema *and* version:
+        //
+        // - logical_schema == None && version == 1:
+        //     first append after create() — adopt this segment’s schema.
+        // - logical_schema == None && version != 1:
+        //     table is in a bad state for v0.1 → error.
+        // - logical_schema == Some(..):
+        //     enforce “no schema evolution” via ensure_schema_exact_match.
+        let (actions, new_table_meta) = match maybe_table_schema {
+            None if expected_version == 1 => {
+                // Bootstrap case: adopt this segment’s schema as canonical in the
+                // same commit that adds the segment.
+                let mut updated_meta = self.state.table_meta.clone();
+                updated_meta.logical_schema = Some(segment_schema.clone());
+
+                let actions = vec![
+                    LogAction::UpdateTableMeta(updated_meta.clone()),
+                    LogAction::AddSegment(segment_meta.clone()),
+                ];
+
+                (actions, Some(updated_meta))
+            }
+
+            None => {
+                return MissingCanonicalSchemaSnafu {
+                    version: expected_version,
+                }
+                .fail();
+            }
+
+            Some(table_schema) => {
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)?;
+
+                let actions = vec![LogAction::AddSegment(segment_meta.clone())];
+
+                (actions, None)
+            }
+        };
+
+        // 4) Commit with OCC. Conflict → CommitError::Conflict → TableError::TransactionLog.
+        let new_version = self
+            .log
+            .commit_with_expected_version(expected_version, actions)
+            .await
+            .context(TransactionLogSnafu)?;
+
+        // 5) Update in-memory state.
+        self.state.version = new_version;
+
+        if let Some(updated_meta) = new_table_meta {
+            self.state.table_meta = updated_meta
+        }
+
+        self.state
+            .segments
+            .insert(segment_meta.segment_id.clone(), segment_meta);
+
+        Ok(new_version)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::TableLocation;
+    use crate::transaction_log::segments::SegmentId;
+    use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
-        LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        CommitError, LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
         TransactionLogStore,
     };
     use chrono::{TimeZone, Utc};
+    use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
+    use parquet::column::writer::ColumnWriter;
+    use parquet::data_type::ByteArray;
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use std::fs::File;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Clone)]
+    struct TestRow {
+        ts_millis: i64,
+        symbol: &'static str,
+        price: f64,
+    }
+
+    fn write_test_parquet(
+        path: &Path,
+        include_symbol: bool,
+        price_as_int: bool,
+        rows: &[TestRow],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut fields: Vec<Arc<Type>> = Vec::new();
+
+        let ts_field = Type::primitive_type_builder("ts", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: TimeUnit::MILLIS,
+            }))
+            .build()?;
+        fields.push(Arc::new(ts_field));
+
+        if include_symbol {
+            let symbol_field = Type::primitive_type_builder("symbol", PhysicalType::BYTE_ARRAY)
+                .with_repetition(Repetition::REQUIRED)
+                .with_logical_type(Some(LogicalType::String))
+                .build()?;
+            fields.push(Arc::new(symbol_field));
+        }
+
+        let price_builder = if price_as_int {
+            Type::primitive_type_builder("price", PhysicalType::INT64)
+        } else {
+            Type::primitive_type_builder("price", PhysicalType::DOUBLE)
+        };
+        let price_field = price_builder
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        fields.push(Arc::new(price_field));
+
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()?,
+        );
+
+        let file = File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = SerializedFileWriter::new(file, schema, Arc::new(props))?;
+
+        let ts_values: Vec<i64> = rows.iter().map(|r| r.ts_millis).collect();
+        let symbol_values: Vec<ByteArray> = rows
+            .iter()
+            .map(|r| ByteArray::from(r.symbol.as_bytes()))
+            .collect();
+        let price_f64: Vec<f64> = rows.iter().map(|r| r.price).collect();
+        let price_i64: Vec<i64> = rows.iter().map(|r| r.price as i64).collect();
+
+        let mut row_group_writer = writer.next_row_group()?;
+        let mut col_idx = 0;
+        while let Some(mut col_writer) = row_group_writer.next_column()? {
+            let mut cw = col_writer.untyped();
+            match (include_symbol, price_as_int, col_idx) {
+                (true, _, 0) | (false, _, 0) => match &mut cw {
+                    ColumnWriter::Int64ColumnWriter(w) => {
+                        w.write_batch(&ts_values, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for ts".into()),
+                },
+                (true, _, 1) => match &mut cw {
+                    ColumnWriter::ByteArrayColumnWriter(w) => {
+                        w.write_batch(&symbol_values, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for symbol".into()),
+                },
+                (true, false, 2) | (false, false, 1) => match &mut cw {
+                    ColumnWriter::DoubleColumnWriter(w) => {
+                        w.write_batch(&price_f64, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for price f64".into()),
+                },
+                (true, true, 2) | (false, true, 1) => match &mut cw {
+                    ColumnWriter::Int64ColumnWriter(w) => {
+                        w.write_batch(&price_i64, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for price i64".into()),
+                },
+                _ => return Err("unexpected column writer ordering".into()),
+            }
+            col_writer.close()?;
+            col_idx += 1;
+        }
+        row_group_writer.close()?;
+        writer.close()?;
+
+        Ok(())
+    }
 
     fn utc_datetime(
         year: i32,
@@ -235,17 +474,20 @@ mod tests {
         let logical_schema = LogicalSchema::new(vec![
             LogicalColumn {
                 name: "ts".to_string(),
-                data_type: "timestamp[millis]".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
                 nullable: false,
             },
             LogicalColumn {
                 name: "symbol".to_string(),
-                data_type: "utf8".to_string(),
+                data_type: LogicalDataType::Utf8,
                 nullable: false,
             },
             LogicalColumn {
                 name: "price".to_string(),
-                data_type: "float64".to_string(),
+                data_type: LogicalDataType::Float64,
                 nullable: false,
             },
         ])
@@ -323,6 +565,276 @@ mod tests {
         // Second create should detect existing commits and fail.
         let result = TimeSeriesTable::create(location.clone(), meta).await;
         assert!(matches!(result, Err(TableError::AlreadyExists { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_updates_state_and_log() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/seg1.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        let new_version = table
+            .append_parquet_segment(SegmentId("seg-1".to_string()), rel_path, "ts")
+            .await?;
+
+        assert_eq!(new_version, 2);
+        assert_eq!(table.state.version, 2);
+        let seg = table
+            .state
+            .segments
+            .get(&SegmentId("seg-1".to_string()))
+            .expect("segment present");
+        assert_eq!(seg.path, rel_path);
+        assert_eq!(seg.row_count, 1);
+        assert_eq!(seg.ts_min.timestamp_millis(), 1_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 1_000);
+
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+        let commit_path = log_dir.join("0000000002.json");
+        assert!(commit_path.is_file());
+        let current =
+            tokio::fs::read_to_string(log_dir.join(TransactionLogStore::CURRENT_FILE_NAME)).await?;
+        assert_eq!(current.trim(), "2");
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert!(
+            reopened
+                .state
+                .segments
+                .contains_key(&SegmentId("seg-1".to_string()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_adopts_schema_when_missing() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec![],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        };
+        let meta = TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: None,
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: 1,
+        };
+
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_path = "data/seg-adopt.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 5_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        let new_version = table
+            .append_parquet_segment(SegmentId("seg-adopt".to_string()), rel_path, "ts")
+            .await?;
+
+        assert_eq!(new_version, 2);
+        let schema = table
+            .state
+            .table_meta
+            .logical_schema
+            .as_ref()
+            .expect("schema adopted");
+        let names: Vec<_> = schema.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["ts", "symbol", "price"]);
+        let ts_col = &schema.columns()[0];
+        assert_eq!(
+            ts_col.data_type,
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_rejects_schema_mismatch() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_path = "data/seg-missing-symbol.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            false,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "C",
+                price: 30.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment(SegmentId("seg-bad".to_string()), rel_path, "ts")
+            .await
+            .expect_err("expected schema mismatch");
+
+        match err {
+            TableError::SchemaCompatibility { source } => {
+                assert!(matches!(
+                    source,
+                    crate::helpers::schema::SchemaCompatibilityError::MissingColumn { .. }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_allows_duplicate_id_and_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/dup.parquet";
+        let abs_path = tmp.path().join(rel_path);
+
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        let v2 = table
+            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(v2, 2);
+        assert_eq!(table.state.version, 2);
+        assert_eq!(
+            table
+                .state
+                .segments
+                .get(&SegmentId("seg-dup".to_string()))
+                .unwrap()
+                .row_count,
+            1
+        );
+
+        // Overwrite the same path with different content and append again with the same segment ID.
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+                TestRow {
+                    ts_millis: 3_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+            ],
+        )?;
+
+        let v3 = table
+            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(v3, 3);
+        assert_eq!(table.state.version, 3);
+
+        let seg = table
+            .state
+            .segments
+            .get(&SegmentId("seg-dup".to_string()))
+            .expect("segment retained after duplicate append");
+        assert_eq!(seg.row_count, 2);
+        assert_eq!(seg.ts_min.timestamp_millis(), 2_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 3_000);
+
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+        assert!(log_dir.join("0000000003.json").is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_conflict_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/conflict.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+
+        // Simulate an external writer advancing CURRENT to version 2 while this handle is at version 1.
+        table
+            .log
+            .commit_with_expected_version(1, vec![])
+            .await
+            .expect("external commit succeeds");
+
+        let err = table
+            .append_parquet_segment(SegmentId("seg-conflict".to_string()), rel_path, "ts")
+            .await
+            .expect_err("expected conflict due to stale version");
+
+        match err {
+            TableError::TransactionLog { source } => {
+                assert!(matches!(
+                    source,
+                    CommitError::Conflict {
+                        expected: 1,
+                        found: 2,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
         Ok(())
     }
 }

@@ -11,7 +11,10 @@ use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
-use crate::storage::{self, StorageError, TableLocation};
+use crate::{
+    storage::{self, StorageError, TableLocation},
+    transaction_log::LogicalSchemaError,
+};
 
 /// Identifier for a physical segment (e.g. a Parquet file or group).
 ///
@@ -161,6 +164,16 @@ pub enum SegmentMetaError {
         path: String,
         /// The column missing statistics.
         column: String,
+    },
+
+    /// Failed to derive a valid LogicalSchema from the Parquet file.
+    #[snafu(display("Invalid logical schema derived from Parquet at {path}: {source}"))]
+    LogicalSchemaInvalid {
+        /// The path to the file without a valid LogicalSchema
+        path: String,
+        #[snafu(source)]
+        /// Underlying logical schema error that triggered this failure.
+        source: LogicalSchemaError,
     },
 }
 

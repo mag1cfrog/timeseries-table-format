@@ -11,7 +11,10 @@ use std::collections::HashMap;
 
 use snafu::prelude::*;
 
-use crate::transaction_log::{LogicalColumn, LogicalSchema, TableMeta, TimeIndexSpec};
+use crate::transaction_log::{
+    LogicalColumn, LogicalSchema, LogicalSchemaError, TableMeta, TimeIndexSpec,
+    table_metadata::LogicalDataType,
+};
 
 /// Errors raised when a segment's schema is not compatible with the table.
 #[derive(Debug, Snafu)]
@@ -46,9 +49,9 @@ pub enum SchemaCompatibilityError {
         /// The name of the column with mismatched type.
         column: String,
         /// The type in the table schema.
-        table_type: String,
+        table_type: LogicalDataType,
         /// The type in the segment schema.
-        segment_type: String,
+        segment_type: LogicalDataType,
     },
 
     /// Specialised version of TypeMismatch for the time index column.
@@ -60,9 +63,17 @@ pub enum SchemaCompatibilityError {
         /// The name of the time index column.
         column: String,
         /// The type in the table schema.
-        table_type: String,
+        table_type: LogicalDataType,
         /// The type in the segment schema.
-        segment_type: String,
+        segment_type: LogicalDataType,
+    },
+
+    /// Logical schema construction or validation failed.
+    #[snafu(display("Logical schema is invalid: {source}"))]
+    LogicalSchema {
+        /// The underlying logical schema error.
+        #[snafu(source)]
+        source: LogicalSchemaError,
     },
 }
 
@@ -87,10 +98,6 @@ fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalColumn> {
         .iter()
         .map(|col| (col.name.as_str(), col))
         .collect()
-}
-
-fn logical_type_string(col: &LogicalColumn) -> String {
-    format!("{}(nullable={})", col.data_type, col.nullable)
 }
 
 /// Enforce the v0.1 "no schema evolution" rule.
@@ -125,22 +132,20 @@ pub fn ensure_schema_exact_match(
             }
             Some(scol) => {
                 if tcol.data_type != scol.data_type || tcol.nullable != scol.nullable {
-                    let table_type = logical_type_string(tcol);
-                    let segment_type = logical_type_string(scol);
                     let column = (*name).to_string();
 
                     if *name == time_col_name {
                         return TimeIndexTypeMismatchSnafu {
                             column,
-                            table_type,
-                            segment_type,
+                            table_type: tcol.data_type.clone(),
+                            segment_type: scol.data_type.clone(),
                         }
                         .fail();
                     } else {
                         return TypeMismatchSnafu {
                             column,
-                            table_type,
-                            segment_type,
+                            table_type: tcol.data_type.clone(),
+                            segment_type: scol.data_type.clone(),
                         }
                         .fail();
                     }
@@ -165,14 +170,14 @@ pub fn ensure_schema_exact_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction_log::TimeBucket;
+    use crate::transaction_log::{TimeBucket, table_metadata::LogicalTimestampUnit};
 
-    fn schema(cols: Vec<(&str, &str, bool)>) -> LogicalSchema {
+    fn schema(cols: Vec<(&str, LogicalDataType, bool)>) -> LogicalSchema {
         LogicalSchema::new(
             cols.into_iter()
                 .map(|(name, dtype, nullable)| LogicalColumn {
                     name: name.to_string(),
-                    data_type: dtype.to_string(),
+                    data_type: dtype,
                     nullable,
                 })
                 .collect(),
@@ -192,12 +197,26 @@ mod tests {
     #[test]
     fn schemas_match_ok() {
         let table = schema(vec![
-            ("ts", "timestamp[us]", false),
-            ("price", "f64", false),
+            (
+                "ts",
+                LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: None,
+                },
+                false,
+            ),
+            ("price", LogicalDataType::Float64, false),
         ]);
         let seg = schema(vec![
-            ("price", "f64", false),
-            ("ts", "timestamp[us]", false),
+            ("price", LogicalDataType::Float64, false),
+            (
+                "ts",
+                LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: None,
+                },
+                false,
+            ),
         ]);
 
         ensure_schema_exact_match(&table, &seg, &index("ts")).expect("schemas should match");
@@ -206,10 +225,24 @@ mod tests {
     #[test]
     fn missing_column_errors() {
         let table = schema(vec![
-            ("ts", "timestamp[us]", false),
-            ("price", "f64", false),
+            (
+                "ts",
+                LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: None,
+                },
+                false,
+            ),
+            ("price", LogicalDataType::Float64, false),
         ]);
-        let seg = schema(vec![("ts", "timestamp[us]", false)]);
+        let seg = schema(vec![(
+            "ts",
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Nanos,
+                timezone: None,
+            },
+            false,
+        )]);
 
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
         assert!(
@@ -219,10 +252,24 @@ mod tests {
 
     #[test]
     fn extra_column_errors() {
-        let table = schema(vec![("ts", "timestamp[us]", false)]);
+        let table = schema(vec![(
+            "ts",
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Nanos,
+                timezone: None,
+            },
+            false,
+        )]);
         let seg = schema(vec![
-            ("ts", "timestamp[us]", false),
-            ("price", "f64", false),
+            (
+                "ts",
+                LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: None,
+                },
+                false,
+            ),
+            ("price", LogicalDataType::Float64, false),
         ]);
 
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
@@ -233,8 +280,8 @@ mod tests {
 
     #[test]
     fn type_mismatch_errors() {
-        let table = schema(vec![("price", "f64", false)]);
-        let seg = schema(vec![("price", "i64", false)]);
+        let table = schema(vec![("price", LogicalDataType::Float64, false)]);
+        let seg = schema(vec![("price", LogicalDataType::Int64, false)]);
 
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
         assert!(
@@ -244,8 +291,8 @@ mod tests {
 
     #[test]
     fn nullability_mismatch_errors() {
-        let table = schema(vec![("price", "f64", false)]);
-        let seg = schema(vec![("price", "f64", true)]);
+        let table = schema(vec![("price", LogicalDataType::Float64, false)]);
+        let seg = schema(vec![("price", LogicalDataType::Float64, true)]);
 
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
         assert!(
@@ -255,8 +302,22 @@ mod tests {
 
     #[test]
     fn time_index_type_mismatch_errors() {
-        let table = schema(vec![("ts", "timestamp[us]", false)]);
-        let seg = schema(vec![("ts", "timestamp[ms]", false)]);
+        let table = schema(vec![(
+            "ts",
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Micros,
+                timezone: None,
+            },
+            false,
+        )]);
+        let seg = schema(vec![(
+            "ts",
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            },
+            false,
+        )]);
 
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
         assert!(
@@ -287,8 +348,8 @@ mod tests {
 
     #[test]
     fn column_names_are_case_sensitive() {
-        let table = schema(vec![("Price", "f64", false)]);
-        let seg = schema(vec![("price", "f64", false)]);
+        let table = schema(vec![("Price", LogicalDataType::Float64, false)]);
+        let seg = schema(vec![("price", LogicalDataType::Float64, false)]);
 
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
         assert!(
@@ -298,7 +359,14 @@ mod tests {
 
     #[test]
     fn require_table_schema_returns_schema_when_present() {
-        let schema = schema(vec![("ts", "timestamp[us]", false)]);
+        let schema = schema(vec![(
+            "ts",
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Nanos,
+                timezone: None,
+            },
+            false,
+        )]);
         let meta = TableMeta {
             kind: crate::transaction_log::TableKind::Generic,
             logical_schema: Some(schema.clone()),

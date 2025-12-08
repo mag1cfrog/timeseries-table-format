@@ -21,13 +21,18 @@ use std::path::Path;
 
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
-use parquet::basic::{LogicalType, TimeUnit, Type as PhysicalType};
+use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
+use parquet::file::metadata::FileMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::schema::types::ColumnDescPtr;
 use snafu::Backtrace;
 
-use crate::storage::{self, TableLocation};
+use crate::storage::{self, TableLocation, read_all_bytes};
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
-use crate::transaction_log::{FileFormat, SegmentId, SegmentMeta};
+use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
+use crate::transaction_log::{
+    FileFormat, LogicalColumn, LogicalSchema, LogicalSchemaError, SegmentId, SegmentMeta,
+};
 
 /// Convert little-endian i64 bytes into i64 with proper error handling.
 fn le_bytes_to_i64(
@@ -305,6 +310,119 @@ pub async fn segment_meta_from_parquet_location(
     })
 }
 
+fn map_parquet_col_to_logical_type(
+    physical: PhysicalType,
+    logical: Option<&LogicalType>,
+) -> LogicalDataType {
+    // First: look at logical annotation when present
+    if let Some(logical) = logical {
+        match logical {
+            LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: _,
+                unit,
+            } => {
+                let unit = match unit {
+                    TimeUnit::MILLIS => LogicalTimestampUnit::Millis,
+                    TimeUnit::MICROS => LogicalTimestampUnit::Micros,
+                    TimeUnit::NANOS => LogicalTimestampUnit::Nanos,
+                };
+
+                // No capture of timezone for now.
+                return LogicalDataType::Timestamp {
+                    unit,
+                    timezone: None,
+                };
+            }
+            LogicalType::String => {
+                // Semantically a UTF-8 string, even though it's BYTE_ARRAY underneath
+                return LogicalDataType::Utf8;
+            }
+            LogicalType::Map
+            | LogicalType::List
+            | LogicalType::Enum
+            | LogicalType::Decimal {
+                scale: _,
+                precision: _,
+            } => {
+                // For now, treat “complex” logical types as Other – v0.1 doesn’t need to fully support them.
+                return LogicalDataType::Other(format!("parquet::{logical:?}"));
+            }
+
+            _ => {}
+        }
+    }
+    // Second: fall back to physical type when no (or unsupported) logical annotation
+    match physical {
+        PhysicalType::BOOLEAN => LogicalDataType::Bool,
+        PhysicalType::INT32 => LogicalDataType::Int32,
+        PhysicalType::INT64 => LogicalDataType::Int64,
+        PhysicalType::FLOAT => LogicalDataType::Float32,
+        PhysicalType::DOUBLE => LogicalDataType::Float64,
+        PhysicalType::BYTE_ARRAY => LogicalDataType::Binary,
+        PhysicalType::FIXED_LEN_BYTE_ARRAY => LogicalDataType::FixedBinary,
+        PhysicalType::INT96 => LogicalDataType::Int96,
+    }
+}
+
+fn column_nullable(desc: &ColumnDescPtr) -> bool {
+    match desc.self_type().get_basic_info().repetition() {
+        Repetition::REQUIRED => false,
+        Repetition::OPTIONAL | Repetition::REPEATED => true,
+    }
+}
+
+fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+    let descr = meta.schema_descr();
+    let mut cols = Vec::with_capacity(descr.num_columns());
+
+    for col in descr.columns() {
+        let name = col.path().string();
+
+        let physical = col.physical_type();
+        let logical = col.logical_type_ref();
+
+        let data_type = map_parquet_col_to_logical_type(physical, logical);
+
+        let nullable = column_nullable(col);
+        cols.push(LogicalColumn {
+            name,
+            data_type,
+            nullable,
+        });
+    }
+
+    LogicalSchema::new(cols)
+}
+
+/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
+pub async fn logical_schema_from_parquet_location(
+    location: &TableLocation,
+    rel_path: &Path,
+) -> SegmentResult<LogicalSchema> {
+    let path_str = rel_path.display().to_string();
+
+    let bytes = read_all_bytes(location, rel_path)
+        .await
+        .map_err(map_storage_error)?;
+
+    let data = Bytes::from(bytes);
+
+    let reader =
+        SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
+            path: path_str.clone(),
+            source,
+            backtrace: Backtrace::capture(),
+        })?;
+
+    let file_meta = reader.metadata().file_metadata();
+
+    logical_schema_from_parquet(file_meta).map_err(|source| {
+        SegmentMetaError::LogicalSchemaInvalid {
+            path: path_str,
+            source,
+        }
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +536,97 @@ mod tests {
         let err = choose_timestamp_unit_from_logical("path", "ts", PhysicalType::INT32, Some(&lt))
             .unwrap_err();
         assert!(matches!(err, SegmentMetaError::UnsupportedTimeType { .. }));
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_timestamp_units() {
+        let cases = vec![
+            (TimeUnit::MILLIS, LogicalTimestampUnit::Millis),
+            (TimeUnit::MICROS, LogicalTimestampUnit::Micros),
+            (TimeUnit::NANOS, LogicalTimestampUnit::Nanos),
+        ];
+
+        for (unit, expected_unit) in cases {
+            let logical = LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit,
+            };
+
+            let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&logical));
+            assert_eq!(
+                mapped,
+                LogicalDataType::Timestamp {
+                    unit: expected_unit,
+                    timezone: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_string_logical() {
+        let mapped =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::String));
+        assert_eq!(mapped, LogicalDataType::Utf8);
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_complex_logical_to_other() {
+        let map_type =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::Map));
+        assert_eq!(map_type, LogicalDataType::Other("parquet::Map".to_string()));
+
+        let list_type =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::List));
+        assert_eq!(
+            list_type,
+            LogicalDataType::Other("parquet::List".to_string())
+        );
+
+        let enum_type =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::Enum));
+        assert_eq!(
+            enum_type,
+            LogicalDataType::Other("parquet::Enum".to_string())
+        );
+
+        let decimal = LogicalType::Decimal {
+            scale: 2,
+            precision: 10,
+        };
+        let decimal_type = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&decimal));
+        assert_eq!(
+            decimal_type,
+            LogicalDataType::Other("parquet::Decimal { scale: 2, precision: 10 }".to_string())
+        );
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_prefers_physical_for_unknown_logical() {
+        let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&LogicalType::Json));
+        assert_eq!(mapped, LogicalDataType::Int64);
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_physical_types_without_logical() {
+        let cases = vec![
+            (PhysicalType::BOOLEAN, LogicalDataType::Bool),
+            (PhysicalType::INT32, LogicalDataType::Int32),
+            (PhysicalType::INT64, LogicalDataType::Int64),
+            (PhysicalType::FLOAT, LogicalDataType::Float32),
+            (PhysicalType::DOUBLE, LogicalDataType::Float64),
+            (PhysicalType::BYTE_ARRAY, LogicalDataType::Binary),
+            (
+                PhysicalType::FIXED_LEN_BYTE_ARRAY,
+                LogicalDataType::FixedBinary,
+            ),
+            (PhysicalType::INT96, LogicalDataType::Int96),
+        ];
+
+        for (physical, expected) in cases {
+            let mapped = map_parquet_col_to_logical_type(physical, None);
+            assert_eq!(mapped, expected);
+        }
     }
 
     #[tokio::test]
