@@ -394,6 +394,7 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
     LogicalSchema::new(cols)
 }
 
+/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
 pub async fn logical_schema_from_parquet_location(
     location: &TableLocation,
     rel_path: &Path,
