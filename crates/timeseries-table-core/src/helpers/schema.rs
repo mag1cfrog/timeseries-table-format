@@ -68,8 +68,10 @@ pub enum SchemaCompatibilityError {
         segment_type: LogicalDataType,
     },
 
+    /// Logical schema construction or validation failed.
     #[snafu(display("Logical schema is invalid: {source}"))]
     LogicalSchema {
+        /// The underlying logical schema error.
         #[snafu(source)]
         source: LogicalSchemaError,
     },
@@ -96,10 +98,6 @@ fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalColumn> {
         .iter()
         .map(|col| (col.name.as_str(), col))
         .collect()
-}
-
-fn logical_type_string(col: &LogicalColumn) -> String {
-    format!("{}(nullable={})", col.data_type, col.nullable)
 }
 
 /// Enforce the v0.1 "no schema evolution" rule.
