@@ -56,30 +56,48 @@ pub struct TableMeta {
 /// versions (for example, partial updates or additive fields).
 pub type TableMetaDelta = TableMeta;
 
+/// Units for logical timestamps recorded in the table metadata.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogicalTimestampUnit {
+    /// Millisecond precision timestamps.
     Millis,
+    /// Microsecond precision timestamps.
     Micros,
+    /// Nanosecond precision timestamps.
     Nanos,
 }
 
+/// Logical data types that can be stored in the table schema metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogicalDataType {
+    /// Boolean value.
     Bool,
+    /// 32-bit signed integer.
     Int32,
+    /// 64-bit signed integer.
     Int64,
+    /// 32-bit floating point.
     Float32,
+    /// 64-bit floating point.
     Float64,
+    /// Variable-length binary data.
     Binary,
+    /// Fixed-length binary data.
     FixedBinary,
+    /// UTF-8 encoded string.
     Utf8,
+    /// Legacy 96-bit integer (primarily for Parquet compatibility).
     Int96,
 
+    /// Timestamp value with a precision unit and optional timezone.
     Timestamp {
+        /// Timestamp precision unit (millis, micros, nanos).
         unit: LogicalTimestampUnit,
+        /// Optional IANA timezone identifier.
         timezone: Option<String>, // keep Option for future TZ support
     },
 
+    /// Catch-all logical data type referenced by name.
     Other(String),
 }
 
