@@ -327,15 +327,128 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::storage::TableLocation;
+    use crate::transaction_log::segments::SegmentId;
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
-        LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        CommitError, LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
         TransactionLogStore,
     };
     use chrono::{TimeZone, Utc};
+    use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
+    use parquet::column::writer::ColumnWriter;
+    use parquet::data_type::ByteArray;
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use std::fs::File;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Clone)]
+    struct TestRow {
+        ts_millis: i64,
+        symbol: &'static str,
+        price: f64,
+    }
+
+    fn write_test_parquet(
+        path: &Path,
+        include_symbol: bool,
+        price_as_int: bool,
+        rows: &[TestRow],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut fields: Vec<Arc<Type>> = Vec::new();
+
+        let ts_field = Type::primitive_type_builder("ts", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: TimeUnit::MILLIS,
+            }))
+            .build()?;
+        fields.push(Arc::new(ts_field));
+
+        if include_symbol {
+            let symbol_field = Type::primitive_type_builder("symbol", PhysicalType::BYTE_ARRAY)
+                .with_repetition(Repetition::REQUIRED)
+                .with_logical_type(Some(LogicalType::String))
+                .build()?;
+            fields.push(Arc::new(symbol_field));
+        }
+
+        let price_builder = if price_as_int {
+            Type::primitive_type_builder("price", PhysicalType::INT64)
+        } else {
+            Type::primitive_type_builder("price", PhysicalType::DOUBLE)
+        };
+        let price_field = price_builder
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        fields.push(Arc::new(price_field));
+
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()?,
+        );
+
+        let file = File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = SerializedFileWriter::new(file, schema, Arc::new(props))?;
+
+        let ts_values: Vec<i64> = rows.iter().map(|r| r.ts_millis).collect();
+        let symbol_values: Vec<ByteArray> = rows
+            .iter()
+            .map(|r| ByteArray::from(r.symbol.as_bytes()))
+            .collect();
+        let price_f64: Vec<f64> = rows.iter().map(|r| r.price).collect();
+        let price_i64: Vec<i64> = rows.iter().map(|r| r.price as i64).collect();
+
+        let mut row_group_writer = writer.next_row_group()?;
+        let mut col_idx = 0;
+        while let Some(mut col_writer) = row_group_writer.next_column()? {
+            let mut cw = col_writer.untyped();
+            match (include_symbol, price_as_int, col_idx) {
+                (true, _, 0) | (false, _, 0) => match &mut cw {
+                    ColumnWriter::Int64ColumnWriter(w) => {
+                        w.write_batch(&ts_values, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for ts".into()),
+                },
+                (true, _, 1) => match &mut cw {
+                    ColumnWriter::ByteArrayColumnWriter(w) => {
+                        w.write_batch(&symbol_values, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for symbol".into()),
+                },
+                (true, false, 2) | (false, false, 1) => match &mut cw {
+                    ColumnWriter::DoubleColumnWriter(w) => {
+                        w.write_batch(&price_f64, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for price f64".into()),
+                },
+                (true, true, 2) | (false, true, 1) => match &mut cw {
+                    ColumnWriter::Int64ColumnWriter(w) => {
+                        w.write_batch(&price_i64, None, None)?;
+                    }
+                    _ => return Err("unexpected writer for price i64".into()),
+                },
+                _ => return Err("unexpected column writer ordering".into()),
+            }
+            col_writer.close()?;
+            col_idx += 1;
+        }
+        row_group_writer.close()?;
+        writer.close()?;
+
+        Ok(())
+    }
 
     fn utc_datetime(
         year: i32,
@@ -452,6 +565,276 @@ mod tests {
         // Second create should detect existing commits and fail.
         let result = TimeSeriesTable::create(location.clone(), meta).await;
         assert!(matches!(result, Err(TableError::AlreadyExists { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_updates_state_and_log() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/seg1.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        let new_version = table
+            .append_parquet_segment(SegmentId("seg-1".to_string()), rel_path, "ts")
+            .await?;
+
+        assert_eq!(new_version, 2);
+        assert_eq!(table.state.version, 2);
+        let seg = table
+            .state
+            .segments
+            .get(&SegmentId("seg-1".to_string()))
+            .expect("segment present");
+        assert_eq!(seg.path, rel_path);
+        assert_eq!(seg.row_count, 1);
+        assert_eq!(seg.ts_min.timestamp_millis(), 1_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 1_000);
+
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+        let commit_path = log_dir.join("0000000002.json");
+        assert!(commit_path.is_file());
+        let current =
+            tokio::fs::read_to_string(log_dir.join(TransactionLogStore::CURRENT_FILE_NAME)).await?;
+        assert_eq!(current.trim(), "2");
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert!(
+            reopened
+                .state
+                .segments
+                .contains_key(&SegmentId("seg-1".to_string()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_adopts_schema_when_missing() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec![],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        };
+        let meta = TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: None,
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: 1,
+        };
+
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_path = "data/seg-adopt.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 5_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        let new_version = table
+            .append_parquet_segment(SegmentId("seg-adopt".to_string()), rel_path, "ts")
+            .await?;
+
+        assert_eq!(new_version, 2);
+        let schema = table
+            .state
+            .table_meta
+            .logical_schema
+            .as_ref()
+            .expect("schema adopted");
+        let names: Vec<_> = schema.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["ts", "symbol", "price"]);
+        let ts_col = &schema.columns()[0];
+        assert_eq!(
+            ts_col.data_type,
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_rejects_schema_mismatch() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_path = "data/seg-missing-symbol.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            false,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "C",
+                price: 30.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment(SegmentId("seg-bad".to_string()), rel_path, "ts")
+            .await
+            .expect_err("expected schema mismatch");
+
+        match err {
+            TableError::SchemaCompatibility { source } => {
+                assert!(matches!(
+                    source,
+                    crate::helpers::schema::SchemaCompatibilityError::MissingColumn { .. }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_allows_duplicate_id_and_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/dup.parquet";
+        let abs_path = tmp.path().join(rel_path);
+
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        let v2 = table
+            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(v2, 2);
+        assert_eq!(table.state.version, 2);
+        assert_eq!(
+            table
+                .state
+                .segments
+                .get(&SegmentId("seg-dup".to_string()))
+                .unwrap()
+                .row_count,
+            1
+        );
+
+        // Overwrite the same path with different content and append again with the same segment ID.
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+                TestRow {
+                    ts_millis: 3_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+            ],
+        )?;
+
+        let v3 = table
+            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(v3, 3);
+        assert_eq!(table.state.version, 3);
+
+        let seg = table
+            .state
+            .segments
+            .get(&SegmentId("seg-dup".to_string()))
+            .expect("segment retained after duplicate append");
+        assert_eq!(seg.row_count, 2);
+        assert_eq!(seg.ts_min.timestamp_millis(), 2_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 3_000);
+
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+        assert!(log_dir.join("0000000003.json").is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_conflict_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/conflict.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+
+        // Simulate an external writer advancing CURRENT to version 2 while this handle is at version 1.
+        table
+            .log
+            .commit_with_expected_version(1, vec![])
+            .await
+            .expect("external commit succeeds");
+
+        let err = table
+            .append_parquet_segment(SegmentId("seg-conflict".to_string()), rel_path, "ts")
+            .await
+            .expect_err("expected conflict due to stale version");
+
+        match err {
+            TableError::TransactionLog { source } => {
+                assert!(matches!(
+                    source,
+                    CommitError::Conflict {
+                        expected: 1,
+                        found: 2,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
         Ok(())
     }
 }
