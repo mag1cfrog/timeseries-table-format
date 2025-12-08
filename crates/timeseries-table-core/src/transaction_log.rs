@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn logical_column_nullable_defaults_to_false() {
-        let json = r#"{ "name": "price", "data_type": "float64" }"#;
+        let json = r#"{ "name": "price", "data_type": "Float64" }"#;
 
         let col: LogicalColumn = serde_json::from_str(json).expect("deserialize");
 
