@@ -232,25 +232,24 @@ mod tests {
             timezone: None,
         };
 
-        let logical_schema = LogicalSchema {
-            columns: vec![
-                LogicalColumn {
-                    name: "ts".to_string(),
-                    data_type: "timestamp[millis]".to_string(),
-                    nullable: false,
-                },
-                LogicalColumn {
-                    name: "symbol".to_string(),
-                    data_type: "utf8".to_string(),
-                    nullable: false,
-                },
-                LogicalColumn {
-                    name: "price".to_string(),
-                    data_type: "float64".to_string(),
-                    nullable: false,
-                },
-            ],
-        };
+        let logical_schema = LogicalSchema::new(vec![
+            LogicalColumn {
+                name: "ts".to_string(),
+                data_type: "timestamp[millis]".to_string(),
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "symbol".to_string(),
+                data_type: "utf8".to_string(),
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "price".to_string(),
+                data_type: "float64".to_string(),
+                nullable: false,
+            },
+        ])
+        .expect("valid logical schema");
 
         TableMeta {
             kind: TableKind::TimeSeries(index),

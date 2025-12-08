@@ -39,8 +39,8 @@ fn sample_time_index_spec() -> TimeIndexSpec {
 fn sample_table_meta() -> TableMeta {
     TableMeta {
         kind: TableKind::TimeSeries(sample_time_index_spec()),
-        logical_schema: Some(LogicalSchema {
-            columns: vec![
+        logical_schema: Some(
+            LogicalSchema::new(vec![
                 LogicalColumn {
                     name: "ts".to_string(),
                     data_type: "timestamp[us]".to_string(),
@@ -56,8 +56,9 @@ fn sample_table_meta() -> TableMeta {
                     data_type: "f64".to_string(),
                     nullable: true,
                 },
-            ],
-        }),
+            ])
+            .expect("valid logical schema"),
+        ),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
         format_version: 1,
     }
@@ -173,7 +174,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
         .logical_schema
         .as_ref()
         .expect("logical schema must be present");
-    assert_eq!(schema.columns.len(), 3);
+    assert_eq!(schema.columns().len(), 3);
 
     Ok(())
 }
