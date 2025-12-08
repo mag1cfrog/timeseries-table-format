@@ -142,7 +142,7 @@ impl fmt::Display for LogicalDataType {
 pub struct LogicalColumn {
     /// Column name as it appears in the data.
     pub name: String,
-    /// Logical data type as a free-form string (e.g. `"int64"`, `"timestamp[us]"`).
+    /// Logical data type as a strongly-typed enum (e.g. `LogicalDataType::Int64`, `LogicalDataType::Timestamp { ... }`).
     pub data_type: LogicalDataType,
     /// Whether the column may contain NULLs.
     #[serde(default)]
