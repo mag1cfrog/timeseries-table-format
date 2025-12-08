@@ -538,6 +538,97 @@ mod tests {
         assert!(matches!(err, SegmentMetaError::UnsupportedTimeType { .. }));
     }
 
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_timestamp_units() {
+        let cases = vec![
+            (TimeUnit::MILLIS, LogicalTimestampUnit::Millis),
+            (TimeUnit::MICROS, LogicalTimestampUnit::Micros),
+            (TimeUnit::NANOS, LogicalTimestampUnit::Nanos),
+        ];
+
+        for (unit, expected_unit) in cases {
+            let logical = LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit,
+            };
+
+            let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&logical));
+            assert_eq!(
+                mapped,
+                LogicalDataType::Timestamp {
+                    unit: expected_unit,
+                    timezone: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_string_logical() {
+        let mapped =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::String));
+        assert_eq!(mapped, LogicalDataType::Utf8);
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_complex_logical_to_other() {
+        let map_type =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::Map));
+        assert_eq!(map_type, LogicalDataType::Other("parquet::Map".to_string()));
+
+        let list_type =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::List));
+        assert_eq!(
+            list_type,
+            LogicalDataType::Other("parquet::List".to_string())
+        );
+
+        let enum_type =
+            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::Enum));
+        assert_eq!(
+            enum_type,
+            LogicalDataType::Other("parquet::Enum".to_string())
+        );
+
+        let decimal = LogicalType::Decimal {
+            scale: 2,
+            precision: 10,
+        };
+        let decimal_type = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&decimal));
+        assert_eq!(
+            decimal_type,
+            LogicalDataType::Other("parquet::Decimal { scale: 2, precision: 10 }".to_string())
+        );
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_prefers_physical_for_unknown_logical() {
+        let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&LogicalType::Json));
+        assert_eq!(mapped, LogicalDataType::Int64);
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_physical_types_without_logical() {
+        let cases = vec![
+            (PhysicalType::BOOLEAN, LogicalDataType::Bool),
+            (PhysicalType::INT32, LogicalDataType::Int32),
+            (PhysicalType::INT64, LogicalDataType::Int64),
+            (PhysicalType::FLOAT, LogicalDataType::Float32),
+            (PhysicalType::DOUBLE, LogicalDataType::Float64),
+            (PhysicalType::BYTE_ARRAY, LogicalDataType::Binary),
+            (
+                PhysicalType::FIXED_LEN_BYTE_ARRAY,
+                LogicalDataType::FixedBinary,
+            ),
+            (PhysicalType::INT96, LogicalDataType::Int96),
+        ];
+
+        for (physical, expected) in cases {
+            let mapped = map_parquet_col_to_logical_type(physical, None);
+            assert_eq!(mapped, expected);
+        }
+    }
+
     #[tokio::test]
     async fn segment_meta_happy_path_uses_stats() -> TestResult {
         let tmp = TempDir::new()?;
