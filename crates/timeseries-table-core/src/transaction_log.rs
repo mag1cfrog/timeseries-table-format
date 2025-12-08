@@ -72,7 +72,8 @@ pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
 pub use segments::{FileFormat, SegmentId, SegmentMeta};
 pub use table_metadata::{
-    LogicalColumn, LogicalSchema, TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,
+    LogicalColumn, LogicalSchema, LogicalSchemaError, TableKind, TableMeta, TableMetaDelta,
+    TimeBucket, TimeIndexSpec,
 };
 pub use table_state::TableState;
 
@@ -150,8 +151,8 @@ mod tests {
 
         let table_meta = TableMeta {
             kind: TableKind::TimeSeries(time_index),
-            logical_schema: Some(LogicalSchema {
-                columns: vec![
+            logical_schema: Some(
+                LogicalSchema::new(vec![
                     LogicalColumn {
                         name: "ts".to_string(),
                         data_type: "timestamp[us]".to_string(),
@@ -162,8 +163,9 @@ mod tests {
                         data_type: "utf8".to_string(),
                         nullable: false,
                     },
-                ],
-            }),
+                ])
+                .expect("valid logical schema"),
+            ),
             created_at: ts0,
             format_version: 1,
         };
@@ -196,6 +198,25 @@ mod tests {
 
         // Round-trip equality.
         assert_eq!(commit, decoded);
+    }
+
+    #[test]
+    fn logical_schema_rejects_duplicate_columns() {
+        let dup = LogicalSchema::new(vec![
+            LogicalColumn {
+                name: "ts".to_string(),
+                data_type: "timestamp[us]".to_string(),
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "ts".to_string(),
+                data_type: "timestamp[us]".to_string(),
+                nullable: false,
+            },
+        ]);
+
+        let err = dup.expect_err("duplicate columns should be rejected");
+        assert!(matches!(err, LogicalSchemaError::DuplicateColumn { column } if column == "ts"));
     }
 
     #[test]

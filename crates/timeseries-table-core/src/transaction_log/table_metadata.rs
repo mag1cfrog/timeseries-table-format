@@ -4,8 +4,11 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
 
 /// The high-level "kind" of table.
 ///
@@ -73,7 +76,40 @@ pub struct LogicalColumn {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogicalSchema {
     /// All logical columns that compose the schema in their defined order.
-    pub columns: Vec<LogicalColumn>,
+    columns: Vec<LogicalColumn>,
+}
+
+/// Errors that can occur while constructing or validating a logical schema.
+#[derive(Debug, Clone, Snafu, PartialEq, Eq)]
+pub enum LogicalSchemaError {
+    /// Duplicate column names are not allowed.
+    #[snafu(display("Duplicate column name: {column}"))]
+    DuplicateColumn {
+        /// The duplicate column name.
+        column: String,
+    },
+}
+
+impl LogicalSchema {
+    /// Construct a validated logical schema (rejects duplicate column names).
+    pub fn new(columns: Vec<LogicalColumn>) -> Result<Self, LogicalSchemaError> {
+        let mut seen = HashSet::new();
+        for col in &columns {
+            if !seen.insert(col.name.clone()) {
+                return DuplicateColumnSnafu {
+                    column: col.name.clone(),
+                }
+                .fail();
+            }
+        }
+
+        Ok(Self { columns })
+    }
+
+    /// Borrow the logical columns.
+    pub fn columns(&self) -> &[LogicalColumn] {
+        &self.columns
+    }
 }
 
 /// Granularity for time buckets used by coverage/bitmap logic.

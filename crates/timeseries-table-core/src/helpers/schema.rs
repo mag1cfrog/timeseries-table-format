@@ -83,14 +83,14 @@ pub fn require_table_schema(meta: &TableMeta) -> SchemaResult<&LogicalSchema> {
 // ---- core comparison helpers ----
 fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalColumn> {
     schema
-        .columns
+        .columns()
         .iter()
         .map(|col| (col.name.as_str(), col))
         .collect()
 }
 
 fn logical_type_string(col: &LogicalColumn) -> String {
-    format!("{:?}(nullable={})", col.data_type, col.nullable)
+    format!("{}(nullable={})", col.data_type, col.nullable)
 }
 
 /// Enforce the v0.1 "no schema evolution" rule.
@@ -168,16 +168,16 @@ mod tests {
     use crate::transaction_log::TimeBucket;
 
     fn schema(cols: Vec<(&str, &str, bool)>) -> LogicalSchema {
-        LogicalSchema {
-            columns: cols
-                .into_iter()
+        LogicalSchema::new(
+            cols.into_iter()
                 .map(|(name, dtype, nullable)| LogicalColumn {
                     name: name.to_string(),
                     data_type: dtype.to_string(),
                     nullable,
                 })
                 .collect(),
-        }
+        )
+        .expect("valid logical schema")
     }
 
     fn index(ts_col: &str) -> TimeIndexSpec {
