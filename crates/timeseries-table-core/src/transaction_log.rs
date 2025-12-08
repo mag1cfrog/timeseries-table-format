@@ -159,7 +159,7 @@ mod tests {
                     LogicalColumn {
                         name: "ts".to_string(),
                         data_type: LogicalDataType::Timestamp {
-                            unit: LogicalTimestampUnit::Nanos,
+                            unit: LogicalTimestampUnit::Micros,
                             timezone: None,
                         },
                         nullable: false,
@@ -212,7 +212,7 @@ mod tests {
             LogicalColumn {
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
-                    unit: LogicalTimestampUnit::Nanos,
+                    unit: LogicalTimestampUnit::Micros,
                     timezone: None,
                 },
                 nullable: false,
@@ -220,7 +220,7 @@ mod tests {
             LogicalColumn {
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
-                    unit: LogicalTimestampUnit::Nanos,
+                    unit: LogicalTimestampUnit::Micros,
                     timezone: None,
                 },
                 nullable: false,
