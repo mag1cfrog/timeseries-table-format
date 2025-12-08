@@ -57,7 +57,7 @@ pub enum SchemaCompatibilityError {
         "Time index column {column} has incompatible type: table has {table_type}, \
          segment has {segment_type}"
     ))]
-    TimeInedxTypeMismatch {
+    TimeIndexTypeMismatch {
         /// The name of the time index column.
         column: String,
         /// The type in the table schema.
@@ -131,7 +131,7 @@ pub fn ensure_schema_exact_match(
                     let column = (*name).to_string();
 
                     if *name == time_col_name {
-                        return TimeInedxTypeMismatchSnafu {
+                        return TimeIndexTypeMismatchSnafu {
                             column,
                             table_type,
                             segment_type,
