@@ -14,6 +14,9 @@
 
 use std::path::Path;
 
+use arrow::{datatypes::DataType, error::ArrowError};
+use chrono::{DateTime, Utc};
+use parquet::errors::ParquetError;
 use snafu::prelude::*;
 
 use crate::{
@@ -21,7 +24,7 @@ use crate::{
         parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
         schema::{SchemaCompatibilityError, ensure_schema_exact_match},
     },
-    storage::TableLocation,
+    storage::{StorageError, TableLocation},
     transaction_log::{
         CommitError, LogAction, SegmentId, TableKind, TableMeta, TableState, TimeIndexSpec,
         TransactionLogStore, segments::SegmentMetaError,
@@ -29,9 +32,14 @@ use crate::{
 };
 
 /// Errors from high-level time-series table operations.
+///
+/// Each variant carries enough context for callers to surface actionable
+/// messages to users or implement retries where appropriate (for example,
+/// conflicts on optimistic concurrency control).
 #[derive(Debug, Snafu)]
 pub enum TableError {
-    /// Any error coming from the transaction log / commit machinery.
+    /// Any error coming from the transaction log / commit machinery
+    /// (for example, OCC conflicts, storage failures, or corrupt commits).
     #[snafu(display("Transaction log error: {source}"))]
     TransactionLog {
         /// Underlying transaction log / commit error.
@@ -39,25 +47,25 @@ pub enum TableError {
         source: CommitError,
     },
 
-    /// Attempting to open a table that has no commits at all.
+    /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
     EmptyTable,
 
-    /// The underlying table is not a time-series table.
+    /// The underlying table is not a time-series table (TableKind mismatch).
     #[snafu(display("Table kind is {kind:?}, expected TableKind::TimeSeries"))]
     NotTimeSeries {
         /// The actual kind of the underlying table that was discovered.
         kind: TableKind,
     },
 
-    /// Attempt to create a table where commits already exist.
+    /// Attempt to create a table where commits already exist (idempotency guard for create).
     #[snafu(display("Table already exists; current transaction log version is {current_version}"))]
     AlreadyExists {
         /// Current transaction log version that indicates the table already exists.
         current_version: u64,
     },
 
-    /// Segment-level metadata / Parquet error during append.
+    /// Segment-level metadata / Parquet error during append (for example, missing time column, unsupported type, corrupt stats).
     #[snafu(display("Segment metadata error while appending: {source}"))]
     SegmentMeta {
         /// Underlying segment metadata error.
@@ -65,7 +73,7 @@ pub enum TableError {
         source: SegmentMetaError,
     },
 
-    /// Schema compatibility error when appending a segment with incompatible schema.
+    /// Schema compatibility error when appending a segment with incompatible schema (no evolution allowed in v0.1).
     #[snafu(display("Schema compatibility error: {source}"))]
     SchemaCompatibility {
         /// Underlying schema compatibility error.
@@ -74,11 +82,57 @@ pub enum TableError {
     },
 
     /// Table has progressed past the initial metadata commit but still lacks
-    /// a canonical logical schema. That’s an invariant violation for v0.1.
+    /// a canonical logical schema (invariant violation for v0.1).
     #[snafu(display("Table has no logical_schema at version {version}; cannot append in v0.1"))]
     MissingCanonicalSchema {
         /// The transaction log version missing a canonical logical schema.
         version: u64,
+    },
+
+    /// Storage error while accessing table data (read/write failure at the storage layer).
+    #[snafu(display("Storage error while accessing table data: {source}"))]
+    Storage {
+        /// Underlying storage error while reading or writing table data.
+        source: StorageError,
+    },
+
+    #[snafu(display("Invalid scan range: start={start}, end={end} (expect start < end)"))]
+    /// Start and end timestamps must satisfy start < end when scanning.
+    InvalidRange {
+        /// Inclusive/lower timestamp bound supplied by caller.
+        start: DateTime<Utc>,
+        /// Exclusive/upper timestamp bound supplied by caller.
+        end: DateTime<Utc>,
+    },
+
+    /// Parquet read/IO error during scanning or schema extraction.
+    #[snafu(display("Parquet read error: {source}"))]
+    ParquetRead {
+        /// Underlying Parquet error raised during read or schema extraction.
+        source: ParquetError,
+    },
+
+    /// Arrow compute or conversion error while materializing or filtering batches.
+    #[snafu(display("Arrow error while filtering batch: {source}"))]
+    Arrow {
+        /// Underlying Arrow error raised during batch conversion or filtering.
+        source: ArrowError,
+    },
+
+    /// Segment is missing the configured time column required for scans.
+    #[snafu(display("Missing time column {column} in segment"))]
+    MissingTimeColumn {
+        /// Name of the expected time column that was not found in the segment.
+        column: String,
+    },
+
+    /// Time column exists but has an unsupported Arrow type for scanning.
+    #[snafu(display("Unsupported time column {column} with type {datatype:?}"))]
+    UnspportedTimeType {
+        /// Name of the time column with an unsupported type.
+        column: String,
+        /// Arrow data type encountered for the time column.
+        datatype: DataType,
     },
 }
 
