@@ -22,6 +22,7 @@ use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
 use arrow::datatypes::{Field, TimeUnit};
 use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
+use arrow_array::Scalar;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -212,18 +213,22 @@ macro_rules! filter_ts_batch {
             }
         })?;
 
-        // 2) Build scalar arrays with matching timezone
+        // 2) Extract timezone from the array's DataType so our scalar matches
         // Extract timezone from the actual array's data type to ensure comparison compatibility
-        let tz = match ts_arr.data_type() {
+        let tz_opt = match ts_arr.data_type() {
             DataType::Timestamp(_, tz_opt) => tz_opt.clone(),
             _ => None,
         };
 
-        let start_scalar =
-            <$array_ty>::from(vec![$start_bound; ts_arr.len()]).with_timezone_opt(tz.clone());
-        let end_scalar = <$array_ty>::from(vec![$end_bound; ts_arr.len()]).with_timezone_opt(tz);
+        // 3) Build *1-element* arrays for the bounds, with matching timezone.
+        let start_arr = <$array_ty>::from(vec![$start_bound]).with_timezone_opt(tz_opt.clone());
+        let end_arr = <$array_ty>::from(vec![$end_bound]).with_timezone_opt(tz_opt);
 
-        // 3) Vectorized comparisons:
+        // Warp themn as scalars (no repeated buffers)
+        let start_scalar = Scalar::new(start_arr);
+        let end_scalar = Scalar::new(end_arr);
+
+        // 4) Vectorized comparisons:
         // ge_mask = (ts >= start)
         // lt_mask = (ts < end)
         let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar)
@@ -231,7 +236,7 @@ macro_rules! filter_ts_batch {
         let lt_mask =
             cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| TableError::Arrow { source })?;
 
-        // 4) Combine: keep rows where ts >= start AND ts < end
+        // 5) Combine: keep rows where ts >= start AND ts < end
         let mask = boolean_kernels::and(&ge_mask, &lt_mask)
             .map_err(|source| TableError::Arrow { source })?;
 
@@ -241,7 +246,7 @@ macro_rules! filter_ts_batch {
         //   as “do not keep this row”, which matches the
         //   `null -> false` behavior.
 
-        // 5) apply the mask to the whole batch
+        // 6) apply the mask to the whole batch
         let filtered =
             filter_record_batch(&$batch, &mask).map_err(|source| TableError::Arrow { source })?;
 
