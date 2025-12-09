@@ -136,7 +136,7 @@ pub enum TableError {
 
     /// Time column exists but has an unsupported Arrow type for scanning.
     #[snafu(display("Unsupported time column {column} with type {datatype:?}"))]
-    UnspportedTimeType {
+    UnsupportedTimeType {
         /// Name of the time column with an unsupported type.
         column: String,
         /// Arrow data type encountered for the time column.
@@ -185,7 +185,7 @@ fn to_bounds_i64(
 
         DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok((to_ns(ts_start)?, to_ns(ts_end)?)),
 
-        other => Err(TableError::UnspportedTimeType {
+        other => Err(TableError::UnsupportedTimeType {
             column: column.to_string(),
             datatype: other.clone(),
         }),
@@ -205,7 +205,7 @@ macro_rules! filter_ts_batch {
         // 1) downcast the column to the concretre timestamp array type
         let col = $batch.column($ts_idx);
         let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
-            TableError::UnspportedTimeType {
+            TableError::UnsupportedTimeType {
                 column: $time_col.to_string(),
                 datatype: $ts_field.data_type().clone(),
             }
@@ -346,7 +346,7 @@ async fn read_segment_range(
                 )?;
             }
             other => {
-                return Err(TableError::UnspportedTimeType {
+                return Err(TableError::UnsupportedTimeType {
                     column: time_column.to_string(),
                     datatype: other.clone(),
                 });
@@ -615,15 +615,15 @@ impl TimeSeriesTable {
         let ts_column = self.index.timestamp_column.clone();
 
         // 1) Pick candidate segments.
-        let mut candicates = segments_for_range(&self.state, ts_start, ts_end);
+        let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
 
         // 2) Sort by ts_min; v0.1 assume non-overlapping segments.
-        candicates.sort_by_key(|seg| seg.ts_min);
+        candidates.sort_by_key(|seg| seg.ts_min);
 
         let location = self.location.clone();
 
         // 3) Build stream: for each segment, read + filter
-        let stream = futures::stream::iter(candicates.into_iter())
+        let stream = futures::stream::iter(candidates.into_iter())
             .then(move |seg| {
                 let location = location.clone();
                 let ts_column = ts_column.clone();
@@ -1672,7 +1672,7 @@ mod tests {
             .await
             .expect_err("unsupported time type should error");
 
-        assert!(matches!(err, TableError::UnspportedTimeType { .. }));
+        assert!(matches!(err, TableError::UnsupportedTimeType { .. }));
         Ok(())
     }
 
@@ -1964,7 +1964,7 @@ mod tests {
         let mut stream = table.scan_range(start, end).await?;
         let err = stream.next().await.expect("expected error from scan");
 
-        assert!(matches!(err, Err(TableError::UnspportedTimeType { .. })));
+        assert!(matches!(err, Err(TableError::UnsupportedTimeType { .. })));
         Ok(())
     }
 
