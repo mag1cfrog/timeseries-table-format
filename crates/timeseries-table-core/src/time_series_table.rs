@@ -104,8 +104,8 @@ pub enum TableError {
         source: StorageError,
     },
 
-    #[snafu(display("Invalid scan range: start={start}, end={end} (expect start < end)"))]
     /// Start and end timestamps must satisfy start < end when scanning.
+    #[snafu(display("Invalid scan range: start={start}, end={end} (expect start < end)"))]
     InvalidRange {
         /// Inclusive/lower timestamp bound supplied by caller.
         start: DateTime<Utc>,
@@ -617,7 +617,8 @@ impl TimeSeriesTable {
         // 1) Pick candidate segments.
         let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
 
-        // 2) Sort by ts_min; v0.1 assume non-overlapping segments.
+        // 2) Sort by ts_min to ensure segments are processed in chronological order.
+        //    In v0.1 we assume non-overlapping segments, so sorting guarantees scan order.
         candidates.sort_by_key(|seg| seg.ts_min);
 
         let location = self.location.clone();
