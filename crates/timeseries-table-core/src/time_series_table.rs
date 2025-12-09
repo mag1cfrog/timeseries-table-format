@@ -14,14 +14,16 @@
 
 use std::{path::Path, pin::Pin};
 
-use arrow::compute::filter_record_batch;
-use arrow::array::{Array, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray};
+use arrow::array::{
+    Array, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+};
 use arrow::array::{BooleanBuilder, RecordBatchReader, TimestampMicrosecondArray};
+use arrow::compute::filter_record_batch;
 use arrow::datatypes::{Field, TimeUnit};
 use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::prelude::*;
 
@@ -171,24 +173,22 @@ fn to_bounds_i64(
     };
 
     match field.data_type() {
-        DataType::Timestamp(TimeUnit::Second, _) => Ok((
-            ts_start.timestamp(),
-            ts_end.timestamp(),
-        )),
+        DataType::Timestamp(TimeUnit::Second, _) => Ok((ts_start.timestamp(), ts_end.timestamp())),
 
-        DataType::Timestamp(TimeUnit::Millisecond, _) => Ok((
-            ts_start.timestamp_millis(),
-            ts_end.timestamp_millis(),
-        )),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            Ok((ts_start.timestamp_millis(), ts_end.timestamp_millis()))
+        }
 
-        DataType::Timestamp(TimeUnit::Microsecond, _) => Ok((
-            ts_start.timestamp_micros(),
-            ts_end.timestamp_micros(),
-        )),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            Ok((ts_start.timestamp_micros(), ts_end.timestamp_micros()))
+        }
 
         DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok((to_ns(ts_start)?, to_ns(ts_end)?)),
 
-        other => Err(TableError::UnspportedTimeType { column: column.to_string(), datatype: other.clone() })
+        other => Err(TableError::UnspportedTimeType {
+            column: column.to_string(),
+            datatype: other.clone(),
+        }),
     }
 }
 
@@ -202,42 +202,40 @@ macro_rules! filter_ts_batch {
     $ts_field:expr,
     $out:expr
 ) => {{
-    // 1) downcast the column to the concretre timestamp array type
-    let col = $batch.column($ts_idx);
-    let ts_arr = col
-    .as_any()
-    .downcast_ref::<$array_ty>()
-    .ok_or_else(|| TableError::UnspportedTimeType{
-        column: $time_col.to_string(),
-        datatype: $ts_field.data_type().clone(),
-    })?;
+        // 1) downcast the column to the concretre timestamp array type
+        let col = $batch.column($ts_idx);
+        let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
+            TableError::UnspportedTimeType {
+                column: $time_col.to_string(),
+                datatype: $ts_field.data_type().clone(),
+            }
+        })?;
 
-    // 2) build a boolean mask: start <= ts < end, nulls -> false
-    let mut mask_builder = BooleanBuilder::with_capacity(ts_arr.len());
-    for i in 0..ts_arr.len() {
-        if ts_arr.is_null(i) {
-            mask_builder.append_value(false);
-        } else {
-            let v = ts_arr.value(i);
-            let keep = v >= $start_bound && v < $end_bound;
-            mask_builder.append_value(keep);
+        // 2) build a boolean mask: start <= ts < end, nulls -> false
+        let mut mask_builder = BooleanBuilder::with_capacity(ts_arr.len());
+        for i in 0..ts_arr.len() {
+            if ts_arr.is_null(i) {
+                mask_builder.append_value(false);
+            } else {
+                let v = ts_arr.value(i);
+                let keep = v >= $start_bound && v < $end_bound;
+                mask_builder.append_value(keep);
+            }
         }
-    }
 
-    let mask = mask_builder.finish();
+        let mask = mask_builder.finish();
 
-    // 3) apply the mask to the whole batch
-    let filtered = filter_record_batch(&$batch, &mask)
-    .map_err(|source| TableError::Arrow{source})?;
+        // 3) apply the mask to the whole batch
+        let filtered =
+            filter_record_batch(&$batch, &mask).map_err(|source| TableError::Arrow { source })?;
 
-    if filtered.num_rows() > 0 {
-        $out.push(filtered);
-    }
+        if filtered.num_rows() > 0 {
+            $out.push(filtered);
+        }
 
-    Ok::<(), TableError>(())
+        Ok::<(), TableError>(())
     }};
 }
-
 
 fn segments_for_range(
     state: &TableState,
@@ -267,18 +265,26 @@ async fn read_segment_range(
     let rel_path = Path::new(&segment.path);
 
     // 1) Use storage layer to get raw bytes.
-    let bytes = storage::read_all_bytes(location, rel_path).await.context(StorageSnafu)?;
+    let bytes = storage::read_all_bytes(location, rel_path)
+        .await
+        .context(StorageSnafu)?;
 
     // 2) Build a reader over an in-memory cursor.
     let bytes = Bytes::from(bytes);
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-    .map_err(|source| TableError::ParquetRead { source })?;
+        .map_err(|source| TableError::ParquetRead { source })?;
 
-    let mut reader = builder.build().map_err(|source| TableError::ParquetRead { source })?;
+    let reader = builder
+        .build()
+        .map_err(|source| TableError::ParquetRead { source })?;
 
     // 3) locate the time column and compute numeric bounds
     let schema = reader.schema();
-    let ts_idx = schema.index_of(time_column).map_err(|_| TableError::MissingTimeColumn { column: time_column.to_string(), })?;
+    let ts_idx = schema
+        .index_of(time_column)
+        .map_err(|_| TableError::MissingTimeColumn {
+            column: time_column.to_string(),
+        })?;
 
     let ts_field = schema.field(ts_idx);
 
@@ -287,7 +293,7 @@ async fn read_segment_range(
     let mut out = Vec::new();
 
     // 4) iterate over batches and filter them
-    while let Some(batch_res) = reader.next() {
+    for batch_res in reader {
         let batch = batch_res.map_err(|source| TableError::Arrow { source })?;
 
         match ts_field.data_type() {
@@ -340,11 +346,13 @@ async fn read_segment_range(
                 )?;
             }
             other => {
-                return Err(TableError::UnspportedTimeType { column: time_column.to_string(), datatype: other.clone(), });
+                return Err(TableError::UnspportedTimeType {
+                    column: time_column.to_string(),
+                    datatype: other.clone(),
+                });
             }
         }
     }
-
 
     Ok(out)
 }
@@ -589,11 +597,19 @@ impl TimeSeriesTable {
         Ok(new_version)
     }
 
+    /// Scan the time-series table for record batches overlapping `[ts_start, ts_end)`,
+    /// returning a stream of filtered batches from the segments covering that range.
     pub async fn scan_range(
-        &self, ts_start: DateTime<Utc>, ts_end: DateTime<Utc>,
+        &self,
+        ts_start: DateTime<Utc>,
+        ts_end: DateTime<Utc>,
     ) -> Result<TimeSeriesScan, TableError> {
         if ts_start >= ts_end {
-            return InvalidRangeSnafu {start: ts_start, end: ts_end}.fail();
+            return InvalidRangeSnafu {
+                start: ts_start,
+                end: ts_end,
+            }
+            .fail();
         }
 
         let ts_column = self.index.timestamp_column.clone();
@@ -608,16 +624,22 @@ impl TimeSeriesTable {
 
         // 3) Build stream: for each segment, read + filter
         let stream = futures::stream::iter(candicates.into_iter())
-        .then(move |seg| {
-            let location = location.clone();
-            let ts_column = ts_column.clone();
+            .then(move |seg| {
+                let location = location.clone();
+                let ts_column = ts_column.clone();
 
-            async move {
-                let batches = read_seg
-            }
-        })
+                async move {
+                    let batches =
+                        read_segment_range(&location, &seg, &ts_column, ts_start, ts_end).await?;
 
-        Ok(())
+                    Ok::<_, TableError>(futures::stream::iter(
+                        batches.into_iter().map(Ok::<_, TableError>),
+                    ))
+                }
+            })
+            .try_flatten();
+
+        Ok(Box::pin(stream))
     }
 }
 
