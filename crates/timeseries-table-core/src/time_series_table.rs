@@ -14,6 +14,7 @@
 
 use std::{path::Path, pin::Pin};
 
+use arrow::array::Scalar;
 use arrow::array::{
     Array, RecordBatchReader, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray,
@@ -22,7 +23,6 @@ use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
 use arrow::datatypes::{Field, TimeUnit};
 use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
-use arrow_array::Scalar;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -256,8 +256,7 @@ macro_rules! filter_ts_batch {
             }
         })?;
 
-        // 2) Extract timezone from the array's DataType so our scalar matches
-        // Extract timezone from the actual array's data type to ensure comparison compatibility
+        // 2) Extract timezone from the array's DataType to ensure that our scalar matches and comparisons are compatible
         let tz_opt = match ts_arr.data_type() {
             DataType::Timestamp(_, tz_opt) => tz_opt.clone(),
             _ => None,
@@ -271,7 +270,7 @@ macro_rules! filter_ts_batch {
         let start_arr = <$array_ty>::from(vec![$start_bound]).with_timezone_opt(tz_opt.clone());
         let end_arr = <$array_ty>::from(vec![$end_bound]).with_timezone_opt(tz_opt);
 
-        // Warp themn as scalars (no repeated buffers)
+        // Wrap them as scalars (no repeated buffers)
         let start_scalar = Scalar::new(start_arr);
         let end_scalar = Scalar::new(end_arr);
 
@@ -289,9 +288,8 @@ macro_rules! filter_ts_batch {
 
         // Note on null semantics:
         // - If ts_arr[i] is null, both comparisons produce null in the mask.
-        // - Arrow’s `filter`/`filter_record_batch` treat nulls in the mask
-        //   as “do not keep this row”, which matches the
-        //   `null -> false` behavior.
+        // Arrow's `filter_record_batch` treats null mask values as false,
+        // excluding those rows from results.
 
         // 6) apply the mask to the whole batch
         let filtered =
