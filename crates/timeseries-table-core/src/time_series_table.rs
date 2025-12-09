@@ -1744,7 +1744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_segment_range_overflow_nanoseconds() -> TestResult {
+    async fn read_segment_range_overflow_bounds_nanoseconds() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -1767,7 +1767,7 @@ mod tests {
             .expect("overflow ts");
         let err = read_segment_range(&location, &segment, "ts", huge, huge)
             .await
-            .expect_err("overflow should error");
+            .expect_err("overflow during bound conversion should error");
 
         assert!(matches!(err, TableError::TimeConversionOverflow { .. }));
         Ok(())
