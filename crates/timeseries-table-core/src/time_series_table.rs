@@ -14,10 +14,14 @@
 
 use std::{path::Path, pin::Pin};
 
+use arrow::array::Array;
+use arrow::array::{BooleanBuilder, RecordBatchReader, TimestampMicrosecondArray};
+use arrow::datatypes::{Field, TimeUnit};
 use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::Stream;
-use parquet::errors::ParquetError;
+use futures::{Stream, StreamExt};
+use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::prelude::*;
 
 use crate::{
@@ -25,10 +29,10 @@ use crate::{
         parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
         schema::{SchemaCompatibilityError, ensure_schema_exact_match},
     },
-    storage::{StorageError, TableLocation},
+    storage::{self, StorageError, TableLocation},
     transaction_log::{
-        CommitError, LogAction, SegmentId, TableKind, TableMeta, TableState, TimeIndexSpec,
-        TransactionLogStore, segments::SegmentMetaError,
+        CommitError, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TableState,
+        TimeIndexSpec, TransactionLogStore, segments::SegmentMetaError,
     },
 };
 
@@ -135,10 +139,128 @@ pub enum TableError {
         /// Arrow data type encountered for the time column.
         datatype: DataType,
     },
+
+    /// Converting a timestamp to the requested unit would overflow `i64`.
+    #[snafu(display("Timestamp conversion overflow for column {column} (value: {timestamp})"))]
+    TimeConversionOverflow {
+        /// Name of the time column being converted.
+        column: String,
+        /// The timestamp value that could not be represented as i64 nanos.
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
 pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;
+
+fn to_bounds_i64(
+    field: &Field,
+    column: &str,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Result<(i64, i64), TableError> {
+    let to_ns = |dt: DateTime<Utc>| {
+        dt.timestamp()
+            .checked_mul(1_000_000_000)
+            .and_then(|secs| secs.checked_add(dt.timestamp_subsec_nanos() as i64))
+            .ok_or_else(|| TableError::TimeConversionOverflow {
+                column: column.to_string(),
+                timestamp: dt,
+            })
+    };
+
+    match field.data_type() {
+        DataType::Timestamp(TimeUnit::Second, _) => Ok((
+            ts_start.timestamp(),
+            ts_end.timestamp(),
+        )),
+
+        DataType::Timestamp(TimeUnit::Millisecond, _) => Ok((
+            ts_start.timestamp_millis(),
+            ts_end.timestamp_millis(),
+        )),
+
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Ok((
+            ts_start.timestamp_micros(),
+            ts_end.timestamp_micros(),
+        )),
+
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok((to_ns(ts_start)?, to_ns(ts_end)?)),
+
+        other => Err(TableError::UnspportedTimeType { column: column.to_string(), datatype: other.clone() })
+    }
+}
+
+fn segments_for_range(
+    state: &TableState,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Vec<SegmentMeta> {
+    state
+        .segments
+        .values()
+        .filter(|seg| {
+            // half-open query [ts_start, ts_end)
+            // intersection with segment's [ts_min, ts_max] (closed) is:
+            // seg.ts_max >= ts_start && seg.ts_min < ts_end
+            seg.ts_max >= ts_start && seg.ts_min < ts_end
+        })
+        .cloned()
+        .collect()
+}
+
+async fn read_segment_range(
+    location: &TableLocation,
+    segment: &SegmentMeta,
+    time_column: &str,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Result<Vec<RecordBatch>, TableError> {
+    let rel_path = Path::new(&segment.path);
+
+    // 1) Use storage layer to get raw bytes.
+    let bytes = storage::read_all_bytes(location, rel_path).await.context(StorageSnafu)?;
+
+    // 2) Build a reader over an in-memory cursor.
+    let bytes = Bytes::from(bytes);
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+    .map_err(|source| TableError::ParquetRead { source })?;
+
+    let mut reader = builder.build().map_err(|source| TableError::ParquetRead { source })?;
+
+    let schema = reader.schema();
+    let ts_idx = schema.index_of(time_column).map_err(|_| TableError::MissingTimeColumn { column: time_column.to_string(), })?;
+
+    // 3) Bounds in microseconds;
+    let start_us = ts_start.timestamp_micros();
+    let end_us = ts_end.timestamp_micros();
+
+    let mut out = Vec::new();
+
+    while let Some(batch_res) = reader.next() {
+        let batch = batch_res.map_err(|source| TableError::ParquetRead { source })?;
+
+        let col = batch.column(ts_idx);
+        let field = batch.schema().field(ts_idx);
+
+        let ts_arr = col
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .ok_or_else(|| TableError::UnspportedTimeType { column: time_column.to_string(), datatype: field.data_type().clone(), })?;
+
+        let mut mask_builder = BooleanBuilder::new(ts_arr.len());
+
+        for i in 0..ts_arr.len() {
+            if ts_arr.is_null(i) {
+                mask_builder.append_value(false);
+            }
+        }
+
+    }
+
+
+    Ok(())
+}
 
 /// High-level time-series table handle.
 ///
@@ -378,6 +500,37 @@ impl TimeSeriesTable {
             .insert(segment_meta.segment_id.clone(), segment_meta);
 
         Ok(new_version)
+    }
+
+    pub async fn scan_range(
+        &self, ts_start: DateTime<Utc>, ts_end: DateTime<Utc>,
+    ) -> Result<TimeSeriesScan, TableError> {
+        if ts_start >= ts_end {
+            return InvalidRangeSnafu {start: ts_start, end: ts_end}.fail();
+        }
+
+        let ts_column = self.index.timestamp_column.clone();
+
+        // 1) Pick candidate segments.
+        let mut candicates = segments_for_range(&self.state, ts_start, ts_end);
+
+        // 2) Sort by ts_min; v0.1 assume non-overlapping segments.
+        candicates.sort_by_key(|seg| seg.ts_min);
+
+        let location = self.location.clone();
+
+        // 3) Build stream: for each segment, read + filter
+        let stream = futures::stream::iter(candicates.into_iter())
+        .then(move |seg| {
+            let location = location.clone();
+            let ts_column = ts_column.clone();
+
+            async move {
+                let batches = read_seg
+            }
+        })
+
+        Ok(())
     }
 }
 
