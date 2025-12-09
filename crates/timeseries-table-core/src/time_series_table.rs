@@ -12,8 +12,21 @@
 //! - `create` bootstraps a fresh table with an initial metadata commit.
 //!   Later issues will add append APIs, coverage, and scanning.
 
-use std::path::Path;
+use std::{path::Path, pin::Pin};
 
+use arrow::array::Scalar;
+use arrow::array::{
+    Array, RecordBatchReader, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
+};
+use arrow::compute::filter_record_batch;
+use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
+use arrow::datatypes::{Field, TimeUnit};
+use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use futures::{Stream, StreamExt, TryStreamExt};
+use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::prelude::*;
 
 use crate::{
@@ -21,17 +34,22 @@ use crate::{
         parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
         schema::{SchemaCompatibilityError, ensure_schema_exact_match},
     },
-    storage::TableLocation,
+    storage::{self, StorageError, TableLocation},
     transaction_log::{
-        CommitError, LogAction, SegmentId, TableKind, TableMeta, TableState, TimeIndexSpec,
-        TransactionLogStore, segments::SegmentMetaError,
+        CommitError, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TableState,
+        TimeIndexSpec, TransactionLogStore, segments::SegmentMetaError,
     },
 };
 
 /// Errors from high-level time-series table operations.
+///
+/// Each variant carries enough context for callers to surface actionable
+/// messages to users or implement retries where appropriate (for example,
+/// conflicts on optimistic concurrency control).
 #[derive(Debug, Snafu)]
 pub enum TableError {
-    /// Any error coming from the transaction log / commit machinery.
+    /// Any error coming from the transaction log / commit machinery
+    /// (for example, OCC conflicts, storage failures, or corrupt commits).
     #[snafu(display("Transaction log error: {source}"))]
     TransactionLog {
         /// Underlying transaction log / commit error.
@@ -39,25 +57,25 @@ pub enum TableError {
         source: CommitError,
     },
 
-    /// Attempting to open a table that has no commits at all.
+    /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
     EmptyTable,
 
-    /// The underlying table is not a time-series table.
+    /// The underlying table is not a time-series table (TableKind mismatch).
     #[snafu(display("Table kind is {kind:?}, expected TableKind::TimeSeries"))]
     NotTimeSeries {
         /// The actual kind of the underlying table that was discovered.
         kind: TableKind,
     },
 
-    /// Attempt to create a table where commits already exist.
+    /// Attempt to create a table where commits already exist (idempotency guard for create).
     #[snafu(display("Table already exists; current transaction log version is {current_version}"))]
     AlreadyExists {
         /// Current transaction log version that indicates the table already exists.
         current_version: u64,
     },
 
-    /// Segment-level metadata / Parquet error during append.
+    /// Segment-level metadata / Parquet error during append (for example, missing time column, unsupported type, corrupt stats).
     #[snafu(display("Segment metadata error while appending: {source}"))]
     SegmentMeta {
         /// Underlying segment metadata error.
@@ -65,7 +83,7 @@ pub enum TableError {
         source: SegmentMetaError,
     },
 
-    /// Schema compatibility error when appending a segment with incompatible schema.
+    /// Schema compatibility error when appending a segment with incompatible schema (no evolution allowed in v0.1).
     #[snafu(display("Schema compatibility error: {source}"))]
     SchemaCompatibility {
         /// Underlying schema compatibility error.
@@ -74,12 +92,335 @@ pub enum TableError {
     },
 
     /// Table has progressed past the initial metadata commit but still lacks
-    /// a canonical logical schema. That’s an invariant violation for v0.1.
+    /// a canonical logical schema (invariant violation for v0.1).
     #[snafu(display("Table has no logical_schema at version {version}; cannot append in v0.1"))]
     MissingCanonicalSchema {
         /// The transaction log version missing a canonical logical schema.
         version: u64,
     },
+
+    /// Storage error while accessing table data (read/write failure at the storage layer).
+    #[snafu(display("Storage error while accessing table data: {source}"))]
+    Storage {
+        /// Underlying storage error while reading or writing table data.
+        source: StorageError,
+    },
+
+    /// Start and end timestamps must satisfy start < end when scanning.
+    #[snafu(display("Invalid scan range: start={start}, end={end} (expect start < end)"))]
+    InvalidRange {
+        /// Inclusive/lower timestamp bound supplied by caller.
+        start: DateTime<Utc>,
+        /// Exclusive/upper timestamp bound supplied by caller.
+        end: DateTime<Utc>,
+    },
+
+    /// Parquet read/IO error during scanning or schema extraction.
+    #[snafu(display("Parquet read error: {source}"))]
+    ParquetRead {
+        /// Underlying Parquet error raised during read or schema extraction.
+        source: ParquetError,
+    },
+
+    /// Arrow compute or conversion error while materializing or filtering batches.
+    #[snafu(display("Arrow error while filtering batch: {source}"))]
+    Arrow {
+        /// Underlying Arrow error raised during batch conversion or filtering.
+        source: ArrowError,
+    },
+
+    /// Segment is missing the configured time column required for scans.
+    #[snafu(display("Missing time column {column} in segment"))]
+    MissingTimeColumn {
+        /// Name of the expected time column that was not found in the segment.
+        column: String,
+    },
+
+    /// Time column exists but has an unsupported Arrow type for scanning.
+    #[snafu(display("Unsupported time column {column} with type {datatype:?}"))]
+    UnsupportedTimeType {
+        /// Name of the time column with an unsupported type.
+        column: String,
+        /// Arrow data type encountered for the time column.
+        datatype: DataType,
+    },
+
+    /// Converting a timestamp to the requested unit would overflow `i64`.
+    #[snafu(display("Timestamp conversion overflow for column {column} (value: {timestamp})"))]
+    TimeConversionOverflow {
+        /// Name of the time column being converted.
+        column: String,
+        /// The timestamp value that could not be represented as i64 nanos.
+        timestamp: DateTime<Utc>,
+    },
+}
+
+/// Stream of Arrow RecordBatch values from a time-series scan.
+pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;
+
+fn to_bounds_i64(
+    field: &Field,
+    column: &str,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Result<(i64, i64), TableError> {
+    let to_ns = |dt: DateTime<Utc>| {
+        dt.timestamp()
+            .checked_mul(1_000_000_000)
+            .and_then(|secs| secs.checked_add(dt.timestamp_subsec_nanos() as i64))
+            .ok_or_else(|| TableError::TimeConversionOverflow {
+                column: column.to_string(),
+                timestamp: dt,
+            })
+    };
+
+    match field.data_type() {
+        DataType::Timestamp(TimeUnit::Second, _) => Ok((ts_start.timestamp(), ts_end.timestamp())),
+
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            Ok((ts_start.timestamp_millis(), ts_end.timestamp_millis()))
+        }
+
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            Ok((ts_start.timestamp_micros(), ts_end.timestamp_micros()))
+        }
+
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok((to_ns(ts_start)?, to_ns(ts_end)?)),
+
+        other => Err(TableError::UnsupportedTimeType {
+            column: column.to_string(),
+            datatype: other.clone(),
+        }),
+    }
+}
+
+/// Helper macro to filter a `RecordBatch` by a timestamp column for a
+/// half-open time range `[start, end)`.
+///
+/// This macro is used by `read_segment_range` for all supported timestamp
+/// units (`second`, `millisecond`, `microsecond`, `nanosecond`) and
+/// encapsulates three non-obvious choices:
+///
+/// 1. **Half-open semantics**:
+///    Rows are kept iff `start_bound <= ts < end_bound`, where
+///    `start_bound`/`end_bound` are already converted to the same integer
+///    time unit as the column (via `to_bounds_i64`).
+///
+/// 2. **Timezone preservation**:
+///    Arrow timestamps carry an optional timezone in their `DataType`
+///    (`Timestamp(unit, Option<tz>)`). The comparison kernels require the
+///    types (including timezone) of both operands to match. To avoid
+///    mismatches, we:
+///       - read the timezone from the actual column’s `DataType`,
+///       - build 1-element timestamp arrays for `start` and `end` with
+///         the same unit and timezone,
+///       - wrap those arrays as `Scalar<Timestamp…Array>`.
+///
+///    This ensures `ts_arr` and the scalar bounds have identical
+///    `DataType`, so the Arrow `gt_eq` / `lt` kernels accept them.
+///
+/// 3. **Scalar-based vectorization (no full-length bound arrays)**:
+///    Arrow’s compute kernels accept `Datum` operands, which can be
+///    either arrays or scalars. When one side is a scalar, the kernel
+///    *broadcasts* the single value across the length of the array without
+///    materializing a repeated column. Using `Scalar::new` over a
+///    1-element array gives us:
+///       - vectorized, element-wise comparison over the whole batch, and
+///       - minimal extra allocation (two tiny 1-element arrays),
+///         instead of allocating full-length `[start; len]` / `[end; len]`
+///         arrays.
+///
+/// The resulting `BooleanArray` mask is then passed to
+/// `filter_record_batch`, which drops nulls in the mask (null => “do not
+/// keep row”), matching the intended `null -> false` semantics for the
+/// time column.
+///
+/// This macro returns `Result<(), TableError>` so callers can use `?` for
+/// error propagation inside the match over different timestamp units.
+macro_rules! filter_ts_batch {
+    ($array_ty: ty,
+    $batch:expr,
+    $ts_idx:expr,
+    $start_bound:expr,
+    $end_bound:expr,
+    $time_col:expr,
+    $ts_field:expr,
+    $out:expr
+) => {{
+        // 1) Downcast the column to the concrete timestamp array type
+        let col = $batch.column($ts_idx);
+        let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
+            TableError::UnsupportedTimeType {
+                column: $time_col.to_string(),
+                datatype: $ts_field.data_type().clone(),
+            }
+        })?;
+
+        // 2) Extract timezone from the array's DataType to ensure that our scalar matches and comparisons are compatible
+        let tz_opt = match ts_arr.data_type() {
+            DataType::Timestamp(_, tz_opt) => tz_opt.clone(),
+            _ => None,
+        };
+
+        // 3) Build *1-element* arrays for the bounds, with matching timezone,
+        //    then wrap them as Scalars. Arrow's comparison kernels operate on
+        //    `Datum` (array or scalar) and will broadcast these scalar bounds
+        //    across the whole `ts_arr` without allocating full-length repeated
+        //    arrays.
+        let start_arr = <$array_ty>::from(vec![$start_bound]).with_timezone_opt(tz_opt.clone());
+        let end_arr = <$array_ty>::from(vec![$end_bound]).with_timezone_opt(tz_opt);
+
+        // Wrap them as scalars (no repeated buffers)
+        let start_scalar = Scalar::new(start_arr);
+        let end_scalar = Scalar::new(end_arr);
+
+        // 4) Vectorized comparisons:
+        // ge_mask = (ts >= start)
+        // lt_mask = (ts < end)
+        let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar)
+            .map_err(|source| TableError::Arrow { source })?;
+        let lt_mask =
+            cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| TableError::Arrow { source })?;
+
+        // 5) Combine: keep rows where ts >= start AND ts < end
+        let mask = boolean_kernels::and(&ge_mask, &lt_mask)
+            .map_err(|source| TableError::Arrow { source })?;
+
+        // Note on null semantics:
+        // - If ts_arr[i] is null, both comparisons produce null in the mask.
+        // Arrow's `filter_record_batch` treats null mask values as false,
+        // excluding those rows from results.
+
+        // 6) apply the mask to the whole batch
+        let filtered =
+            filter_record_batch(&$batch, &mask).map_err(|source| TableError::Arrow { source })?;
+
+        if filtered.num_rows() > 0 {
+            $out.push(filtered);
+        }
+
+        Ok::<(), TableError>(())
+    }};
+}
+
+fn segments_for_range(
+    state: &TableState,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Vec<SegmentMeta> {
+    state
+        .segments
+        .values()
+        .filter(|seg| {
+            // half-open query [ts_start, ts_end)
+            // intersection with segment's [ts_min, ts_max] (closed) is:
+            // seg.ts_max >= ts_start && seg.ts_min < ts_end
+            seg.ts_max >= ts_start && seg.ts_min < ts_end
+        })
+        .cloned()
+        .collect()
+}
+
+async fn read_segment_range(
+    location: &TableLocation,
+    segment: &SegmentMeta,
+    time_column: &str,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Result<Vec<RecordBatch>, TableError> {
+    let rel_path = Path::new(&segment.path);
+
+    // 1) Use storage layer to get raw bytes.
+    let bytes = storage::read_all_bytes(location, rel_path)
+        .await
+        .context(StorageSnafu)?;
+
+    // 2) Build a reader over an in-memory cursor.
+    let bytes = Bytes::from(bytes);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+        .map_err(|source| TableError::ParquetRead { source })?;
+
+    let reader = builder
+        .build()
+        .map_err(|source| TableError::ParquetRead { source })?;
+
+    // 3) locate the time column and compute numeric bounds
+    let schema = reader.schema();
+    let ts_idx = schema
+        .index_of(time_column)
+        .map_err(|_| TableError::MissingTimeColumn {
+            column: time_column.to_string(),
+        })?;
+
+    let ts_field = schema.field(ts_idx);
+
+    let (start_bound, end_bound) = to_bounds_i64(ts_field, time_column, ts_start, ts_end)?;
+
+    let mut out = Vec::new();
+
+    // 4) iterate over batches and filter them
+    for batch_res in reader {
+        let batch = batch_res.map_err(|source| TableError::Arrow { source })?;
+
+        match ts_field.data_type() {
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                filter_ts_batch!(
+                    TimestampSecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                filter_ts_batch!(
+                    TimestampMillisecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                filter_ts_batch!(
+                    TimestampMicrosecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                filter_ts_batch!(
+                    TimestampNanosecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            other => {
+                return Err(TableError::UnsupportedTimeType {
+                    column: time_column.to_string(),
+                    datatype: other.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// High-level time-series table handle.
@@ -321,19 +662,73 @@ impl TimeSeriesTable {
 
         Ok(new_version)
     }
+
+    /// Scan the time-series table for record batches overlapping `[ts_start, ts_end)`,
+    /// returning a stream of filtered batches from the segments covering that range.
+    pub async fn scan_range(
+        &self,
+        ts_start: DateTime<Utc>,
+        ts_end: DateTime<Utc>,
+    ) -> Result<TimeSeriesScan, TableError> {
+        if ts_start >= ts_end {
+            return InvalidRangeSnafu {
+                start: ts_start,
+                end: ts_end,
+            }
+            .fail();
+        }
+
+        let ts_column = self.index.timestamp_column.clone();
+
+        // 1) Pick candidate segments.
+        let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
+
+        // 2) Sort by ts_min to ensure segments are processed in chronological order.
+        //    In v0.1 we assume non-overlapping segments, so sorting guarantees scan order.
+        //    Unstable is fine here; we only care about ordering by ts_min.
+        candidates.sort_unstable_by_key(|seg| seg.ts_min);
+
+        let location = self.location.clone();
+
+        // 3) Build stream: for each segment, read + filter
+        let stream = futures::stream::iter(candidates.into_iter())
+            .then(move |seg| {
+                let location = location.clone();
+                let ts_column = ts_column.clone();
+
+                async move {
+                    let batches =
+                        read_segment_range(&location, &seg, &ts_column, ts_start, ts_end).await?;
+
+                    Ok::<_, TableError>(futures::stream::iter(
+                        batches.into_iter().map(Ok::<_, TableError>),
+                    ))
+                }
+            })
+            .try_flatten();
+
+        Ok(Box::pin(stream))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::TableLocation;
-    use crate::transaction_log::segments::SegmentId;
+    use crate::transaction_log::segments::{FileFormat, SegmentId, SegmentMetaError};
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
         CommitError, LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
         TransactionLogStore,
     };
+    use arrow::array::{
+        Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
+        TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
+    };
+    use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};
     use chrono::{TimeZone, Utc};
+    use futures::StreamExt;
+    use parquet::arrow::ArrowWriter;
     use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
     use parquet::column::writer::ColumnWriter;
     use parquet::data_type::ByteArray;
@@ -351,6 +746,44 @@ mod tests {
         ts_millis: i64,
         symbol: &'static str,
         price: f64,
+    }
+
+    fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta {
+        let index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string()],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        };
+
+        let logical_schema = LogicalSchema::new(vec![
+            LogicalColumn {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit,
+                    timezone: None,
+                },
+                nullable: true,
+            },
+            LogicalColumn {
+                name: "symbol".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "price".to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: false,
+            },
+        ])
+        .expect("valid logical schema");
+
+        TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: Some(logical_schema),
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: 1,
+        }
     }
 
     fn write_test_parquet(
@@ -450,6 +883,188 @@ mod tests {
         Ok(())
     }
 
+    fn write_arrow_parquet_with_unit(
+        path: &Path,
+        unit: ArrowTimeUnit,
+        ts: &[Option<i64>],
+        symbols: &[&str],
+        prices: &[f64],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(ts.len(), symbols.len());
+        assert_eq!(symbols.len(), prices.len());
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(unit, None), true),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]);
+
+        let ts_array: Arc<dyn Array> = match unit {
+            ArrowTimeUnit::Second => {
+                let mut b = TimestampSecondBuilder::with_capacity(ts.len());
+                for v in ts {
+                    match v {
+                        Some(val) => b.append_value(*val),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            ArrowTimeUnit::Millisecond => {
+                let mut b = TimestampMillisecondBuilder::with_capacity(ts.len());
+                for v in ts {
+                    match v {
+                        Some(val) => b.append_value(*val),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            ArrowTimeUnit::Microsecond => {
+                let mut b = TimestampMicrosecondBuilder::with_capacity(ts.len());
+                for v in ts {
+                    match v {
+                        Some(val) => b.append_value(*val),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            ArrowTimeUnit::Nanosecond => {
+                let mut b = TimestampNanosecondBuilder::with_capacity(ts.len());
+                for v in ts {
+                    match v {
+                        Some(val) => b.append_value(*val),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+        };
+
+        let mut sym_builder =
+            StringBuilder::with_capacity(symbols.len(), symbols.iter().map(|s| s.len()).sum());
+        for s in symbols {
+            sym_builder.append_value(s);
+        }
+        let sym_array = Arc::new(sym_builder.finish()) as Arc<dyn Array>;
+
+        let mut price_builder = Float64Builder::with_capacity(prices.len());
+        for p in prices {
+            price_builder.append_value(*p);
+        }
+        let price_array = Arc::new(price_builder.finish()) as Arc<dyn Array>;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![ts_array, sym_array, price_array],
+        )?;
+
+        let file = File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        Ok(())
+    }
+
+    fn write_arrow_parquet_int_time(
+        path: &Path,
+        ts: &[i64],
+        symbols: &[&str],
+        prices: &[f64],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(ts.len(), symbols.len());
+        assert_eq!(symbols.len(), prices.len());
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]);
+
+        let mut ts_builder = Int64Builder::with_capacity(ts.len());
+        for v in ts {
+            ts_builder.append_value(*v);
+        }
+        let ts_array = Arc::new(ts_builder.finish()) as Arc<dyn Array>;
+
+        let mut sym_builder =
+            StringBuilder::with_capacity(symbols.len(), symbols.iter().map(|s| s.len()).sum());
+        for s in symbols {
+            sym_builder.append_value(s);
+        }
+        let sym_array = Arc::new(sym_builder.finish()) as Arc<dyn Array>;
+
+        let mut price_builder = Float64Builder::with_capacity(prices.len());
+        for p in prices {
+            price_builder.append_value(*p);
+        }
+        let price_array = Arc::new(price_builder.finish()) as Arc<dyn Array>;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![ts_array, sym_array, price_array],
+        )?;
+
+        let file = File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        Ok(())
+    }
+
+    fn write_parquet_without_time_column(
+        path: &Path,
+        symbols: &[&str],
+        prices: &[f64],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(symbols.len(), prices.len());
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]);
+
+        let mut sym_builder =
+            StringBuilder::with_capacity(symbols.len(), symbols.iter().map(|s| s.len()).sum());
+        for s in symbols {
+            sym_builder.append_value(s);
+        }
+        let sym_array = Arc::new(sym_builder.finish()) as Arc<dyn Array>;
+
+        let mut price_builder = Float64Builder::with_capacity(prices.len());
+        for p in prices {
+            price_builder.append_value(*p);
+        }
+        let price_array = Arc::new(price_builder.finish()) as Arc<dyn Array>;
+
+        let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![sym_array, price_array])?;
+
+        let file = File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        Ok(())
+    }
+
     fn utc_datetime(
         year: i32,
         month: u32,
@@ -499,6 +1114,82 @@ mod tests {
             created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
             format_version: 1,
         }
+    }
+
+    async fn collect_scan_rows(
+        table: &TimeSeriesTable,
+        ts_start: DateTime<Utc>,
+        ts_end: DateTime<Utc>,
+    ) -> Result<Vec<(i64, String, f64)>, TableError> {
+        let mut stream = table.scan_range(ts_start, ts_end).await?;
+        let mut rows = Vec::new();
+
+        while let Some(batch_res) = stream.next().await {
+            let batch = batch_res?;
+
+            let ts_idx = batch.schema().index_of("ts").expect("ts column");
+            let sym_idx = batch.schema().index_of("symbol").expect("symbol column");
+            let price_idx = batch.schema().index_of("price").expect("price column");
+
+            let ts_arr = batch.column(ts_idx);
+            let ts_values: Vec<i64> = match ts_arr.data_type() {
+                DataType::Timestamp(ArrowTimeUnit::Second, _) => batch
+                    .column(ts_idx)
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .expect("ts as seconds")
+                    .iter()
+                    .map(|v| v.expect("non-null ts"))
+                    .collect(),
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, _) => batch
+                    .column(ts_idx)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("ts as millis")
+                    .iter()
+                    .map(|v| v.expect("non-null ts"))
+                    .collect(),
+                DataType::Timestamp(ArrowTimeUnit::Microsecond, _) => batch
+                    .column(ts_idx)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .expect("ts as micros")
+                    .iter()
+                    .map(|v| v.expect("non-null ts"))
+                    .collect(),
+                DataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => batch
+                    .column(ts_idx)
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .expect("ts as nanos")
+                    .iter()
+                    .map(|v| v.expect("non-null ts"))
+                    .collect(),
+                other => panic!("unexpected time type: {other:?}"),
+            };
+            let sym_arr = batch
+                .column(sym_idx)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("symbol as utf8");
+            let price_arr = batch
+                .column(price_idx)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .expect("price as f64");
+
+            for ((ts, symbol), price) in ts_values
+                .iter()
+                .zip(sym_arr.iter())
+                .zip(price_arr.values().iter())
+            {
+                let symbol = symbol.expect("symbol as utf8");
+                let price = *price;
+                rows.push((*ts, symbol.to_string(), price));
+            }
+        }
+
+        Ok(rows)
     }
 
     #[tokio::test]
@@ -565,6 +1256,32 @@ mod tests {
         // Second create should detect existing commits and fail.
         let result = TimeSeriesTable::create(location.clone(), meta).await;
         assert!(matches!(result, Err(TableError::AlreadyExists { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_missing_time_column_errors() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel = "data/seg-no-ts.parquet";
+        let path = tmp.path().join(rel);
+        write_parquet_without_time_column(&path, &["A"], &[1.0])?;
+
+        let err = table
+            .append_parquet_segment(SegmentId("seg-no-ts".to_string()), rel, "ts")
+            .await
+            .expect_err("expected missing time column");
+
+        match err {
+            TableError::SegmentMeta { source } => {
+                assert!(matches!(source, SegmentMetaError::MissingTimeColumn { .. }));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
         Ok(())
     }
 
@@ -835,6 +1552,628 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_filters_and_orders_across_segments() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel1 = "data/seg-scan-1.parquet";
+        let path1 = tmp.path().join(rel1);
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+            ],
+        )?;
+
+        let rel2 = "data/seg-scan-2.parquet";
+        let path2 = tmp.path().join(rel2);
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 3_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+                TestRow {
+                    ts_millis: 4_000,
+                    symbol: "D",
+                    price: 40.0,
+                },
+            ],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-scan-1".to_string()), rel1, "ts")
+            .await?;
+        table
+            .append_parquet_segment(SegmentId("seg-scan-2".to_string()), rel2, "ts")
+            .await?;
+
+        let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
+        let end = Utc.timestamp_millis_opt(3_500).single().expect("valid ts");
+
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(
+            rows,
+            vec![
+                (2_000, "B".to_string(), 20.0),
+                (3_000, "C".to_string(), 30.0),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_exclusive_end_and_empty() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-boundary.parquet";
+        let path = tmp.path().join(rel);
+        write_test_parquet(
+            &path,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+            ],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-boundary".to_string()), rel, "ts")
+            .await?;
+
+        let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
+        let end = Utc.timestamp_millis_opt(2_000).single().expect("valid ts");
+        let rows = collect_scan_rows(&table, start, end).await?;
+        assert_eq!(rows, vec![(1_000, "A".to_string(), 10.0)]);
+
+        let empty_start = Utc.timestamp_millis_opt(5_000).single().expect("valid ts");
+        let empty_end = Utc.timestamp_millis_opt(6_000).single().expect("valid ts");
+        let rows = collect_scan_rows(&table, empty_start, empty_end).await?;
+        assert!(rows.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_rejects_invalid_range() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let table = TimeSeriesTable::create(location, meta).await?;
+
+        let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
+        let end = start;
+
+        let result = table.scan_range(start, end).await;
+
+        assert!(matches!(result, Err(TableError::InvalidRange { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_segment_range_errors_when_missing_time_column() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let rel = "data/no-ts.parquet";
+        let path = tmp.path().join(rel);
+        write_parquet_without_time_column(&path, &["A"], &[1.0])?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-no-ts".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
+            row_count: 1,
+        };
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 1, 0);
+
+        let err = read_segment_range(&location, &segment, "ts", start, end)
+            .await
+            .expect_err("missing ts column should error");
+
+        assert!(matches!(err, TableError::MissingTimeColumn { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_segment_range_errors_on_unsupported_time_type() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let rel = "data/int-ts.parquet";
+        let path = tmp.path().join(rel);
+        let ts_vals = [1_000_i64, 2_000];
+        write_arrow_parquet_int_time(&path, &ts_vals, &["A", "B"], &[1.0, 2.0])?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-int".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
+            ts_max: utc_datetime(2024, 1, 1, 0, 0, 2),
+            row_count: ts_vals.len() as u64,
+        };
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 1, 0);
+
+        let err = read_segment_range(&location, &segment, "ts", start, end)
+            .await
+            .expect_err("unsupported time type should error");
+
+        assert!(matches!(err, TableError::UnsupportedTimeType { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_segment_range_overflow_bounds_nanoseconds() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let rel = "data/nano-empty.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Nanosecond, &[], &[], &[])?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-nano-empty".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
+            row_count: 0,
+        };
+
+        let huge = Utc
+            .timestamp_opt(9_223_372_037, 0)
+            .single()
+            .expect("overflow ts");
+        let err = read_segment_range(&location, &segment, "ts", huge, huge)
+            .await
+            .expect_err("overflow during bound conversion should error");
+
+        assert!(matches!(err, TableError::TimeConversionOverflow { .. }));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn scan_range_supports_microsecond_unit() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_table_meta_with_unit(LogicalTimestampUnit::Micros);
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-micros.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(
+            &path,
+            ArrowTimeUnit::Microsecond,
+            &[Some(1_000_000), Some(2_000_000), Some(3_000_000)],
+            &["A", "B", "C"],
+            &[1.0, 2.0, 3.0],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-micros".to_string()), rel, "ts")
+            .await?;
+
+        let start = Utc
+            .timestamp_opt(1, 500_000_000)
+            .single()
+            .expect("valid start");
+        let end = Utc
+            .timestamp_opt(2, 500_000_000)
+            .single()
+            .expect("valid end");
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(rows, vec![(2_000_000, "B".to_string(), 2.0)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_supports_nanosecond_unit() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_table_meta_with_unit(LogicalTimestampUnit::Nanos);
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-nanos.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(
+            &path,
+            ArrowTimeUnit::Nanosecond,
+            &[
+                Some(1_000_000_000),
+                Some(1_500_000_000),
+                Some(2_000_000_000),
+            ],
+            &["A", "B", "C"],
+            &[1.0, 2.0, 3.0],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-nanos".to_string()), rel, "ts")
+            .await?;
+
+        let start = Utc
+            .timestamp_opt(1, 250_000_000)
+            .single()
+            .expect("valid start");
+        let end = Utc
+            .timestamp_opt(1, 750_000_000)
+            .single()
+            .expect("valid end");
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(rows, vec![(1_500_000_000, "B".to_string(), 2.0)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_filters_null_timestamps() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_table_meta_with_unit(LogicalTimestampUnit::Millis);
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-null-ts.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(
+            &path,
+            ArrowTimeUnit::Millisecond,
+            &[Some(1_000), None, Some(2_000)],
+            &["A", "B", "C"],
+            &[1.0, 2.0, 3.0],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-null".to_string()), rel, "ts")
+            .await?;
+
+        let start = Utc.timestamp_millis_opt(500).single().unwrap();
+        let end = Utc.timestamp_millis_opt(2_500).single().unwrap();
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(
+            rows,
+            vec![(1_000, "A".to_string(), 1.0), (2_000, "C".to_string(), 3.0)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_empty_when_no_segments() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let table = TimeSeriesTable::create(location, meta).await?;
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 1, 0);
+
+        let mut stream = table.scan_range(start, end).await?;
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_empty_for_zero_row_segment() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-empty.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Millisecond, &[], &[], &[])?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-empty".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
+            row_count: 0,
+        };
+
+        table
+            .state
+            .segments
+            .insert(segment.segment_id.clone(), segment);
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 1, 0);
+
+        let mut stream = table.scan_range(start, end).await?;
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_all_null_time_filtered_out() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_table_meta_with_unit(LogicalTimestampUnit::Millis);
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-null-only.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(
+            &path,
+            ArrowTimeUnit::Millisecond,
+            &[None, None],
+            &["A", "B"],
+            &[1.0, 2.0],
+        )?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-null-only".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2024, 1, 1, 0, 0, 1),
+            row_count: 2,
+        };
+
+        table
+            .state
+            .segments
+            .insert(segment.segment_id.clone(), segment);
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 0, 5);
+
+        let mut stream = table.scan_range(start, end).await?;
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_errors_on_missing_time_column_in_segment() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-scan-no-ts.parquet";
+        let path = tmp.path().join(rel);
+        write_parquet_without_time_column(&path, &["A"], &[1.0])?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-scan-no-ts".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2024, 1, 1, 0, 1, 0),
+            row_count: 1,
+        };
+
+        table
+            .state
+            .segments
+            .insert(segment.segment_id.clone(), segment);
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 2, 0);
+
+        let mut stream = table.scan_range(start, end).await?;
+        let err = stream.next().await.expect("expected error from scan");
+
+        assert!(matches!(err, Err(TableError::MissingTimeColumn { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_errors_on_unsupported_time_type_segment() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-scan-int-ts.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_int_time(&path, &[1_000], &["A"], &[1.0])?;
+
+        let segment = SegmentMeta {
+            segment_id: SegmentId("seg-scan-int".to_string()),
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
+            ts_max: utc_datetime(2024, 1, 1, 0, 0, 1),
+            row_count: 1,
+        };
+
+        table
+            .state
+            .segments
+            .insert(segment.segment_id.clone(), segment);
+
+        let start = utc_datetime(2024, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2024, 1, 1, 0, 1, 0);
+
+        let mut stream = table.scan_range(start, end).await?;
+        let err = stream.next().await.expect("expected error from scan");
+
+        assert!(matches!(err, Err(TableError::UnsupportedTimeType { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_orders_overlapping_segments_by_ts_min() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_b = "data/seg-overlap-b.parquet";
+        let path_b = tmp.path().join(rel_b);
+        write_test_parquet(
+            &path_b,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_500,
+                symbol: "B1",
+                price: 2.0,
+            }],
+        )?;
+
+        let rel_a = "data/seg-overlap-a.parquet";
+        let path_a = tmp.path().join(rel_a);
+        write_test_parquet(
+            &path_a,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A1",
+                price: 1.0,
+            }],
+        )?;
+
+        // append in reverse ts_min order to ensure sort_by_key is exercised
+        table
+            .append_parquet_segment(SegmentId("seg-b".to_string()), rel_b, "ts")
+            .await?;
+        table
+            .append_parquet_segment(SegmentId("seg-a".to_string()), rel_a, "ts")
+            .await?;
+
+        let start = Utc.timestamp_millis_opt(900).single().unwrap();
+        let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(
+            rows,
+            vec![
+                (1_000, "A1".to_string(), 1.0),
+                (1_500, "B1".to_string(), 2.0)
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_skips_non_overlapping_segments() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel1 = "data/seg-early.parquet";
+        let path1 = tmp.path().join(rel1);
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )?;
+
+        let rel2 = "data/seg-late.parquet";
+        let path2 = tmp.path().join(rel2);
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "Z",
+                price: 9.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-early".to_string()), rel1, "ts")
+            .await?;
+        table
+            .append_parquet_segment(SegmentId("seg-late".to_string()), rel2, "ts")
+            .await?;
+
+        let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
+        let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(rows, Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_propagates_parquet_read_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel = "data/seg-corrupt.parquet";
+        let path = tmp.path().join(rel);
+        write_test_parquet(
+            &path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment(SegmentId("seg-corrupt".to_string()), rel, "ts")
+            .await?;
+
+        // Corrupt the file after append so scan encounters a read failure.
+        let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+        f.set_len(4)?;
+
+        let start = Utc.timestamp_millis_opt(0).single().unwrap();
+        let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
+
+        let mut stream = table.scan_range(start, end).await?;
+        let err = stream.next().await.expect("first item should be error");
+
+        assert!(matches!(err, Err(TableError::ParquetRead { .. })));
         Ok(())
     }
 }
