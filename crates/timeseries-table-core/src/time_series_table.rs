@@ -212,11 +212,16 @@ macro_rules! filter_ts_batch {
             }
         })?;
 
-        // 2) Build scalar values in the same logical unit as ts_arr
-        // (second/ millisecond/ microsecond/ nanosecond).
-        // `$start_bound` / `$end_bound` are already in that unit.
-        let start_scalar = <$array_ty>::new_scalar($start_bound);
-        let end_scalar = <$array_ty>::new_scalar($end_bound);
+        // 2) Build scalar arrays with matching timezone
+        // Extract timezone from the actual array's data type to ensure comparison compatibility
+        let tz = match ts_arr.data_type() {
+            DataType::Timestamp(_, tz_opt) => tz_opt.clone(),
+            _ => None,
+        };
+
+        let start_scalar =
+            <$array_ty>::from(vec![$start_bound; ts_arr.len()]).with_timezone_opt(tz.clone());
+        let end_scalar = <$array_ty>::from(vec![$end_bound; ts_arr.len()]).with_timezone_opt(tz);
 
         // 3) Vectorized comparisons:
         // ge_mask = (ts >= start)
