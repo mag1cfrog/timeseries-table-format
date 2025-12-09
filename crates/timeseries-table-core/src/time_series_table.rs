@@ -685,7 +685,8 @@ impl TimeSeriesTable {
 
         // 2) Sort by ts_min to ensure segments are processed in chronological order.
         //    In v0.1 we assume non-overlapping segments, so sorting guarantees scan order.
-        candidates.sort_by_key(|seg| seg.ts_min);
+        //    Unstable is fine here; we only care about ordering by ts_min.
+        candidates.sort_unstable_by_key(|seg| seg.ts_min);
 
         let location = self.location.clone();
 
