@@ -202,7 +202,7 @@ macro_rules! filter_ts_batch {
     $ts_field:expr,
     $out:expr
 ) => {{
-        // 1) downcast the column to the concretre timestamp array type
+        // 1) downcast the column to the concrete timestamp array type
         let col = $batch.column($ts_idx);
         let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
             TableError::UnsupportedTimeType {
