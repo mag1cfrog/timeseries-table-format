@@ -14,7 +14,8 @@
 
 use std::{path::Path, pin::Pin};
 
-use arrow::array::Array;
+use arrow::compute::filter_record_batch;
+use arrow::array::{Array, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray};
 use arrow::array::{BooleanBuilder, RecordBatchReader, TimestampMicrosecondArray};
 use arrow::datatypes::{Field, TimeUnit};
 use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
@@ -191,6 +192,53 @@ fn to_bounds_i64(
     }
 }
 
+macro_rules! filter_ts_batch {
+    ($array_ty: ty,
+    $batch:expr,
+    $ts_idx:expr,
+    $start_bound:expr,
+    $end_bound:expr,
+    $time_col:expr,
+    $ts_field:expr,
+    $out:expr
+) => {{
+    // 1) downcast the column to the concretre timestamp array type
+    let col = $batch.column($ts_idx);
+    let ts_arr = col
+    .as_any()
+    .downcast_ref::<$array_ty>()
+    .ok_or_else(|| TableError::UnspportedTimeType{
+        column: $time_col.to_string(),
+        datatype: $ts_field.data_type().clone(),
+    })?;
+
+    // 2) build a boolean mask: start <= ts < end, nulls -> false
+    let mut mask_builder = BooleanBuilder::with_capacity(ts_arr.len());
+    for i in 0..ts_arr.len() {
+        if ts_arr.is_null(i) {
+            mask_builder.append_value(false);
+        } else {
+            let v = ts_arr.value(i);
+            let keep = v >= $start_bound && v < $end_bound;
+            mask_builder.append_value(keep);
+        }
+    }
+
+    let mask = mask_builder.finish();
+
+    // 3) apply the mask to the whole batch
+    let filtered = filter_record_batch(&$batch, &mask)
+    .map_err(|source| TableError::Arrow{source})?;
+
+    if filtered.num_rows() > 0 {
+        $out.push(filtered);
+    }
+
+    Ok::<(), TableError>(())
+    }};
+}
+
+
 fn segments_for_range(
     state: &TableState,
     ts_start: DateTime<Utc>,
@@ -223,43 +271,82 @@ async fn read_segment_range(
 
     // 2) Build a reader over an in-memory cursor.
     let bytes = Bytes::from(bytes);
-    let mut builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
     .map_err(|source| TableError::ParquetRead { source })?;
 
     let mut reader = builder.build().map_err(|source| TableError::ParquetRead { source })?;
 
+    // 3) locate the time column and compute numeric bounds
     let schema = reader.schema();
     let ts_idx = schema.index_of(time_column).map_err(|_| TableError::MissingTimeColumn { column: time_column.to_string(), })?;
 
-    // 3) Bounds in microseconds;
-    let start_us = ts_start.timestamp_micros();
-    let end_us = ts_end.timestamp_micros();
+    let ts_field = schema.field(ts_idx);
+
+    let (start_bound, end_bound) = to_bounds_i64(ts_field, time_column, ts_start, ts_end)?;
 
     let mut out = Vec::new();
 
+    // 4) iterate over batches and filter them
     while let Some(batch_res) = reader.next() {
-        let batch = batch_res.map_err(|source| TableError::ParquetRead { source })?;
+        let batch = batch_res.map_err(|source| TableError::Arrow { source })?;
 
-        let col = batch.column(ts_idx);
-        let field = batch.schema().field(ts_idx);
-
-        let ts_arr = col
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .ok_or_else(|| TableError::UnspportedTimeType { column: time_column.to_string(), datatype: field.data_type().clone(), })?;
-
-        let mut mask_builder = BooleanBuilder::new(ts_arr.len());
-
-        for i in 0..ts_arr.len() {
-            if ts_arr.is_null(i) {
-                mask_builder.append_value(false);
+        match ts_field.data_type() {
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                filter_ts_batch!(
+                    TimestampSecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                filter_ts_batch!(
+                    TimestampMillisecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                filter_ts_batch!(
+                    TimestampMicrosecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                filter_ts_batch!(
+                    TimestampNanosecondArray,
+                    batch,
+                    ts_idx,
+                    start_bound,
+                    end_bound,
+                    time_column,
+                    ts_field,
+                    out
+                )?;
+            }
+            other => {
+                return Err(TableError::UnspportedTimeType { column: time_column.to_string(), datatype: other.clone(), });
             }
         }
-
     }
 
 
-    Ok(())
+    Ok(out)
 }
 
 /// High-level time-series table handle.
