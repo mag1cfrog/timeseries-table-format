@@ -12,10 +12,11 @@
 //! - `create` bootstraps a fresh table with an initial metadata commit.
 //!   Later issues will add append APIs, coverage, and scanning.
 
-use std::path::Path;
+use std::{path::Path, pin::Pin};
 
-use arrow::{datatypes::DataType, error::ArrowError};
+use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
 use chrono::{DateTime, Utc};
+use futures::Stream;
 use parquet::errors::ParquetError;
 use snafu::prelude::*;
 
@@ -135,6 +136,9 @@ pub enum TableError {
         datatype: DataType,
     },
 }
+
+/// Stream of Arrow RecordBatch values from a time-series scan.
+pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;
 
 /// High-level time-series table handle.
 ///
