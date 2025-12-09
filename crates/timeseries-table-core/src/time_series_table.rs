@@ -194,6 +194,49 @@ fn to_bounds_i64(
     }
 }
 
+/// Helper macro to filter a `RecordBatch` by a timestamp column for a
+/// half-open time range `[start, end)`.
+///
+/// This macro is used by `read_segment_range` for all supported timestamp
+/// units (`second`, `millisecond`, `microsecond`, `nanosecond`) and
+/// encapsulates three non-obvious choices:
+///
+/// 1. **Half-open semantics**:
+///    Rows are kept iff `start_bound <= ts < end_bound`, where
+///    `start_bound`/`end_bound` are already converted to the same integer
+///    time unit as the column (via `to_bounds_i64`).
+///
+/// 2. **Timezone preservation**:
+///    Arrow timestamps carry an optional timezone in their `DataType`
+///    (`Timestamp(unit, Option<tz>)`). The comparison kernels require the
+///    types (including timezone) of both operands to match. To avoid
+///    mismatches, we:
+///       - read the timezone from the actual column’s `DataType`,
+///       - build 1-element timestamp arrays for `start` and `end` with
+///         the same unit and timezone,
+///       - wrap those arrays as `Scalar<Timestamp…Array>`.
+///
+///    This ensures `ts_arr` and the scalar bounds have identical
+///    `DataType`, so the Arrow `gt_eq` / `lt` kernels accept them.
+///
+/// 3. **Scalar-based vectorization (no full-length bound arrays)**:
+///    Arrow’s compute kernels accept `Datum` operands, which can be
+///    either arrays or scalars. When one side is a scalar, the kernel
+///    *broadcasts* the single value across the length of the array without
+///    materializing a repeated column. Using `Scalar::new` over a
+///    1-element array gives us:
+///       - vectorized, element-wise comparison over the whole batch, and
+///       - minimal extra allocation (two tiny 1-element arrays),
+///         instead of allocating full-length `[start; len]` / `[end; len]`
+///         arrays.
+///
+/// The resulting `BooleanArray` mask is then passed to
+/// `filter_record_batch`, which drops nulls in the mask (null => “do not
+/// keep row”), matching the intended `null -> false` semantics for the
+/// time column.
+///
+/// This macro returns `Result<(), TableError>` so callers can use `?` for
+/// error propagation inside the match over different timestamp units.
 macro_rules! filter_ts_batch {
     ($array_ty: ty,
     $batch:expr,
@@ -220,7 +263,11 @@ macro_rules! filter_ts_batch {
             _ => None,
         };
 
-        // 3) Build *1-element* arrays for the bounds, with matching timezone.
+        // 3) Build *1-element* arrays for the bounds, with matching timezone,
+        //    then wrap them as Scalars. Arrow's comparison kernels operate on
+        //    `Datum` (array or scalar) and will broadcast these scalar bounds
+        //    across the whole `ts_arr` without allocating full-length repeated
+        //    arrays.
         let start_arr = <$array_ty>::from(vec![$start_bound]).with_timezone_opt(tz_opt.clone());
         let end_arr = <$array_ty>::from(vec![$end_bound]).with_timezone_opt(tz_opt);
 
