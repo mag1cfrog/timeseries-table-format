@@ -15,10 +15,11 @@
 use std::{path::Path, pin::Pin};
 
 use arrow::array::{
-    Array, BooleanBuilder, RecordBatchReader, TimestampMicrosecondArray, TimestampMillisecondArray,
+    Array, RecordBatchReader, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow::compute::filter_record_batch;
+use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
 use arrow::datatypes::{Field, TimeUnit};
 use arrow::{array::RecordBatch, datatypes::DataType, error::ArrowError};
 use bytes::Bytes;
@@ -202,7 +203,7 @@ macro_rules! filter_ts_batch {
     $ts_field:expr,
     $out:expr
 ) => {{
-        // 1) downcast the column to the concrete timestamp array type
+        // 1) Downcast the column to the concrete timestamp array type
         let col = $batch.column($ts_idx);
         let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
             TableError::UnsupportedTimeType {
@@ -211,21 +212,31 @@ macro_rules! filter_ts_batch {
             }
         })?;
 
-        // 2) build a boolean mask: start <= ts < end, nulls -> false
-        let mut mask_builder = BooleanBuilder::with_capacity(ts_arr.len());
-        for i in 0..ts_arr.len() {
-            if ts_arr.is_null(i) {
-                mask_builder.append_value(false);
-            } else {
-                let v = ts_arr.value(i);
-                let keep = v >= $start_bound && v < $end_bound;
-                mask_builder.append_value(keep);
-            }
-        }
+        // 2) Build scalar values in the same logical unit as ts_arr
+        // (second/ millisecond/ microsecond/ nanosecond).
+        // `$start_bound` / `$end_bound` are already in that unit.
+        let start_scalar = <$array_ty>::new_scalar($start_bound);
+        let end_scalar = <$array_ty>::new_scalar($end_bound);
 
-        let mask = mask_builder.finish();
+        // 3) Vectorized comparisons:
+        // ge_mask = (ts >= start)
+        // lt_mask = (ts < end)
+        let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar)
+            .map_err(|source| TableError::Arrow { source })?;
+        let lt_mask =
+            cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| TableError::Arrow { source })?;
 
-        // 3) apply the mask to the whole batch
+        // 4) Combine: keep rows where ts >= start AND ts < end
+        let mask = boolean_kernels::and(&ge_mask, &lt_mask)
+            .map_err(|source| TableError::Arrow { source })?;
+
+        // Note on null semantics:
+        // - If ts_arr[i] is null, both comparisons produce null in the mask.
+        // - Arrow’s `filter`/`filter_record_batch` treat nulls in the mask
+        //   as “do not keep this row”, which matches the
+        //   `null -> false` behavior.
+
+        // 5) apply the mask to the whole batch
         let filtered =
             filter_record_batch(&$batch, &mask).map_err(|source| TableError::Arrow { source })?;
 
