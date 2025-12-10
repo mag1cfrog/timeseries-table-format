@@ -212,7 +212,7 @@ fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<RangeInclusive<Bucket>> {
     let mut prev = start;
 
     for v in iter {
-        if v == prev + 1 {
+        if prev.checked_add(1) == Some(v) {
             // still in the same contiguous run
             prev = v;
         } else {
@@ -238,12 +238,16 @@ fn split_runs_by_len(
     }
 
     let mut out = Vec::new();
+    let step = max_len - 1;
 
     for range in runs {
         let (start, end) = (*range.start() as u64, *range.end() as u64);
         let mut cur = start;
         while cur <= end {
-            let chunk_end = (cur + max_len - 1).min(end);
+            let chunk_end = match cur.checked_add(step) {
+                Some(v) => v.min(end),
+                None => break, // overflow would only happen at u64::MAX; stop splitting
+            };
             out.push(cur as Bucket..=chunk_end as Bucket);
 
             if chunk_end == end {
