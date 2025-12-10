@@ -201,7 +201,7 @@ impl FromIterator<Bucket> for Coverage {
 
 /// Convert a bitmap into contiguous runs of bucket ids.
 ///
-/// Each run is returned as a `RangeInclusive<u64>`.
+/// Each run is returned as a `RangeInclusive<Bucket>`.
 fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<RangeInclusive<Bucket>> {
     let mut out = Vec::new();
     let mut iter = bitmap.iter();
