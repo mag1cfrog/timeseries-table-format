@@ -133,7 +133,7 @@ impl Coverage {
         min_len: u64,
     ) -> Option<RangeInclusive<u64>> {
         if min_len == 0 {
-            // Define "min_len == 0" as trivially satisfied by the empty range.
+            // Return None for min_len == 0 as it's a degenerate case.
             // Callers can avoid this case if they prefer a different meaning.
             return None;
         }
