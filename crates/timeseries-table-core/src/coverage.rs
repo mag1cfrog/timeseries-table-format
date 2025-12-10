@@ -271,6 +271,43 @@ mod tests {
     }
 
     #[test]
+    fn from_iterator_builds_expected_bitmap() {
+        let cov: Coverage = (10u32..15u32).collect();
+        assert_eq!(cov.cardinality(), 5);
+        for b in 10u32..15u32 {
+            assert!(cov.present().contains(b));
+        }
+    }
+
+    #[test]
+    fn basic_api_cardinality_union_intersect_into_bitmap() {
+        let cov_a = Coverage::from_bitmap(bm_from_range(0, 5)); // {0,1,2,3,4}
+        let cov_b = Coverage::from_bitmap(bm_from_range(3, 8)); // {3,4,5,6,7}
+
+        // cardinality
+        assert_eq!(cov_a.cardinality(), 5);
+
+        // union: {0..8} without 8
+        let union = cov_a.union(&cov_b);
+        assert_eq!(union.cardinality(), 8);
+        assert!(union.present().contains(0));
+        assert!(union.present().contains(7));
+
+        // intersection: {3,4}
+        let inter = cov_a.intersect(&cov_b);
+        assert_eq!(inter.cardinality(), 2);
+        assert!(inter.present().contains(3));
+        assert!(inter.present().contains(4));
+        assert!(!inter.present().contains(2));
+
+        // into_bitmap returns underlying set
+        let bitmap = inter.into_bitmap();
+        assert!(bitmap.contains(3));
+        assert!(bitmap.contains(4));
+        assert_eq!(bitmap.len(), 2);
+    }
+
+    #[test]
     fn full_coverage_continuous() {
         // expected = {0..10}, present = {0..10}
         let expected = bm_from_range(0, 10);
@@ -289,6 +326,9 @@ mod tests {
             assert_eq!(*run.start(), 0);
             assert_eq!(*run.end(), 9);
         }
+
+        // Past the run length, there should be no run.
+        assert!(cov.last_run_with_min_len(&expected, 11).is_none());
 
         assert!((cov.coverage_ratio(&expected) - 1.0).abs() < 1e-12);
         assert_eq!(cov.max_gap_len(&expected), 0);
@@ -349,6 +389,21 @@ mod tests {
         assert_eq!((*runs_split[1].start(), *runs_split[1].end()), (10, 11));
         assert_eq!((*runs_split[2].start(), *runs_split[2].end()), (12, 12));
         assert_eq!((*runs_split[3].start(), *runs_split[3].end()), (18, 18));
+
+        // With max_run_len = 1, every gap is split into singletons.
+        let runs_split_single = cov.missing_runs(&expected, Some(1));
+        let expected_singletons = vec![3, 4, 10, 11, 12, 18];
+        assert_eq!(runs_split_single.len(), expected_singletons.len());
+        for (range, expected_bucket) in runs_split_single.iter().zip(expected_singletons.iter()) {
+            assert_eq!(
+                (*range.start(), *range.end()),
+                (*expected_bucket, *expected_bucket)
+            );
+        }
+
+        // With max_run_len = 0, nothing is returned per contract.
+        let runs_zero = cov.missing_runs(&expected, Some(0));
+        assert!(runs_zero.is_empty());
     }
 
     #[test]
