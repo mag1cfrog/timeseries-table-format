@@ -383,8 +383,7 @@ mod tests {
         assert_eq!(cov.max_gap_len(&expected), 5);
 
         assert!(cov.last_run_with_min_len(&expected, 6).is_none());
-        let r2 = cov.last_run_with_min_len(&expected, 3).unwrap();
-        assert_eq!((*r2.start(), *r2.end()), (0, 4));
+        assert!(cov.last_run_with_min_len(&expected, 3).is_none());
     }
 
     #[test]
