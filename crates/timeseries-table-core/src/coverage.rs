@@ -10,8 +10,7 @@
 //! Typical usage:
 //!
 //! ```
-//! use roaring::RoaringBitmap;
-//! use timeseries_table_core::coverage::Coverage;
+//! use timeseries_table_core::coverage::{Coverage, RoaringBitmap};
 //!
 //! // "expected" domain: buckets 0..10
 //! let expected: RoaringBitmap = (0u32..10).collect();
@@ -35,7 +34,8 @@
 
 use std::ops::RangeInclusive;
 
-use roaring::RoaringBitmap;
+// Re-export to let callers use `RoaringBitmap` without declaring `roaring` explicitly.
+pub use roaring::RoaringBitmap;
 
 /// Type alias for bucket ids used by Coverage.
 ///
