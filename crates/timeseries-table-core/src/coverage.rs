@@ -121,6 +121,72 @@ impl Coverage {
             base_runs
         }
     }
+
+    /// Return the last (highest) contiguous run of coverage of length
+    /// at least `min_len`, relative to `expected`.
+    ///
+    /// "Coverage" here means buckets that are both in `expected` and in
+    /// `self.present()`.
+    pub fn last_run_with_min_len(
+        &self,
+        expected: &RoaringBitmap,
+        min_len: u64,
+    ) -> Option<RangeInclusive<u64>> {
+        if min_len == 0 {
+            // Define "min_len == 0" as trivially satisfied by the empty range.
+            // Callers can avoid this case if they prefer a different meaning.
+            return None;
+        }
+
+        let covered = &self.bitmap & expected;
+        let runs = runs_from_bitmap(&covered);
+
+        for range in runs.into_iter().rev() {
+            let (start, end) = (*range.start(), *range.end());
+            let len = end - start + 1;
+            if len >= min_len {
+                return Some(start..=end);
+            }
+        }
+
+        None
+    }
+
+    /// Coverage ratio in `[0.0, 1.0]` relative to `expected`.
+    ///
+    /// Defined as:
+    ///
+    /// `(|present ∩ expected| as f64) / (|expected| as f64)`
+    ///
+    /// For `expected.is_empty()`, this returns `1.0` by convention
+    /// (vacuous full coverage).
+    pub fn coverage_ration(&self, expected: &RoaringBitmap) -> f64 {
+        let expected_count = expected.len();
+        if expected_count == 0 {
+            return 1.0;
+        }
+
+        let covered = &self.bitmap & expected;
+        let covered_count = covered.len();
+        covered_count as f64 / expected_count as f64
+    }
+
+    /// Maximum gap length (in buckets) relative to `expected`.
+    ///
+    /// This is the length (number of buckets) of the longest missing run.
+    /// If there are no missing buckets, returns 0.
+    pub fn max_gap_len(&self, expected: &RoaringBitmap) -> u64 {
+        let missing = self.missing_points(expected);
+        let runs = runs_from_bitmap(&missing);
+
+        runs.into_iter()
+            .map(|r| {
+                let (start, end) = (*r.start(), *r.end());
+                end - start + 1
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl FromIterator<Bucket> for Coverage {
