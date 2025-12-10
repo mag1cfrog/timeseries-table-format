@@ -35,7 +35,7 @@
 
 use std::ops::RangeInclusive;
 
-use roaring::{RoaringBitmap, bitmap};
+use roaring::RoaringBitmap;
 
 /// Type alias for bucket ids used by Coverage.
 ///
@@ -101,6 +101,12 @@ impl Coverage {
         missing
     }
 
+    /// Group missing buckets into contiguous runs, optionally splitting
+    /// long runs into chunks of at most `max_run_len`.
+    ///
+    /// - `expected` defines the domain we care about.
+    /// - Missing buckets are `expected - present`.
+    /// - Each returned range is inclusive in bucket space.
     pub fn missing_runs(
         &self,
         expected: &RoaringBitmap,
@@ -108,6 +114,12 @@ impl Coverage {
     ) -> Vec<RangeInclusive<u64>> {
         let missing = self.missing_points(expected);
         let base_runs = runs_from_bitmap(&missing);
+
+        if let Some(max_len) = max_run_len {
+            split_runs_by_len(base_runs, max_len)
+        } else {
+            base_runs
+        }
     }
 }
 
@@ -147,5 +159,31 @@ fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<RangeInclusive<u64>> {
 
     // finalize last run
     out.push(start as u64..=prev as u64);
+    out
+}
+
+/// Split runs into smaller runs of at most `max_len` buckets.
+fn split_runs_by_len(runs: Vec<RangeInclusive<u64>>, max_len: u64) -> Vec<RangeInclusive<u64>> {
+    if max_len == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+
+    for range in runs {
+        let (start, end) = (*range.start(), *range.end());
+        let mut cur = start;
+        while cur <= end {
+            let chunk_end = (cur + max_len - 1).min(end);
+            out.push(cur..=chunk_end);
+
+            if chunk_end == end {
+                break;
+            }
+
+            cur = chunk_end + 1;
+        }
+    }
+
     out
 }
