@@ -111,7 +111,7 @@ impl Coverage {
         &self,
         expected: &RoaringBitmap,
         max_run_len: Option<u64>,
-    ) -> Vec<RangeInclusive<u64>> {
+    ) -> Vec<RangeInclusive<Bucket>> {
         let missing = self.missing_points(expected);
         let base_runs = runs_from_bitmap(&missing);
 
@@ -131,7 +131,7 @@ impl Coverage {
         &self,
         expected: &RoaringBitmap,
         min_len: u64,
-    ) -> Option<RangeInclusive<u64>> {
+    ) -> Option<RangeInclusive<Bucket>> {
         if min_len == 0 {
             // Return None for min_len == 0 as it's a degenerate case.
             // Callers can avoid this case if they prefer a different meaning.
@@ -142,10 +142,10 @@ impl Coverage {
         let runs = runs_from_bitmap(&covered);
 
         for range in runs.into_iter().rev() {
-            let (start, end) = (*range.start(), *range.end());
-            let len = end - start + 1;
+            let (start, end) = (*range.start() as u64, *range.end() as u64);
+            let len = end.saturating_sub(start) + 1;
             if len >= min_len {
-                return Some(start..=end);
+                return Some(start as Bucket..=end as Bucket);
             }
         }
 
@@ -182,7 +182,7 @@ impl Coverage {
         runs.into_iter()
             .map(|r| {
                 let (start, end) = (*r.start(), *r.end());
-                end - start + 1
+                (end as u64).saturating_sub(start as u64) + 1
             })
             .max()
             .unwrap_or(0)
@@ -202,7 +202,7 @@ impl FromIterator<Bucket> for Coverage {
 /// Convert a bitmap into contiguous runs of bucket ids.
 ///
 /// Each run is returned as a `RangeInclusive<u64>`.
-fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<RangeInclusive<u64>> {
+fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<RangeInclusive<Bucket>> {
     let mut out = Vec::new();
     let mut iter = bitmap.iter();
 
@@ -217,19 +217,22 @@ fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<RangeInclusive<u64>> {
             prev = v;
         } else {
             // close previous run and start a new one
-            out.push(start as u64..=prev as u64);
+            out.push(start..=prev);
             start = v;
             prev = v;
         }
     }
 
     // finalize last run
-    out.push(start as u64..=prev as u64);
+    out.push(start..=prev);
     out
 }
 
 /// Split runs into smaller runs of at most `max_len` buckets.
-fn split_runs_by_len(runs: Vec<RangeInclusive<u64>>, max_len: u64) -> Vec<RangeInclusive<u64>> {
+fn split_runs_by_len(
+    runs: Vec<RangeInclusive<Bucket>>,
+    max_len: u64,
+) -> Vec<RangeInclusive<Bucket>> {
     if max_len == 0 {
         return Vec::new();
     }
@@ -237,11 +240,11 @@ fn split_runs_by_len(runs: Vec<RangeInclusive<u64>>, max_len: u64) -> Vec<RangeI
     let mut out = Vec::new();
 
     for range in runs {
-        let (start, end) = (*range.start(), *range.end());
+        let (start, end) = (*range.start() as u64, *range.end() as u64);
         let mut cur = start;
         while cur <= end {
             let chunk_end = (cur + max_len - 1).min(end);
-            out.push(cur..=chunk_end);
+            out.push(cur as Bucket..=chunk_end as Bucket);
 
             if chunk_end == end {
                 break;
