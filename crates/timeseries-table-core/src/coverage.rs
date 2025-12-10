@@ -160,7 +160,7 @@ impl Coverage {
     ///
     /// For `expected.is_empty()`, this returns `1.0` by convention
     /// (vacuous full coverage).
-    pub fn coverage_ration(&self, expected: &RoaringBitmap) -> f64 {
+    pub fn coverage_ratio(&self, expected: &RoaringBitmap) -> f64 {
         let expected_count = expected.len();
         if expected_count == 0 {
             return 1.0;
@@ -252,4 +252,162 @@ fn split_runs_by_len(runs: Vec<RangeInclusive<u64>>, max_len: u64) -> Vec<RangeI
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roaring::RoaringBitmap;
+
+    fn bm_from_range(start: u32, end_exclusive: u32) -> RoaringBitmap {
+        (start..end_exclusive).collect()
+    }
+
+    #[test]
+    fn full_coverage_continuous() {
+        // expected = {0..10}, present = {0..10}
+        let expected = bm_from_range(0, 10);
+        let present = bm_from_range(0, 10);
+
+        let cov = Coverage::from_bitmap(present);
+
+        let missing = cov.missing_points(&expected);
+        assert!(missing.is_empty());
+
+        let runs = cov.missing_runs(&expected, None);
+        assert!(runs.is_empty());
+
+        for min_len in 1..=10 {
+            let run = cov.last_run_with_min_len(&expected, min_len).unwrap();
+            assert_eq!(*run.start(), 0);
+            assert_eq!(*run.end(), 9);
+        }
+
+        assert!((cov.coverage_ratio(&expected) - 1.0).abs() < 1e-12);
+        assert_eq!(cov.max_gap_len(&expected), 0);
+    }
+
+    #[test]
+    fn single_gap_in_middle() {
+        // expected = {0..10}, present = {0..10} \ {5}
+        let expected = bm_from_range(0, 10);
+
+        let mut present = bm_from_range(0, 10);
+        present.remove(5);
+
+        let cov = Coverage::from_bitmap(present);
+
+        let missing = cov.missing_points(&expected);
+        assert_eq!(missing.len(), 1);
+        assert!(missing.contains(5));
+
+        let runs = cov.missing_runs(&expected, None);
+        assert_eq!(runs.len(), 1);
+        let r = &runs[0];
+        assert_eq!((*r.start(), *r.end()), (5, 5));
+
+        assert_eq!(cov.max_gap_len(&expected), 1);
+    }
+
+    #[test]
+    fn multiple_gaps_and_run_splitting() {
+        // expected = {0..20}
+        // present = {0..20} \ {3,4,10,11,12,18}
+        let expected = bm_from_range(0, 20);
+
+        let mut present = bm_from_range(0, 20);
+        for b in [3, 4, 10, 11, 12, 18] {
+            present.remove(b);
+        }
+
+        let cov = Coverage::from_bitmap(present);
+
+        let missing = cov.missing_points(&expected);
+        let mut missing_vec: Vec<_> = missing.iter().collect();
+        missing_vec.sort_unstable();
+        assert_eq!(missing_vec, vec![3, 4, 10, 11, 12, 18]);
+
+        // Without max_run_len, we get contiguous runs.
+        let runs = cov.missing_runs(&expected, None);
+        assert_eq!(runs.len(), 3);
+        assert_eq!((*runs[0].start(), *runs[0].end()), (3, 4)); // len 2
+        assert_eq!((*runs[1].start(), *runs[1].end()), (10, 12)); // len 3
+        assert_eq!((*runs[2].start(), *runs[2].end()), (18, 18)); // len 1
+
+        // With max_run_len = 2, the {10..12} run should be split.
+        let runs_split = cov.missing_runs(&expected, Some(2));
+        // Gaps: [3,4], [10,11], [12,12], [18,18]
+        assert_eq!(runs_split.len(), 4);
+        assert_eq!((*runs_split[0].start(), *runs_split[0].end()), (3, 4));
+        assert_eq!((*runs_split[1].start(), *runs_split[1].end()), (10, 11));
+        assert_eq!((*runs_split[2].start(), *runs_split[2].end()), (12, 12));
+        assert_eq!((*runs_split[3].start(), *runs_split[3].end()), (18, 18));
+    }
+
+    #[test]
+    fn edge_cases_empty_expected() {
+        let expected = RoaringBitmap::new();
+
+        // Nonempty present, but expected is empty.
+        let present = bm_from_range(0, 10);
+        let cov = Coverage::from_bitmap(present);
+
+        let missing = cov.missing_points(&expected);
+        assert!(missing.is_empty());
+
+        let runs = cov.missing_runs(&expected, None);
+        assert!(runs.is_empty());
+
+        let ratio = cov.coverage_ratio(&expected);
+        assert!((ratio - 1.0).abs() < 1e-12);
+
+        assert_eq!(cov.max_gap_len(&expected), 0);
+        assert!(cov.last_run_with_min_len(&expected, 1).is_none());
+    }
+
+    #[test]
+    fn edge_cases_empty_present() {
+        // Nonempty expected, empty present.
+        let expected = bm_from_range(0, 5);
+        let cov = Coverage::empty();
+
+        let missing = cov.missing_points(&expected);
+        assert_eq!(missing.len(), expected.len());
+
+        let runs = cov.missing_runs(&expected, None);
+        assert_eq!(runs.len(), 1);
+        let r = &runs[0];
+        assert_eq!((*r.start(), *r.end()), (0, 4));
+
+        assert_eq!(cov.coverage_ratio(&expected), 0.0);
+        assert_eq!(cov.max_gap_len(&expected), 5);
+
+        assert!(cov.last_run_with_min_len(&expected, 6).is_none());
+        let r2 = cov.last_run_with_min_len(&expected, 3).unwrap();
+        assert_eq!((*r2.start(), *r2.end()), (0, 4));
+    }
+
+    #[test]
+    fn single_point_cases() {
+        let mut expected = RoaringBitmap::new();
+        expected.insert(42);
+
+        // Present covers the single point.
+        let mut present = RoaringBitmap::new();
+        present.insert(42);
+        let cov = Coverage::from_bitmap(present);
+
+        assert!(cov.missing_points(&expected).is_empty());
+        assert!(cov.missing_runs(&expected, None).is_empty());
+        assert_eq!(cov.coverage_ratio(&expected), 1.0);
+        assert_eq!(cov.max_gap_len(&expected), 0);
+
+        let run = cov.last_run_with_min_len(&expected, 1).unwrap();
+        assert_eq!((*run.start(), *run.end()), (42, 42));
+
+        // Present is empty.
+        let cov_empty = Coverage::empty();
+        let missing = cov_empty.missing_points(&expected);
+        assert!(missing.contains(42));
+    }
 }
