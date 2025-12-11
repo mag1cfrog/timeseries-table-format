@@ -249,6 +249,42 @@ mod tests {
         assert_eq!(last, first + 3);
     }
 
+    #[test]
+    fn expected_buckets_matches_bucket_range_minutes() {
+        let spec = TimeBucket::Minutes(1);
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 10).unwrap();
+        let end = Utc.with_ymd_and_hms(2020, 1, 1, 10, 3, 0).unwrap();
+
+        let range = bucket_range(&spec, start, end);
+        let bitmap = expected_buckets_for_range(&spec, start, end);
+
+        let manual: RoaringBitmap = range.clone().map(|b| b as Bucket).collect();
+        assert_eq!(bitmap, manual);
+        assert_eq!(bitmap.len(), 3);
+        assert!(bitmap.contains(*range.start() as Bucket));
+        assert!(bitmap.contains(*range.end() as Bucket));
+    }
+
+    #[test]
+    fn expected_buckets_respects_end_boundary() {
+        let spec = TimeBucket::Minutes(1);
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2020, 1, 1, 10, 2, 0).unwrap();
+
+        let bitmap = expected_buckets_for_range(&spec, start, end);
+
+        let buckets_present: Vec<Bucket> = bitmap.iter().collect();
+        assert_eq!(buckets_present.len(), 2);
+
+        let first = bucket_id(&spec, start) as Bucket; // 10:00 bucket
+        let second = bucket_id(&spec, start + Duration::minutes(1)) as Bucket; // 10:01 bucket
+        let excluded = bucket_id(&spec, end) as Bucket; // 10:02 bucket (end boundary, should be excluded)
+
+        assert!(bitmap.contains(first));
+        assert!(bitmap.contains(second));
+        assert!(!bitmap.contains(excluded));
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic]
