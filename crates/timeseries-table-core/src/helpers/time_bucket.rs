@@ -62,12 +62,12 @@ pub fn bucket_id(spec: &TimeBucket, ts: DateTime<Utc>) -> u64 {
     // pre-epoch timestamps.
     let bucket_i64 = secs_since_epoch.div_euclid(len_secs);
 
+    debug_assert!(
+        bucket_i64 >= 0,
+        "bucket_id received pre-epoch timestamp: {ts:?} -> bucket {bucket_i64}"
+    );
     if bucket_i64 < 0 {
         // v0.1: clamp to 0; we don't expect pre-epoch data in practice.
-        debug_assert!(
-            false,
-            "bucket_id received pre-epoch timestamp: {ts:?} -> bucket {bucket_i64}"
-        );
         0
     } else {
         bucket_i64 as u64
