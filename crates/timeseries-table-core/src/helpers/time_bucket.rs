@@ -113,3 +113,131 @@ pub fn bucket_range(
 
     first..=last
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn bucket_id_monotonic_seconds() {
+        let spec = TimeBucket::Seconds(60); // 1-minute buckets
+        let base = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+
+        let t0 = base;
+        let t1 = base + Duration::seconds(1);
+        let t2 = base + Duration::seconds(60);
+        let t3 = base + Duration::seconds(61);
+
+        let b0 = bucket_id(&spec, t0);
+        let b1 = bucket_id(&spec, t1);
+        let b2 = bucket_id(&spec, t2);
+        let b3 = bucket_id(&spec, t3);
+
+        assert!(b0 <= b1);
+        assert!(b1 <= b2);
+        assert!(b2 <= b3);
+        assert_eq!(b0, b1); // still bucket 0
+        assert_eq!(b2, b3); // both in bucket 1
+        assert_eq!(b2, b0 + 1); // next bucket after 60s
+    }
+
+    #[test]
+    fn bucket_range_simple_minutes() {
+        let spec = TimeBucket::Minutes(1);
+
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 10).unwrap();
+        let end = Utc.with_ymd_and_hms(2020, 1, 1, 10, 3, 0).unwrap();
+
+        let range = bucket_range(&spec, start, end);
+        let first = *range.start();
+        let last = *range.end();
+
+        // Should cover 10:00, 10:01, 10:02 buckets (3 buckets)
+        assert_eq!(last, first + 2);
+    }
+
+    #[test]
+    fn bucket_range_single_bucket() {
+        let spec = TimeBucket::Hours(1);
+
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 0).unwrap();
+        let end = start + Duration::seconds(30); // stays inside same hour
+
+        let range = bucket_range(&spec, start, end);
+        assert_eq!(*range.start(), *range.end());
+    }
+
+    #[test]
+    fn bucket_len_secs_covers_variants() {
+        assert_eq!(bucket_len_secs(&TimeBucket::Seconds(7)), 7);
+        assert_eq!(bucket_len_secs(&TimeBucket::Minutes(3)), 3 * 60);
+        assert_eq!(bucket_len_secs(&TimeBucket::Hours(2)), 2 * 60 * 60);
+        assert_eq!(bucket_len_secs(&TimeBucket::Days(1)), 24 * 60 * 60);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic]
+    fn bucket_id_pre_epoch_panics_in_debug() {
+        let spec = TimeBucket::Minutes(1);
+        let pre_epoch = Utc.with_ymd_and_hms(1969, 12, 31, 23, 59, 0).unwrap();
+        let _ = bucket_id(&spec, pre_epoch);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn bucket_id_pre_epoch_clamps_to_zero_in_release() {
+        let spec = TimeBucket::Minutes(1);
+        let pre_epoch = Utc.with_ymd_and_hms(1969, 12, 31, 23, 59, 0).unwrap();
+        assert_eq!(bucket_id(&spec, pre_epoch), 0);
+    }
+
+    #[test]
+    fn bucket_range_excludes_end_bucket_on_boundary() {
+        let spec = TimeBucket::Minutes(1);
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2020, 1, 1, 10, 2, 0).unwrap();
+
+        let range = bucket_range(&spec, start, end);
+        let first = *range.start();
+        let last = *range.end();
+
+        // Should include 10:00 and 10:01 buckets, but not 10:02.
+        assert_eq!(last, first + 1);
+    }
+
+    #[test]
+    fn bucket_range_minimal_interval_inside_bucket() {
+        let spec = TimeBucket::Minutes(1);
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 0).unwrap();
+        let end = start + Duration::nanoseconds(1);
+
+        let range = bucket_range(&spec, start, end);
+        assert_eq!(*range.start(), *range.end());
+    }
+
+    #[test]
+    fn bucket_range_multi_bucket_with_wider_granularity() {
+        let spec = TimeBucket::Minutes(5);
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2020, 1, 1, 10, 17, 0).unwrap();
+
+        let range = bucket_range(&spec, start, end);
+        let first = *range.start();
+        let last = *range.end();
+
+        // Buckets at 10:00, 10:05, 10:10, 10:15 -> four buckets
+        assert_eq!(last, first + 3);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic]
+    fn bucket_range_panics_when_start_not_before_end_in_debug() {
+        let spec = TimeBucket::Minutes(1);
+        let t = Utc.with_ymd_and_hms(2020, 1, 1, 10, 0, 0).unwrap();
+        // In debug builds the debug_assert! should fire.
+        let _ = bucket_range(&spec, t, t);
+    }
+}
