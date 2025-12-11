@@ -37,24 +37,44 @@ pub enum TableKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableMeta {
     /// Table kind: TimeSeries or Generic.
-    pub kind: TableKind,
+    pub(crate) kind: TableKind,
 
     /// Optional logical schema description.
     ///
     /// v0.1 can treat this as informational; enforcement is handled by
     /// higher layers.
-    pub logical_schema: Option<LogicalSchema>,
+    pub(crate) logical_schema: Option<LogicalSchema>,
 
     /// Creation timestamp of the table, stored as RFC3339 UTC.
-    pub created_at: DateTime<Utc>,
+    pub(crate) created_at: DateTime<Utc>,
 
     /// Format version for future evolution of the log/table format.
     ///
     /// v0.1 can hard-code this to 1.
-    pub format_version: u32,
+    pub(crate) format_version: u32,
 }
 
 impl TableMeta {
+    /// Returns the table kind (e.g. time series or generic).
+    pub fn kind(&self) -> &TableKind {
+        &self.kind
+    }
+
+    /// Returns the optional logical schema if it has been set.
+    pub fn logical_schema(&self) -> Option<&LogicalSchema> {
+        self.logical_schema.as_ref()
+    }
+
+    /// Returns the UTC timestamp when the table was created.
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    /// Returns the on-disk table metadata format version.
+    pub fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
     /// Convenience constructor for a time-series table.
     ///
     /// - Fills `created_at` with `Utc::now()`.
