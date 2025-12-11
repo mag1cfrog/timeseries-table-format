@@ -12,7 +12,9 @@
 //!   returns an *inclusive* range of bucket ids that intersect that
 //!   interval.
 
-use chrono::{DateTime, Utc};
+use std::ops::RangeInclusive;
+
+use chrono::{DateTime, Duration, Utc};
 
 use crate::transaction_log::TimeBucket;
 
@@ -69,4 +71,45 @@ pub fn bucket_id(spec: &TimeBucket, ts: DateTime<Utc>) -> u64 {
     } else {
         bucket_i64 as u64
     }
+}
+
+/// Return the *inclusive* range of bucket ids intersecting `[start, end)`.
+///
+/// - The time interval is half-open: it includes `start` and excludes `end`.
+/// - All buckets whose interval intersects `[start, end)` are included.
+/// - Requires `start < end`; behavior is undefined if `start >= end`.
+///
+/// Example (1-minute buckets):
+///
+/// - `start = 10:00:10`, `end = 10:03:00`
+/// - Buckets covering 10:00, 10:01, and 10:02 are included.
+/// - The bucket starting at 10:03 is *not* included.
+pub fn bucket_range(
+    spec: &TimeBucket,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> RangeInclusive<u64> {
+    debug_assert!(
+        start < end,
+        "bucket_range expects start < end; got start={start:?}, end={end:?}"
+    );
+
+    let first = bucket_id(spec, start);
+
+    // We want the *last* bucket that still intersects [start, end).
+    //
+    // A bucket intersects [start, end) iff:
+    //   bucket_start < end  &&  bucket_end > start
+    //
+    // Rather than reason about bucket boundaries here, we take a simpler
+    // approach: shift `end` back by 1 nanosecond so it definitely falls
+    // inside the half-open interval (as long as start < end), and map that
+    // timestamp to a bucket id.
+    //
+    // This works for all bucket sizes >= 1 second and preserves the
+    // half-open semantics.
+    let end_adj = end - Duration::nanoseconds(1);
+    let last = bucket_id(spec, end_adj);
+
+    first..=last
 }
