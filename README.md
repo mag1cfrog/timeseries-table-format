@@ -114,7 +114,7 @@ Early **MVP** work in progress:
 
 - [x] Workspace + core crate scaffolding  
 - [x] Log-based metadata layer with version-guard OCC  
-- [ ] Time-series table abstraction + basic range scans  
+- [x] Time-series table abstraction + basic range scans  
 - [ ] Coverage helpers and simple gap/coverage metrics  
 - [ ] Small end-to-end example (synthetic time-series data)
 
