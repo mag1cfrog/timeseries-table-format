@@ -594,6 +594,8 @@ async fn update_table_meta_last_one_wins() -> TestResult {
         }
         _ => panic!("expected TimeSeries"),
     }
+    // Format version is constant in v0.1; this test focuses on "last one wins" for
+    // the index spec and related fields. We still sanity-check the version value.
     assert_eq!(state.table_meta.format_version(), TABLE_FORMAT_VERSION);
 
     Ok(())
