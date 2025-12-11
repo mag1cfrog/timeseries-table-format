@@ -10,6 +10,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
+/// Current table metadata / log format version.
+///
+/// Bumped only when we make a breaking change to the on-disk JSON format.
+pub const TABLE_FORMAT_VERSION: u32 = 1;
+
 /// The high-level "kind" of table.
 ///
 /// v0.1 supports only `TimeSeries`, but a `Generic` kind is reserved so that
@@ -47,6 +52,36 @@ pub struct TableMeta {
     ///
     /// v0.1 can hard-code this to 1.
     pub format_version: u32,
+}
+
+impl TableMeta {
+    /// Convenience constructor for a time-series table.
+    ///
+    /// - Fills `created_at` with `Utc::now()`.
+    /// - Fills `format_version` with `TABLE_FORMAT_VERSION`.
+    /// - Leaves `logical_schema` as `None`; it will be adopted from the
+    ///   first appended segment in v0.1.
+    pub fn new_time_series(index: TimeIndexSpec) -> Self {
+        TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: None,
+            created_at: Utc::now(),
+            format_version: TABLE_FORMAT_VERSION,
+        }
+    }
+
+    /// Variant that lets you explicitly pass a logical schema up front.
+    pub fn new_time_series_with_schema(
+        index: TimeIndexSpec,
+        logical_schema: LogicalSchema,
+    ) -> Self {
+        TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: Some(logical_schema),
+            created_at: Utc::now(),
+            format_version: TABLE_FORMAT_VERSION,
+        }
+    }
 }
 
 /// For v0.1, a `TableMetaDelta` is just a full replacement of [`TableMeta`].
