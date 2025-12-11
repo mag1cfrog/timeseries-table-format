@@ -129,7 +129,10 @@ pub fn expected_buckets_for_range(
 
     // In v0.1 we standardize on u32 bucket ids for RoaringBitmap and
     // assume bucket ids fit in u32::MAX.
-    RoaringBitmap::from_iter(range.map(|b| b as Bucket))
+    RoaringBitmap::from_iter(range.map(|b| {
+        debug_assert!(b <= u32::MAX as u64, "bucket ID {} exceeds u32::MAX", b);
+        b as Bucket
+    }))
 }
 
 #[cfg(test)]
