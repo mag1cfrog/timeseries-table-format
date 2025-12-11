@@ -15,8 +15,9 @@
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Duration, Utc};
+use roaring::RoaringBitmap;
 
-use crate::transaction_log::TimeBucket;
+use crate::{coverage::Bucket, transaction_log::TimeBucket};
 
 const SECONDS_PER_MINUTE: i64 = 60;
 const SECONDS_PER_HOUR: i64 = 60 * 60;
@@ -112,6 +113,23 @@ pub fn bucket_range(
     let last = bucket_id(spec, end_adj);
 
     first..=last
+}
+
+/// Build an "expected" bitmap for the half-open time range `[start, end)`,
+/// given a bucket spec.
+///
+/// This is just:
+///   bucket_range(spec, start, end) -> RoaringBitmap::from_iter(...)
+pub fn expected_buckets_for_range(
+    spec: &TimeBucket,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> RoaringBitmap {
+    let range = bucket_range(spec, start, end);
+
+    // In v0.1 we standardize on u32 bucket ids for RoaringBitmap and
+    // assume bucket ids fit in u32::MAX.
+    RoaringBitmap::from_iter(range.map(|b| b as Bucket))
 }
 
 #[cfg(test)]
