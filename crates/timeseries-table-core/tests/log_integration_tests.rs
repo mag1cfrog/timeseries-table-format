@@ -10,7 +10,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 use timeseries_table_core::storage::{StorageError, TableLocation};
 use timeseries_table_core::transaction_log::table_metadata::{
-    LogicalDataType, LogicalTimestampUnit,
+    LogicalDataType, LogicalTimestampUnit, TABLE_FORMAT_VERSION,
 };
 use timeseries_table_core::transaction_log::{
     CommitError, FileFormat, LogAction, LogicalColumn, LogicalSchema, SegmentId, SegmentMeta,
@@ -40,34 +40,29 @@ fn sample_time_index_spec() -> TimeIndexSpec {
 }
 
 fn sample_table_meta() -> TableMeta {
-    TableMeta {
-        kind: TableKind::TimeSeries(sample_time_index_spec()),
-        logical_schema: Some(
-            LogicalSchema::new(vec![
-                LogicalColumn {
-                    name: "ts".to_string(),
-                    data_type: LogicalDataType::Timestamp {
-                        unit: LogicalTimestampUnit::Micros,
-                        timezone: None,
-                    },
-                    nullable: false,
-                },
-                LogicalColumn {
-                    name: "symbol".to_string(),
-                    data_type: LogicalDataType::Utf8,
-                    nullable: false,
-                },
-                LogicalColumn {
-                    name: "price".to_string(),
-                    data_type: LogicalDataType::Float64,
-                    nullable: true,
-                },
-            ])
-            .expect("valid logical schema"),
-        ),
-        created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: 1,
-    }
+    let schema = LogicalSchema::new(vec![
+        LogicalColumn {
+            name: "ts".to_string(),
+            data_type: LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Micros,
+                timezone: None,
+            },
+            nullable: false,
+        },
+        LogicalColumn {
+            name: "symbol".to_string(),
+            data_type: LogicalDataType::Utf8,
+            nullable: false,
+        },
+        LogicalColumn {
+            name: "price".to_string(),
+            data_type: LogicalDataType::Float64,
+            nullable: true,
+        },
+    ])
+    .expect("valid logical schema");
+
+    TableMeta::new_time_series_with_schema(sample_time_index_spec(), schema)
 }
 
 fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
@@ -165,7 +160,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     assert!(state.segments.contains_key(&seg2.segment_id));
 
     // Verify table_meta.kind is TableKind::TimeSeries
-    match &state.table_meta.kind {
+    match state.table_meta.kind() {
         TableKind::TimeSeries(spec) => {
             assert_eq!(spec.timestamp_column, "ts");
             assert_eq!(spec.entity_columns, vec!["symbol".to_string()]);
@@ -174,11 +169,10 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     }
 
     // Verify logical schema was preserved
-    assert!(state.table_meta.logical_schema.is_some());
+    assert!(state.table_meta.logical_schema().is_some());
     let schema = state
         .table_meta
-        .logical_schema
-        .as_ref()
+        .logical_schema()
         .expect("logical schema must be present");
     assert_eq!(schema.columns().len(), 3);
 
@@ -565,29 +559,19 @@ async fn rebuild_without_table_meta_returns_corrupt_state() -> TestResult {
 async fn update_table_meta_last_one_wins() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
-    let meta1 = TableMeta {
-        kind: TableKind::TimeSeries(TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
-            entity_columns: vec![],
-            bucket: TimeBucket::Minutes(1),
-            timezone: None,
-        }),
-        logical_schema: None,
-        created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: 1,
-    };
+    let meta1 = TableMeta::new_time_series(TimeIndexSpec {
+        timestamp_column: "ts".to_string(),
+        entity_columns: vec![],
+        bucket: TimeBucket::Minutes(1),
+        timezone: None,
+    });
 
-    let meta2 = TableMeta {
-        kind: TableKind::TimeSeries(TimeIndexSpec {
-            timestamp_column: "event_time".to_string(), // Changed!
-            entity_columns: vec!["user_id".to_string()],
-            bucket: TimeBucket::Hours(1),
-            timezone: Some("UTC".to_string()),
-        }),
-        logical_schema: None,
-        created_at: utc_datetime(2025, 6, 1, 0, 0, 0),
-        format_version: 2,
-    };
+    let meta2 = TableMeta::new_time_series(TimeIndexSpec {
+        timestamp_column: "event_time".to_string(), // Changed!
+        entity_columns: vec!["user_id".to_string()],
+        bucket: TimeBucket::Hours(1),
+        timezone: Some("UTC".to_string()),
+    });
 
     // Commit 1: First TableMeta
     store
@@ -602,7 +586,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
     let state = store.rebuild_table_state().await?;
 
     // meta2 should win
-    match &state.table_meta.kind {
+    match state.table_meta.kind() {
         TableKind::TimeSeries(spec) => {
             assert_eq!(spec.timestamp_column, "event_time");
             assert_eq!(spec.entity_columns, vec!["user_id".to_string()]);
@@ -610,7 +594,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
         }
         _ => panic!("expected TimeSeries"),
     }
-    assert_eq!(state.table_meta.format_version, 2);
+    assert_eq!(state.table_meta.format_version(), TABLE_FORMAT_VERSION);
 
     Ok(())
 }
