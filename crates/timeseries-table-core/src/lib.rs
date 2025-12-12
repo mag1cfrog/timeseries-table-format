@@ -18,6 +18,7 @@
 //! re-implementing the storage and metadata logic.
 pub mod coverage;
 pub mod helpers;
+pub mod layout;
 pub mod storage;
 pub mod time_series_table;
 pub mod transaction_log;
