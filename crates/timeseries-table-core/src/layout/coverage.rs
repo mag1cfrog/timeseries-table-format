@@ -90,3 +90,55 @@ pub fn segment_coverage_path(coverage_id: &str) -> Result<PathBuf, CoverageLayou
 pub fn table_snapshot_path(version: u64) -> PathBuf {
     PathBuf::from(format!("{TABLE_SNAPSHOT_DIR}/{version}.{COVERAGE_EXT}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_coverage_id_accepts_valid_ids() {
+        let long = "a".repeat(128);
+        let valid_ids = ["abc", "A_B-1.2", long.as_str()];
+
+        for id in valid_ids {
+            validate_coverage_id(id).expect("valid id should pass");
+        }
+    }
+
+    #[test]
+    fn validate_coverage_id_rejects_empty_or_too_long() {
+        let too_long = "x".repeat(129);
+        assert!(validate_coverage_id("").is_err());
+        assert!(validate_coverage_id(&too_long).is_err());
+    }
+
+    #[test]
+    fn validate_coverage_id_rejects_path_components() {
+        for id in ["a/b", "a\\b", "a..b", "..", "../etc"] {
+            assert!(validate_coverage_id(id).is_err(), "id `{id}` should fail");
+        }
+    }
+
+    #[test]
+    fn validate_coverage_id_rejects_disallowed_chars() {
+        for id in ["space id", "id*", "id@", "id$", "id:"] {
+            assert!(validate_coverage_id(id).is_err(), "id `{id}` should fail");
+        }
+    }
+
+    #[test]
+    fn segment_coverage_path_formats_and_validates() {
+        let id = "seg-001";
+        let path = segment_coverage_path(id).expect("valid id");
+        assert_eq!(path, PathBuf::from("_coverage/segments/seg-001.roar"));
+
+        // Ensure validation runs
+        assert!(segment_coverage_path("bad/id").is_err());
+    }
+
+    #[test]
+    fn table_snapshot_path_formats() {
+        let path = table_snapshot_path(42);
+        assert_eq!(path, PathBuf::from("_coverage/table/42.roar"));
+    }
+}
