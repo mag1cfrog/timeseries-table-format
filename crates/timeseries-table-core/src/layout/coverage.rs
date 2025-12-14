@@ -81,14 +81,22 @@ pub fn validate_coverage_id(coverage_id: &str) -> Result<(), CoverageLayoutError
 /// Relative path: `_coverage/segments/<coverage_id>.roar`
 pub fn segment_coverage_path(coverage_id: &str) -> Result<PathBuf, CoverageLayoutError> {
     validate_coverage_id(coverage_id)?;
-    Ok(PathBuf::from(format!(
-        "{SEGMENT_COVERAGE_DIR}/{coverage_id}.{COVERAGE_EXT}"
-    )))
+    let mut p = PathBuf::from(COVERAGE_ROOT_DIR);
+    p.push("segments");
+    p.push(format!("{coverage_id}.{COVERAGE_EXT}"));
+    Ok(p)
 }
 
 /// Relative path: `_coverage/table/<version>.roar`
-pub fn table_snapshot_path(version: u64) -> PathBuf {
-    PathBuf::from(format!("{TABLE_SNAPSHOT_DIR}/{version}.{COVERAGE_EXT}"))
+pub fn table_snapshot_path(
+    version: u64,
+    snapshot_id: &str,
+) -> Result<PathBuf, CoverageLayoutError> {
+    validate_coverage_id(snapshot_id)?;
+    let mut p = PathBuf::from(COVERAGE_ROOT_DIR);
+    p.push("table");
+    p.push(format!("{version}-{snapshot_id}.{COVERAGE_EXT}"));
+    Ok(p)
 }
 
 #[cfg(test)]
@@ -138,7 +146,7 @@ mod tests {
 
     #[test]
     fn table_snapshot_path_formats() {
-        let path = table_snapshot_path(42);
-        assert_eq!(path, PathBuf::from("_coverage/table/42.roar"));
+        let path = table_snapshot_path(42, "snap-001").expect("valid snapshot id");
+        assert_eq!(path, PathBuf::from("_coverage/table/42-snap-001.roar"));
     }
 }
