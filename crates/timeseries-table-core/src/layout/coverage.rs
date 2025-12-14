@@ -87,7 +87,7 @@ pub fn segment_coverage_path(coverage_id: &str) -> Result<PathBuf, CoverageLayou
     Ok(p)
 }
 
-/// Relative path: `_coverage/table/<version>.roar`
+/// Relative path: `_coverage/table/<version>-<snapshot_id>.roar`
 pub fn table_snapshot_path(
     version: u64,
     snapshot_id: &str,
