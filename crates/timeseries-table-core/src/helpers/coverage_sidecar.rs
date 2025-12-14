@@ -139,3 +139,64 @@ pub async fn write_coverage_sidecar_new(
         .context(StorageSnafu)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage::serde::coverage_from_bytes;
+    use tempfile::TempDir;
+
+    fn temp_location() -> (TempDir, TableLocation) {
+        let tmp = TempDir::new().expect("tempdir");
+        let loc = TableLocation::local(tmp.path());
+        (tmp, loc)
+    }
+
+    #[tokio::test]
+    async fn write_atomic_overwrites_existing() {
+        let (_tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/table/1.roar");
+
+        let cov1 = Coverage::from_iter(vec![1u32, 2, 3]);
+        write_coverage_sidecar_atomic(&loc, rel, &cov1)
+            .await
+            .expect("first write");
+
+        // Overwrite with different coverage
+        let cov2 = Coverage::from_iter(vec![10u32, 11]);
+        write_coverage_sidecar_atomic(&loc, rel, &cov2)
+            .await
+            .expect("overwrite");
+
+        // Read back and verify it matches the second write
+        let abs = match &loc {
+            TableLocation::Local(root) => root.join(rel),
+        };
+        let bytes = std::fs::read(abs).expect("read file");
+        let restored = coverage_from_bytes(&bytes).expect("deserialize");
+        assert_eq!(cov2.present(), restored.present());
+    }
+
+    #[tokio::test]
+    async fn write_new_fails_if_exists() {
+        let (_tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/segments/seg-1.roar");
+
+        let cov = Coverage::from_iter(vec![5u32]);
+        write_coverage_sidecar_new(&loc, rel, &cov)
+            .await
+            .expect("first write");
+
+        let err = write_coverage_sidecar_new(&loc, rel, &cov)
+            .await
+            .expect_err("second write should fail");
+
+        match err {
+            CoverageError::Storage {
+                source: StorageError::AlreadyExists { .. },
+                ..
+            } => {}
+            _ => panic!("expected AlreadyExists storage error"),
+        }
+    }
+}
