@@ -31,6 +31,7 @@
 //! let ratio = cov.coverage_ratio(&expected);
 //! assert!((ratio - 0.9).abs() < 1e-9);
 //! ```
+pub mod serde;
 
 use std::ops::RangeInclusive;
 
