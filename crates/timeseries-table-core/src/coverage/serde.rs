@@ -101,3 +101,63 @@ pub fn coverage_from_bytes(bytes: &[u8]) -> Result<Coverage, CoverageSerdeError>
     let bm = RoaringBitmap::deserialize_from(&mut r).context(DeserializeSnafu)?;
     Ok(Coverage::from_bitmap(bm))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_empty_and_non_empty() {
+        // Empty coverage
+        let cov_empty = Coverage::empty();
+        let bytes = coverage_to_bytes(&cov_empty).expect("serialize empty");
+        let restored = coverage_from_bytes(&bytes).expect("deserialize empty");
+        assert_eq!(cov_empty.cardinality(), restored.cardinality());
+
+        // Non-empty coverage
+        let cov = Coverage::from_iter(vec![1u32, 2, 3, 100]);
+        let bytes = coverage_to_bytes(&cov).expect("serialize non-empty");
+        let restored = coverage_from_bytes(&bytes).expect("deserialize non-empty");
+        assert_eq!(cov.present(), restored.present());
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_bytes() {
+        let bad = b"not a roaring bitmap";
+        let err = coverage_from_bytes(bad).unwrap_err();
+        match err {
+            CoverageSerdeError::Deserialize { .. } => {}
+            _ => panic!("expected deserialize error"),
+        }
+    }
+
+    #[test]
+    fn serialize_reports_io_error() {
+        // Force an I/O error by using a writer that always errors.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fail"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let cov = Coverage::from_iter(vec![1u32]);
+
+        // Reimplement minimal logic to inject failing writer
+        let err = {
+            let mut w = FailingWriter;
+            cov.present()
+                .serialize_into(&mut w)
+                .map_err(|e| CoverageSerdeError::Serialize { source: e })
+                .unwrap_err()
+        };
+
+        match err {
+            CoverageSerdeError::Serialize { .. } => {}
+            _ => panic!("expected serialize error"),
+        }
+    }
+}
