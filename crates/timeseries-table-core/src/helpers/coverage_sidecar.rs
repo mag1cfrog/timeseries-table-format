@@ -27,7 +27,7 @@ use snafu::{ResultExt, Snafu};
 use crate::{
     coverage::{
         Coverage,
-        serde::{CoverageSerdeError, coverage_to_bytes},
+        serde::{CoverageSerdeError, coverage_from_bytes, coverage_to_bytes},
     },
     layout::coverage::CoverageLayoutError,
     storage::{self, StorageError, TableLocation},
@@ -140,6 +140,39 @@ pub async fn write_coverage_sidecar_new(
     Ok(())
 }
 
+/// Read a coverage bitmap from a sidecar file.
+///
+/// Reads and deserializes a [`Coverage`] instance from a sidecar file at `rel_path`
+/// within the table storage. If the file is not found, returns a [`CoverageError::NotFound`]
+/// error. If deserialization fails, returns a [`CoverageError::Serde`] error.
+///
+/// # Arguments
+///
+/// * `location` - The table storage location.
+/// * `rel_path` - The relative path within the table root where the sidecar is located.
+///
+/// # Returns
+///
+/// Returns `Ok(coverage)` if the sidecar was read and deserialized successfully,
+/// or an error if the file is not found or deserialization fails.
+///
+/// # Errors
+///
+/// Returns [`CoverageError`] if:
+/// - The file does not exist ([`CoverageError::NotFound`]).
+/// - Deserialization of the coverage fails ([`CoverageError::Serde`]).
+/// - Storage I/O fails for other reasons ([`CoverageError::Storage`]).
+pub async fn read_coverage_sidecar(
+    location: &TableLocation,
+    rel_path: &Path,
+) -> Result<Coverage, CoverageError> {
+    match storage::read_all_bytes(location, rel_path).await {
+        Ok(bytes) => coverage_from_bytes(&bytes).context(SerdeSnafu),
+        Err(StorageError::NotFound { path, .. }) => Err(CoverageError::NotFound { path }),
+        Err(e) => Err(CoverageError::Storage { source: e }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +231,62 @@ mod tests {
             } => {}
             _ => panic!("expected AlreadyExists storage error"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_sidecar_round_trip() {
+        let (_tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/table/2.roar");
+
+        let cov = Coverage::from_iter(vec![1u32, 3, 5, 7]);
+        write_coverage_sidecar_atomic(&loc, rel, &cov)
+            .await
+            .expect("write sidecar");
+
+        let restored = read_coverage_sidecar(&loc, rel)
+            .await
+            .expect("read sidecar");
+        assert_eq!(cov.present(), restored.present());
+    }
+
+    #[tokio::test]
+    async fn read_sidecar_missing_returns_not_found() {
+        let (_tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/table/missing.roar");
+
+        let err = read_coverage_sidecar(&loc, rel)
+            .await
+            .expect_err("should be missing");
+
+        match err {
+            CoverageError::NotFound { path } => {
+                assert!(path.contains("missing.roar"));
+            }
+            _ => panic!("expected NotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_sidecar_corrupt_bytes_returns_serde_error() {
+        let (tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/table/corrupt.roar");
+
+        // Write garbage bytes to the expected path
+        let abs = match &loc {
+            TableLocation::Local(root) => root.join(rel),
+        };
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create dirs");
+        std::fs::write(&abs, b"not a bitmap").expect("write corrupt");
+
+        let err = read_coverage_sidecar(&loc, rel)
+            .await
+            .expect_err("should fail to deserialize");
+
+        match err {
+            CoverageError::Serde { .. } => {}
+            _ => panic!("expected Serde error"),
+        }
+
+        drop(tmp); // ensure tempdir not optimized away
     }
 }
