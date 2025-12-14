@@ -262,6 +262,12 @@ impl SegmentMeta {
         })
     }
 
+    /// Set the coverage sidecar path for this segment metadata.
+    pub fn with_coverage_path(mut self, path: impl Into<String>) -> Self {
+        self.coverage_path = Some(path.into());
+        self
+    }
+
     /// Format-dispatching constructor that can grow in future versions.
     ///
     /// v0.1: only `FileFormat::Parquet` is supported and validated via
