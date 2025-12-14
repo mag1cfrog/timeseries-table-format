@@ -57,6 +57,20 @@ pub fn validate_coverage_id(coverage_id: &str) -> Result<(), CoverageLayoutError
         });
     }
 
+    // Require at least one alphanumeric
+    if !coverage_id.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(CoverageLayoutError::InvalidCoverageId {
+            coverage_id: coverage_id.to_string(),
+        });
+    }
+
+    // Reject leading dot
+    if coverage_id.starts_with('.') {
+        return Err(CoverageLayoutError::InvalidCoverageId {
+            coverage_id: coverage_id.to_string(),
+        });
+    }
+
     // Reject any path separator and any ".." component-ish content.
     if coverage_id.contains('/') || coverage_id.contains('\\') || coverage_id.contains("..") {
         return Err(CoverageLayoutError::InvalidCoverageId {
