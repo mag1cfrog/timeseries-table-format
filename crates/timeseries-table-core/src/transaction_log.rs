@@ -183,6 +183,7 @@ mod tests {
             ts_min: ts0,
             ts_max: ts1,
             row_count: 1024,
+            coverage_path: None,
         };
 
         let commit = Commit {

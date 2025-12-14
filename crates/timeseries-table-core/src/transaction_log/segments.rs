@@ -66,6 +66,10 @@ pub struct SegmentMeta {
 
     /// Number of rows in this segment.
     pub row_count: u64,
+
+    /// coverage sidecar pointer
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_path: Option<String>,
 }
 
 /// Errors that can occur while validating or handling segment metadata.
@@ -254,6 +258,7 @@ impl SegmentMeta {
             ts_min,
             ts_max,
             row_count,
+            coverage_path: None,
         })
     }
 

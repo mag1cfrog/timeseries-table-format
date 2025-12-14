@@ -1701,6 +1701,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
             row_count: 1,
+            coverage_path: None,
         };
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
@@ -1731,6 +1732,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
             ts_max: utc_datetime(2024, 1, 1, 0, 0, 2),
             row_count: ts_vals.len() as u64,
+            coverage_path: None,
         };
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
@@ -1760,6 +1762,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
             row_count: 0,
+            coverage_path: None,
         };
 
         let huge = Utc
@@ -1912,6 +1915,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
             row_count: 0,
+            coverage_path: None,
         };
 
         table
@@ -1951,6 +1955,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2024, 1, 1, 0, 0, 1),
             row_count: 2,
+            coverage_path: None,
         };
 
         table
@@ -1984,6 +1989,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2024, 1, 1, 0, 1, 0),
             row_count: 1,
+            coverage_path: None,
         };
 
         table
@@ -2019,6 +2025,7 @@ mod tests {
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
             ts_max: utc_datetime(2024, 1, 1, 0, 0, 1),
             row_count: 1,
+            coverage_path: None,
         };
 
         table

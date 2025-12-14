@@ -142,6 +142,7 @@ mod tests {
                 .single()
                 .expect("valid sample segment ts_max"),
             row_count: 42,
+            coverage_path: None,
         }
     }
 
