@@ -73,6 +73,7 @@ fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
         ts_min: utc_datetime(2025, 1, 1, ts_hour, 0, 0),
         ts_max: utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0),
         row_count: 1000,
+        coverage_path: None,
     }
 }
 
@@ -615,6 +616,7 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
         ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
         ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
         row_count: 100,
+        coverage_path: None,
     };
 
     let seg_v2 = SegmentMeta {
@@ -624,6 +626,7 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
         ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
         ts_max: utc_datetime(2025, 1, 1, 2, 0, 0), // Different ts_max
         row_count: 200,                            // Different row_count
+        coverage_path: None,
     };
 
     // Commit 1: Add seg_v1
