@@ -13,6 +13,7 @@
 //! - CSV and ORC format support.
 //! - Batch segment registration helpers.
 //! - Schema inference from segment metadata.
+pub mod coverage_sidecar;
 pub mod parquet;
 pub mod schema;
 pub mod time_bucket;
