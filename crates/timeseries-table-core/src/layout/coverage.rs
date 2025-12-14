@@ -57,7 +57,7 @@ pub fn validate_coverage_id(coverage_id: &str) -> Result<(), CoverageLayoutError
         });
     }
 
-    // Reject any path seperator and any ".." component-ish content.
+    // Reject any path separator and any ".." component-ish content.
     if coverage_id.contains('/') || coverage_id.contains('\\') || coverage_id.contains("..") {
         return Err(CoverageLayoutError::InvalidCoverageId {
             coverage_id: coverage_id.to_string(),
