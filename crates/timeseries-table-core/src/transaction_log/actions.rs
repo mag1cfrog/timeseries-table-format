@@ -32,7 +32,7 @@ pub enum LogAction {
 
     /// Points to the table-level coverage snapshot sidecar for this commit version.
     UpdateTableCoverage {
-        /// Path to the coverage snapshot file.
+        /// Time bucket specification for the coverage snapshot.
         bucket_spec: TimeBucket,
         /// Path to the coverage data.
         coverage_path: String,
