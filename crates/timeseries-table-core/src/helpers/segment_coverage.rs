@@ -12,6 +12,7 @@
 //! - Bucket ID overflow (when a bucket index exceeds u32 range).
 
 use arrow::datatypes::TimeUnit;
+use chrono::{DateTime, TimeZone, Utc};
 use parquet::errors::ParquetError;
 use snafu::Snafu;
 
@@ -75,7 +76,7 @@ pub enum SegmentCoverageError {
     #[snafu(display(
         "Timestamp value out of chrono range: raw={raw} unit={unit:?} in {path}.{column}"
     ))]
-    TimestampOutOfRange {
+    InvalidTimestamp {
         /// The path to the segment file.
         path: String,
         /// The name of the timestamp column.
@@ -100,11 +101,28 @@ pub enum SegmentCoverageError {
     },
 }
 
-// fn dt_from_raw(
-//     path: &str,
-//     column: &str,
-//     unit: TimeUnit,
-//     raw: i64,
-// ) -> Result<DateTime<Utc>, SegmentCoverageError> {
-//     Ok(())
-// }
+fn dt_from_raw(
+    path: &str,
+    column: &str,
+    unit: TimeUnit,
+    raw: i64,
+) -> Result<DateTime<Utc>, SegmentCoverageError> {
+    let opt = match unit {
+        TimeUnit::Second => Utc.timestamp_opt(raw, 0),
+        TimeUnit::Millisecond => Utc.timestamp_millis_opt(raw),
+        TimeUnit::Microsecond => Utc.timestamp_micros(raw),
+        TimeUnit::Nanosecond => {
+            let secs = raw.div_euclid(1_000_000_000);
+            let nanos = raw.rem_euclid(1_000_000_000) as u32;
+            Utc.timestamp_opt(secs, nanos)
+        }
+    };
+
+    // In UTC, LocalResult is never ambiguous; single()==None means invalid/out-of-range.
+    opt.single().ok_or(SegmentCoverageError::InvalidTimestamp {
+        path: path.to_string(),
+        column: column.to_string(),
+        raw,
+        unit,
+    })
+}
