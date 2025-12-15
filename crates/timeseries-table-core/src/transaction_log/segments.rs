@@ -67,7 +67,7 @@ pub struct SegmentMeta {
     /// Number of rows in this segment.
     pub row_count: u64,
 
-    /// coverage sidecar pointer
+    /// Coverage sidecar pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_path: Option<String>,
 }
@@ -332,8 +332,7 @@ mod tests {
         assert_eq!(back.coverage_path, None);
 
         // With coverage_path
-        let mut seg2 = sample_segment_meta();
-        seg2.coverage_path = Some("_coverage/segments/a.roar".to_string());
+        let seg2 = sample_segment_meta().with_coverage_path("_coverage/segments/a.roar");
         let json2 = serde_json::to_string(&seg2).unwrap();
         let back2: SegmentMeta = serde_json::from_str(&json2).unwrap();
         assert_eq!(
