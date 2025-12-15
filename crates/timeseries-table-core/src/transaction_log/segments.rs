@@ -311,6 +311,37 @@ mod tests {
             .expect("valid UTC timestamp")
     }
 
+    fn sample_segment_meta() -> SegmentMeta {
+        SegmentMeta {
+            segment_id: SegmentId("seg-001".to_string()),
+            path: "data/seg-001.parquet".to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
+            row_count: 123,
+            coverage_path: None,
+        }
+    }
+
+    #[test]
+    fn segment_meta_json_roundtrip_with_and_without_coverage_path() {
+        // Without coverage_path
+        let seg = sample_segment_meta();
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: SegmentMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.coverage_path, None);
+
+        // With coverage_path
+        let mut seg2 = sample_segment_meta();
+        seg2.coverage_path = Some("_coverage/segments/a.roar".to_string());
+        let json2 = serde_json::to_string(&seg2).unwrap();
+        let back2: SegmentMeta = serde_json::from_str(&json2).unwrap();
+        assert_eq!(
+            back2.coverage_path.as_deref(),
+            Some("_coverage/segments/a.roar")
+        );
+    }
+
     async fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
