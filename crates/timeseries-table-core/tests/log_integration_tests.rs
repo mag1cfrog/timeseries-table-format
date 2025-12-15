@@ -732,6 +732,55 @@ async fn table_coverage_pointer_is_replayed() -> TestResult {
     Ok(())
 }
 
+/// Test: Multiple UpdateTableCoverage commits – last one wins.
+#[tokio::test]
+async fn table_coverage_last_one_wins() -> TestResult {
+    let (_tmp, store) = create_test_log_store();
+
+    let meta = sample_table_meta();
+    let coverage_bucket_v1 = TimeBucket::Minutes(5);
+    let coverage_bucket_v2 = TimeBucket::Hours(1);
+    let coverage_path_v1 = "coverage/0000000002.bitmap".to_string();
+    let coverage_path_v2 = "coverage/0000000003.bitmap".to_string();
+
+    let v1 = store
+        .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+        .await?;
+
+    let v2 = store
+        .commit_with_expected_version(
+            v1,
+            vec![LogAction::UpdateTableCoverage {
+                bucket_spec: coverage_bucket_v1.clone(),
+                coverage_path: coverage_path_v1.clone(),
+            }],
+        )
+        .await?;
+
+    let v3 = store
+        .commit_with_expected_version(
+            v2,
+            vec![LogAction::UpdateTableCoverage {
+                bucket_spec: coverage_bucket_v2.clone(),
+                coverage_path: coverage_path_v2.clone(),
+            }],
+        )
+        .await?;
+
+    let state = store.rebuild_table_state().await?;
+    assert_eq!(state.version, v3);
+
+    let pointer = state
+        .table_coverage
+        .as_ref()
+        .expect("table coverage pointer should be present");
+    assert_eq!(pointer.bucket_spec, coverage_bucket_v2);
+    assert_eq!(pointer.coverage_path, coverage_path_v2);
+    assert_eq!(pointer.version, v3);
+
+    Ok(())
+}
+
 /// Test: Absence of UpdateTableCoverage leaves TableState.table_coverage as None.
 #[tokio::test]
 async fn table_coverage_is_none_when_not_committed() -> TestResult {
