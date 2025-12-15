@@ -387,3 +387,82 @@ pub async fn compute_segment_coverage(
 
     Ok(Coverage::from_bitmap(bitmap))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use arrow::{
+        datatypes::{Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use arrow_array::builder::{Int32Builder, TimestampMillisecondBuilder};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn write_parquet_with_timestamps(path: &Path, ts_values: &[Option<i64>]) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("val", DataType::Int32, false),
+        ]);
+
+        let mut ts_builder = TimestampMillisecondBuilder::with_capacity(ts_values.len());
+        for v in ts_values {
+            match v {
+                Some(ts) => ts_builder.append_value(*ts),
+                None => ts_builder.append_null(),
+            }
+        }
+        let ts_array = Arc::new(ts_builder.finish()) as Arc<dyn Array>;
+
+        let mut val_builder = Int32Builder::with_capacity(ts_values.len());
+        for i in 0..ts_values.len() {
+            val_builder.append_value(i as i32);
+        }
+        let val_array = Arc::new(val_builder.finish()) as Arc<dyn Array>;
+
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![ts_array, val_array])?;
+
+        let file = std::fs::File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_supports_nulls_and_dedup_and_multiple_specs() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/seg.parquet");
+        let abs_path = tmp.path().join(rel_path);
+
+        // Two points in bucket 0, one point in bucket 60 (1 hour), and one null.
+        let ts_values = vec![Some(1_000), Some(30_000), Some(3_600_000), None];
+        write_parquet_with_timestamps(&abs_path, &ts_values)?;
+
+        let location = TableLocation::local(tmp.path());
+
+        // Minutes bucket: 1 second and 30 seconds map to bucket 0; 3600s -> bucket 60.
+        let cov_min =
+            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1)).await?;
+        let buckets_min: Vec<u32> = cov_min.present().iter().collect();
+        assert_eq!(buckets_min, vec![0, 60]);
+
+        // Hours bucket: 1 second -> bucket 0; 3600s -> bucket 1.
+        let cov_hr =
+            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Hours(1)).await?;
+        let buckets_hr: Vec<u32> = cov_hr.present().iter().collect();
+        assert_eq!(buckets_hr, vec![0, 1]);
+
+        Ok(())
+    }
+}
