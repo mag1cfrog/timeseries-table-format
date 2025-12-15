@@ -714,6 +714,7 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::time_column::TimeColumnError;
     use crate::storage::TableLocation;
     use crate::transaction_log::segments::{FileFormat, SegmentId, SegmentMetaError};
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
@@ -1277,7 +1278,13 @@ mod tests {
 
         match err {
             TableError::SegmentMeta { source } => {
-                assert!(matches!(source, SegmentMetaError::MissingTimeColumn { .. }));
+                assert!(matches!(
+                    source,
+                    SegmentMetaError::TimeColumn {
+                        source: TimeColumnError::Missing { .. },
+                        ..
+                    }
+                ));
             }
             other => panic!("unexpected error: {other:?}"),
         }
