@@ -66,6 +66,10 @@ pub struct SegmentMeta {
 
     /// Number of rows in this segment.
     pub row_count: u64,
+
+    /// Coverage sidecar pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_path: Option<String>,
 }
 
 /// Errors that can occur while validating or handling segment metadata.
@@ -254,7 +258,14 @@ impl SegmentMeta {
             ts_min,
             ts_max,
             row_count,
+            coverage_path: None,
         })
+    }
+
+    /// Set the coverage sidecar path for this segment metadata.
+    pub fn with_coverage_path(mut self, path: impl Into<String>) -> Self {
+        self.coverage_path = Some(path.into());
+        self
     }
 
     /// Format-dispatching constructor that can grow in future versions.
@@ -298,6 +309,36 @@ mod tests {
         Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
             .single()
             .expect("valid UTC timestamp")
+    }
+
+    fn sample_segment_meta() -> SegmentMeta {
+        SegmentMeta {
+            segment_id: SegmentId("seg-001".to_string()),
+            path: "data/seg-001.parquet".to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
+            ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
+            row_count: 123,
+            coverage_path: None,
+        }
+    }
+
+    #[test]
+    fn segment_meta_json_roundtrip_with_and_without_coverage_path() {
+        // Without coverage_path
+        let seg = sample_segment_meta();
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: SegmentMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.coverage_path, None);
+
+        // With coverage_path
+        let seg2 = sample_segment_meta().with_coverage_path("_coverage/segments/a.roar");
+        let json2 = serde_json::to_string(&seg2).unwrap();
+        let back2: SegmentMeta = serde_json::from_str(&json2).unwrap();
+        assert_eq!(
+            back2.coverage_path.as_deref(),
+            Some("_coverage/segments/a.roar")
+        );
     }
 
     async fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Error> {

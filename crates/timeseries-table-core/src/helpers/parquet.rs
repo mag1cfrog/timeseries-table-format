@@ -307,6 +307,7 @@ pub async fn segment_meta_from_parquet_location(
         ts_min,
         ts_max,
         row_count,
+        coverage_path: None,
     })
 }
 

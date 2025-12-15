@@ -10,6 +10,17 @@ use std::collections::HashMap;
 
 use crate::transaction_log::*;
 
+/// Pointer to table coverage metadata including bucket specification, path, and version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCoveragePointer {
+    /// Time bucket specification for the coverage metadata.
+    pub bucket_spec: TimeBucket,
+    /// Path to the coverage metadata file.
+    pub coverage_path: String,
+    /// Version number associated with this coverage pointer.
+    pub version: u64,
+}
+
 /// In-memory view of table metadata and live segments, reconstructed from the log.
 ///
 /// Invariant:
@@ -24,6 +35,9 @@ pub struct TableState {
     pub table_meta: TableMeta,
     /// Current live segments keyed by SegmentId.
     pub segments: HashMap<SegmentId, SegmentMeta>,
+
+    /// Optional pointer to the latest table coverage metadata.
+    pub table_coverage: Option<TableCoveragePointer>,
 }
 
 impl TransactionLogStore {
@@ -46,6 +60,8 @@ impl TransactionLogStore {
 
         let mut table_meta: Option<TableMeta> = None;
         let mut segments: HashMap<SegmentId, SegmentMeta> = HashMap::new();
+
+        let mut table_coverage: Option<TableCoveragePointer> = None;
 
         // Replay all commits from 1..=current_version in order
         for v in 1..=current_version {
@@ -75,6 +91,16 @@ impl TransactionLogStore {
                         // v0.1: full replacement of TableMeta
                         table_meta = Some(delta);
                     }
+                    LogAction::UpdateTableCoverage {
+                        bucket_spec,
+                        coverage_path,
+                    } => {
+                        table_coverage = Some(TableCoveragePointer {
+                            bucket_spec,
+                            coverage_path,
+                            version: v,
+                        })
+                    }
                 }
             }
         }
@@ -87,6 +113,7 @@ impl TransactionLogStore {
             version: current_version,
             table_meta,
             segments,
+            table_coverage,
         })
     }
 }
@@ -142,6 +169,7 @@ mod tests {
                 .single()
                 .expect("valid sample segment ts_max"),
             row_count: 42,
+            coverage_path: None,
         }
     }
 

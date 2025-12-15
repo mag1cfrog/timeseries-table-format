@@ -73,6 +73,7 @@ fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
         ts_min: utc_datetime(2025, 1, 1, ts_hour, 0, 0),
         ts_max: utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0),
         row_count: 1000,
+        coverage_path: None,
     }
 }
 
@@ -615,6 +616,7 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
         ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
         ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
         row_count: 100,
+        coverage_path: None,
     };
 
     let seg_v2 = SegmentMeta {
@@ -624,6 +626,7 @@ async fn add_segment_with_same_id_replaces() -> TestResult {
         ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
         ts_max: utc_datetime(2025, 1, 1, 2, 0, 0), // Different ts_max
         row_count: 200,                            // Different row_count
+        coverage_path: None,
     };
 
     // Commit 1: Add seg_v1
@@ -688,6 +691,115 @@ async fn remove_nonexistent_segment_is_noop() -> TestResult {
     let state = store.rebuild_table_state().await?;
     assert_eq!(state.segments.len(), 1);
     assert!(state.segments.contains_key(&seg.segment_id));
+
+    Ok(())
+}
+
+/// Test: UpdateTableCoverage actions are replayed into TableState.
+#[tokio::test]
+async fn table_coverage_pointer_is_replayed() -> TestResult {
+    let (_tmp, store) = create_test_log_store();
+
+    let meta = sample_table_meta();
+    let coverage_bucket = TimeBucket::Minutes(5);
+    let coverage_path = "coverage/0000000002.bitmap".to_string();
+
+    let v1 = store
+        .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+        .await?;
+
+    let v2 = store
+        .commit_with_expected_version(
+            v1,
+            vec![LogAction::UpdateTableCoverage {
+                bucket_spec: coverage_bucket.clone(),
+                coverage_path: coverage_path.clone(),
+            }],
+        )
+        .await?;
+
+    let state = store.rebuild_table_state().await?;
+    assert_eq!(state.version, v2);
+
+    let pointer = state
+        .table_coverage
+        .as_ref()
+        .expect("table coverage pointer should be present");
+    assert_eq!(pointer.bucket_spec, coverage_bucket);
+    assert_eq!(pointer.coverage_path, coverage_path);
+    assert_eq!(pointer.version, v2);
+
+    Ok(())
+}
+
+/// Test: Multiple UpdateTableCoverage commits – last one wins.
+#[tokio::test]
+async fn table_coverage_last_one_wins() -> TestResult {
+    let (_tmp, store) = create_test_log_store();
+
+    let meta = sample_table_meta();
+    let coverage_bucket_v1 = TimeBucket::Minutes(5);
+    let coverage_bucket_v2 = TimeBucket::Hours(1);
+    let coverage_path_v1 = "coverage/0000000002.bitmap".to_string();
+    let coverage_path_v2 = "coverage/0000000003.bitmap".to_string();
+
+    let v1 = store
+        .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+        .await?;
+
+    let v2 = store
+        .commit_with_expected_version(
+            v1,
+            vec![LogAction::UpdateTableCoverage {
+                bucket_spec: coverage_bucket_v1.clone(),
+                coverage_path: coverage_path_v1.clone(),
+            }],
+        )
+        .await?;
+
+    let v3 = store
+        .commit_with_expected_version(
+            v2,
+            vec![LogAction::UpdateTableCoverage {
+                bucket_spec: coverage_bucket_v2.clone(),
+                coverage_path: coverage_path_v2.clone(),
+            }],
+        )
+        .await?;
+
+    let state = store.rebuild_table_state().await?;
+    assert_eq!(state.version, v3);
+
+    let pointer = state
+        .table_coverage
+        .as_ref()
+        .expect("table coverage pointer should be present");
+    assert_eq!(pointer.bucket_spec, coverage_bucket_v2);
+    assert_eq!(pointer.coverage_path, coverage_path_v2);
+    assert_eq!(pointer.version, v3);
+
+    Ok(())
+}
+
+/// Test: Absence of UpdateTableCoverage leaves TableState.table_coverage as None.
+#[tokio::test]
+async fn table_coverage_is_none_when_not_committed() -> TestResult {
+    let (_tmp, store) = create_test_log_store();
+
+    let meta = sample_table_meta();
+    let seg = sample_segment("seg-without-coverage", 0);
+
+    let v1 = store
+        .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+        .await?;
+    store
+        .commit_with_expected_version(v1, vec![LogAction::AddSegment(seg)])
+        .await?;
+
+    let state = store.rebuild_table_state().await?;
+
+    assert_eq!(state.version, 2);
+    assert!(state.table_coverage.is_none());
 
     Ok(())
 }

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::transaction_log::{
+    TimeBucket,
     segments::{SegmentId, SegmentMeta},
     table_metadata::TableMetaDelta,
 };
@@ -28,6 +29,14 @@ pub enum LogAction {
 
     /// Update table-level metadata (v0.1 uses full replacement).
     UpdateTableMeta(TableMetaDelta),
+
+    /// Points to the table-level coverage snapshot sidecar for this commit version.
+    UpdateTableCoverage {
+        /// Time bucket specification for the coverage snapshot.
+        bucket_spec: TimeBucket,
+        /// Path to the coverage data.
+        coverage_path: String,
+    },
 }
 
 /// A single, immutable commit in the metadata log.
