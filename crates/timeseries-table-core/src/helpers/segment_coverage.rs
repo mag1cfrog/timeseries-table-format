@@ -11,12 +11,32 @@
 //! - Unsupported or out-of-range timestamp values.
 //! - Bucket ID overflow (when a bucket index exceeds u32 range).
 
-use arrow::datatypes::TimeUnit;
+use std::path::Path;
+
+use arrow::{
+    datatypes::{DataType, TimeUnit},
+    error::ArrowError,
+};
+use arrow_array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
-use parquet::errors::ParquetError;
+use parquet::{
+    arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder},
+    errors::ParquetError,
+};
+use roaring::RoaringBitmap;
 use snafu::Snafu;
 
-use crate::{common::time_column::TimeColumnError, storage::StorageError};
+use crate::{
+    common::time_column::TimeColumnError,
+    coverage::Coverage,
+    helpers::time_bucket::bucket_id,
+    storage::{self, StorageError, TableLocation},
+    transaction_log::TimeBucket,
+};
 
 /// Errors that can occur when reading or computing segment coverage.
 ///
@@ -54,6 +74,16 @@ pub enum SegmentCoverageError {
         /// The underlying Parquet library error.
         #[snafu(source)]
         source: ParquetError,
+    },
+
+    /// Arrow read error.
+    #[snafu(display("Arrow read error for {path}: {source}"))]
+    ArrowRead {
+        /// The path to the segment file with a Parquet format error.
+        path: String,
+        /// The underlying Parquet library error.
+        #[snafu(source)]
+        source: ArrowError,
     },
 
     /// Time column validation or metadata error.
@@ -125,4 +155,192 @@ fn dt_from_raw(
         raw,
         unit,
     })
+}
+
+fn insert_bucket(
+    bitmap: &mut RoaringBitmap,
+    path: &str,
+    bucket: u64,
+) -> Result<(), SegmentCoverageError> {
+    if bucket > u32::MAX as u64 {
+        return Err(SegmentCoverageError::BucketOverflow {
+            path: path.to_string(),
+            bucket_id: bucket,
+        });
+    }
+    bitmap.insert(bucket as u32);
+    Ok(())
+}
+
+/// Computes segment-level time-series coverage by reading a Parquet segment file
+/// and mapping timestamps to bucket IDs based on the provided time bucket specification.
+///
+/// This function:
+/// 1. Reads the Parquet segment file from storage.
+/// 2. Extracts the specified timestamp column.
+/// 3. Validates that the timestamp column uses a supported time unit.
+/// 4. Iterates over timestamp values and maps each to a bucket ID.
+/// 5. Returns a Coverage bitmap containing all bucket IDs found in the segment.
+///
+/// # Arguments
+///
+/// * `location` - The table location for accessing the storage layer.
+/// * `rel_path` - The relative path to the Parquet segment file.
+/// * `time_column` - The name of the timestamp column to analyze.
+/// * `bucket_spec` - The time bucket specification for mapping timestamps to bucket IDs.
+///
+/// # Returns
+///
+/// A `Coverage` bitmap containing the bucket IDs of all timestamps in the segment,
+/// or a `SegmentCoverageError` if any stage of the process fails.
+pub async fn compute_segment_coverage(
+    location: &TableLocation,
+    rel_path: &Path,
+    time_column: &str,
+    bucket_spec: &TimeBucket,
+) -> Result<Coverage, SegmentCoverageError> {
+    let path_str = rel_path.display().to_string();
+
+    // 1) Read parquet bytes.
+    let bytes = storage::read_all_bytes(location, rel_path)
+        .await
+        .map_err(|source| SegmentCoverageError::Storage {
+            path: path_str.clone(),
+            source,
+        })?;
+    let data = Bytes::from(bytes);
+
+    // 2) Build parquet -> arrow batch reader.
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(|source| {
+        SegmentCoverageError::ParquetRead {
+            path: path_str.clone(),
+            source,
+        }
+    })?;
+
+    // 3) Find the time column index, and ideally project only that one.
+    let schema = builder.schema();
+    // Validate the column exists in the Arrow schema (good error message)
+    let _arrow_idx =
+        schema
+            .index_of(time_column)
+            .map_err(|_| SegmentCoverageError::TimeColumn {
+                path: path_str.clone(),
+                source: TimeColumnError::Missing {
+                    column: time_column.to_string(),
+                },
+            })?;
+
+    let mask = ProjectionMask::columns(builder.parquet_schema(), [time_column]);
+    let builder = builder.with_projection(mask);
+
+    let reader = builder
+        .build()
+        .map_err(|source| SegmentCoverageError::ParquetRead {
+            path: path_str.clone(),
+            source,
+        })?;
+
+    // 4) Compute coverage.
+    let mut bitmap = RoaringBitmap::new();
+
+    for batch_res in reader {
+        let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
+            path: path_str.clone(),
+            source,
+        })?;
+
+        // After projection, the timestamp column is at 0;
+        let col = batch.column(0);
+
+        match col.data_type() {
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .ok_or_else(|| SegmentCoverageError::TimeColumn {
+                        path: path_str.clone(),
+                        source: TimeColumnError::UnsupportedArrowType {
+                            column: time_column.to_string(),
+                            datatype: col.data_type().to_string(),
+                        },
+                    })?;
+
+                for v in arr.iter().flatten() {
+                    let dt = dt_from_raw(&path_str, time_column, TimeUnit::Second, v)?;
+                    let b = bucket_id(bucket_spec, dt);
+                    insert_bucket(&mut bitmap, &path_str, b)?;
+                }
+            }
+
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .ok_or_else(|| SegmentCoverageError::TimeColumn {
+                        path: path_str.clone(),
+                        source: TimeColumnError::UnsupportedArrowType {
+                            column: time_column.to_string(),
+                            datatype: col.data_type().to_string(),
+                        },
+                    })?;
+
+                for v in arr.iter().flatten() {
+                    let dt = dt_from_raw(&path_str, time_column, TimeUnit::Millisecond, v)?;
+                    let b = bucket_id(bucket_spec, dt);
+                    insert_bucket(&mut bitmap, &path_str, b)?;
+                }
+            }
+
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .ok_or_else(|| SegmentCoverageError::TimeColumn {
+                        path: path_str.clone(),
+                        source: TimeColumnError::UnsupportedArrowType {
+                            column: time_column.to_string(),
+                            datatype: col.data_type().to_string(),
+                        },
+                    })?;
+
+                for v in arr.iter().flatten() {
+                    let dt = dt_from_raw(&path_str, time_column, TimeUnit::Microsecond, v)?;
+                    let b = bucket_id(bucket_spec, dt);
+                    insert_bucket(&mut bitmap, &path_str, b)?;
+                }
+            }
+
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| SegmentCoverageError::TimeColumn {
+                        path: path_str.clone(),
+                        source: TimeColumnError::UnsupportedArrowType {
+                            column: time_column.to_string(),
+                            datatype: col.data_type().to_string(),
+                        },
+                    })?;
+
+                for v in arr.iter().flatten() {
+                    let dt = dt_from_raw(&path_str, time_column, TimeUnit::Nanosecond, v)?;
+                    let b = bucket_id(bucket_spec, dt);
+                    insert_bucket(&mut bitmap, &path_str, b)?;
+                }
+            }
+
+            other => {
+                return Err(SegmentCoverageError::TimeColumn {
+                    path: path_str.clone(),
+                    source: TimeColumnError::UnsupportedArrowType {
+                        column: time_column.to_string(),
+                        datatype: other.to_string(),
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(Coverage::from_bitmap(bitmap))
 }
