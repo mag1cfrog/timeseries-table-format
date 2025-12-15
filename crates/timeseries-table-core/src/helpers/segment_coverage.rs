@@ -11,11 +11,11 @@
 //! - Unsupported or out-of-range timestamp values.
 //! - Bucket ID overflow (when a bucket index exceeds u32 range).
 
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::TimeUnit;
 use parquet::errors::ParquetError;
 use snafu::Snafu;
 
-use crate::storage::StorageError;
+use crate::{common::time_column::TimeColumnError, storage::StorageError};
 
 /// Errors that can occur when reading or computing segment coverage.
 ///
@@ -55,26 +55,16 @@ pub enum SegmentCoverageError {
         source: ParquetError,
     },
 
-    /// The specified timestamp column was not found in the Parquet schema.
-    #[snafu(display("Missing time column {column} in parquet schema for {path}"))]
-    MissingTimeColumn {
-        /// The path to the segment file.
-        path: String,
-        /// The name of the column that was expected but not found.
-        column: String,
-    },
-
-    /// The timestamp column uses a type that is not supported for coverage computation.
+    /// Time column validation or metadata error.
     ///
-    /// For example, a non-integer or non-timestamp Arrow data type may be used.
-    #[snafu(display("Unsupported time column type {datatype:?} for {column} in {path}"))]
-    UnsupportedTimeType {
-        /// The path to the segment file.
+    /// This may occur when the timestamp column is missing, has an unsupported type,
+    /// or fails validation during coverage computation.
+    #[snafu(display("Time column error in segment at {path}: {source}"))]
+    TimeColumn {
+        /// The path to the segment file with a time column error.
         path: String,
-        /// The name of the timestamp column.
-        column: String,
-        /// The unsupported Arrow data type.
-        datatype: DataType,
+        /// The underlying time column error.
+        source: TimeColumnError,
     },
 
     /// A raw timestamp value could not be converted to a valid chrono DateTime<Utc>.
