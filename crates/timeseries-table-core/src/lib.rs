@@ -16,6 +16,7 @@
 //! Higher-level integration crates (for example, DataFusion, backtesting
 //! tools, or a CLI) are expected to depend on this core crate rather than
 //! re-implementing the storage and metadata logic.
+pub mod common;
 pub mod coverage;
 pub mod helpers;
 pub mod layout;
