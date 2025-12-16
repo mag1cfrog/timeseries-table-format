@@ -27,7 +27,7 @@ use parquet::{
     errors::ParquetError,
 };
 use roaring::RoaringBitmap;
-use snafu::Snafu;
+use snafu::{Backtrace, Snafu};
 
 use crate::{
     common::time_column::TimeColumnError,
@@ -58,7 +58,7 @@ pub enum SegmentCoverageError {
         /// The path to the segment file that could not be read.
         path: String,
         /// The underlying storage error that caused this failure.
-        #[snafu(source)]
+        #[snafu(source, backtrace)]
         source: StorageError,
     },
 
@@ -73,6 +73,8 @@ pub enum SegmentCoverageError {
         /// The underlying Parquet library error.
         #[snafu(source)]
         source: ParquetError,
+        /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
     },
 
     /// Arrow read error.
@@ -83,6 +85,8 @@ pub enum SegmentCoverageError {
         /// The underlying Arrow library error.
         #[snafu(source)]
         source: ArrowError,
+        /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
     },
 
     /// Time column validation or metadata error.
@@ -209,6 +213,7 @@ pub async fn compute_segment_coverage(
         SegmentCoverageError::ParquetRead {
             path: path_str.clone(),
             source,
+            backtrace: Backtrace::capture(),
         }
     })?;
 
@@ -233,6 +238,7 @@ pub async fn compute_segment_coverage(
         .map_err(|source| SegmentCoverageError::ParquetRead {
             path: path_str.clone(),
             source,
+            backtrace: Backtrace::capture(),
         })?;
 
     // 4) Compute coverage.
@@ -262,6 +268,7 @@ pub async fn compute_segment_coverage(
         let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
             path: path_str.clone(),
             source,
+            backtrace: Backtrace::capture(),
         })?;
 
         // After projection, the timestamp column is at 0;
