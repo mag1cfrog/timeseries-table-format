@@ -78,9 +78,9 @@ pub enum SegmentCoverageError {
     /// Arrow read error.
     #[snafu(display("Arrow read error for {path}: {source}"))]
     ArrowRead {
-        /// The path to the segment file with a Parquet format error.
+        /// The path to the segment file with an Arrow format error.
         path: String,
-        /// The underlying Parquet library error.
+        /// The underlying Arrow library error.
         #[snafu(source)]
         source: ArrowError,
     },
