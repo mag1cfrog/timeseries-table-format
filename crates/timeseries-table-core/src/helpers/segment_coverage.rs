@@ -482,9 +482,10 @@ mod tests {
         write_parquet_with_timestamps(&abs_path, &[Some(1_000)])?;
 
         let location = TableLocation::local(tmp.path());
-        let err = compute_segment_coverage(&location, rel_path, "missing_ts", &TimeBucket::Minutes(1))
-            .await
-            .expect_err("expected missing column error");
+        let err =
+            compute_segment_coverage(&location, rel_path, "missing_ts", &TimeBucket::Minutes(1))
+                .await
+                .expect_err("expected missing column error");
 
         assert!(matches!(
             err,
@@ -519,10 +520,9 @@ mod tests {
         write_parquet_batch(&abs_path, schema, vec![ts_array, val_array])?;
 
         let location = TableLocation::local(tmp.path());
-        let err =
-            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
-                .await
-                .expect_err("expected unsupported arrow type");
+        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
+            .await
+            .expect_err("expected unsupported arrow type");
 
         assert!(matches!(
             err,
@@ -543,10 +543,9 @@ mod tests {
         write_parquet_with_timestamps(&abs_path, &[Some(overflow_ms)])?;
 
         let location = TableLocation::local(tmp.path());
-        let err =
-            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Seconds(1))
-                .await
-                .expect_err("expected bucket overflow error");
+        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Seconds(1))
+            .await
+            .expect_err("expected bucket overflow error");
 
         assert!(matches!(
             err,
@@ -587,10 +586,9 @@ mod tests {
         std::fs::write(&abs_path, b"not a parquet file")?;
 
         let location = TableLocation::local(tmp.path());
-        let err =
-            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
-                .await
-                .expect_err("expected parquet read error");
+        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
+            .await
+            .expect_err("expected parquet read error");
 
         assert!(matches!(err, SegmentCoverageError::ParquetRead { .. }));
         Ok(())
