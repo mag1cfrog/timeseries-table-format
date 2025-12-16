@@ -27,6 +27,7 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::schema::types::ColumnDescPtr;
 use snafu::Backtrace;
 
+use crate::common::time_column::TimeColumnError;
 use crate::storage::{self, TableLocation, read_all_bytes};
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
 use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
@@ -83,14 +84,12 @@ enum TimestampUnit {
 }
 
 fn choose_timestamp_unit_from_logical(
-    path: &str,
     column: &str,
     physical: PhysicalType,
     logical: Option<&LogicalType>,
-) -> Result<TimestampUnit, SegmentMetaError> {
+) -> Result<TimestampUnit, TimeColumnError> {
     if physical != PhysicalType::INT64 {
-        return Err(SegmentMetaError::UnsupportedTimeType {
-            path: path.to_string(),
+        return Err(TimeColumnError::UnsupportedParquetType {
             column: column.to_string(),
             physical: format!("{physical:?}"),
             logical: format!("{logical:?}"),
@@ -103,8 +102,7 @@ fn choose_timestamp_unit_from_logical(
             TimeUnit::MICROS => Ok(TimestampUnit::Micros),
             TimeUnit::NANOS => Ok(TimestampUnit::Nanos),
         },
-        other => Err(SegmentMetaError::UnsupportedTimeType {
-            path: path.to_string(),
+        other => Err(TimeColumnError::UnsupportedParquetType {
             column: column.to_string(),
             physical: format!("{physical:?}"),
             logical: format!("{other:?}"),
@@ -271,9 +269,11 @@ pub async fn segment_meta_from_parquet_location(
         .columns()
         .iter()
         .position(|c| c.path().string() == time_column)
-        .ok_or_else(|| SegmentMetaError::MissingTimeColumn {
+        .ok_or_else(|| SegmentMetaError::TimeColumn {
             path: path_str.clone(),
-            column: time_column.to_string(),
+            source: TimeColumnError::Missing {
+                column: time_column.to_string(),
+            },
         })?;
 
     // Optionally sanity-check the physical type.
@@ -282,7 +282,13 @@ pub async fn segment_meta_from_parquet_location(
     let logical = col_descr.logical_type_ref();
 
     // 5) Decide which timestamp unit we support for this column.
-    let unit = choose_timestamp_unit_from_logical(&path_str, time_column, physical, logical)?;
+    let unit =
+        choose_timestamp_unit_from_logical(time_column, physical, logical).map_err(|source| {
+            SegmentMetaError::TimeColumn {
+                path: path_str.clone(),
+                source,
+            }
+        })?;
 
     // 6) Try fast path: min/max from row-group stats.
     let stats_min_max = min_max_from_stats(&path_str, time_column, time_idx, &reader)?;
@@ -523,9 +529,11 @@ mod tests {
     #[test]
     fn choose_timestamp_unit_rejects_wrong_logical() {
         // No logical type (None) should fail
-        let err = choose_timestamp_unit_from_logical("path", "ts", PhysicalType::INT64, None)
-            .unwrap_err();
-        assert!(matches!(err, SegmentMetaError::UnsupportedTimeType { .. }));
+        let err = choose_timestamp_unit_from_logical("ts", PhysicalType::INT64, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TimeColumnError::UnsupportedParquetType { .. }
+        ));
     }
 
     #[test]
@@ -534,9 +542,12 @@ mod tests {
             is_adjusted_to_u_t_c: true,
             unit: TimeUnit::MILLIS,
         };
-        let err = choose_timestamp_unit_from_logical("path", "ts", PhysicalType::INT32, Some(&lt))
-            .unwrap_err();
-        assert!(matches!(err, SegmentMetaError::UnsupportedTimeType { .. }));
+        let err =
+            choose_timestamp_unit_from_logical("ts", PhysicalType::INT32, Some(&lt)).unwrap_err();
+        assert!(matches!(
+            err,
+            TimeColumnError::UnsupportedParquetType { .. }
+        ));
     }
 
     #[test]
@@ -801,7 +812,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentMetaError::MissingTimeColumn { .. })
+            Err(SegmentMetaError::TimeColumn {
+                source: TimeColumnError::Missing { .. },
+                ..
+            })
         ));
         Ok(())
     }
@@ -825,7 +839,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentMetaError::UnsupportedTimeType { .. })
+            Err(SegmentMetaError::TimeColumn {
+                source: TimeColumnError::UnsupportedParquetType { .. },
+                ..
+            })
         ));
         Ok(())
     }

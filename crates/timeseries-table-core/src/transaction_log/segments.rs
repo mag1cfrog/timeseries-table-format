@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
 use crate::{
+    common::time_column::TimeColumnError,
     storage::{self, StorageError, TableLocation},
     transaction_log::LogicalSchemaError,
 };
@@ -124,28 +125,16 @@ pub enum SegmentMetaError {
         backtrace: Backtrace,
     },
 
-    /// The requested time column is not present in the Parquet schema.
-    #[snafu(display("Time column {column} not found in Parquet schema for segment at {path}"))]
-    MissingTimeColumn {
-        /// The path to the file missing the requested time column.
+    /// Time column validation or metadata error.
+    ///
+    /// This may occur when the timestamp column is missing, has an unsupported type,
+    /// or fails validation during coverage computation.
+    #[snafu(display("Time column error in segment at {path}: {source}"))]
+    TimeColumn {
+        /// The path to the segment file with a time column error.
         path: String,
-        /// The requested time column name that was not found.
-        column: String,
-    },
-
-    /// We found the time column but don't understand its physical type.
-    #[snafu(display(
-        "Unsupported physical type for time column {column} in segment at {path}: {physical}"
-    ))]
-    UnsupportedTimeType {
-        /// The path to the file with an unsupported time column physical type.
-        path: String,
-        /// The column name for the time column.
-        column: String,
-        /// The physical type encountered for the time column.
-        physical: String,
-        /// The logical type encountered for the time column.
-        logical: String,
+        /// The underlying time column error.
+        source: TimeColumnError,
     },
 
     /// Statistics exist but are not well-shaped (wrong length / unexpected type).
