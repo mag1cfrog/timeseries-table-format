@@ -6,6 +6,8 @@
 //! on-disk encoding. They are used by `LogAction::AddSegment` and related
 //! reader logic to rebuild the live segment map.
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,12 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct SegmentId(pub String);
+
+impl fmt::Display for SegmentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Supported on-disk file formats for segments.
 ///
