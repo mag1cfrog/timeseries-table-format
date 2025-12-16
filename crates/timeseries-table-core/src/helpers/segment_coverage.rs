@@ -397,18 +397,33 @@ mod tests {
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
     };
-    use arrow_array::builder::{Int32Builder, TimestampMillisecondBuilder};
+    use arrow_array::builder::{Int32Builder, StringBuilder, TimestampMillisecondBuilder};
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn write_parquet_with_timestamps(path: &Path, ts_values: &[Option<i64>]) -> TestResult {
+    fn write_parquet_batch(
+        path: &Path,
+        schema: Schema,
+        columns: Vec<Arc<dyn Array>>,
+    ) -> TestResult {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
+
+        let file = std::fs::File::create(path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    }
+
+    fn write_parquet_with_timestamps(path: &Path, ts_values: &[Option<i64>]) -> TestResult {
         let schema = Schema::new(vec![
             Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("val", DataType::Int32, false),
@@ -429,14 +444,7 @@ mod tests {
         }
         let val_array = Arc::new(val_builder.finish()) as Arc<dyn Array>;
 
-        let batch = RecordBatch::try_new(Arc::new(schema), vec![ts_array, val_array])?;
-
-        let file = std::fs::File::create(path)?;
-        let props = WriterProperties::builder().build();
-        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
-        writer.write(&batch)?;
-        writer.close()?;
-        Ok(())
+        write_parquet_batch(path, schema, vec![ts_array, val_array])
     }
 
     #[tokio::test]
@@ -463,6 +471,128 @@ mod tests {
         let buckets_hr: Vec<u32> = cov_hr.present().iter().collect();
         assert_eq!(buckets_hr, vec![0, 1]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_errors_on_missing_time_column() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/seg.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        write_parquet_with_timestamps(&abs_path, &[Some(1_000)])?;
+
+        let location = TableLocation::local(tmp.path());
+        let err = compute_segment_coverage(&location, rel_path, "missing_ts", &TimeBucket::Minutes(1))
+            .await
+            .expect_err("expected missing column error");
+
+        assert!(matches!(
+            err,
+            SegmentCoverageError::TimeColumn {
+                source: TimeColumnError::Missing { ref column },
+                ..
+            } if column == "missing_ts"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_rejects_unsupported_time_type() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/string_ts.parquet");
+        let abs_path = tmp.path().join(rel_path);
+
+        let schema = Schema::new(vec![
+            Field::new("ts", DataType::Utf8, false),
+            Field::new("val", DataType::Int32, false),
+        ]);
+        let mut ts_builder = StringBuilder::with_capacity(2, 8);
+        ts_builder.append_value("a");
+        ts_builder.append_value("b");
+        let ts_array = Arc::new(ts_builder.finish()) as Arc<dyn Array>;
+
+        let mut val_builder = Int32Builder::with_capacity(2);
+        val_builder.append_value(1);
+        val_builder.append_value(2);
+        let val_array = Arc::new(val_builder.finish()) as Arc<dyn Array>;
+
+        write_parquet_batch(&abs_path, schema, vec![ts_array, val_array])?;
+
+        let location = TableLocation::local(tmp.path());
+        let err =
+            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
+                .await
+                .expect_err("expected unsupported arrow type");
+
+        assert!(matches!(
+            err,
+            SegmentCoverageError::TimeColumn {
+                source: TimeColumnError::UnsupportedArrowType { ref datatype, .. },
+                ..
+            } if datatype == "Utf8"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_errors_on_bucket_overflow() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/overflow.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let overflow_ms = ((u32::MAX as i64) + 1) * 1_000;
+        write_parquet_with_timestamps(&abs_path, &[Some(overflow_ms)])?;
+
+        let location = TableLocation::local(tmp.path());
+        let err =
+            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Seconds(1))
+                .await
+                .expect_err("expected bucket overflow error");
+
+        assert!(matches!(
+            err,
+            SegmentCoverageError::BucketOverflow { bucket_id, .. }
+            if bucket_id == (u32::MAX as u64 + 1)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_bubbles_up_storage_errors() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("missing/seg.parquet");
+        let location = TableLocation::local(tmp.path());
+
+        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
+            .await
+            .expect_err("expected storage error");
+
+        assert!(matches!(
+            err,
+            SegmentCoverageError::Storage {
+                source: StorageError::NotFound { .. },
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_surfaces_parquet_read_errors() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/corrupt.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&abs_path, b"not a parquet file")?;
+
+        let location = TableLocation::local(tmp.path());
+        let err =
+            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
+                .await
+                .expect_err("expected parquet read error");
+
+        assert!(matches!(err, SegmentCoverageError::ParquetRead { .. }));
         Ok(())
     }
 }
