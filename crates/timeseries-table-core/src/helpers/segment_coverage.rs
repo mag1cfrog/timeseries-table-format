@@ -238,6 +238,26 @@ pub async fn compute_segment_coverage(
     // 4) Compute coverage.
     let mut bitmap = RoaringBitmap::new();
 
+    macro_rules! process_timestamp_array {
+        ($array_type: ty, $col: expr, $unit: expr) => {{
+            let arr = $col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
+                SegmentCoverageError::TimeColumn {
+                    path: path_str.clone(),
+                    source: TimeColumnError::UnsupportedArrowType {
+                        column: time_column.to_string(),
+                        datatype: $col.data_type().to_string(),
+                    },
+                }
+            })?;
+
+            if arr.null_count() == 0 {
+                add_buckets_from_values(&mut bitmap, &path_str, bucket_spec, $unit, arr.values())
+            } else {
+                add_buckets_from_iter(&mut bitmap, &path_str, bucket_spec, $unit, arr.iter())
+            }
+        }};
+    }
+
     for batch_res in reader {
         let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
             path: path_str.clone(),
@@ -249,127 +269,18 @@ pub async fn compute_segment_coverage(
 
         match col.data_type() {
             DataType::Timestamp(unit, _) => match unit {
-                TimeUnit::Second => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampSecondArray>()
-                        .ok_or_else(|| SegmentCoverageError::TimeColumn {
-                            path: path_str.clone(),
-                            source: TimeColumnError::UnsupportedArrowType {
-                                column: time_column.to_string(),
-                                datatype: col.data_type().to_string(),
-                            },
-                        })?;
-                    if arr.null_count() == 0 {
-                        add_buckets_from_values(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.values(),
-                        )?;
-                    } else {
-                        add_buckets_from_iter(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.iter(),
-                        )?;
-                    }
-                }
+                TimeUnit::Second => process_timestamp_array!(TimestampSecondArray, col, *unit)?,
 
                 TimeUnit::Millisecond => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampMillisecondArray>()
-                        .ok_or_else(|| SegmentCoverageError::TimeColumn {
-                            path: path_str.clone(),
-                            source: TimeColumnError::UnsupportedArrowType {
-                                column: time_column.to_string(),
-                                datatype: col.data_type().to_string(),
-                            },
-                        })?;
-
-                    if arr.null_count() == 0 {
-                        add_buckets_from_values(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.values(),
-                        )?;
-                    } else {
-                        add_buckets_from_iter(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.iter(),
-                        )?;
-                    }
+                    process_timestamp_array!(TimestampMillisecondArray, col, *unit)?
                 }
 
                 TimeUnit::Microsecond => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampMicrosecondArray>()
-                        .ok_or_else(|| SegmentCoverageError::TimeColumn {
-                            path: path_str.clone(),
-                            source: TimeColumnError::UnsupportedArrowType {
-                                column: time_column.to_string(),
-                                datatype: col.data_type().to_string(),
-                            },
-                        })?;
-
-                    if arr.null_count() == 0 {
-                        add_buckets_from_values(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.values(),
-                        )?;
-                    } else {
-                        add_buckets_from_iter(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.iter(),
-                        )?;
-                    }
+                    process_timestamp_array!(TimestampMicrosecondArray, col, *unit)?
                 }
 
                 TimeUnit::Nanosecond => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampNanosecondArray>()
-                        .ok_or_else(|| SegmentCoverageError::TimeColumn {
-                            path: path_str.clone(),
-                            source: TimeColumnError::UnsupportedArrowType {
-                                column: time_column.to_string(),
-                                datatype: col.data_type().to_string(),
-                            },
-                        })?;
-
-                    if arr.null_count() == 0 {
-                        add_buckets_from_values(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.values(),
-                        )?;
-                    } else {
-                        add_buckets_from_iter(
-                            &mut bitmap,
-                            &path_str,
-                            bucket_spec,
-                            *unit,
-                            arr.iter(),
-                        )?;
-                    }
+                    process_timestamp_array!(TimestampNanosecondArray, col, *unit)?
                 }
             },
 
