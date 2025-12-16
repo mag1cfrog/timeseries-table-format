@@ -29,6 +29,7 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::prelude::*;
 
+use crate::helpers::segment_coverage::SegmentCoverageError;
 use crate::{
     helpers::{
         parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
@@ -153,6 +154,42 @@ pub enum TableError {
         /// The timestamp value that could not be represented as i64 nanos.
         timestamp: DateTime<Utc>,
     },
+
+    /// Coverage sidecar read/write or computation error.
+    #[snafu(display("Coverage sidecar error: {source}"))]
+    SegmentCoverage {
+        /// Underlying coverage error.
+        #[snafu(source, backtrace)]
+        source: SegmentCoverageError,
+    },
+
+    /// Appending would overlap existing coverage for the same segment path.
+    #[snafu(display(
+        "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example={example_bucket:?})"
+    ))]
+    CoverageOverlap {
+        /// Relative path of the segment being appended.
+        segment_path: String,
+        /// Number of overlapping buckets detected.
+        overlap_count: u64,
+        /// Example overlapping bucket (if available) to aid debugging.
+        example_bucket: Option<u32>,
+    },
+
+    /// Existing segment lacks a coverage_path when coverage is required.
+    #[snafu(display(
+        "Cannot append because existing segment {segment_id} is missing coverage_path (v0.1 requires coverage_path for all segments once #39 is active)"
+    ))]
+    ExistingSegmentMissingCoverage {
+        /// Segment ID missing a coverage_path entry.
+        segment_id: SegmentId,
+    },
+
+    /// Table state is missing a coverage snapshot pointer when required.
+    #[snafu(display(
+        "Cannot append because table has segments but no table coverage snapshot pointer in state"
+    ))]
+    MissingTableCoveragePointer,
 }
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
