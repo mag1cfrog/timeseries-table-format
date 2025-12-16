@@ -154,6 +154,42 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
+    fn bucket_id_from_epoch_secs_clamps_negative() {
+        let spec = TimeBucket::Seconds(60);
+        assert_eq!(bucket_id_from_epoch_secs(&spec, -1), 0);
+        assert_eq!(bucket_id_from_epoch_secs(&spec, -120), 0);
+    }
+
+    #[test]
+    fn bucket_id_from_epoch_secs_respects_boundaries() {
+        let spec = TimeBucket::Minutes(1); // 60-second buckets
+        assert_eq!(bucket_id_from_epoch_secs(&spec, 0), 0);
+        assert_eq!(bucket_id_from_epoch_secs(&spec, 59), 0);
+        assert_eq!(bucket_id_from_epoch_secs(&spec, 60), 1);
+        assert_eq!(bucket_id_from_epoch_secs(&spec, 119), 1);
+        assert_eq!(bucket_id_from_epoch_secs(&spec, 120), 2);
+    }
+
+    #[test]
+    fn bucket_id_from_epoch_secs_varies_with_spec() {
+        let seconds_spec = TimeBucket::Seconds(10);
+        let minutes_spec = TimeBucket::Minutes(1); // 60s
+        let hours_spec = TimeBucket::Hours(1); // 3600s
+
+        // At 450 seconds (7.5 minutes): buckets differ by spec granularity.
+        let ts = 450;
+        assert_eq!(bucket_id_from_epoch_secs(&seconds_spec, ts), 45);
+        assert_eq!(bucket_id_from_epoch_secs(&minutes_spec, ts), 7);
+        assert_eq!(bucket_id_from_epoch_secs(&hours_spec, ts), 0);
+
+        // Crossing an hour boundary.
+        let ts = 3_600;
+        assert_eq!(bucket_id_from_epoch_secs(&seconds_spec, ts), 360);
+        assert_eq!(bucket_id_from_epoch_secs(&minutes_spec, ts), 60);
+        assert_eq!(bucket_id_from_epoch_secs(&hours_spec, ts), 1);
+    }
+
+    #[test]
     fn bucket_id_monotonic_seconds() {
         let spec = TimeBucket::Seconds(60); // 1-minute buckets
         let base = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
