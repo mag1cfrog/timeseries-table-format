@@ -65,6 +65,7 @@ pub enum CoverageError {
     #[snafu(display("Storage error while reading/writing coverage sidecar: {source}"))]
     Storage {
         /// The underlying storage error.
+        #[snafu(source, backtrace)]
         source: StorageError,
     },
 }
