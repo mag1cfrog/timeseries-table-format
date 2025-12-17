@@ -115,13 +115,9 @@ pub fn table_snapshot_path(
     Ok(p)
 }
 
-/// Deterministically derive a safe coverage id for a segment sidecar.
-///
-/// This produces an id that:
-/// - is stable across retries given the same inputs
-/// - contains only ASCII [a-z0-9-] characters
-/// - is bounded in length and passes validate_coverage_id
-pub fn segment_coverage_id_v1(
+fn coverage_id_v1(
+    domain_prefix: &[u8],
+    output_prefix: &str,
     bucket_spec: &TimeBucket,
     time_column: &str,
     coverage_bytes: &[u8],
@@ -130,7 +126,7 @@ pub fn segment_coverage_id_v1(
 
     // domain separation
 
-    h.update(b"segcov-v1");
+    h.update(domain_prefix);
     h.update(b"\0");
 
     // stable encoding for TimeBucket (avoid Display/to_string)
@@ -162,7 +158,27 @@ pub fn segment_coverage_id_v1(
 
     // 32 hex chars = 128 bits of hash, plenty for collisions here.
     // Prefix avoids leading dot and provides easy debugging.
-    format!("segcov-{}", &hex[..32])
+    format!("{output_prefix}-{}", &hex[..32])
+}
+
+/// Deterministically derive a safe coverage id for a segment sidecar.
+///
+/// This produces an id that:
+/// - is stable across retries given the same inputs
+/// - contains only ASCII [a-z0-9-] characters
+/// - is bounded in length and passes validate_coverage_id
+pub fn segment_coverage_id_v1(
+    bucket_spec: &TimeBucket,
+    time_column: &str,
+    coverage_bytes: &[u8],
+) -> String {
+    coverage_id_v1(
+        b"segcov-v1",
+        "segcov",
+        bucket_spec,
+        time_column,
+        coverage_bytes,
+    )
 }
 
 /// Deterministically derive a safe coverage id for a table snapshot sidecar.
@@ -176,43 +192,13 @@ pub fn table_coverage_id_v1(
     time_column: &str,
     coverage_bytes: &[u8],
 ) -> String {
-    let mut h = blake3::Hasher::new();
-
-    // domain separation
-
-    h.update(b"tblcov-v1");
-    h.update(b"\0");
-
-    // stable encoding for TimeBucket (avoid Display/to_string)
-    match bucket_spec {
-        TimeBucket::Seconds(n) => {
-            h.update(b"S");
-            h.update(&n.to_le_bytes());
-        }
-        TimeBucket::Minutes(n) => {
-            h.update(b"M");
-            h.update(&n.to_le_bytes());
-        }
-        TimeBucket::Hours(n) => {
-            h.update(b"H");
-            h.update(&n.to_le_bytes());
-        }
-        TimeBucket::Days(n) => {
-            h.update(b"D");
-            h.update(&n.to_le_bytes());
-        }
-    }
-
-    h.update(b"\0");
-    h.update(time_column.as_bytes());
-    h.update(b"\0");
-    h.update(coverage_bytes);
-
-    let hex = h.finalize().to_hex();
-
-    // 32 hex chars = 128 bits of hash, plenty for collisions here.
-    // Prefix avoids leading dot and provides easy debugging.
-    format!("tblcov-{}", &hex[..32])
+    coverage_id_v1(
+        b"tblcov-v1",
+        "tblcov",
+        bucket_spec,
+        time_column,
+        coverage_bytes,
+    )
 }
 
 #[cfg(test)]
