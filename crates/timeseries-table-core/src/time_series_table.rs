@@ -682,7 +682,7 @@ impl TimeSeriesTable {
         })
     }
 
-    /// Append a new Parquet segment, registering it in the transaction log.
+    /// Append a new Parquet segment with a caller-provided `segment_id`, registering it in the transaction log.
     ///
     /// v0.1 behavior:
     /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
@@ -690,6 +690,8 @@ impl TimeSeriesTable {
     /// - If the table has no logical_schema yet, adopt this segment schema
     ///   as canonical and write an UpdateTableMeta + AddSegment commit.
     /// - Otherwise, enforce "no schema evolution" via schema_helpers.
+    /// - Compute coverage for the segment and table; reject if coverage overlaps.
+    /// - Write the segment coverage sidecar before committing (safe to orphan on failure).
     /// - Commit with OCC on the current version.
     /// - Update in-memory TableState on success.
     ///
