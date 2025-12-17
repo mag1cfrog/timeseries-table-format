@@ -32,8 +32,7 @@ use snafu::prelude::*;
 use crate::coverage::Coverage;
 use crate::coverage::serde::coverage_to_bytes;
 use crate::helpers::coverage_sidecar::{
-    CoverageError, read_coverage_sidecar, write_coverage_sidecar_atomic,
-    write_coverage_sidecar_new_bytes,
+    CoverageError, read_coverage_sidecar, write_coverage_sidecar_new_bytes,
 };
 use crate::helpers::segment_coverage::{SegmentCoverageError, compute_segment_coverage};
 use crate::layout::coverage::{
@@ -808,9 +807,17 @@ impl TimeSeriesTable {
             }
         })?;
 
-        write_coverage_sidecar_atomic(&self.location, &snapshot_path, &new_table_cov)
+        match write_coverage_sidecar_new_bytes(&self.location, &snapshot_path, &new_snap_cov_bytes)
             .await
-            .context(CoverageSidecarSnafu)?;
+        {
+            Ok(()) => {}
+            Err(CoverageError::Storage {
+                source: StorageError::AlreadyExists { .. },
+            }) => {
+                // ok: same id implies same intended content
+            }
+            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+        }
 
         // 7) Build actions and commit.
         segment_meta.coverage_path = Some(seg_cov_path.to_string_lossy().to_string());
