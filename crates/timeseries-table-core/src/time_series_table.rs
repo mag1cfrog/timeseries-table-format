@@ -34,17 +34,17 @@ use crate::coverage::serde::coverage_to_bytes;
 use crate::helpers::coverage_sidecar::{
     CoverageError, read_coverage_sidecar, write_coverage_sidecar_new_bytes,
 };
-use crate::helpers::segment_coverage::{SegmentCoverageError, compute_segment_coverage};
+use crate::helpers::parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes};
+use crate::helpers::segment_coverage::{
+    SegmentCoverageError, compute_segment_coverage_from_parquet_bytes,
+};
 use crate::layout::coverage::{
     segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
 };
 use crate::transaction_log::TimeBucket;
 use crate::transaction_log::table_state::TableCoveragePointer;
 use crate::{
-    helpers::{
-        parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
-        schema::{SchemaCompatibilityError, ensure_schema_exact_match},
-    },
+    helpers::schema::{SchemaCompatibilityError, ensure_schema_exact_match},
     storage::{self, StorageError, TableLocation},
     transaction_log::{
         CommitError, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TableState,
@@ -682,26 +682,22 @@ impl TimeSeriesTable {
         })
     }
 
-    /// Append a new Parquet segment with a caller-provided `segment_id`, registering it in the transaction log.
+    /// Core append implementation that operates on already-loaded Parquet bytes.
     ///
-    /// v0.1 behavior:
-    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
-    /// - Derive the segment logical schema from the Parquet file.
-    /// - If the table has no logical_schema yet, adopt this segment schema
-    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
-    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
-    /// - Compute coverage for the segment and table; reject if coverage overlaps.
-    /// - Write the segment coverage sidecar before committing (safe to orphan on failure).
-    /// - Commit with OCC on the current version.
-    /// - Update in-memory TableState on success.
+    /// This contains the full v0.1 append flow (schema adoption/enforcement,
+    /// coverage computation + overlap detection, sidecar writes, OCC commit,
+    /// and in-memory state update). The public
+    /// `append_parquet_segment_with_id` wrapper is responsible only for
+    /// fetching the bytes from storage before delegating here.
     ///
-    /// v0.1: duplicates (same segment_id/path) are allowed if their coverage
-    /// does not overlap existing data; otherwise overlap is rejected.
-    pub async fn append_parquet_segment_with_id(
+    /// Callers must ensure `data` corresponds to `relative_path`; the function
+    /// does not re-read from storage.
+    async fn append_parquet_segment_with_id_and_bytes(
         &mut self,
         segment_id: SegmentId,
         relative_path: &str,
         time_column: &str,
+        data: Bytes,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -712,13 +708,11 @@ impl TimeSeriesTable {
 
         // 1) Segment meta + schema.
         let mut segment_meta =
-            segment_meta_from_parquet_location(&self.location, rel_path, segment_id, time_column)
-                .await
+            segment_meta_from_parquet_bytes(rel_path, segment_id, time_column, data.clone())
                 .context(SegmentMetaSnafu)?;
 
-        let segment_schema = logical_schema_from_parquet_location(&self.location, rel_path)
-            .await
-            .context(SegmentMetaSnafu)?;
+        let segment_schema =
+            logical_schema_from_parquet_bytes(rel_path, data.clone()).context(SegmentMetaSnafu)?;
 
         // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
@@ -754,10 +748,13 @@ impl TimeSeriesTable {
             load_table_snapshot_coverage(&self.location, &self.state, &bucket_spec).await?;
 
         // 4) Compute segment coverage.
-        let segment_cov =
-            compute_segment_coverage(&self.location, rel_path, time_column, &bucket_spec)
-                .await
-                .context(SegmentCoverageSnafu)?;
+        let segment_cov = compute_segment_coverage_from_parquet_bytes(
+            rel_path,
+            time_column,
+            &bucket_spec,
+            data.clone(),
+        )
+        .context(SegmentCoverageSnafu)?;
 
         // 5) Overlap detection.
         let overlap = segment_cov.intersect(&table_cov);
@@ -863,6 +860,45 @@ impl TimeSeriesTable {
         });
 
         Ok(new_version)
+    }
+
+    /// Append a new Parquet segment with a caller-provided `segment_id`, registering it in the transaction log.
+    ///
+    /// v0.1 behavior:
+    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
+    /// - Derive the segment logical schema from the Parquet file.
+    /// - If the table has no logical_schema yet, adopt this segment schema
+    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
+    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
+    /// - Compute coverage for the segment and table; reject if coverage overlaps.
+    /// - Write the segment coverage sidecar before committing (safe to orphan on failure).
+    /// - Commit with OCC on the current version.
+    /// - Update in-memory TableState on success.
+    ///
+    /// v0.1: duplicates (same segment_id/path) are allowed if their coverage
+    /// does not overlap existing data; otherwise overlap is rejected.
+    ///
+    /// This wrapper reads the Parquet bytes from storage, then delegates to
+    /// `append_parquet_segment_with_id_and_bytes` for the core logic.
+    pub async fn append_parquet_segment_with_id(
+        &mut self,
+        segment_id: SegmentId,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<u64, TableError> {
+        let rel_path = Path::new(relative_path);
+
+        let bytes = storage::read_all_bytes(&self.location, rel_path)
+            .await
+            .context(StorageSnafu)?;
+
+        self.append_parquet_segment_with_id_and_bytes(
+            segment_id,
+            relative_path,
+            time_column,
+            Bytes::from(bytes),
+        )
+        .await
     }
 
     /// Scan the time-series table for record batches overlapping `[ts_start, ts_end)`,
