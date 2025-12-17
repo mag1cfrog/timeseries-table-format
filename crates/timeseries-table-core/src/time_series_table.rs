@@ -36,7 +36,9 @@ use crate::helpers::coverage_sidecar::{
     write_coverage_sidecar_new_bytes,
 };
 use crate::helpers::segment_coverage::{SegmentCoverageError, compute_segment_coverage};
-use crate::layout::coverage::{segment_coverage_id_v1, segment_coverage_path, table_snapshot_path};
+use crate::layout::coverage::{
+    segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
+};
 use crate::transaction_log::TimeBucket;
 use crate::transaction_log::table_state::TableCoveragePointer;
 use crate::{
@@ -798,7 +800,7 @@ impl TimeSeriesTable {
             coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
                 source: CoverageError::Serde { source },
             })?;
-        let snapshot_id = segment_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
+        let snapshot_id = table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
 
         let snapshot_path = table_snapshot_path(new_version_guess, &snapshot_id).map_err(|e| {
             TableError::CoverageSidecar {
