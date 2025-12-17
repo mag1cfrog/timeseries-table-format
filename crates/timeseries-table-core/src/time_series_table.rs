@@ -9,8 +9,18 @@
 //!
 //! In v0.1 this is intentionally read-heavy and write-light:
 //! - `open` reconstructs state from the transaction log,
-//! - `create` bootstraps a fresh table with an initial metadata commit.
-//!   Later issues will add append APIs, coverage, and scanning.
+//! - `create` bootstraps a fresh table with an initial metadata commit,
+//! - append APIs handle schema enforcement, coverage sidecars, and OCC,
+//! - range scans stream filtered record batches.
+//!
+//! Append entry points:
+//! - `append_parquet_segment_with_id`: caller supplies a `SegmentId`, bytes are read from storage, and the core append logic enforces schema and coverage.
+//! - `append_parquet_segment`: derives a deterministic `SegmentId` from `(relative_path, bytes)` before delegating to the same core logic.
+//!
+//! Both append paths:
+//! - compute segment coverage, reject overlaps against the current snapshot, and persist sidecars,
+//! - commit `AddSegment` with `coverage_path` plus `UpdateTableCoverage` atomically,
+//! - fail fast if the table state is missing coverage pointers or has segments without `coverage_path`.
 
 use std::{path::Path, pin::Pin};
 
@@ -29,11 +39,22 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::prelude::*;
 
+use crate::coverage::Coverage;
+use crate::coverage::serde::coverage_to_bytes;
+use crate::helpers::coverage_sidecar::{
+    CoverageError, read_coverage_sidecar, write_coverage_sidecar_new_bytes,
+};
+use crate::helpers::parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes};
+use crate::helpers::segment_coverage::{
+    SegmentCoverageError, compute_segment_coverage_from_parquet_bytes,
+};
+use crate::layout::coverage::{
+    segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
+};
+use crate::transaction_log::TimeBucket;
+use crate::transaction_log::table_state::TableCoveragePointer;
 use crate::{
-    helpers::{
-        parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
-        schema::{SchemaCompatibilityError, ensure_schema_exact_match},
-    },
+    helpers::schema::{SchemaCompatibilityError, ensure_schema_exact_match},
     storage::{self, StorageError, TableLocation},
     transaction_log::{
         CommitError, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TableState,
@@ -153,10 +174,113 @@ pub enum TableError {
         /// The timestamp value that could not be represented as i64 nanos.
         timestamp: DateTime<Utc>,
     },
+
+    /// Segment Coverage error.
+    #[snafu(display("Segment coverage error: {source}"))]
+    SegmentCoverage {
+        /// Underlying coverage error.
+        #[snafu(source, backtrace)]
+        source: SegmentCoverageError,
+    },
+
+    /// Table coverage pointer uses a bucket spec that doesn't match the table's index bucket.
+    #[snafu(display(
+        "Table coverage bucket spec mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
+    ))]
+    TableCoverageBucketMismatch {
+        /// Bucket spec defined by the table's time index.
+        expected: TimeBucket,
+        /// Bucket spec recorded in the table coverage pointer.
+        actual: TimeBucket,
+        /// Log version where the mismatching coverage pointer was recorded.
+        pointer_version: u64,
+    },
+
+    /// Coverage sidecar read/write or computation error.
+    #[snafu(display("Coverage sidecar error: {source}"))]
+    CoverageSidecar {
+        /// Underlying Coverage error.
+        #[snafu(source, backtrace)]
+        source: CoverageError,
+    },
+
+    /// Appending would overlap existing coverage for the same segment path.
+    #[snafu(display(
+        "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example={example_bucket:?})"
+    ))]
+    CoverageOverlap {
+        /// Relative path of the segment being appended.
+        segment_path: String,
+        /// Number of overlapping buckets detected.
+        overlap_count: u64,
+        /// Example overlapping bucket (if available) to aid debugging.
+        example_bucket: Option<u32>,
+    },
+
+    /// Existing segment lacks a coverage_path when coverage is required.
+    #[snafu(display(
+        "Cannot append because existing segment {segment_id} is missing coverage_path (required for coverage tracking)"
+    ))]
+    ExistingSegmentMissingCoverage {
+        /// Segment ID missing a coverage_path entry.
+        segment_id: SegmentId,
+    },
+
+    /// Table state is missing a coverage snapshot pointer when required.
+    #[snafu(display(
+        "Cannot append because table has segments but no table coverage snapshot pointer in state"
+    ))]
+    MissingTableCoveragePointer,
 }
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
 pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;
+
+fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), TableError> {
+    for seg in state.segments.values() {
+        if seg.coverage_path.is_none() {
+            return ExistingSegmentMissingCoverageSnafu {
+                segment_id: seg.segment_id.clone(),
+            }
+            .fail();
+        }
+    }
+
+    Ok(())
+}
+
+async fn load_table_snapshot_coverage(
+    location: &TableLocation,
+    state: &TableState,
+    bucket_spec: &TimeBucket,
+) -> Result<Coverage, TableError> {
+    match &state.table_coverage {
+        None => {
+            // If there are no segments, treat as empty (first append case).
+            // If there are segments, this is suspicious in v0.1: fail.
+            if state.segments.is_empty() {
+                Ok(Coverage::empty())
+            } else {
+                MissingTableCoveragePointerSnafu.fail()
+            }
+        }
+        Some(ptr) => {
+            // Extra safety: ensure bucket spec matches current index.bucket
+            ensure!(
+                ptr.bucket_spec == *bucket_spec,
+                TableCoverageBucketMismatchSnafu {
+                    expected: bucket_spec.clone(),
+                    actual: ptr.bucket_spec.clone(),
+                    pointer_version: ptr.version,
+                }
+            );
+
+            read_coverage_sidecar(location, Path::new(&ptr.coverage_path))
+                .await
+                .context(CoverageSidecarSnafu)
+        }
+    }
+}
 
 fn to_bounds_i64(
     field: &Field,
@@ -438,6 +562,23 @@ pub struct TimeSeriesTable {
     index: TimeIndexSpec,
 }
 
+/// Derive a deterministic segment id for an append entry.
+///
+/// This is content-addressable: it hashes both the relative path and the bytes so
+/// retries with the same input stay stable while same bytes at different paths
+/// diverge. The returned id uses the `seg-` prefix followed by 32 hex chars of
+/// the BLAKE3 digest, keeping ids bounded and safe for idempotent appends.
+fn segment_id_v1(relative_path: &str, data: &Bytes) -> SegmentId {
+    let mut h = blake3::Hasher::new();
+    h.update(b"segment-id-v1");
+    h.update(b"\0");
+    h.update(relative_path.as_bytes());
+    h.update(b"\0");
+    h.update(data.as_ref());
+    let hex = h.finalize().to_hex();
+    SegmentId(format!("seg-{}", &hex[..32]))
+}
+
 impl TimeSeriesTable {
     /// Return the current committed table state.
     pub fn state(&self) -> &TableState {
@@ -568,41 +709,39 @@ impl TimeSeriesTable {
         })
     }
 
-    /// Append a new Parquet segment, registering it in the transaction log.
+    /// Core append implementation that operates on already-loaded Parquet bytes.
     ///
-    /// v0.1 behavior:
-    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
-    /// - Derive the segment logical schema from the Parquet file.
-    /// - If the table has no logical_schema yet, adopt this segment schema
-    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
-    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
-    /// - Commit with OCC on the current version.
-    /// - Update in-memory TableState on success.
+    /// This contains the full v0.1 append flow (schema adoption/enforcement,
+    /// coverage computation + overlap detection, sidecar writes, OCC commit,
+    /// and in-memory state update). The public
+    /// `append_parquet_segment_with_id` wrapper is responsible only for
+    /// fetching the bytes from storage before delegating here.
     ///
-    /// v0.1: duplicates (same segment_id/path) are allowed; they’ll just be
-    /// treated as distinct segments. We can tighten that later.
-    pub async fn append_parquet_segment(
+    /// Callers must ensure `data` corresponds to `relative_path`; the function
+    /// does not re-read from storage.
+    async fn append_parquet_segment_with_id_and_bytes(
         &mut self,
         segment_id: SegmentId,
         relative_path: &str,
         time_column: &str,
+        data: Bytes,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
+        let expected_version = self.state.version;
+        let bucket_spec = self.index.bucket.clone();
 
-        // 1) Build SegmentMeta from Parquet (ts_min, ts_max, row_count, basic validation).
-        let segment_meta =
-            segment_meta_from_parquet_location(&self.location, rel_path, segment_id, time_column)
-                .await
+        // 0) Coverage readiness checks.
+        ensure_existing_segments_have_coverage(&self.state)?;
+
+        // 1) Segment meta + schema.
+        let mut segment_meta =
+            segment_meta_from_parquet_bytes(rel_path, segment_id, time_column, data.clone())
                 .context(SegmentMetaSnafu)?;
 
-        // 2) Derive the segment's LogicalSchema from the same Parquet file.
-        let segment_schema = logical_schema_from_parquet_location(&self.location, rel_path)
-            .await
-            .context(SegmentMetaSnafu)?;
+        let segment_schema =
+            logical_schema_from_parquet_bytes(rel_path, data.clone()).context(SegmentMetaSnafu)?;
 
-        let expected_version = self.state.version;
-        let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
-        // 3) Decide schema behavior based on both schema *and* version:
+        // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
         // - logical_schema == None && version == 1:
         //     first append after create() — adopt this segment’s schema.
@@ -610,49 +749,137 @@ impl TimeSeriesTable {
         //     table is in a bad state for v0.1 → error.
         // - logical_schema == Some(..):
         //     enforce “no schema evolution” via ensure_schema_exact_match.
-        let (actions, new_table_meta) = match maybe_table_schema {
+        let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
+
+        let maybe_updated_meta = match maybe_table_schema {
             None if expected_version == 1 => {
-                // Bootstrap case: adopt this segment’s schema as canonical in the
-                // same commit that adds the segment.
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
-
-                let actions = vec![
-                    LogAction::UpdateTableMeta(updated_meta.clone()),
-                    LogAction::AddSegment(segment_meta.clone()),
-                ];
-
-                (actions, Some(updated_meta))
+                Some(updated_meta)
             }
-
             None => {
                 return MissingCanonicalSchemaSnafu {
                     version: expected_version,
                 }
                 .fail();
             }
-
             Some(table_schema) => {
                 ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
                     .context(SchemaCompatibilitySnafu)?;
-
-                let actions = vec![LogAction::AddSegment(segment_meta.clone())];
-
-                (actions, None)
+                None
             }
         };
 
-        // 4) Commit with OCC. Conflict → CommitError::Conflict → TableError::TransactionLog.
+        // 3) Load current table snapshot coverage (or empty if first append).
+        let table_cov =
+            load_table_snapshot_coverage(&self.location, &self.state, &bucket_spec).await?;
+
+        // 4) Compute segment coverage.
+        let segment_cov = compute_segment_coverage_from_parquet_bytes(
+            rel_path,
+            time_column,
+            &bucket_spec,
+            data.clone(),
+        )
+        .context(SegmentCoverageSnafu)?;
+
+        // 5) Overlap detection.
+        let overlap = segment_cov.intersect(&table_cov);
+        let overlap_count = overlap.cardinality();
+        if overlap_count > 0 {
+            let example_bucket = overlap.present().iter().next();
+            return CoverageOverlapSnafu {
+                segment_path: relative_path.to_string(),
+                overlap_count,
+                example_bucket,
+            }
+            .fail();
+        }
+        let seg_cov_bytes =
+            coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Serde { source },
+            })?;
+
+        // 6) Write sidecars BEFORE commit (orphan files OK on commit failure)
+        let coverage_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
+        let seg_cov_path =
+            segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Layout { source },
+            })?;
+        match write_coverage_sidecar_new_bytes(&self.location, &seg_cov_path, &seg_cov_bytes).await
+        {
+            Ok(()) => {}
+            Err(CoverageError::Storage {
+                source: StorageError::AlreadyExists { .. },
+            }) => {
+                // ok: same id implies same intended content
+            }
+            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+        }
+
+        let new_version_guess = expected_version + 1;
+
+        let new_table_cov = table_cov.union(&segment_cov);
+
+        let new_snap_cov_bytes =
+            coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Serde { source },
+            })?;
+        let snapshot_id = table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
+
+        let snapshot_path = table_snapshot_path(new_version_guess, &snapshot_id).map_err(|e| {
+            TableError::CoverageSidecar {
+                source: CoverageError::Layout { source: e },
+            }
+        })?;
+
+        match write_coverage_sidecar_new_bytes(&self.location, &snapshot_path, &new_snap_cov_bytes)
+            .await
+        {
+            Ok(()) => {}
+            Err(CoverageError::Storage {
+                source: StorageError::AlreadyExists { .. },
+            }) => {
+                // ok: same id implies same intended content
+            }
+            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+        }
+
+        // 7) Build actions and commit.
+        segment_meta.coverage_path = Some(seg_cov_path.to_string_lossy().to_string());
+
+        let mut actions = Vec::new();
+        if let Some(updated_meta) = maybe_updated_meta.clone() {
+            actions.push(LogAction::UpdateTableMeta(updated_meta));
+        }
+
+        actions.push(LogAction::AddSegment(segment_meta.clone()));
+        actions.push(LogAction::UpdateTableCoverage {
+            bucket_spec: bucket_spec.clone(),
+            coverage_path: snapshot_path.to_string_lossy().to_string(),
+        });
+
         let new_version = self
             .log
             .commit_with_expected_version(expected_version, actions)
             .await
             .context(TransactionLogSnafu)?;
 
-        // 5) Update in-memory state.
+        // OCC invariant: a successful commit_with_expected_version must return
+        // the same "next" version we predicted when constructing `snapshot_path`.
+        // If this ever diverges, it indicates a severe bug between snapshot path
+        // construction and the transaction log implementation, so we panic rather
+        // than continuing with an inconsistent in-memory state.
+        assert_eq!(
+            new_version, new_version_guess,
+            "transaction log returned unexpected version: expected {}, got {}",
+            new_version_guess, new_version
+        );
+
+        // 8) Update in-memory state.
         self.state.version = new_version;
 
-        if let Some(updated_meta) = new_table_meta {
+        if let Some(updated_meta) = maybe_updated_meta {
             self.state.table_meta = updated_meta
         }
 
@@ -660,7 +887,76 @@ impl TimeSeriesTable {
             .segments
             .insert(segment_meta.segment_id.clone(), segment_meta);
 
+        // Also update the snapshot pointer in state.
+        self.state.table_coverage = Some(TableCoveragePointer {
+            bucket_spec,
+            coverage_path: snapshot_path.to_string_lossy().to_string(),
+            version: new_version,
+        });
+
         Ok(new_version)
+    }
+
+    /// Append a new Parquet segment with a caller-provided `segment_id`, registering it in the transaction log.
+    ///
+    /// v0.1 behavior:
+    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
+    /// - Derive the segment logical schema from the Parquet file.
+    /// - If the table has no logical_schema yet, adopt this segment schema
+    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
+    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
+    /// - Compute coverage for the segment and table; reject if coverage overlaps.
+    /// - Write the segment coverage sidecar before committing (safe to orphan on failure).
+    /// - Commit with OCC on the current version.
+    /// - Update in-memory TableState on success.
+    ///
+    /// v0.1: duplicates (same segment_id/path) are allowed if their coverage
+    /// does not overlap existing data; otherwise overlap is rejected.
+    ///
+    /// This wrapper reads the Parquet bytes from storage, then delegates to
+    /// `append_parquet_segment_with_id_and_bytes` for the core logic.
+    pub async fn append_parquet_segment_with_id(
+        &mut self,
+        segment_id: SegmentId,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<u64, TableError> {
+        let rel_path = Path::new(relative_path);
+
+        let bytes = storage::read_all_bytes(&self.location, rel_path)
+            .await
+            .context(StorageSnafu)?;
+
+        self.append_parquet_segment_with_id_and_bytes(
+            segment_id,
+            relative_path,
+            time_column,
+            Bytes::from(bytes),
+        )
+        .await
+    }
+
+    /// Append a Parquet segment using a deterministic, content-derived `segment_id`.
+    ///
+    /// This wrapper reads the Parquet bytes from storage, derives `segment_id`
+    /// via `segment_id_v1(relative_path, bytes)`, then delegates to
+    /// `append_parquet_segment_with_id_and_bytes` for the core logic.
+    /// Behavior (schema adoption/enforcement, coverage, OCC, state updates)
+    /// matches `append_parquet_segment_with_id`.
+    pub async fn append_parquet_segment(
+        &mut self,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<u64, TableError> {
+        let rel_path = Path::new(relative_path);
+        let bytes = storage::read_all_bytes(&self.location, rel_path)
+            .await
+            .context(StorageSnafu)?;
+        let data = Bytes::from(bytes);
+
+        let segment_id = segment_id_v1(relative_path, &data);
+        self.append_parquet_segment_with_id_and_bytes(segment_id, relative_path, time_column, data)
+            .await
     }
 
     /// Scan the time-series table for record batches overlapping `[ts_start, ts_end)`,
@@ -715,9 +1011,12 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::common::time_column::TimeColumnError;
+    use crate::helpers::coverage_sidecar::read_coverage_sidecar;
+    use crate::helpers::segment_coverage::compute_segment_coverage_from_parquet_bytes;
     use crate::storage::TableLocation;
     use crate::transaction_log::segments::{FileFormat, SegmentId, SegmentMetaError};
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
+    use crate::transaction_log::table_state::TableCoveragePointer;
     use crate::transaction_log::{
         CommitError, LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
         TransactionLogStore,
@@ -727,6 +1026,7 @@ mod tests {
         TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
     };
     use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};
+    use bytes::Bytes;
     use chrono::{TimeZone, Utc};
     use futures::StreamExt;
     use parquet::arrow::ArrowWriter;
@@ -1261,7 +1561,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_missing_time_column_errors() -> TestResult {
+    async fn append_parquet_segment_with_id_missing_time_column_errors() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1272,7 +1572,7 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let err = table
-            .append_parquet_segment(SegmentId("seg-no-ts".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-no-ts".to_string()), rel, "ts")
             .await
             .expect_err("expected missing time column");
 
@@ -1293,7 +1593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_updates_state_and_log() -> TestResult {
+    async fn append_parquet_segment_with_id_updates_state_and_log() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1314,7 +1614,7 @@ mod tests {
         )?;
 
         let new_version = table
-            .append_parquet_segment(SegmentId("seg-1".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-1".to_string()), rel_path, "ts")
             .await?;
 
         assert_eq!(new_version, 2);
@@ -1347,7 +1647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_adopts_schema_when_missing() -> TestResult {
+    async fn append_parquet_segment_with_id_adopts_schema_when_missing() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -1380,7 +1680,7 @@ mod tests {
         )?;
 
         let new_version = table
-            .append_parquet_segment(SegmentId("seg-adopt".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-adopt".to_string()), rel_path, "ts")
             .await?;
 
         assert_eq!(new_version, 2);
@@ -1404,7 +1704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_rejects_schema_mismatch() -> TestResult {
+    async fn append_parquet_segment_with_id_rejects_schema_mismatch() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1424,7 +1724,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment(SegmentId("seg-bad".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-bad".to_string()), rel_path, "ts")
             .await
             .expect_err("expected schema mismatch");
 
@@ -1441,7 +1741,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_allows_duplicate_id_and_path() -> TestResult {
+    async fn append_parquet_segment_with_id_allows_same_id_with_nonoverlapping_coverage()
+    -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1461,7 +1762,7 @@ mod tests {
             }],
         )?;
         let v2 = table
-            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
             .await?;
         assert_eq!(v2, 2);
         assert_eq!(table.state.version, 2);
@@ -1482,12 +1783,12 @@ mod tests {
             false,
             &[
                 TestRow {
-                    ts_millis: 2_000,
+                    ts_millis: 120_000,
                     symbol: "B",
                     price: 20.0,
                 },
                 TestRow {
-                    ts_millis: 3_000,
+                    ts_millis: 121_000,
                     symbol: "C",
                     price: 30.0,
                 },
@@ -1495,7 +1796,7 @@ mod tests {
         )?;
 
         let v3 = table
-            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
             .await?;
         assert_eq!(v3, 3);
         assert_eq!(table.state.version, 3);
@@ -1506,8 +1807,8 @@ mod tests {
             .get(&SegmentId("seg-dup".to_string()))
             .expect("segment retained after duplicate append");
         assert_eq!(seg.row_count, 2);
-        assert_eq!(seg.ts_min.timestamp_millis(), 2_000);
-        assert_eq!(seg.ts_max.timestamp_millis(), 3_000);
+        assert_eq!(seg.ts_min.timestamp_millis(), 120_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 121_000);
 
         let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         assert!(log_dir.join("0000000003.json").is_file());
@@ -1515,7 +1816,217 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_conflict_returns_error() -> TestResult {
+    async fn append_parquet_segment_generates_id_and_updates_snapshot() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-auto-1.parquet";
+        let rel2 = "data/seg-auto-2.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+            ],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 120_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+                TestRow {
+                    ts_millis: 121_000,
+                    symbol: "D",
+                    price: 40.0,
+                },
+            ],
+        )?;
+
+        let v2 = table.append_parquet_segment(rel1, "ts").await?;
+        let v3 = table.append_parquet_segment(rel2, "ts").await?;
+        assert_eq!(v2, 2);
+        assert_eq!(v3, 3);
+
+        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
+        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
+
+        let expected_id1 = segment_id_v1(rel1, &data1);
+        let expected_id2 = segment_id_v1(rel2, &data2);
+
+        let seg1 = table
+            .state
+            .segments
+            .get(&expected_id1)
+            .expect("segment 1 present");
+        let seg2 = table
+            .state
+            .segments
+            .get(&expected_id2)
+            .expect("segment 2 present");
+        assert!(seg1.coverage_path.is_some());
+        assert!(seg2.coverage_path.is_some());
+
+        let bucket_spec = table.index_spec().bucket.clone();
+
+        let cov1 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel1),
+            "ts",
+            &bucket_spec,
+            data1.clone(),
+        )?;
+        let cov2 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel2),
+            "ts",
+            &bucket_spec,
+            data2.clone(),
+        )?;
+        let expected_snapshot = cov1.union(&cov2);
+
+        let ptr = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("table snapshot pointer present after append");
+        assert_eq!(ptr.version, v3);
+        assert_eq!(ptr.bucket_spec, bucket_spec);
+
+        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+
+        assert_eq!(snapshot_cov.present(), expected_snapshot.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_rejects_overlap() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-overlap-a.parquet";
+        let rel2 = "data/seg-overlap-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_500,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+
+        let err = table
+            .append_parquet_segment(rel2, "ts")
+            .await
+            .expect_err("overlapping append should fail");
+
+        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_snapshot_survives_reopen() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-reopen-a.parquet";
+        let rel2 = "data/seg-reopen-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
+
+        let reopened = TimeSeriesTable::open(location.clone()).await?;
+        let ptr = reopened
+            .state()
+            .table_coverage
+            .as_ref()
+            .expect("table snapshot pointer present after reopen");
+
+        let bucket_spec = reopened.index_spec().bucket.clone();
+        assert_eq!(ptr.bucket_spec, bucket_spec);
+
+        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
+        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
+
+        let cov1 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel1),
+            "ts",
+            &bucket_spec,
+            data1,
+        )?;
+        let cov2 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel2),
+            "ts",
+            &bucket_spec,
+            data2,
+        )?;
+        let expected = cov1.union(&cov2);
+
+        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        assert_eq!(snapshot_cov.present(), expected.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_conflict_returns_error() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1542,7 +2053,7 @@ mod tests {
             .expect("external commit succeeds");
 
         let err = table
-            .append_parquet_segment(SegmentId("seg-conflict".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-conflict".to_string()), rel_path, "ts")
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -1559,6 +2070,172 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fails_when_existing_segment_missing_coverage_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-missing-cov.parquet";
+        let rel2 = "data/seg-next.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
+            .await?;
+
+        // Simulate legacy/bad state: drop coverage_path on the existing segment.
+        let seg = table
+            .state
+            .segments
+            .get_mut(&SegmentId("seg-a".to_string()))
+            .expect("segment present");
+        seg.coverage_path = None;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .await
+            .expect_err("append should fail when existing segment lacks coverage");
+
+        assert!(matches!(
+            err,
+            TableError::ExistingSegmentMissingCoverage { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fails_when_table_snapshot_pointer_missing() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-no-pointer-a.parquet";
+        let rel2 = "data/seg-no-pointer-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
+            .await?;
+
+        // Simulate missing snapshot pointer while segments exist.
+        table.state.table_coverage = None;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .await
+            .expect_err("append should fail when snapshot pointer is missing");
+
+        assert!(matches!(err, TableError::MissingTableCoveragePointer));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fails_when_table_snapshot_bucket_mismatches_index() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-bucket-a.parquet";
+        let rel2 = "data/seg-bucket-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
+            .await?;
+
+        // Tamper snapshot pointer to a mismatching bucket spec.
+        let bad_bucket = TimeBucket::Hours(1);
+        let ptr = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("pointer present")
+            .clone();
+        table.state.table_coverage = Some(TableCoveragePointer {
+            bucket_spec: bad_bucket.clone(),
+            coverage_path: ptr.coverage_path.clone(),
+            version: ptr.version,
+        });
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .await
+            .expect_err("append should fail when snapshot bucket mismatches index");
+
+        assert!(matches!(
+            err,
+            TableError::TableCoverageBucketMismatch { .. }
+        ));
         Ok(())
     }
 
@@ -1597,12 +2274,12 @@ mod tests {
             false,
             &[
                 TestRow {
-                    ts_millis: 3_000,
+                    ts_millis: 61_000,
                     symbol: "C",
                     price: 30.0,
                 },
                 TestRow {
-                    ts_millis: 4_000,
+                    ts_millis: 62_000,
                     symbol: "D",
                     price: 40.0,
                 },
@@ -1610,14 +2287,15 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-scan-1".to_string()), rel1, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-scan-1".to_string()), rel1, "ts")
             .await?;
         table
-            .append_parquet_segment(SegmentId("seg-scan-2".to_string()), rel2, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-scan-2".to_string()), rel2, "ts")
             .await?;
 
+        // Query spans both segments but excludes the last row of the second segment.
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
-        let end = Utc.timestamp_millis_opt(3_500).single().expect("valid ts");
+        let end = Utc.timestamp_millis_opt(61_500).single().expect("valid ts");
 
         let rows = collect_scan_rows(&table, start, end).await?;
 
@@ -1625,7 +2303,7 @@ mod tests {
             rows,
             vec![
                 (2_000, "B".to_string(), 20.0),
-                (3_000, "C".to_string(), 30.0),
+                (61_000, "C".to_string(), 30.0),
             ]
         );
 
@@ -1660,7 +2338,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-boundary".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-boundary".to_string()), rel, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
@@ -1801,7 +2479,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-micros".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-micros".to_string()), rel, "ts")
             .await?;
 
         let start = Utc
@@ -1840,7 +2518,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-nanos".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-nanos".to_string()), rel, "ts")
             .await?;
 
         let start = Utc
@@ -1875,7 +2553,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-null".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-null".to_string()), rel, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(500).single().unwrap();
@@ -2051,7 +2729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_range_orders_overlapping_segments_by_ts_min() -> TestResult {
+    async fn scan_range_orders_segments_by_ts_min() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -2064,7 +2742,7 @@ mod tests {
             true,
             false,
             &[TestRow {
-                ts_millis: 1_500,
+                ts_millis: 120_000,
                 symbol: "B1",
                 price: 2.0,
             }],
@@ -2077,7 +2755,7 @@ mod tests {
             true,
             false,
             &[TestRow {
-                ts_millis: 1_000,
+                ts_millis: 60_000,
                 symbol: "A1",
                 price: 1.0,
             }],
@@ -2085,21 +2763,21 @@ mod tests {
 
         // append in reverse ts_min order to ensure sort_by_key is exercised
         table
-            .append_parquet_segment(SegmentId("seg-b".to_string()), rel_b, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel_b, "ts")
             .await?;
         table
-            .append_parquet_segment(SegmentId("seg-a".to_string()), rel_a, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel_a, "ts")
             .await?;
 
-        let start = Utc.timestamp_millis_opt(900).single().unwrap();
-        let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
+        let start = Utc.timestamp_millis_opt(50_000).single().unwrap();
+        let end = Utc.timestamp_millis_opt(150_000).single().unwrap();
         let rows = collect_scan_rows(&table, start, end).await?;
 
         assert_eq!(
             rows,
             vec![
-                (1_000, "A1".to_string(), 1.0),
-                (1_500, "B1".to_string(), 2.0)
+                (60_000, "A1".to_string(), 1.0),
+                (120_000, "B1".to_string(), 2.0)
             ]
         );
         Ok(())
@@ -2132,17 +2810,17 @@ mod tests {
             true,
             false,
             &[TestRow {
-                ts_millis: 10_000,
+                ts_millis: 70_000,
                 symbol: "Z",
                 price: 9.0,
             }],
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-early".to_string()), rel1, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-early".to_string()), rel1, "ts")
             .await?;
         table
-            .append_parquet_segment(SegmentId("seg-late".to_string()), rel2, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-late".to_string()), rel2, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
@@ -2174,7 +2852,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-corrupt".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-corrupt".to_string()), rel, "ts")
             .await?;
 
         // Corrupt the file after append so scan encounters a read failure.

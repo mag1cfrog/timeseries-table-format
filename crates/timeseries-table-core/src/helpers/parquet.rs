@@ -227,30 +227,36 @@ fn min_max_from_scan(
     }
 }
 
-/// Read a Parquet file at `rel_path` from `location` and produce a SegmentMeta
-/// containing the given `segment_id`, the min/max timestamps for `time_column`,
-/// and the row count; returns a SegmentMeta on success or a SegmentMetaError on failure.
-pub async fn segment_meta_from_parquet_location(
-    location: &TableLocation,
+/// Build a `SegmentMeta` from in-memory Parquet bytes.
+///
+/// This mirrors `segment_meta_from_parquet_location` but operates on a provided
+/// `Bytes` buffer instead of reading from storage. The caller supplies:
+/// - `rel_path`: relative path of the segment within the table (for metadata/logging).
+/// - `segment_id`: stable identifier to store in the resulting `SegmentMeta`.
+/// - `time_column`: name of the timestamp column used for min/max extraction.
+/// - `data`: Parquet file contents (complete file).
+///
+/// Behavior:
+/// - Validates a minimal length before parsing (defensive guard).
+/// - Reads Parquet metadata to get row count and locate the time column.
+/// - Determines the timestamp unit from the column’s logical type.
+/// - Tries to derive min/max timestamps from row-group stats; falls back to a
+///   row scan if stats are missing or incomplete.
+/// - Converts raw i64 timestamps to `DateTime<Utc>` using the chosen unit.
+/// - Returns a `SegmentMeta` with `coverage_path` left as `None`.
+pub fn segment_meta_from_parquet_bytes(
     rel_path: &Path,
     segment_id: SegmentId,
     time_column: &str,
+    data: Bytes,
 ) -> SegmentResult<SegmentMeta> {
     let path_str = rel_path.display().to_string();
 
-    // 1) Read whole file via storage abstraction.
-    let bytes = storage::read_all_bytes(location, rel_path)
-        .await
-        .map_err(map_storage_error)?;
-
-    if bytes.len() < 8 {
+    if data.len() < 8 {
         return Err(SegmentMetaError::TooShort { path: path_str });
     }
 
-    // 2) Wrap in Bytes so we satisfy ChunkReader.
-    let data = Bytes::from(bytes);
-
-    // 3) Parquet reader works on any Read + Seek.
+    // Parquet reader works on any Read + Seek.
     let reader =
         SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
             path: path_str.clone(),
@@ -262,7 +268,7 @@ pub async fn segment_meta_from_parquet_location(
     let file_meta = meta.file_metadata();
     let row_count = file_meta.num_rows() as u64;
 
-    // 4) Locate the time column in the schema descriptor.
+    // Locate the time column in the schema descriptor.
     let schema = file_meta.schema_descr();
 
     let time_idx = schema
@@ -276,12 +282,12 @@ pub async fn segment_meta_from_parquet_location(
             },
         })?;
 
-    // Optionally sanity-check the physical type.
+    // Optionally sanity-check the physical type and logical annotation.
     let col_descr = &schema.column(time_idx);
     let physical = col_descr.physical_type();
     let logical = col_descr.logical_type_ref();
 
-    // 5) Decide which timestamp unit we support for this column.
+    // Decide which timestamp unit we support for this column.
     let unit =
         choose_timestamp_unit_from_logical(time_column, physical, logical).map_err(|source| {
             SegmentMetaError::TimeColumn {
@@ -290,22 +296,22 @@ pub async fn segment_meta_from_parquet_location(
             }
         })?;
 
-    // 6) Try fast path: min/max from row-group stats.
+    // Try fast path: min/max from row-group stats.
     let stats_min_max = min_max_from_stats(&path_str, time_column, time_idx, &reader)?;
 
     let (ts_min_raw, ts_max_raw) = match stats_min_max {
         Some(pair) => pair,
         None => {
-            // 7) Fallback: row scan if stats are missing/incomplete.
+            // Fallback: row scan if stats are missing/incomplete.
             min_max_from_scan(&path_str, time_column, time_idx, &reader)?
         }
     };
 
-    // 8) Convert raw i64 timestamps to DateTime<Utc> using the chosen unit.
+    // Convert raw i64 timestamps to DateTime<Utc> using the chosen unit.
     let ts_min = ts_from_i64(unit, ts_min_raw)?;
     let ts_max = ts_from_i64(unit, ts_max_raw)?;
 
-    // 9) Build SegmentMeta: caller supplies segment_id; we fill in the ts_* and row_count.
+    // Build SegmentMeta: caller supplies segment_id; we fill in the ts_* and row_count.
     Ok(SegmentMeta {
         segment_id,
         path: rel_path.to_string_lossy().into_owned(),
@@ -315,6 +321,23 @@ pub async fn segment_meta_from_parquet_location(
         row_count,
         coverage_path: None,
     })
+}
+
+/// Read a Parquet file at `rel_path` from `location` and produce a SegmentMeta
+/// containing the given `segment_id`, the min/max timestamps for `time_column`,
+/// and the row count; returns a SegmentMeta on success or a SegmentMetaError on failure.
+pub async fn segment_meta_from_parquet_location(
+    location: &TableLocation,
+    rel_path: &Path,
+    segment_id: SegmentId,
+    time_column: &str,
+) -> SegmentResult<SegmentMeta> {
+    // 1) Read whole file via storage abstraction.
+    let bytes = storage::read_all_bytes(location, rel_path)
+        .await
+        .map_err(map_storage_error)?;
+
+    segment_meta_from_parquet_bytes(rel_path, segment_id, time_column, Bytes::from(bytes))
 }
 
 fn map_parquet_col_to_logical_type(
@@ -401,19 +424,20 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
     LogicalSchema::new(cols)
 }
 
-/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
-pub async fn logical_schema_from_parquet_location(
-    location: &TableLocation,
+/// Build a `LogicalSchema` from Parquet bytes.
+///
+/// This mirrors `logical_schema_from_parquet_location` but consumes a provided
+/// `Bytes` buffer. The caller supplies the relative path (for error context)
+/// and the full Parquet file contents. On success it returns a `LogicalSchema`
+/// derived from the Parquet physical/logical types; otherwise it returns a
+/// `SegmentMetaError` with contextual path information.
+pub fn logical_schema_from_parquet_bytes(
     rel_path: &Path,
+    data: Bytes,
 ) -> SegmentResult<LogicalSchema> {
     let path_str = rel_path.display().to_string();
 
-    let bytes = read_all_bytes(location, rel_path)
-        .await
-        .map_err(map_storage_error)?;
-
-    let data = Bytes::from(bytes);
-
+    // Parse Parquet metadata from the in-memory buffer.
     let reader =
         SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
             path: path_str.clone(),
@@ -423,12 +447,25 @@ pub async fn logical_schema_from_parquet_location(
 
     let file_meta = reader.metadata().file_metadata();
 
+    // Map Parquet physical/logical types into our LogicalSchema representation.
     logical_schema_from_parquet(file_meta).map_err(|source| {
         SegmentMetaError::LogicalSchemaInvalid {
             path: path_str,
             source,
         }
     })
+}
+
+/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
+pub async fn logical_schema_from_parquet_location(
+    location: &TableLocation,
+    rel_path: &Path,
+) -> SegmentResult<LogicalSchema> {
+    let bytes = read_all_bytes(location, rel_path)
+        .await
+        .map_err(map_storage_error)?;
+
+    logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))
 }
 #[cfg(test)]
 mod tests {

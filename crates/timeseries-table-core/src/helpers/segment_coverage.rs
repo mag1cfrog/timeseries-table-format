@@ -27,7 +27,7 @@ use parquet::{
     errors::ParquetError,
 };
 use roaring::RoaringBitmap;
-use snafu::Snafu;
+use snafu::{Backtrace, Snafu};
 
 use crate::{
     common::time_column::TimeColumnError,
@@ -58,7 +58,7 @@ pub enum SegmentCoverageError {
         /// The path to the segment file that could not be read.
         path: String,
         /// The underlying storage error that caused this failure.
-        #[snafu(source)]
+        #[snafu(source, backtrace)]
         source: StorageError,
     },
 
@@ -73,6 +73,8 @@ pub enum SegmentCoverageError {
         /// The underlying Parquet library error.
         #[snafu(source)]
         source: ParquetError,
+        /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
     },
 
     /// Arrow read error.
@@ -83,6 +85,8 @@ pub enum SegmentCoverageError {
         /// The underlying Arrow library error.
         #[snafu(source)]
         source: ArrowError,
+        /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
     },
 
     /// Time column validation or metadata error.
@@ -166,53 +170,39 @@ fn add_buckets_from_values(
     Ok(())
 }
 
-/// Computes segment-level time-series coverage by reading a Parquet segment file
-/// and mapping timestamps to bucket IDs based on the provided time bucket specification.
+/// Compute segment coverage from in-memory Parquet bytes.
 ///
-/// This function:
-/// 1. Reads the Parquet segment file from storage.
-/// 2. Extracts the specified timestamp column.
-/// 3. Validates that the timestamp column uses a supported time unit.
-/// 4. Iterates over timestamp values and maps each to a bucket ID.
-/// 5. Returns a Coverage bitmap containing all bucket IDs found in the segment.
+/// This mirrors `compute_segment_coverage` but operates on a provided `Bytes`
+/// buffer instead of reading from storage. The caller supplies:
+/// - `rel_path`: relative segment path (for error context).
+/// - `time_column`: name of the timestamp column to analyze.
+/// - `bucket_spec`: time bucket specification used to map timestamps to bucket IDs.
+/// - `data`: complete Parquet file contents.
 ///
-/// # Arguments
-///
-/// * `location` - The table location for accessing the storage layer.
-/// * `rel_path` - The relative path to the Parquet segment file.
-/// * `time_column` - The name of the timestamp column to analyze.
-/// * `bucket_spec` - The time bucket specification for mapping timestamps to bucket IDs.
-///
-/// # Returns
-///
-/// A `Coverage` bitmap containing the bucket IDs of all timestamps in the segment,
-/// or a `SegmentCoverageError` if any stage of the process fails.
-pub async fn compute_segment_coverage(
-    location: &TableLocation,
+/// Behavior:
+/// - Builds an Arrow `RecordBatch` reader over the supplied bytes.
+/// - Projects only the timestamp column for efficiency.
+/// - Validates the column exists and uses a supported timestamp unit.
+/// - Streams batches and maps each timestamp to a bucket ID, inserting into a `RoaringBitmap`.
+/// - Returns a `Coverage` bitmap or a contextual `SegmentCoverageError` on failure.
+pub fn compute_segment_coverage_from_parquet_bytes(
     rel_path: &Path,
     time_column: &str,
     bucket_spec: &TimeBucket,
+    data: Bytes,
 ) -> Result<Coverage, SegmentCoverageError> {
     let path_str = rel_path.display().to_string();
 
-    // 1) Read parquet bytes.
-    let bytes = storage::read_all_bytes(location, rel_path)
-        .await
-        .map_err(|source| SegmentCoverageError::Storage {
-            path: path_str.clone(),
-            source,
-        })?;
-    let data = Bytes::from(bytes);
-
-    // 2) Build parquet -> arrow batch reader.
+    // Build parquet -> arrow batch reader from the provided bytes.
     let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(|source| {
         SegmentCoverageError::ParquetRead {
             path: path_str.clone(),
             source,
+            backtrace: Backtrace::capture(),
         }
     })?;
 
-    // 3) Find the time column index, and ideally project only that one.
+    // Find the time column index, and project only that one for efficiency.
     let schema = builder.schema();
     // Validate the column exists in the Arrow schema (good error message)
     let _arrow_idx =
@@ -233,9 +223,10 @@ pub async fn compute_segment_coverage(
         .map_err(|source| SegmentCoverageError::ParquetRead {
             path: path_str.clone(),
             source,
+            backtrace: Backtrace::capture(),
         })?;
 
-    // 4) Compute coverage.
+    // Compute coverage: accumulate bucket IDs into a bitmap.
     let mut bitmap = RoaringBitmap::new();
 
     macro_rules! process_timestamp_array {
@@ -262,6 +253,7 @@ pub async fn compute_segment_coverage(
         let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
             path: path_str.clone(),
             source,
+            backtrace: Backtrace::capture(),
         })?;
 
         // After projection, the timestamp column is at 0;
@@ -297,6 +289,47 @@ pub async fn compute_segment_coverage(
     }
 
     Ok(Coverage::from_bitmap(bitmap))
+}
+
+/// Computes segment-level time-series coverage by reading a Parquet segment file
+/// and mapping timestamps to bucket IDs based on the provided time bucket specification.
+///
+/// This function:
+/// 1. Reads the Parquet segment file from storage.
+/// 2. Extracts the specified timestamp column.
+/// 3. Validates that the timestamp column uses a supported time unit.
+/// 4. Iterates over timestamp values and maps each to a bucket ID.
+/// 5. Returns a Coverage bitmap containing all bucket IDs found in the segment.
+///
+/// # Arguments
+///
+/// * `location` - The table location for accessing the storage layer.
+/// * `rel_path` - The relative path to the Parquet segment file.
+/// * `time_column` - The name of the timestamp column to analyze.
+/// * `bucket_spec` - The time bucket specification for mapping timestamps to bucket IDs.
+///
+/// # Returns
+///
+/// A `Coverage` bitmap containing the bucket IDs of all timestamps in the segment,
+/// or a `SegmentCoverageError` if any stage of the process fails.
+pub async fn compute_segment_coverage(
+    location: &TableLocation,
+    rel_path: &Path,
+    time_column: &str,
+    bucket_spec: &TimeBucket,
+) -> Result<Coverage, SegmentCoverageError> {
+    let bytes = storage::read_all_bytes(location, rel_path)
+        .await
+        .map_err(|source| SegmentCoverageError::Storage {
+            path: rel_path.display().to_string(),
+            source,
+        })?;
+    compute_segment_coverage_from_parquet_bytes(
+        rel_path,
+        time_column,
+        bucket_spec,
+        Bytes::from(bytes),
+    )
 }
 
 #[cfg(test)]

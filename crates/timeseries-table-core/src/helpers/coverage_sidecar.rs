@@ -65,6 +65,7 @@ pub enum CoverageError {
     #[snafu(display("Storage error while reading/writing coverage sidecar: {source}"))]
     Storage {
         /// The underlying storage error.
+        #[snafu(source, backtrace)]
         source: StorageError,
     },
 }
@@ -135,6 +136,24 @@ pub async fn write_coverage_sidecar_new(
 ) -> Result<(), CoverageError> {
     let bytes = coverage_to_bytes(cov).context(SerdeSnafu)?;
     storage::write_new(location, rel_path, &bytes)
+        .await
+        .context(StorageSnafu)?;
+    Ok(())
+}
+
+/// Write a coverage bitmap as bytes to a sidecar file with exclusive creation.
+///
+/// # Errors
+///
+/// Returns [`CoverageError::Storage`] when the storage layer rejects the write,
+/// including when the file already exists. Callers that perform idempotent
+/// writes may choose to treat an `AlreadyExists` storage error as non-fatal.
+pub async fn write_coverage_sidecar_new_bytes(
+    location: &TableLocation,
+    rel_path: &Path,
+    bytes: &[u8],
+) -> Result<(), CoverageError> {
+    storage::write_new(location, rel_path, bytes)
         .await
         .context(StorageSnafu)?;
     Ok(())
