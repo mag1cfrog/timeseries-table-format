@@ -693,9 +693,9 @@ impl TimeSeriesTable {
     /// - Commit with OCC on the current version.
     /// - Update in-memory TableState on success.
     ///
-    /// v0.1: duplicates (same segment_id/path) are allowed; they’ll just be
-    /// treated as distinct segments. We can tighten that later.
-    pub async fn append_parquet_segment(
+    /// v0.1: duplicates (same segment_id/path) are allowed if their coverage
+    /// does not overlap existing data; otherwise overlap is rejected.
+    pub async fn append_parquet_segment_with_id(
         &mut self,
         segment_id: SegmentId,
         relative_path: &str,
@@ -1461,7 +1461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_missing_time_column_errors() -> TestResult {
+    async fn append_parquet_segment_with_id_missing_time_column_errors() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1472,7 +1472,7 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let err = table
-            .append_parquet_segment(SegmentId("seg-no-ts".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-no-ts".to_string()), rel, "ts")
             .await
             .expect_err("expected missing time column");
 
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_updates_state_and_log() -> TestResult {
+    async fn append_parquet_segment_with_id_updates_state_and_log() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1514,7 +1514,7 @@ mod tests {
         )?;
 
         let new_version = table
-            .append_parquet_segment(SegmentId("seg-1".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-1".to_string()), rel_path, "ts")
             .await?;
 
         assert_eq!(new_version, 2);
@@ -1547,7 +1547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_adopts_schema_when_missing() -> TestResult {
+    async fn append_parquet_segment_with_id_adopts_schema_when_missing() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -1580,7 +1580,7 @@ mod tests {
         )?;
 
         let new_version = table
-            .append_parquet_segment(SegmentId("seg-adopt".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-adopt".to_string()), rel_path, "ts")
             .await?;
 
         assert_eq!(new_version, 2);
@@ -1604,7 +1604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_rejects_schema_mismatch() -> TestResult {
+    async fn append_parquet_segment_with_id_rejects_schema_mismatch() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1624,7 +1624,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment(SegmentId("seg-bad".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-bad".to_string()), rel_path, "ts")
             .await
             .expect_err("expected schema mismatch");
 
@@ -1641,7 +1641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_allows_duplicate_id_and_path() -> TestResult {
+    async fn append_parquet_segment_with_id_allows_duplicate_id_and_path() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1661,7 +1661,7 @@ mod tests {
             }],
         )?;
         let v2 = table
-            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
             .await?;
         assert_eq!(v2, 2);
         assert_eq!(table.state.version, 2);
@@ -1695,7 +1695,7 @@ mod tests {
         )?;
 
         let v3 = table
-            .append_parquet_segment(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
             .await?;
         assert_eq!(v3, 3);
         assert_eq!(table.state.version, 3);
@@ -1715,7 +1715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_conflict_returns_error() -> TestResult {
+    async fn append_parquet_segment_with_id_conflict_returns_error() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1742,7 +1742,7 @@ mod tests {
             .expect("external commit succeeds");
 
         let err = table
-            .append_parquet_segment(SegmentId("seg-conflict".to_string()), rel_path, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-conflict".to_string()), rel_path, "ts")
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -1810,10 +1810,10 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-scan-1".to_string()), rel1, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-scan-1".to_string()), rel1, "ts")
             .await?;
         table
-            .append_parquet_segment(SegmentId("seg-scan-2".to_string()), rel2, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-scan-2".to_string()), rel2, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
@@ -1860,7 +1860,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-boundary".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-boundary".to_string()), rel, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
@@ -2001,7 +2001,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-micros".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-micros".to_string()), rel, "ts")
             .await?;
 
         let start = Utc
@@ -2040,7 +2040,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-nanos".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-nanos".to_string()), rel, "ts")
             .await?;
 
         let start = Utc
@@ -2075,7 +2075,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-null".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-null".to_string()), rel, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(500).single().unwrap();
@@ -2285,10 +2285,10 @@ mod tests {
 
         // append in reverse ts_min order to ensure sort_by_key is exercised
         table
-            .append_parquet_segment(SegmentId("seg-b".to_string()), rel_b, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel_b, "ts")
             .await?;
         table
-            .append_parquet_segment(SegmentId("seg-a".to_string()), rel_a, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel_a, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(900).single().unwrap();
@@ -2339,10 +2339,10 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-early".to_string()), rel1, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-early".to_string()), rel1, "ts")
             .await?;
         table
-            .append_parquet_segment(SegmentId("seg-late".to_string()), rel2, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-late".to_string()), rel2, "ts")
             .await?;
 
         let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
@@ -2374,7 +2374,7 @@ mod tests {
         )?;
 
         table
-            .append_parquet_segment(SegmentId("seg-corrupt".to_string()), rel, "ts")
+            .append_parquet_segment_with_id(SegmentId("seg-corrupt".to_string()), rel, "ts")
             .await?;
 
         // Corrupt the file after append so scan encounters a read failure.
