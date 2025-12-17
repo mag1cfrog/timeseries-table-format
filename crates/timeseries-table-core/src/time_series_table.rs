@@ -30,13 +30,13 @@ use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::Parq
 use snafu::prelude::*;
 
 use crate::coverage::Coverage;
+use crate::coverage::serde::coverage_to_bytes;
 use crate::helpers::coverage_sidecar::{
-    CoverageError, read_coverage_sidecar, write_coverage_sidecar_atomic, write_coverage_sidecar_new,
+    CoverageError, read_coverage_sidecar, write_coverage_sidecar_atomic,
+    write_coverage_sidecar_new_bytes,
 };
 use crate::helpers::segment_coverage::{SegmentCoverageError, compute_segment_coverage};
-use crate::layout::coverage::{
-    deterministic_coverage_id, segment_coverage_path, table_snapshot_path,
-};
+use crate::layout::coverage::{segment_coverage_id_v1, segment_coverage_path, table_snapshot_path};
 use crate::transaction_log::TimeBucket;
 use crate::transaction_log::table_state::TableCoveragePointer;
 use crate::{
@@ -768,27 +768,44 @@ impl TimeSeriesTable {
             }
             .fail();
         }
+        let seg_cov_bytes =
+            coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Serde { source },
+            })?;
 
         // 6) Write sidecars BEFORE commit (orphan files OK on commit failure)
-        let coverage_id = deterministic_coverage_id(&segment_meta.segment_id.0, &segment_meta.path);
+        let coverage_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
         let seg_cov_path =
             segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
                 source: CoverageError::Layout { source },
             })?;
-        write_coverage_sidecar_new(&self.location, &seg_cov_path, &segment_cov)
-            .await
-            .context(CoverageSidecarSnafu)?;
+        match write_coverage_sidecar_new_bytes(&self.location, &seg_cov_path, &seg_cov_bytes).await
+        {
+            Ok(()) => {}
+            Err(CoverageError::Storage {
+                source: StorageError::AlreadyExists { .. },
+            }) => {
+                // ok: same id implies same intended content
+            }
+            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+        }
 
         let new_version_guess = expected_version + 1;
-        // snapshot_id: tie it to the target version + the segment coverage id
-        let snapshot_id = deterministic_coverage_id(&format!("v{new_version_guess}"), &coverage_id);
+
+        let new_table_cov = table_cov.union(&segment_cov);
+
+        let new_snap_cov_bytes =
+            coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Serde { source },
+            })?;
+        let snapshot_id = segment_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
 
         let snapshot_path = table_snapshot_path(new_version_guess, &snapshot_id).map_err(|e| {
             TableError::CoverageSidecar {
                 source: CoverageError::Layout { source: e },
             }
         })?;
-        let new_table_cov = table_cov.union(&segment_cov);
+
         write_coverage_sidecar_atomic(&self.location, &snapshot_path, &new_table_cov)
             .await
             .context(CoverageSidecarSnafu)?;
