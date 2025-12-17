@@ -12,6 +12,15 @@
 //! - `create` bootstraps a fresh table with an initial metadata commit,
 //! - append APIs handle schema enforcement, coverage sidecars, and OCC,
 //! - range scans stream filtered record batches.
+//!
+//! Append entry points:
+//! - `append_parquet_segment_with_id`: caller supplies a `SegmentId`, bytes are read from storage, and the core append logic enforces schema and coverage.
+//! - `append_parquet_segment`: derives a deterministic `SegmentId` from `(relative_path, bytes)` before delegating to the same core logic.
+//!
+//! Both append paths:
+//! - compute segment coverage, reject overlaps against the current snapshot, and persist sidecars,
+//! - commit `AddSegment` with `coverage_path` plus `UpdateTableCoverage` atomically,
+//! - fail fast if the table state is missing coverage pointers or has segments without `coverage_path`.
 
 use std::{path::Path, pin::Pin};
 
