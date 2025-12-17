@@ -1741,7 +1741,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_allows_duplicate_id_and_path() -> TestResult {
+    async fn append_parquet_segment_with_id_allows_same_id_with_nonoverlapping_coverage()
+    -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
