@@ -562,6 +562,12 @@ pub struct TimeSeriesTable {
     index: TimeIndexSpec,
 }
 
+/// Derive a deterministic segment id for an append entry.
+///
+/// This is content-addressable: it hashes both the relative path and the bytes so
+/// retries with the same input stay stable while same bytes at different paths
+/// diverge. The returned id uses the `seg-` prefix followed by 32 hex chars of
+/// the BLAKE3 digest, keeping ids bounded and safe for idempotent appends.
 fn segment_id_v1(relative_path: &str, data: &Bytes) -> SegmentId {
     let mut h = blake3::Hasher::new();
     h.update(b"segment-id-v1");
@@ -764,7 +770,7 @@ impl TimeSeriesTable {
             }
         };
 
-        // 3) Load current table snapshot coverage(or empty if first append).
+        // 3) Load current table snapshot coverage (or empty if first append).
         let table_cov =
             load_table_snapshot_coverage(&self.location, &self.state, &bucket_spec).await?;
 
