@@ -219,7 +219,7 @@ pub enum TableError {
 
     /// Existing segment lacks a coverage_path when coverage is required.
     #[snafu(display(
-        "Cannot append because existing segment {segment_id} is missing coverage_path (v0.1 requires coverage_path for all segments once #39 is active)"
+        "Cannot append because existing segment {segment_id} is missing coverage_path (required for coverage tracking)"
     ))]
     ExistingSegmentMissingCoverage {
         /// Segment ID missing a coverage_path entry.
