@@ -29,7 +29,10 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::prelude::*;
 
+use crate::coverage::Coverage;
+use crate::helpers::coverage_sidecar::{CoverageError, read_coverage_sidecar};
 use crate::helpers::segment_coverage::SegmentCoverageError;
+use crate::transaction_log::TimeBucket;
 use crate::{
     helpers::{
         parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
@@ -155,12 +158,34 @@ pub enum TableError {
         timestamp: DateTime<Utc>,
     },
 
-    /// Coverage sidecar read/write or computation error.
-    #[snafu(display("Coverage sidecar error: {source}"))]
+    /// Segment Coverage error.
+    #[snafu(display("Segment coverage error: {source}"))]
     SegmentCoverage {
         /// Underlying coverage error.
         #[snafu(source, backtrace)]
         source: SegmentCoverageError,
+    },
+
+    /// Table coverage pointer uses a bucket spec that doesn't match the table's index bucket.
+    #[snafu(display(
+        "Table coverage bucket spec mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
+    ))]
+    TableCoverageBucketMismatch {
+        /// Bucket spec defined by the table's time index.
+        expected: TimeBucket,
+        /// Bucket spec recorded in the table coverage pointer.
+        actual: TimeBucket,
+        /// Log version where the mismatching coverage pointer was recorded.
+        pointer_version: u64,
+    },
+
+    /// Coverage sidecar read/write or computation error.
+    #[snafu(display("Coverage sidecar error: {source}"))]
+    CoverageSidecar {
+        /// Underlying Coverage error.
+        #[snafu(source, backtrace)]
+        source: CoverageError,
+        
     },
 
     /// Appending would overlap existing coverage for the same segment path.
@@ -194,6 +219,52 @@ pub enum TableError {
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
 pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;
+
+fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), TableError> {
+    for seg in state.segments.values() {
+        if seg.coverage_path.is_none() {
+            return ExistingSegmentMissingCoverageSnafu {
+                segment_id: seg.segment_id.clone(),
+            }
+            .fail();
+        }
+    }
+
+    Ok(())
+}
+
+async fn load_table_snapshot_coverage(
+    location: &TableLocation,
+    state: &TableState,
+    bucket_spec: &TimeBucket,
+) -> Result<Coverage, TableError> {
+    match &state.table_coverage {
+        None => {
+            // If there are no segments, treat as empty (first append case).
+            // If there are segments, this is suspicious in v0.1: fail.
+            if state.segments.is_empty() {
+                Ok(Coverage::empty())
+            } else {
+                MissingTableCoveragePointerSnafu.fail()
+            }
+        }
+        Some(ptr) => {
+            // Extra safety: ensure bucket spec matches current index.bucket
+            ensure!(
+                ptr.bucket_spec == *bucket_spec,
+                TableCoverageBucketMismatchSnafu {
+                    expected: bucket_spec.clone(),
+                    actual: ptr.bucket_spec.clone(),
+                    pointer_version: ptr.version,
+                }
+            );
+
+            read_coverage_sidecar(location, Path::new(&ptr.coverage_path))
+                .await
+                .context(CoverageSidecarSnafu)
+        }
+    }
+}
 
 fn to_bounds_i64(
     field: &Field,
