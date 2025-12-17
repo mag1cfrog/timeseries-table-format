@@ -552,6 +552,17 @@ pub struct TimeSeriesTable {
     index: TimeIndexSpec,
 }
 
+fn segment_id_v1(relative_path: &str, data: &Bytes) -> SegmentId {
+    let mut h = blake3::Hasher::new();
+    h.update(b"segment-id-v1");
+    h.update(b"\0");
+    h.update(relative_path.as_bytes());
+    h.update(b"\0");
+    h.update(data.as_ref());
+    let hex = h.finalize().to_hex();
+    SegmentId(format!("seg-{}", &hex[..32]))
+}
+
 impl TimeSeriesTable {
     /// Return the current committed table state.
     pub fn state(&self) -> &TableState {
@@ -899,6 +910,29 @@ impl TimeSeriesTable {
             Bytes::from(bytes),
         )
         .await
+    }
+
+    /// Append a Parquet segment using a deterministic, content-derived `segment_id`.
+    ///
+    /// This wrapper reads the Parquet bytes from storage, derives `segment_id`
+    /// via `segment_id_v1(relative_path, bytes)`, then delegates to
+    /// `append_parquet_segment_with_id_and_bytes` for the core logic.
+    /// Behavior (schema adoption/enforcement, coverage, OCC, state updates)
+    /// matches `append_parquet_segment_with_id`.
+    pub async fn append_parquet_segment(
+        &mut self,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<u64, TableError> {
+        let rel_path = Path::new(relative_path);
+        let bytes = storage::read_all_bytes(&self.location, rel_path)
+            .await
+            .context(StorageSnafu)?;
+        let data = Bytes::from(bytes);
+
+        let segment_id = segment_id_v1(relative_path, &data);
+        self.append_parquet_segment_with_id_and_bytes(segment_id, relative_path, time_column, data)
+            .await
     }
 
     /// Scan the time-series table for record batches overlapping `[ts_start, ts_end)`,
