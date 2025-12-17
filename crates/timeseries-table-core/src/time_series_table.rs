@@ -30,9 +30,15 @@ use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::Parq
 use snafu::prelude::*;
 
 use crate::coverage::Coverage;
-use crate::helpers::coverage_sidecar::{CoverageError, read_coverage_sidecar};
-use crate::helpers::segment_coverage::SegmentCoverageError;
+use crate::helpers::coverage_sidecar::{
+    CoverageError, read_coverage_sidecar, write_coverage_sidecar_atomic, write_coverage_sidecar_new,
+};
+use crate::helpers::segment_coverage::{SegmentCoverageError, compute_segment_coverage};
+use crate::layout::coverage::{
+    deterministic_coverage_id, segment_coverage_path, table_snapshot_path,
+};
 use crate::transaction_log::TimeBucket;
+use crate::transaction_log::table_state::TableCoveragePointer;
 use crate::{
     helpers::{
         parquet::{logical_schema_from_parquet_location, segment_meta_from_parquet_location},
@@ -185,7 +191,6 @@ pub enum TableError {
         /// Underlying Coverage error.
         #[snafu(source, backtrace)]
         source: CoverageError,
-        
     },
 
     /// Appending would overlap existing coverage for the same segment path.
@@ -696,21 +701,23 @@ impl TimeSeriesTable {
         time_column: &str,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
+        let expected_version = self.state.version;
+        let bucket_spec = self.index.bucket.clone();
 
-        // 1) Build SegmentMeta from Parquet (ts_min, ts_max, row_count, basic validation).
-        let segment_meta =
+        // 0) Coverage readiness checks.
+        ensure_existing_segments_have_coverage(&self.state)?;
+
+        // 1) Segment meta + schema.
+        let mut segment_meta =
             segment_meta_from_parquet_location(&self.location, rel_path, segment_id, time_column)
                 .await
                 .context(SegmentMetaSnafu)?;
 
-        // 2) Derive the segment's LogicalSchema from the same Parquet file.
         let segment_schema = logical_schema_from_parquet_location(&self.location, rel_path)
             .await
             .context(SegmentMetaSnafu)?;
 
-        let expected_version = self.state.version;
-        let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
-        // 3) Decide schema behavior based on both schema *and* version:
+        // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
         // - logical_schema == None && version == 1:
         //     first append after create() — adopt this segment’s schema.
@@ -718,55 +725,114 @@ impl TimeSeriesTable {
         //     table is in a bad state for v0.1 → error.
         // - logical_schema == Some(..):
         //     enforce “no schema evolution” via ensure_schema_exact_match.
-        let (actions, new_table_meta) = match maybe_table_schema {
+        let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
+
+        let maybe_updated_meta = match maybe_table_schema {
             None if expected_version == 1 => {
-                // Bootstrap case: adopt this segment’s schema as canonical in the
-                // same commit that adds the segment.
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
-
-                let actions = vec![
-                    LogAction::UpdateTableMeta(updated_meta.clone()),
-                    LogAction::AddSegment(segment_meta.clone()),
-                ];
-
-                (actions, Some(updated_meta))
+                Some(updated_meta)
             }
-
             None => {
                 return MissingCanonicalSchemaSnafu {
                     version: expected_version,
                 }
                 .fail();
             }
-
             Some(table_schema) => {
                 ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
                     .context(SchemaCompatibilitySnafu)?;
-
-                let actions = vec![LogAction::AddSegment(segment_meta.clone())];
-
-                (actions, None)
+                None
             }
         };
 
-        // 4) Commit with OCC. Conflict → CommitError::Conflict → TableError::TransactionLog.
+        // 3) Load current table snapshot coverage(or empty if first append).
+        let table_cov =
+            load_table_snapshot_coverage(&self.location, &self.state, &bucket_spec).await?;
+
+        // 4) Compute segment coverage.
+        let segment_cov =
+            compute_segment_coverage(&self.location, rel_path, time_column, &bucket_spec)
+                .await
+                .context(SegmentCoverageSnafu)?;
+
+        // 5) Overlap detection.
+        let overlap = segment_cov.intersect(&table_cov);
+        let overlap_count = overlap.cardinality();
+        if overlap_count > 0 {
+            let example_bucket = overlap.present().iter().next();
+            return CoverageOverlapSnafu {
+                segment_path: relative_path.to_string(),
+                overlap_count,
+                example_bucket,
+            }
+            .fail();
+        }
+
+        // 6) Write sidecars BEFORE commit (orphan files OK on commit failure)
+        let coverage_id = deterministic_coverage_id(&segment_meta.segment_id.0, &segment_meta.path);
+        let seg_cov_path =
+            segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Layout { source },
+            })?;
+        write_coverage_sidecar_new(&self.location, &seg_cov_path, &segment_cov)
+            .await
+            .context(CoverageSidecarSnafu)?;
+
+        let new_version_guess = expected_version + 1;
+        // snapshot_id: tie it to the target version + the segment coverage id
+        let snapshot_id = deterministic_coverage_id(&format!("v{new_version_guess}"), &coverage_id);
+
+        let snapshot_path = table_snapshot_path(new_version_guess, &snapshot_id).map_err(|e| {
+            TableError::CoverageSidecar {
+                source: CoverageError::Layout { source: e },
+            }
+        })?;
+        let new_table_cov = table_cov.union(&segment_cov);
+        write_coverage_sidecar_atomic(&self.location, &snapshot_path, &new_table_cov)
+            .await
+            .context(CoverageSidecarSnafu)?;
+
+        // 7) Build actions and commit.
+        segment_meta.coverage_path = Some(seg_cov_path.to_string_lossy().to_string());
+
+        let mut actions = Vec::new();
+        if let Some(updated_meta) = maybe_updated_meta.clone() {
+            actions.push(LogAction::UpdateTableMeta(updated_meta));
+        }
+
+        actions.push(LogAction::AddSegment(segment_meta.clone()));
+        actions.push(LogAction::UpdateTableCoverage {
+            bucket_spec: bucket_spec.clone(),
+            coverage_path: snapshot_path.to_string_lossy().to_string(),
+        });
+
         let new_version = self
             .log
             .commit_with_expected_version(expected_version, actions)
             .await
             .context(TransactionLogSnafu)?;
 
-        // 5) Update in-memory state.
+        // Optional sanity check.
+        debug_assert_eq!(new_version, new_version_guess);
+
+        // 8) Update in-memory state.
         self.state.version = new_version;
 
-        if let Some(updated_meta) = new_table_meta {
+        if let Some(updated_meta) = maybe_updated_meta {
             self.state.table_meta = updated_meta
         }
 
         self.state
             .segments
             .insert(segment_meta.segment_id.clone(), segment_meta);
+
+        // Also update the snapshot pointer in state.
+        self.state.table_coverage = Some(TableCoveragePointer {
+            bucket_spec,
+            coverage_path: snapshot_path.to_string_lossy().to_string(),
+            version: new_version,
+        });
 
         Ok(new_version)
     }
