@@ -121,10 +121,6 @@ pub fn table_snapshot_path(
 /// - is stable across retries given the same inputs
 /// - contains only ASCII [a-z0-9-] characters
 /// - is bounded in length and passes validate_coverage_id
-///
-/// Inputs should be stable identifiers for the segment, such as:
-/// - segment_id (recommended)
-/// - segment relative path
 pub fn segment_coverage_id_v1(
     bucket_spec: &TimeBucket,
     time_column: &str,
@@ -167,6 +163,56 @@ pub fn segment_coverage_id_v1(
     // 32 hex chars = 128 bits of hash, plenty for collisions here.
     // Prefix avoids leading dot and provides easy debugging.
     format!("segcov-{}", &hex[..32])
+}
+
+/// Deterministically derive a safe coverage id for a table snapshot sidecar.
+///
+/// This produces an id that:
+/// - is stable across retries given the same inputs
+/// - contains only ASCII [a-z0-9-] characters
+/// - is bounded in length and passes validate_coverage_id
+pub fn table_coverage_id_v1(
+    bucket_spec: &TimeBucket,
+    time_column: &str,
+    coverage_bytes: &[u8],
+) -> String {
+    let mut h = blake3::Hasher::new();
+
+    // domain separation
+
+    h.update(b"tblcov-v1");
+    h.update(b"\0");
+
+    // stable encoding for TimeBucket (avoid Display/to_string)
+    match bucket_spec {
+        TimeBucket::Seconds(n) => {
+            h.update(b"S");
+            h.update(&n.to_le_bytes());
+        }
+        TimeBucket::Minutes(n) => {
+            h.update(b"M");
+            h.update(&n.to_le_bytes());
+        }
+        TimeBucket::Hours(n) => {
+            h.update(b"H");
+            h.update(&n.to_le_bytes());
+        }
+        TimeBucket::Days(n) => {
+            h.update(b"D");
+            h.update(&n.to_le_bytes());
+        }
+    }
+
+    h.update(b"\0");
+    h.update(time_column.as_bytes());
+    h.update(b"\0");
+    h.update(coverage_bytes);
+
+    let hex = h.finalize().to_hex();
+
+    // 32 hex chars = 128 bits of hash, plenty for collisions here.
+    // Prefix avoids leading dot and provides easy debugging.
+    format!("tblcov-{}", &hex[..32])
 }
 
 #[cfg(test)]
@@ -239,14 +285,39 @@ mod tests {
     fn segment_coverage_id_changes_with_inputs() {
         let bytes = b"bytes";
 
-        let base =
-            segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", bytes);
-        let different_bucket =
-            segment_coverage_id_v1(&TimeBucket::Hours(5), "ts", bytes);
-        let different_column =
-            segment_coverage_id_v1(&TimeBucket::Seconds(5), "event_time", bytes);
-        let different_bytes =
-            segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", b"other");
+        let base = segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", bytes);
+        let different_bucket = segment_coverage_id_v1(&TimeBucket::Hours(5), "ts", bytes);
+        let different_column = segment_coverage_id_v1(&TimeBucket::Seconds(5), "event_time", bytes);
+        let different_bytes = segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", b"other");
+
+        assert_ne!(base, different_bucket, "bucket spec should affect id");
+        assert_ne!(base, different_column, "time column should affect id");
+        assert_ne!(base, different_bytes, "coverage bytes should affect id");
+    }
+
+    #[test]
+    fn table_coverage_id_is_deterministic_and_valid() {
+        let bucket = TimeBucket::Hours(1);
+        let time_col = "ts";
+        let bytes = b"table-bitmap";
+
+        let id1 = table_coverage_id_v1(&bucket, time_col, bytes);
+        let id2 = table_coverage_id_v1(&bucket, time_col, bytes);
+
+        assert_eq!(id1, id2, "same inputs must produce stable id");
+        assert!(id1.starts_with("tblcov-"));
+        assert_eq!(id1.len(), "tblcov-".len() + 32, "prefix + 32 hex chars");
+        validate_coverage_id(&id1).expect("derived id should be valid");
+    }
+
+    #[test]
+    fn table_coverage_id_changes_with_inputs() {
+        let bytes = b"bytes";
+
+        let base = table_coverage_id_v1(&TimeBucket::Minutes(15), "ts", bytes);
+        let different_bucket = table_coverage_id_v1(&TimeBucket::Days(1), "ts", bytes);
+        let different_column = table_coverage_id_v1(&TimeBucket::Minutes(15), "event_time", bytes);
+        let different_bytes = table_coverage_id_v1(&TimeBucket::Minutes(15), "ts", b"other");
 
         assert_ne!(base, different_bucket, "bucket spec should affect id");
         assert_ne!(base, different_column, "time column should affect id");
