@@ -1002,11 +1002,11 @@ mod tests {
     use crate::storage::TableLocation;
     use crate::transaction_log::segments::{FileFormat, SegmentId, SegmentMetaError};
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
+    use crate::transaction_log::table_state::TableCoveragePointer;
     use crate::transaction_log::{
         CommitError, LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
         TransactionLogStore,
     };
-    use crate::transaction_log::table_state::TableCoveragePointer;
     use arrow::array::{
         Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
         TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
@@ -1894,8 +1894,7 @@ mod tests {
         assert_eq!(ptr.version, v3);
         assert_eq!(ptr.bucket_spec, bucket_spec);
 
-        let snapshot_cov =
-            read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
 
         assert_eq!(snapshot_cov.present(), expected_snapshot.present());
         Ok(())
@@ -2006,8 +2005,7 @@ mod tests {
         )?;
         let expected = cov1.union(&cov2);
 
-        let snapshot_cov =
-            read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
         assert_eq!(snapshot_cov.present(), expected.present());
         Ok(())
     }
