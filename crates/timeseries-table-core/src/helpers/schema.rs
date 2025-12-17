@@ -82,7 +82,7 @@ pub type SchemaResult<T> = Result<T, SchemaCompatibilityError>;
 
 /// Convenience helper if you *want* to require a schema to be present.
 ///
-/// For `append_parquet_segment` we likely won't use this directly; instead
+/// For `append_parquet_segment_with_id` we likely won't use this directly; instead
 /// we'll treat `logical_schema: None` as "adopt schema from first segment".
 pub fn require_table_schema(meta: &TableMeta) -> SchemaResult<&LogicalSchema> {
     match &meta.logical_schema {
