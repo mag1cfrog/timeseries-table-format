@@ -24,6 +24,8 @@ use std::path::PathBuf;
 
 use snafu::Snafu;
 
+use crate::transaction_log::TimeBucket;
+
 /// Root directory for coverage data.
 pub const COVERAGE_ROOT_DIR: &str = "_coverage";
 /// Directory for segment coverage data.
@@ -123,13 +125,44 @@ pub fn table_snapshot_path(
 /// Inputs should be stable identifiers for the segment, such as:
 /// - segment_id (recommended)
 /// - segment relative path
-pub fn deterministic_coverage_id(segment_id: &str, segment_rel_path: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(segment_id.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(segment_rel_path.as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest.to_hex();
+pub fn segment_coverage_id_v1(
+    bucket_spec: &TimeBucket,
+    time_column: &str,
+    coverage_bytes: &[u8],
+) -> String {
+    let mut h = blake3::Hasher::new();
+
+    // domain separation
+
+    h.update(b"segcov-v1");
+    h.update(b"\0");
+
+    // stable encoding for TimeBucket (avoid Display/to_string)
+    match bucket_spec {
+        TimeBucket::Seconds(n) => {
+            h.update(b"S");
+            h.update(&n.to_le_bytes());
+        }
+        TimeBucket::Minutes(n) => {
+            h.update(b"M");
+            h.update(&n.to_le_bytes());
+        }
+        TimeBucket::Hours(n) => {
+            h.update(b"H");
+            h.update(&n.to_le_bytes());
+        }
+        TimeBucket::Days(n) => {
+            h.update(b"D");
+            h.update(&n.to_le_bytes());
+        }
+    }
+
+    h.update(b"\0");
+    h.update(time_column.as_bytes());
+    h.update(b"\0");
+    h.update(coverage_bytes);
+
+    let hex = h.finalize().to_hex();
 
     // 32 hex chars = 128 bits of hash, plenty for collisions here.
     // Prefix avoids leading dot and provides easy debugging.
@@ -185,17 +218,5 @@ mod tests {
     fn table_snapshot_path_formats() {
         let path = table_snapshot_path(42, "snap-001").expect("valid snapshot id");
         assert_eq!(path, PathBuf::from("_coverage/table/42-snap-001.roar"));
-    }
-    #[test]
-    fn deterministic_coverage_id_is_stable_and_safe() {
-        let id1 = deterministic_coverage_id("seg-001", "data/seg-001.parquet");
-        let id2 = deterministic_coverage_id("seg-001", "data/seg-001.parquet");
-        assert_eq!(id1, id2);
-
-        validate_coverage_id(&id1).expect("deterministic id must be valid");
-        assert!(id1.len() <= 128);
-
-        let id3 = deterministic_coverage_id("seg-001", "data/seg-002.parquet");
-        assert_ne!(id1, id3);
     }
 }
