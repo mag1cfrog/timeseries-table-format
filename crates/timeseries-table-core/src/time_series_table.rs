@@ -9,8 +9,9 @@
 //!
 //! In v0.1 this is intentionally read-heavy and write-light:
 //! - `open` reconstructs state from the transaction log,
-//! - `create` bootstraps a fresh table with an initial metadata commit.
-//!   Later issues will add append APIs, coverage, and scanning.
+//! - `create` bootstraps a fresh table with an initial metadata commit,
+//! - append APIs handle schema enforcement, coverage sidecars, and OCC,
+//! - range scans stream filtered record batches.
 
 use std::{path::Path, pin::Pin};
 
@@ -987,6 +988,8 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::common::time_column::TimeColumnError;
+    use crate::helpers::coverage_sidecar::read_coverage_sidecar;
+    use crate::helpers::segment_coverage::compute_segment_coverage_from_parquet_bytes;
     use crate::storage::TableLocation;
     use crate::transaction_log::segments::{FileFormat, SegmentId, SegmentMetaError};
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
@@ -999,6 +1002,7 @@ mod tests {
         TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
     };
     use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};
+    use bytes::Bytes;
     use chrono::{TimeZone, Utc};
     use futures::StreamExt;
     use parquet::arrow::ArrowWriter;
@@ -1754,12 +1758,12 @@ mod tests {
             false,
             &[
                 TestRow {
-                    ts_millis: 2_000,
+                    ts_millis: 120_000,
                     symbol: "B",
                     price: 20.0,
                 },
                 TestRow {
-                    ts_millis: 3_000,
+                    ts_millis: 121_000,
                     symbol: "C",
                     price: 30.0,
                 },
@@ -1778,11 +1782,223 @@ mod tests {
             .get(&SegmentId("seg-dup".to_string()))
             .expect("segment retained after duplicate append");
         assert_eq!(seg.row_count, 2);
-        assert_eq!(seg.ts_min.timestamp_millis(), 2_000);
-        assert_eq!(seg.ts_max.timestamp_millis(), 3_000);
+        assert_eq!(seg.ts_min.timestamp_millis(), 120_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 121_000);
 
         let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
         assert!(log_dir.join("0000000003.json").is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_generates_id_and_updates_snapshot() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-auto-1.parquet";
+        let rel2 = "data/seg-auto-2.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+            ],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 120_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+                TestRow {
+                    ts_millis: 121_000,
+                    symbol: "D",
+                    price: 40.0,
+                },
+            ],
+        )?;
+
+        let v2 = table.append_parquet_segment(rel1, "ts").await?;
+        let v3 = table.append_parquet_segment(rel2, "ts").await?;
+        assert_eq!(v2, 2);
+        assert_eq!(v3, 3);
+
+        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
+        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
+
+        let expected_id1 = segment_id_v1(rel1, &data1);
+        let expected_id2 = segment_id_v1(rel2, &data2);
+
+        let seg1 = table
+            .state
+            .segments
+            .get(&expected_id1)
+            .expect("segment 1 present");
+        let seg2 = table
+            .state
+            .segments
+            .get(&expected_id2)
+            .expect("segment 2 present");
+        assert!(seg1.coverage_path.is_some());
+        assert!(seg2.coverage_path.is_some());
+
+        let bucket_spec = table.index_spec().bucket.clone();
+
+        let cov1 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel1),
+            "ts",
+            &bucket_spec,
+            data1.clone(),
+        )?;
+        let cov2 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel2),
+            "ts",
+            &bucket_spec,
+            data2.clone(),
+        )?;
+        let expected_snapshot = cov1.union(&cov2);
+
+        let ptr = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("table snapshot pointer present after append");
+        assert_eq!(ptr.version, v3);
+        assert_eq!(ptr.bucket_spec, bucket_spec);
+
+        let snapshot_cov =
+            read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+
+        assert_eq!(snapshot_cov.present(), expected_snapshot.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_rejects_overlap() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-overlap-a.parquet";
+        let rel2 = "data/seg-overlap-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_500,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+
+        let err = table
+            .append_parquet_segment(rel2, "ts")
+            .await
+            .expect_err("overlapping append should fail");
+
+        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_snapshot_survives_reopen() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-reopen-a.parquet";
+        let rel2 = "data/seg-reopen-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
+
+        let reopened = TimeSeriesTable::open(location.clone()).await?;
+        let ptr = reopened
+            .state()
+            .table_coverage
+            .as_ref()
+            .expect("table snapshot pointer present after reopen");
+
+        let bucket_spec = reopened.index_spec().bucket.clone();
+        assert_eq!(ptr.bucket_spec, bucket_spec);
+
+        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
+        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
+
+        let cov1 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel1),
+            "ts",
+            &bucket_spec,
+            data1,
+        )?;
+        let cov2 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel2),
+            "ts",
+            &bucket_spec,
+            data2,
+        )?;
+        let expected = cov1.union(&cov2);
+
+        let snapshot_cov =
+            read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        assert_eq!(snapshot_cov.present(), expected.present());
         Ok(())
     }
 
