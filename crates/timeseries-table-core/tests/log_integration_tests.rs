@@ -803,3 +803,55 @@ async fn table_coverage_is_none_when_not_committed() -> TestResult {
 
     Ok(())
 }
+
+/// Test: Segments with coverage_path and a snapshot pointer are replayed.
+#[tokio::test]
+async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
+    let (_tmp, store) = create_test_log_store();
+
+    let meta = sample_table_meta();
+    let coverage_bucket = TimeBucket::Minutes(5);
+    let segment_cov_path = "coverage/seg-001.roar".to_string();
+    let snapshot_cov_path = "coverage/table/0000000002.roar".to_string();
+
+    let mut seg = sample_segment("seg-001", 0);
+    seg.coverage_path = Some(segment_cov_path.clone());
+
+    let v1 = store
+        .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+        .await?;
+    let v2 = store
+        .commit_with_expected_version(v1, vec![LogAction::AddSegment(seg.clone())])
+        .await?;
+    let v3 = store
+        .commit_with_expected_version(
+            v2,
+            vec![LogAction::UpdateTableCoverage {
+                bucket_spec: coverage_bucket.clone(),
+                coverage_path: snapshot_cov_path.clone(),
+            }],
+        )
+        .await?;
+
+    let state = store.rebuild_table_state().await?;
+    assert_eq!(state.version, v3);
+
+    let rebuilt_seg = state
+        .segments
+        .get(&seg.segment_id)
+        .expect("segment present after rebuild");
+    assert_eq!(
+        rebuilt_seg.coverage_path.as_deref(),
+        Some(segment_cov_path.as_str())
+    );
+
+    let pointer = state
+        .table_coverage
+        .as_ref()
+        .expect("table coverage pointer should be present");
+    assert_eq!(pointer.bucket_spec, coverage_bucket);
+    assert_eq!(pointer.coverage_path, snapshot_cov_path);
+    assert_eq!(pointer.version, v3);
+
+    Ok(())
+}
