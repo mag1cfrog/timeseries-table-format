@@ -424,19 +424,20 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
     LogicalSchema::new(cols)
 }
 
-/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
-pub async fn logical_schema_from_parquet_location(
-    location: &TableLocation,
+/// Build a `LogicalSchema` from Parquet bytes.
+///
+/// This mirrors `logical_schema_from_parquet_location` but consumes a provided
+/// `Bytes` buffer. The caller supplies the relative path (for error context)
+/// and the full Parquet file contents. On success it returns a `LogicalSchema`
+/// derived from the Parquet physical/logical types; otherwise it returns a
+/// `SegmentMetaError` with contextual path information.
+pub fn logical_schema_from_parquet_bytes(
     rel_path: &Path,
+    data: Bytes,
 ) -> SegmentResult<LogicalSchema> {
     let path_str = rel_path.display().to_string();
 
-    let bytes = read_all_bytes(location, rel_path)
-        .await
-        .map_err(map_storage_error)?;
-
-    let data = Bytes::from(bytes);
-
+    // Parse Parquet metadata from the in-memory buffer.
     let reader =
         SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
             path: path_str.clone(),
@@ -446,12 +447,25 @@ pub async fn logical_schema_from_parquet_location(
 
     let file_meta = reader.metadata().file_metadata();
 
+    // Map Parquet physical/logical types into our LogicalSchema representation.
     logical_schema_from_parquet(file_meta).map_err(|source| {
         SegmentMetaError::LogicalSchemaInvalid {
             path: path_str,
             source,
         }
     })
+}
+
+/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
+pub async fn logical_schema_from_parquet_location(
+    location: &TableLocation,
+    rel_path: &Path,
+) -> SegmentResult<LogicalSchema> {
+    let bytes = read_all_bytes(location, rel_path)
+        .await
+        .map_err(map_storage_error)?;
+
+    logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))
 }
 #[cfg(test)]
 mod tests {
