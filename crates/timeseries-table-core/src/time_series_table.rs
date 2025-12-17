@@ -865,8 +865,16 @@ impl TimeSeriesTable {
             .await
             .context(TransactionLogSnafu)?;
 
-        // Optional sanity check.
-        debug_assert_eq!(new_version, new_version_guess);
+        // OCC invariant: a successful commit_with_expected_version must return
+        // the same "next" version we predicted when constructing `snapshot_path`.
+        // If this ever diverges, it indicates a severe bug between snapshot path
+        // construction and the transaction log implementation, so we panic rather
+        // than continuing with an inconsistent in-memory state.
+        assert_eq!(
+            new_version, new_version_guess,
+            "transaction log returned unexpected version: expected {}, got {}",
+            new_version_guess, new_version
+        );
 
         // 8) Update in-memory state.
         self.state.version = new_version;
