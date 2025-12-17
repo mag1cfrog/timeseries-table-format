@@ -113,6 +113,29 @@ pub fn table_snapshot_path(
     Ok(p)
 }
 
+/// Deterministically derive a safe coverage id for a segment sidecar.
+///
+/// This produces an id that:
+/// - is stable across retries given the same inputs
+/// - contains only ASCII [a-z0-9-] characters
+/// - is bounded in length and passes validate_coverage_id
+///
+/// Inputs should be stable identifiers for the segment, such as:
+/// - segment_id (recommended)
+/// - segment relative path
+pub fn deterministic_coverage_id(segment_id: &str, segment_rel_path: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(segment_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(segment_rel_path.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest.to_hex();
+
+    // 32 hex chars = 128 bits of hash, plenty for collisions here.
+    // Prefix avoids leading dot and provides easy debugging.
+    format!("segcov-{}", &hex[..32])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +185,17 @@ mod tests {
     fn table_snapshot_path_formats() {
         let path = table_snapshot_path(42, "snap-001").expect("valid snapshot id");
         assert_eq!(path, PathBuf::from("_coverage/table/42-snap-001.roar"));
+    }
+    #[test]
+    fn deterministic_coverage_id_is_stable_and_safe() {
+        let id1 = deterministic_coverage_id("seg-001", "data/seg-001.parquet");
+        let id2 = deterministic_coverage_id("seg-001", "data/seg-001.parquet");
+        assert_eq!(id1, id2);
+
+        validate_coverage_id(&id1).expect("deterministic id must be valid");
+        assert!(id1.len() <= 128);
+
+        let id3 = deterministic_coverage_id("seg-001", "data/seg-002.parquet");
+        assert_ne!(id1, id3);
     }
 }
