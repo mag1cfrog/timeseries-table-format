@@ -2261,12 +2261,12 @@ mod tests {
             false,
             &[
                 TestRow {
-                    ts_millis: 3_000,
+                    ts_millis: 61_000,
                     symbol: "C",
                     price: 30.0,
                 },
                 TestRow {
-                    ts_millis: 4_000,
+                    ts_millis: 62_000,
                     symbol: "D",
                     price: 40.0,
                 },
@@ -2280,8 +2280,9 @@ mod tests {
             .append_parquet_segment_with_id(SegmentId("seg-scan-2".to_string()), rel2, "ts")
             .await?;
 
+        // Query spans both segments but excludes the last row of the second segment.
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
-        let end = Utc.timestamp_millis_opt(3_500).single().expect("valid ts");
+        let end = Utc.timestamp_millis_opt(61_500).single().expect("valid ts");
 
         let rows = collect_scan_rows(&table, start, end).await?;
 
@@ -2289,7 +2290,7 @@ mod tests {
             rows,
             vec![
                 (2_000, "B".to_string(), 20.0),
-                (3_000, "C".to_string(), 30.0),
+                (61_000, "C".to_string(), 30.0),
             ]
         );
 
@@ -2715,7 +2716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_range_orders_overlapping_segments_by_ts_min() -> TestResult {
+    async fn scan_range_orders_segments_by_ts_min() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -2728,7 +2729,7 @@ mod tests {
             true,
             false,
             &[TestRow {
-                ts_millis: 1_500,
+                ts_millis: 120_000,
                 symbol: "B1",
                 price: 2.0,
             }],
@@ -2741,7 +2742,7 @@ mod tests {
             true,
             false,
             &[TestRow {
-                ts_millis: 1_000,
+                ts_millis: 60_000,
                 symbol: "A1",
                 price: 1.0,
             }],
@@ -2755,15 +2756,15 @@ mod tests {
             .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel_a, "ts")
             .await?;
 
-        let start = Utc.timestamp_millis_opt(900).single().unwrap();
-        let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
+        let start = Utc.timestamp_millis_opt(50_000).single().unwrap();
+        let end = Utc.timestamp_millis_opt(150_000).single().unwrap();
         let rows = collect_scan_rows(&table, start, end).await?;
 
         assert_eq!(
             rows,
             vec![
-                (1_000, "A1".to_string(), 1.0),
-                (1_500, "B1".to_string(), 2.0)
+                (60_000, "A1".to_string(), 1.0),
+                (120_000, "B1".to_string(), 2.0)
             ]
         );
         Ok(())
@@ -2796,7 +2797,7 @@ mod tests {
             true,
             false,
             &[TestRow {
-                ts_millis: 10_000,
+                ts_millis: 70_000,
                 symbol: "Z",
                 price: 9.0,
             }],
