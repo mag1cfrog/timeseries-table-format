@@ -219,4 +219,37 @@ mod tests {
         let path = table_snapshot_path(42, "snap-001").expect("valid snapshot id");
         assert_eq!(path, PathBuf::from("_coverage/table/42-snap-001.roar"));
     }
+
+    #[test]
+    fn segment_coverage_id_is_deterministic_and_valid() {
+        let bucket = TimeBucket::Minutes(1);
+        let time_col = "ts";
+        let bytes = b"bitmap-bytes";
+
+        let id1 = segment_coverage_id_v1(&bucket, time_col, bytes);
+        let id2 = segment_coverage_id_v1(&bucket, time_col, bytes);
+
+        assert_eq!(id1, id2, "same inputs must produce stable id");
+        assert!(id1.starts_with("segcov-"));
+        assert_eq!(id1.len(), "segcov-".len() + 32, "prefix + 32 hex chars");
+        validate_coverage_id(&id1).expect("derived id should be valid");
+    }
+
+    #[test]
+    fn segment_coverage_id_changes_with_inputs() {
+        let bytes = b"bytes";
+
+        let base =
+            segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", bytes);
+        let different_bucket =
+            segment_coverage_id_v1(&TimeBucket::Hours(5), "ts", bytes);
+        let different_column =
+            segment_coverage_id_v1(&TimeBucket::Seconds(5), "event_time", bytes);
+        let different_bytes =
+            segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", b"other");
+
+        assert_ne!(base, different_bucket, "bucket spec should affect id");
+        assert_ne!(base, different_column, "time column should affect id");
+        assert_ne!(base, different_bytes, "coverage bytes should affect id");
+    }
 }
