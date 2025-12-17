@@ -156,7 +156,7 @@ fn coverage_id_v1(
 
     let hex = h.finalize().to_hex();
 
-    // 32 hex chars = 128 bits of hash, plenty for collisions here.
+    // 32 hex chars = 128 bits of hash, providing strong collision resistance.
     // Prefix avoids leading dot and provides easy debugging.
     format!("{output_prefix}-{}", &hex[..32])
 }
