@@ -141,6 +141,18 @@ pub async fn write_coverage_sidecar_new(
     Ok(())
 }
 
+/// Write a coverage bitmap as bytes to a sidecar file with exclusive creation.
+pub async fn write_coverage_sidecar_new_bytes(
+    location: &TableLocation,
+    rel_path: &Path,
+    bytes: &[u8],
+) -> Result<(), CoverageError> {
+    storage::write_new(location, rel_path, bytes)
+        .await
+        .context(StorageSnafu)?;
+    Ok(())
+}
+
 /// Read a coverage bitmap from a sidecar file.
 ///
 /// Reads and deserializes a [`Coverage`] instance from a sidecar file at `rel_path`
