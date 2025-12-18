@@ -188,6 +188,14 @@ impl Coverage {
             .max()
             .unwrap_or(0)
     }
+
+    /// Merge another coverage bitmap into this one, accumulating all buckets.
+    ///
+    /// This performs an in-place union, so after the call `self` contains every
+    /// bucket that was set in either `self` or `other`.
+    pub fn union_inplace(&mut self, other: &Coverage) {
+        self.bitmap |= other.present();
+    }
 }
 
 impl FromIterator<Bucket> for Coverage {
