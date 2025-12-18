@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
@@ -184,6 +185,23 @@ impl SegmentMetaError {
     pub fn from_storage(err: StorageError, path: String) -> Self {
         SegmentMetaError::Io { path, source: err }
     }
+}
+
+/// Derive a deterministic segment id for an append entry.
+///
+/// This is content-addressable: it hashes both the relative path and the bytes so
+/// retries with the same input stay stable while same bytes at different paths
+/// diverge. The returned id uses the `seg-` prefix followed by 32 hex chars of
+/// the BLAKE3 digest, keeping ids bounded and safe for idempotent appends.
+pub fn segment_id_v1(relative_path: &str, data: &Bytes) -> SegmentId {
+    let mut h = blake3::Hasher::new();
+    h.update(b"segment-id-v1");
+    h.update(b"\0");
+    h.update(relative_path.as_bytes());
+    h.update(b"\0");
+    h.update(data.as_ref());
+    let hex = h.finalize().to_hex();
+    SegmentId(format!("seg-{}", &hex[..32]))
 }
 
 /// Convenience alias for results returned by segment metadata operations.
