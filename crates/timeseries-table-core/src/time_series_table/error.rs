@@ -190,4 +190,18 @@ pub enum TableError {
         "Cannot append because table has segments but no table coverage snapshot pointer in state"
     ))]
     MissingTableCoveragePointer,
+
+    /// Reading the per-segment coverage sidecar failed while rebuilding coverage.
+    #[snafu(display(
+        "Cannot recover table coverage: failed to read segment coverage sidecar for {segment_id} at {coverage_path}: {source}"
+    ))]
+    SegmentCoverageSidecarRead {
+        /// Segment whose coverage sidecar could not be read.
+        segment_id: SegmentId,
+        /// Path to the coverage sidecar file that failed to read.
+        coverage_path: String,
+        /// Underlying coverage error (boxed to keep the variant size small).
+        #[snafu(source(from(CoverageError, Box::new)), backtrace)]
+        source: Box<CoverageError>,
+    },
 }
