@@ -31,9 +31,9 @@ use crate::{
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
         error::{
-            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu,
-            MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
-            StorageSnafu, TableCoverageBucketMismatchSnafu, TableError, TransactionLogSnafu,
+            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
+            SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu,
+            TableCoverageBucketMismatchSnafu, TableError, TransactionLogSnafu,
         },
     },
     transaction_log::{
@@ -920,14 +920,12 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered =
-            load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
+        let recovered = load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
             let cov_path = seg.coverage_path.as_ref().expect("coverage path");
-            let cov =
-                read_coverage_sidecar(&location, Path::new(cov_path)).await?;
+            let cov = read_coverage_sidecar(&location, Path::new(cov_path)).await?;
             expected.union_inplace(&cov);
         }
 
@@ -981,14 +979,12 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered =
-            load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
+        let recovered = load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
             let cov_path = seg.coverage_path.as_ref().expect("coverage path");
-            let cov =
-                read_coverage_sidecar(&location, Path::new(cov_path)).await?;
+            let cov = read_coverage_sidecar(&location, Path::new(cov_path)).await?;
             expected.union_inplace(&cov);
         }
 
@@ -1089,10 +1085,7 @@ mod tests {
             .map(|(id, meta)| {
                 (
                     id.clone(),
-                    meta.coverage_path
-                        .as_ref()
-                        .expect("coverage path")
-                        .clone(),
+                    meta.coverage_path.as_ref().expect("coverage path").clone(),
                 )
             })
             .expect("at least one segment");
