@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
+use log::warn;
 use snafu::prelude::*;
 
 use crate::{
@@ -124,6 +125,12 @@ async fn load_table_snapshot_coverage(
                 Ok(cov) => Ok(cov),
 
                 Err(snapshot_err) => {
+                    warn!(
+                        "Failed to read table coverage snapshot at {} (version {}): {snapshot_err:?}. \
+                         Attempting recovery from segment sidecars.",
+                        ptr.coverage_path, ptr.version
+                    );
+
                     // Try recovery from segments.
                     let recovered = recover_table_coverage_from_segments(location, state).await?;
 
@@ -134,8 +141,6 @@ async fn load_table_snapshot_coverage(
                         &recovered,
                     )
                     .await;
-
-                    let _ = snapshot_err;
 
                     Ok(recovered)
                 }
