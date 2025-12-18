@@ -17,7 +17,8 @@ use crate::{
     coverage::{Coverage, serde::coverage_to_bytes},
     helpers::{
         coverage_sidecar::{
-            CoverageError, read_coverage_sidecar, write_coverage_sidecar_new_bytes,
+            CoverageError, read_coverage_sidecar, write_coverage_sidecar_atomic,
+            write_coverage_sidecar_new_bytes,
         },
         parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes},
         schema::ensure_schema_exact_match,
@@ -30,8 +31,7 @@ use crate::{
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
         error::{
-            CoverageOverlapSnafu, CoverageSidecarSnafu, ExistingSegmentMissingCoverageSnafu,
-            MissingCanonicalSchemaSnafu, MissingTableCoveragePointerSnafu,
+            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
             SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu,
             TableCoverageBucketMismatchSnafu, TableError, TransactionLogSnafu,
         },
@@ -55,6 +55,43 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
     Ok(())
 }
 
+/// Rebuild table coverage by reading each segment's coverage sidecar.
+///
+/// This is used as a fallback when the table snapshot coverage is missing or
+/// unreadable. Requires every segment to have a `coverage_path`.
+async fn recover_table_coverage_from_segments(
+    location: &TableLocation,
+    state: &TableState,
+) -> Result<Coverage, TableError> {
+    let mut acc = Coverage::empty();
+
+    for seg in state.segments.values() {
+        let path = seg.coverage_path.as_ref().ok_or_else(|| {
+            TableError::ExistingSegmentMissingCoverage {
+                segment_id: seg.segment_id.clone(),
+            }
+        })?;
+
+        let cov = read_coverage_sidecar(location, Path::new(path))
+            .await
+            .map_err(|source| TableError::SegmentCoverageSidecarRead {
+                segment_id: seg.segment_id.clone(),
+                coverage_path: path.clone(),
+                source: Box::new(source),
+            })?;
+
+        // Prefer an in-place union to avoid repeated allocations.
+        acc.union_inplace(&cov);
+    }
+
+    Ok(acc)
+}
+
+/// Load the table's snapshot coverage, falling back to recovering from segments.
+///
+/// Ensures the snapshot bucket spec matches the current table index, and if the
+/// snapshot is missing or unreadable, reconstructs coverage from segment
+/// sidecars (best-effort healing the snapshot afterward).
 async fn load_table_snapshot_coverage(
     location: &TableLocation,
     state: &TableState,
@@ -65,11 +102,13 @@ async fn load_table_snapshot_coverage(
             // If there are no segments, treat as empty (first append case).
             // If there are segments, this is suspicious in v0.1: fail.
             if state.segments.is_empty() {
-                Ok(Coverage::empty())
-            } else {
-                MissingTableCoveragePointerSnafu.fail()
+                return Ok(Coverage::empty());
             }
+
+            // No snapshot pointer, but segments exist -> recover from segments.
+            return recover_table_coverage_from_segments(location, state).await;
         }
+
         Some(ptr) => {
             // Extra safety: ensure bucket spec matches current index.bucket
             ensure!(
@@ -81,9 +120,26 @@ async fn load_table_snapshot_coverage(
                 }
             );
 
-            read_coverage_sidecar(location, Path::new(&ptr.coverage_path))
-                .await
-                .context(CoverageSidecarSnafu)
+            match read_coverage_sidecar(location, Path::new(&ptr.coverage_path)).await {
+                Ok(cov) => Ok(cov),
+
+                Err(snapshot_err) => {
+                    // Try recovery from segments.
+                    let recovered = recover_table_coverage_from_segments(location, state).await?;
+
+                    // Optional: heal snapshot best-effort (do not fail open if this fails)
+                    let _ = write_coverage_sidecar_atomic(
+                        location,
+                        Path::new(&ptr.coverage_path),
+                        &recovered,
+                    )
+                    .await;
+
+                    let _ = snapshot_err;
+
+                    Ok(recovered)
+                }
+            }
         }
     }
 }
