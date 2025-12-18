@@ -339,3 +339,695 @@ impl TimeSeriesTable {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_util::*;
+    use super::*;
+    use crate::common::time_column::TimeColumnError;
+    use crate::transaction_log::segments::SegmentMetaError;
+    use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
+    use crate::transaction_log::{
+        CommitError, TableKind, TableMeta, TimeIndexSpec, TransactionLogStore,
+    };
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_missing_time_column_errors() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel = "data/seg-no-ts.parquet";
+        let path = tmp.path().join(rel);
+        write_parquet_without_time_column(&path, &["A"], &[1.0])?;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-no-ts".to_string()), rel, "ts")
+            .await
+            .expect_err("expected missing time column");
+
+        match err {
+            TableError::SegmentMeta { source } => {
+                assert!(matches!(
+                    source,
+                    SegmentMetaError::TimeColumn {
+                        source: TimeColumnError::Missing { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_updates_state_and_log() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/seg1.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        let new_version = table
+            .append_parquet_segment_with_id(SegmentId("seg-1".to_string()), rel_path, "ts")
+            .await?;
+
+        assert_eq!(new_version, 2);
+        assert_eq!(table.state.version, 2);
+        let seg = table
+            .state
+            .segments
+            .get(&SegmentId("seg-1".to_string()))
+            .expect("segment present");
+        assert_eq!(seg.path, rel_path);
+        assert_eq!(seg.row_count, 1);
+        assert_eq!(seg.ts_min.timestamp_millis(), 1_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 1_000);
+
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+        let commit_path = log_dir.join("0000000002.json");
+        assert!(commit_path.is_file());
+        let current =
+            tokio::fs::read_to_string(log_dir.join(TransactionLogStore::CURRENT_FILE_NAME)).await?;
+        assert_eq!(current.trim(), "2");
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert!(
+            reopened
+                .state
+                .segments
+                .contains_key(&SegmentId("seg-1".to_string()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_adopts_schema_when_missing() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec![],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        };
+        let meta = TableMeta {
+            kind: TableKind::TimeSeries(index),
+            logical_schema: None,
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: 1,
+        };
+
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_path = "data/seg-adopt.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 5_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        let new_version = table
+            .append_parquet_segment_with_id(SegmentId("seg-adopt".to_string()), rel_path, "ts")
+            .await?;
+
+        assert_eq!(new_version, 2);
+        let schema = table
+            .state
+            .table_meta
+            .logical_schema
+            .as_ref()
+            .expect("schema adopted");
+        let names: Vec<_> = schema.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["ts", "symbol", "price"]);
+        let ts_col = &schema.columns()[0];
+        assert_eq!(
+            ts_col.data_type,
+            LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_rejects_schema_mismatch() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel_path = "data/seg-missing-symbol.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            false,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "C",
+                price: 30.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-bad".to_string()), rel_path, "ts")
+            .await
+            .expect_err("expected schema mismatch");
+
+        match err {
+            TableError::SchemaCompatibility { source } => {
+                assert!(matches!(
+                    source,
+                    crate::helpers::schema::SchemaCompatibilityError::MissingColumn { .. }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_allows_same_id_with_nonoverlapping_coverage()
+    -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/dup.parquet";
+        let abs_path = tmp.path().join(rel_path);
+
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        let v2 = table
+            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(v2, 2);
+        assert_eq!(table.state.version, 2);
+        assert_eq!(
+            table
+                .state
+                .segments
+                .get(&SegmentId("seg-dup".to_string()))
+                .unwrap()
+                .row_count,
+            1
+        );
+
+        // Overwrite the same path with different content and append again with the same segment ID.
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 120_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+                TestRow {
+                    ts_millis: 121_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+            ],
+        )?;
+
+        let v3 = table
+            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(v3, 3);
+        assert_eq!(table.state.version, 3);
+
+        let seg = table
+            .state
+            .segments
+            .get(&SegmentId("seg-dup".to_string()))
+            .expect("segment retained after duplicate append");
+        assert_eq!(seg.row_count, 2);
+        assert_eq!(seg.ts_min.timestamp_millis(), 120_000);
+        assert_eq!(seg.ts_max.timestamp_millis(), 121_000);
+
+        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+        assert!(log_dir.join("0000000003.json").is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_generates_id_and_updates_snapshot() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-auto-1.parquet";
+        let rel2 = "data/seg-auto-2.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 2_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+            ],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[
+                TestRow {
+                    ts_millis: 120_000,
+                    symbol: "C",
+                    price: 30.0,
+                },
+                TestRow {
+                    ts_millis: 121_000,
+                    symbol: "D",
+                    price: 40.0,
+                },
+            ],
+        )?;
+
+        let v2 = table.append_parquet_segment(rel1, "ts").await?;
+        let v3 = table.append_parquet_segment(rel2, "ts").await?;
+        assert_eq!(v2, 2);
+        assert_eq!(v3, 3);
+
+        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
+        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
+
+        let expected_id1 = segment_id_v1(rel1, &data1);
+        let expected_id2 = segment_id_v1(rel2, &data2);
+
+        let seg1 = table
+            .state
+            .segments
+            .get(&expected_id1)
+            .expect("segment 1 present");
+        let seg2 = table
+            .state
+            .segments
+            .get(&expected_id2)
+            .expect("segment 2 present");
+        assert!(seg1.coverage_path.is_some());
+        assert!(seg2.coverage_path.is_some());
+
+        let bucket_spec = table.index_spec().bucket.clone();
+
+        let cov1 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel1),
+            "ts",
+            &bucket_spec,
+            data1.clone(),
+        )?;
+        let cov2 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel2),
+            "ts",
+            &bucket_spec,
+            data2.clone(),
+        )?;
+        let expected_snapshot = cov1.union(&cov2);
+
+        let ptr = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("table snapshot pointer present after append");
+        assert_eq!(ptr.version, v3);
+        assert_eq!(ptr.bucket_spec, bucket_spec);
+
+        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+
+        assert_eq!(snapshot_cov.present(), expected_snapshot.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_rejects_overlap() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-overlap-a.parquet";
+        let rel2 = "data/seg-overlap-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_500,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+
+        let err = table
+            .append_parquet_segment(rel2, "ts")
+            .await
+            .expect_err("overlapping append should fail");
+
+        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_snapshot_survives_reopen() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-reopen-a.parquet";
+        let rel2 = "data/seg-reopen-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
+
+        let reopened = TimeSeriesTable::open(location.clone()).await?;
+        let ptr = reopened
+            .state()
+            .table_coverage
+            .as_ref()
+            .expect("table snapshot pointer present after reopen");
+
+        let bucket_spec = reopened.index_spec().bucket.clone();
+        assert_eq!(ptr.bucket_spec, bucket_spec);
+
+        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
+        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
+
+        let cov1 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel1),
+            "ts",
+            &bucket_spec,
+            data1,
+        )?;
+        let cov2 = compute_segment_coverage_from_parquet_bytes(
+            Path::new(rel2),
+            "ts",
+            &bucket_spec,
+            data2,
+        )?;
+        let expected = cov1.union(&cov2);
+
+        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        assert_eq!(snapshot_cov.present(), expected.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_with_id_conflict_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/conflict.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+
+        // Simulate an external writer advancing CURRENT to version 2 while this handle is at version 1.
+        table
+            .log
+            .commit_with_expected_version(1, vec![])
+            .await
+            .expect("external commit succeeds");
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-conflict".to_string()), rel_path, "ts")
+            .await
+            .expect_err("expected conflict due to stale version");
+
+        match err {
+            TableError::TransactionLog { source } => {
+                assert!(matches!(
+                    source,
+                    CommitError::Conflict {
+                        expected: 1,
+                        found: 2,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fails_when_existing_segment_missing_coverage_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-missing-cov.parquet";
+        let rel2 = "data/seg-next.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
+            .await?;
+
+        // Simulate legacy/bad state: drop coverage_path on the existing segment.
+        let seg = table
+            .state
+            .segments
+            .get_mut(&SegmentId("seg-a".to_string()))
+            .expect("segment present");
+        seg.coverage_path = None;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .await
+            .expect_err("append should fail when existing segment lacks coverage");
+
+        assert!(matches!(
+            err,
+            TableError::ExistingSegmentMissingCoverage { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fails_when_table_snapshot_pointer_missing() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-no-pointer-a.parquet";
+        let rel2 = "data/seg-no-pointer-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
+            .await?;
+
+        // Simulate missing snapshot pointer while segments exist.
+        table.state.table_coverage = None;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .await
+            .expect_err("append should fail when snapshot pointer is missing");
+
+        assert!(matches!(err, TableError::MissingTableCoveragePointer));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fails_when_table_snapshot_bucket_mismatches_index() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-bucket-a.parquet";
+        let rel2 = "data/seg-bucket-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
+            .await?;
+
+        // Tamper snapshot pointer to a mismatching bucket spec.
+        let bad_bucket = TimeBucket::Hours(1);
+        let ptr = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("pointer present")
+            .clone();
+        table.state.table_coverage = Some(TableCoveragePointer {
+            bucket_spec: bad_bucket.clone(),
+            coverage_path: ptr.coverage_path.clone(),
+            version: ptr.version,
+        });
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .await
+            .expect_err("append should fail when snapshot bucket mismatches index");
+
+        assert!(matches!(
+            err,
+            TableError::TableCoverageBucketMismatch { .. }
+        ));
+        Ok(())
+    }
+}
