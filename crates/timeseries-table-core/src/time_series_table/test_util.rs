@@ -7,8 +7,12 @@ use arrow::array::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
     TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
 };
-use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};
-use chrono::{TimeZone, Utc};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit};
+use arrow_array::{
+    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use chrono::{DateTime, TimeZone, Utc};
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
@@ -18,6 +22,7 @@ use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::types::Type;
 use std::fs::File;
+use std::path::Path;
 use std::sync::Arc;
 
 pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
