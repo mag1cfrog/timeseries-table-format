@@ -31,9 +31,9 @@ use crate::{
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
         error::{
-            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
-            SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu,
-            TableCoverageBucketMismatchSnafu, TableError, TransactionLogSnafu,
+            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu,
+            MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
+            StorageSnafu, TableCoverageBucketMismatchSnafu, TableError, TransactionLogSnafu,
         },
     },
     transaction_log::{
@@ -874,6 +874,254 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_snapshot_recovers_when_missing_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        // Append two segments so we have segment sidecars plus a table snapshot pointer.
+        let rel1 = "data/seg-missing-snap-a.parquet";
+        let rel2 = "data/seg-missing-snap-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
+
+        let bucket_spec = table.index_spec().bucket.clone();
+        let state = table.state.clone();
+        let ptr = state
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer present");
+        let snapshot_abs = match &location {
+            TableLocation::Local(root) => root.join(&ptr.coverage_path),
+        };
+
+        tokio::fs::remove_file(&snapshot_abs).await?;
+
+        let recovered =
+            load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
+
+        let mut expected = Coverage::empty();
+        for seg in state.segments.values() {
+            let cov_path = seg.coverage_path.as_ref().expect("coverage path");
+            let cov =
+                read_coverage_sidecar(&location, Path::new(cov_path)).await?;
+            expected.union_inplace(&cov);
+        }
+
+        assert_eq!(recovered.present(), expected.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_recovers_when_corrupt_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-corrupt-snap-a.parquet";
+        let rel2 = "data/seg-corrupt-snap-b.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
+
+        let bucket_spec = table.index_spec().bucket.clone();
+        let state = table.state.clone();
+        let ptr = state
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer present");
+        let snapshot_abs = match &location {
+            TableLocation::Local(root) => root.join(&ptr.coverage_path),
+        };
+
+        tokio::fs::write(&snapshot_abs, b"garbage").await?;
+
+        let recovered =
+            load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
+
+        let mut expected = Coverage::empty();
+        for seg in state.segments.values() {
+            let cov_path = seg.coverage_path.as_ref().expect("coverage path");
+            let cov =
+                read_coverage_sidecar(&location, Path::new(cov_path)).await?;
+            expected.union_inplace(&cov);
+        }
+
+        assert_eq!(recovered.present(), expected.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_errors_when_segment_missing_coverage_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-missing-cov-path.parquet";
+        let path1 = tmp.path().join(rel1);
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+
+        let bucket_spec = table.index_spec().bucket.clone();
+        let mut state = table.state.clone();
+        state.table_coverage = None;
+
+        let seg_id = state
+            .segments
+            .keys()
+            .next()
+            .expect("segment present")
+            .clone();
+        state
+            .segments
+            .get_mut(&seg_id)
+            .expect("segment present")
+            .coverage_path = None;
+
+        let err = load_table_snapshot_coverage(&location, &state, &bucket_spec)
+            .await
+            .expect_err("missing coverage_path should error");
+
+        assert!(matches!(
+            err,
+            TableError::ExistingSegmentMissingCoverage { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_errors_when_segment_sidecar_corrupt() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let rel1 = "data/seg-corrupt-sidecar.parquet";
+        let rel2 = "data/seg-corrupt-sidecar-ok.parquet";
+        let path1 = tmp.path().join(rel1);
+        let path2 = tmp.path().join(rel2);
+        write_test_parquet(
+            &path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        write_test_parquet(
+            &path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
+
+        let bucket_spec = table.index_spec().bucket.clone();
+        let mut state = table.state.clone();
+        state.table_coverage = None;
+
+        let (corrupt_seg_id, corrupt_cov_path) = state
+            .segments
+            .iter()
+            .next()
+            .map(|(id, meta)| {
+                (
+                    id.clone(),
+                    meta.coverage_path
+                        .as_ref()
+                        .expect("coverage path")
+                        .clone(),
+                )
+            })
+            .expect("at least one segment");
+
+        let corrupt_abs = match &location {
+            TableLocation::Local(root) => root.join(&corrupt_cov_path),
+        };
+        tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
+
+        let err = load_table_snapshot_coverage(&location, &state, &bucket_spec)
+            .await
+            .expect_err("corrupt sidecar should error");
+
+        match err {
+            TableError::SegmentCoverageSidecarRead {
+                segment_id,
+                coverage_path,
+                ..
+            } => {
+                assert_eq!(segment_id, corrupt_seg_id);
+                assert_eq!(coverage_path, corrupt_cov_path);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_parquet_segment_with_id_conflict_returns_error() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -978,7 +1226,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_fails_when_table_snapshot_pointer_missing() -> TestResult {
+    // Unlike load_snapshot_recovers_when_missing_file (which exercises recovery when
+    // the pointer exists but the snapshot file is gone), this covers the case where
+    // the in-memory pointer itself is missing while segments exist, and append
+    // must rebuild + rewrite the pointer as part of the append flow.
+    async fn append_recovers_when_table_snapshot_pointer_missing() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1016,12 +1268,27 @@ mod tests {
         // Simulate missing snapshot pointer while segments exist.
         table.state.table_coverage = None;
 
-        let err = table
+        table
             .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
-            .await
-            .expect_err("append should fail when snapshot pointer is missing");
+            .await?;
 
-        assert!(matches!(err, TableError::MissingTableCoveragePointer));
+        // Snapshot pointer should be restored after a successful append.
+        let ptr = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer restored");
+
+        let cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+
+        let mut expected = Coverage::empty();
+        for seg in table.state.segments.values() {
+            let path = seg.coverage_path.as_ref().expect("coverage path");
+            let seg_cov = read_coverage_sidecar(&location, Path::new(path)).await?;
+            expected.union_inplace(&seg_cov);
+        }
+
+        assert_eq!(cov.present(), expected.present());
         Ok(())
     }
 
