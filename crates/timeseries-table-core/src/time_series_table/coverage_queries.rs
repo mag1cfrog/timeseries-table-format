@@ -15,7 +15,7 @@ use crate::{
     helpers::time_bucket::{bucket_id, bucket_range},
     time_series_table::{
         TimeSeriesTable,
-        error::{InvalidRangeSnafu, TableError},
+        error::{BucketDomainOverflowSnafu, InvalidRangeSnafu, TableError},
     },
 };
 
@@ -31,7 +31,9 @@ impl TimeSeriesTable {
                 max: u32::MAX,
             });
         }
-        Ok(RoaringBitmap::from_iter((first..=last).map(|b| b as Bucket)))
+        Ok(RoaringBitmap::from_iter(
+            (first..=last).map(|b| b as Bucket),
+        ))
     }
 
     /// Build an "expected" bitmap for `[start, end)` with validation.
@@ -105,9 +107,18 @@ impl TimeSeriesTable {
         }
 
         let cov = self.load_table_snapshot_coverage_readonly().await?;
-        let end_bucket = self.end_bucket_for_half_open_end(ts_end)?;
+        let end_bucket_u64 = self.end_bucket_for_half_open_end(ts_end)?;
 
-        Ok(cov.last_window_at_or_before(end_bucket as u32, window_len_buckets))
+        ensure!(
+            end_bucket_u64 <= u32::MAX as u64,
+            BucketDomainOverflowSnafu {
+                last_bucket_id: end_bucket_u64,
+                max: u32::MAX,
+            }
+        );
+
+        let end_bucket = end_bucket_u64 as Bucket;
+        Ok(cov.last_window_at_or_before(end_bucket, window_len_buckets))
     }
 }
 
@@ -117,7 +128,7 @@ mod tests {
     use crate::{
         storage::TableLocation,
         time_series_table::test_util::{
-            TestResult, make_basic_table_meta, utc_datetime, write_test_parquet, TestRow,
+            TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
         },
         transaction_log::TimeBucket,
     };
@@ -127,7 +138,9 @@ mod tests {
     type HelperResult<T> = Result<T, Box<dyn std::error::Error>>;
 
     fn ts_from_secs(secs: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(secs, 0).single().expect("valid timestamp")
+        Utc.timestamp_opt(secs, 0)
+            .single()
+            .expect("valid timestamp")
     }
 
     async fn make_table() -> HelperResult<(TempDir, TimeSeriesTable)> {
@@ -319,7 +332,9 @@ mod tests {
             .expect_err("mismatched bucket spec should error");
 
         match err {
-            TableError::TableCoverageBucketMismatch { expected, actual, .. } => {
+            TableError::TableCoverageBucketMismatch {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, table.index.bucket);
                 assert_eq!(actual, ptr.bucket_spec);
             }
@@ -365,9 +380,7 @@ mod tests {
     #[tokio::test]
     async fn last_window_returns_none_for_zero_length() -> TestResult {
         let (_tmp, table) = make_table().await?;
-        let res = table
-            .last_fully_covered_window(ts_from_secs(0), 0)
-            .await?;
+        let res = table.last_fully_covered_window(ts_from_secs(0), 0).await?;
         assert!(res.is_none());
         Ok(())
     }
