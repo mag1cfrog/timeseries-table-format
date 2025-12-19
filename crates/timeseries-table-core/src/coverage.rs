@@ -196,6 +196,57 @@ impl Coverage {
     pub fn union_inplace(&mut self, other: &Coverage) {
         self.bitmap |= other.present();
     }
+
+    /// Return the last fully-covered contiguous window of length `len`
+    /// ending at or before `end_bucket`, based on *present buckets only*.
+    pub fn last_window_at_or_before(
+        &self,
+        end_bucket: Bucket,
+        len: u64,
+    ) -> Option<RangeInclusive<Bucket>> {
+        if len == 0 {
+            return None;
+        }
+
+        let it = self.bitmap.iter().rev();
+
+        let mut started = false;
+        let mut run_end: Bucket = 0;
+        let mut prev_seen: Option<Bucket> = None;
+        let mut run_len: u64 = 0;
+
+        for b in it {
+            if b > end_bucket {
+                continue;
+            }
+
+            if !started {
+                started = true;
+                run_end = b;
+                run_len = 1;
+            } else if prev_seen == Some(b + 1) {
+                run_len += 1;
+            } else {
+                // break in coverage -> start a new run
+                run_end = b;
+                run_len = 1;
+            }
+
+            prev_seen = Some(b);
+
+            if run_len >= len {
+                let end_u64 = run_end as u64;
+                let start_u64 = end_u64.checked_add(1)?.checked_sub(len)?;
+
+                if start_u64 > u32::MAX as u64 {
+                    return None;
+                }
+                return Some(start_u64 as Bucket..=run_end);
+            }
+        }
+
+        None
+    }
 }
 
 impl FromIterator<Bucket> for Coverage {
@@ -479,5 +530,44 @@ mod tests {
         let cov_empty = Coverage::empty();
         let missing = cov_empty.missing_points(&expected);
         assert!(missing.contains(42));
+    }
+
+    #[test]
+    fn last_window_contiguous_runs() {
+        let cov = Coverage::from_bitmap(bm_from_range(0, 10)); // 0..=9
+
+        assert_eq!(cov.last_window_at_or_before(9, 3), Some(7u32..=9u32));
+
+        // Move the end back by one; window should slide accordingly.
+        assert_eq!(cov.last_window_at_or_before(8, 3), Some(6u32..=8u32));
+
+        // Request longer than available -> None.
+        assert!(cov.last_window_at_or_before(9, 11).is_none());
+    }
+
+    #[test]
+    fn last_window_skips_over_gaps() {
+        // Coverage with a gap between 4 and 7.
+        let mut bm = bm_from_range(0, 5); // 0..=4
+        bm.extend((7u32..=10u32).collect::<RoaringBitmap>()); // 7..=10
+        let cov = Coverage::from_bitmap(bm);
+
+        // Highest contiguous run ends at 10.
+        assert_eq!(cov.last_window_at_or_before(10, 3), Some(8u32..=10u32));
+        assert_eq!(cov.last_window_at_or_before(10, 4), Some(7u32..=10u32));
+
+        // If the end is inside the gap, we fall back to the previous run.
+        assert_eq!(cov.last_window_at_or_before(6, 2), Some(3u32..=4u32));
+
+        // End inside the run but request longer than that run; should fall back
+        // to the earlier run if it satisfies the length.
+        assert_eq!(cov.last_window_at_or_before(9, 5), Some(0u32..=4u32));
+    }
+
+    #[test]
+    fn last_window_handles_len_zero_and_empty() {
+        let cov = Coverage::empty();
+        assert!(cov.last_window_at_or_before(100, 1).is_none());
+        assert!(cov.last_window_at_or_before(100, 0).is_none());
     }
 }
