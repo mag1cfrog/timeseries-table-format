@@ -81,6 +81,23 @@ impl TimeSeriesTable {
     }
 
     /// Maximum contiguous missing run length (in buckets) for the half-open time range [start, end).
+    ///
+    /// # Errors
+    /// - [`TableError::InvalidRange`] if `start >= end`.
+    /// - [`TableError::BucketDomainOverflow`] if the derived bucket ids exceed `u32::MAX`.
+    ///
+    /// # Examples
+    /// ```
+    /// use chrono::{TimeZone, Utc};
+    /// # use timeseries_table_core::{time_series_table::TimeSeriesTable, storage::TableLocation};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::time_series_table::error::TableError> {
+    /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
+    /// let end = Utc.timestamp_opt(180, 0).single().unwrap();
+    /// let gap = table.max_gap_len_for_range(start, end).await?;
+    /// # let _ = gap;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn max_gap_len_for_range(
         &self,
         start: DateTime<Utc>,
@@ -96,7 +113,22 @@ impl TimeSeriesTable {
     ///
     /// Notes:
     /// - This returns a bucket-id RangeInclusive in the v0.1 bucket domain (u32).
-    /// - We search within a bounded lookback window in bucket space to keep it cheap.
+    /// - Returns `None` when `window_len_buckets == 0` or when no fully covered window is found.
+    ///
+    /// # Errors
+    /// - [`TableError::BucketDomainOverflow`] if `ts_end` maps beyond the u32 bucket domain.
+    ///
+    /// # Examples
+    /// ```
+    /// use chrono::{TimeZone, Utc};
+    /// # use timeseries_table_core::{time_series_table::TimeSeriesTable, storage::TableLocation};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::time_series_table::error::TableError> {
+    /// let ts_end = Utc.timestamp_opt(360, 0).single().unwrap(); // end of bucket 5
+    /// let window = table.last_fully_covered_window(ts_end, 2).await?;
+    /// # let _ = window;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn last_fully_covered_window(
         &self,
         ts_end: DateTime<Utc>,
