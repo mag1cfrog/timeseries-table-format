@@ -16,8 +16,13 @@ use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Duration, Utc};
 use roaring::RoaringBitmap;
+use snafu::ensure;
 
-use crate::{coverage::Bucket, transaction_log::TimeBucket};
+use crate::{
+    coverage::Bucket,
+    time_series_table::error::{BucketDomainOverflowSnafu, InvalidRangeSnafu, TableError},
+    transaction_log::TimeBucket,
+};
 
 const SECONDS_PER_MINUTE: i64 = 60;
 const SECONDS_PER_HOUR: i64 = 60 * 60;
@@ -146,6 +151,34 @@ pub fn expected_buckets_for_range(
         debug_assert!(b <= u32::MAX as u64, "bucket ID {} exceeds u32::MAX", b);
         b as Bucket
     }))
+}
+
+/// Build an "expected" bitmap for `[start, end)` with validation.
+///
+/// - Uses [`bucket_range`] to compute the inclusive set of bucket ids
+///   intersecting the half-open interval `[start, end)`.
+/// - Returns [`TableError::InvalidRange`] if `start >= end`.
+/// - Returns [`TableError::BucketDomainOverflow`] if any bucket id
+///   would exceed `u32::MAX` (our Roaring bitmap domain in v0.1).
+pub fn expected_buckets_for_range_checked(
+    spec: &TimeBucket,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<RoaringBitmap, TableError> {
+    ensure!(start < end, InvalidRangeSnafu { start, end });
+
+    let range = bucket_range(spec, start, end);
+    let last = *range.end();
+
+    ensure!(
+        last <= u32::MAX as u64,
+        BucketDomainOverflowSnafu {
+            last_bucket_id: last,
+            max: u32::MAX
+        }
+    );
+
+    Ok(RoaringBitmap::from_iter(range.map(|b| b as Bucket)))
 }
 
 #[cfg(test)]

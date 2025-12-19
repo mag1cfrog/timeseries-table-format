@@ -198,4 +198,19 @@ pub enum TableError {
         #[snafu(source(from(CoverageError, Box::new)), backtrace)]
         source: Box<CoverageError>,
     },
+
+    /// Building an expected bucket bitmap would exceed the u32 bucket domain.
+    ///
+    /// In v0.1 we store bucket ids in RoaringBitmap (u32). If the requested
+    /// time range maps to bucket ids > u32::MAX, we must fail instead of
+    /// truncating in release builds.
+    #[snafu(display(
+        "Expected bucket domain overflows u32: last_bucket_id={last_bucket_id} (max={max})"
+    ))]
+    BucketDomainOverflow {
+        /// The last bucket id in the requested range (inclusive).
+        last_bucket_id: u64,
+        /// Always u32::MAX, included to make the error self-describing.
+        max: u32,
+    },
 }
