@@ -988,7 +988,6 @@ mod tests {
 
         let mut state = table.state.clone();
         state.table_coverage = None;
-
         let (corrupt_seg_id, corrupt_cov_path) = state
             .segments
             .iter()
@@ -1000,6 +999,7 @@ mod tests {
                 )
             })
             .expect("at least one segment");
+        table.state = state;
 
         let corrupt_abs = match &location {
             TableLocation::Local(root) => root.join(&corrupt_cov_path),
