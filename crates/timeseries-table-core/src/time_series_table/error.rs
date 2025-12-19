@@ -213,4 +213,10 @@ pub enum TableError {
         /// Always u32::MAX, included to make the error self-describing.
         max: u32,
     },
+
+    /// Table state is missing a coverage snapshot pointer when required.
+    #[snafu(display(
+        "Cannot append because table has segments but no table coverage snapshot pointer in state"
+    ))]
+    MissingTableCoveragePointer,
 }

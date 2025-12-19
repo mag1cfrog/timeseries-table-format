@@ -11,16 +11,13 @@
 use std::path::Path;
 
 use bytes::Bytes;
-use log::warn;
+
 use snafu::prelude::*;
 
 use crate::{
-    coverage::{Coverage, serde::coverage_to_bytes},
+    coverage::serde::coverage_to_bytes,
     helpers::{
-        coverage_sidecar::{
-            CoverageError, read_coverage_sidecar, write_coverage_sidecar_atomic,
-            write_coverage_sidecar_new_bytes,
-        },
+        coverage_sidecar::{CoverageError, write_coverage_sidecar_new_bytes},
         parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes},
         schema::ensure_schema_exact_match,
         segment_coverage::compute_segment_coverage_from_parquet_bytes,
@@ -28,17 +25,17 @@ use crate::{
     layout::coverage::{
         segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
     },
-    storage::{self, StorageError, TableLocation},
+    storage::{self, StorageError},
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
         error::{
             CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
-            SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu,
-            TableCoverageBucketMismatchSnafu, TableError, TransactionLogSnafu,
+            SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu, TableError,
+            TransactionLogSnafu,
         },
     },
     transaction_log::{
-        LogAction, SegmentId, TableState, TimeBucket, segments::segment_id_v1,
+        LogAction, SegmentId, TableState, segments::segment_id_v1,
         table_state::TableCoveragePointer,
     },
 };
@@ -54,99 +51,6 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
     }
 
     Ok(())
-}
-
-/// Rebuild table coverage by reading each segment's coverage sidecar.
-///
-/// This is used as a fallback when the table snapshot coverage is missing or
-/// unreadable. Requires every segment to have a `coverage_path`.
-async fn recover_table_coverage_from_segments(
-    location: &TableLocation,
-    state: &TableState,
-) -> Result<Coverage, TableError> {
-    let mut acc = Coverage::empty();
-
-    for seg in state.segments.values() {
-        let path = seg.coverage_path.as_ref().ok_or_else(|| {
-            TableError::ExistingSegmentMissingCoverage {
-                segment_id: seg.segment_id.clone(),
-            }
-        })?;
-
-        let cov = read_coverage_sidecar(location, Path::new(path))
-            .await
-            .map_err(|source| TableError::SegmentCoverageSidecarRead {
-                segment_id: seg.segment_id.clone(),
-                coverage_path: path.clone(),
-                source: Box::new(source),
-            })?;
-
-        // Prefer an in-place union to avoid repeated allocations.
-        acc.union_inplace(&cov);
-    }
-
-    Ok(acc)
-}
-
-/// Load the table's snapshot coverage, falling back to recovering from segments.
-///
-/// Ensures the snapshot bucket spec matches the current table index, and if the
-/// snapshot is missing or unreadable, reconstructs coverage from segment
-/// sidecars (best-effort healing the snapshot afterward).
-async fn load_table_snapshot_coverage(
-    location: &TableLocation,
-    state: &TableState,
-    bucket_spec: &TimeBucket,
-) -> Result<Coverage, TableError> {
-    match &state.table_coverage {
-        None => {
-            // If there are no segments, treat as empty (first append case).
-            // If there are segments, this is suspicious in v0.1: fail.
-            if state.segments.is_empty() {
-                return Ok(Coverage::empty());
-            }
-
-            // No snapshot pointer, but segments exist -> recover from segments.
-            return recover_table_coverage_from_segments(location, state).await;
-        }
-
-        Some(ptr) => {
-            // Extra safety: ensure bucket spec matches current index.bucket
-            ensure!(
-                ptr.bucket_spec == *bucket_spec,
-                TableCoverageBucketMismatchSnafu {
-                    expected: bucket_spec.clone(),
-                    actual: ptr.bucket_spec.clone(),
-                    pointer_version: ptr.version,
-                }
-            );
-
-            match read_coverage_sidecar(location, Path::new(&ptr.coverage_path)).await {
-                Ok(cov) => Ok(cov),
-
-                Err(snapshot_err) => {
-                    warn!(
-                        "Failed to read table coverage snapshot at {} (version {}): {snapshot_err:?}. \
-                         Attempting recovery from segment sidecars.",
-                        ptr.coverage_path, ptr.version
-                    );
-
-                    // Try recovery from segments.
-                    let recovered = recover_table_coverage_from_segments(location, state).await?;
-
-                    // Optional: heal snapshot best-effort (do not fail open if this fails)
-                    let _ = write_coverage_sidecar_atomic(
-                        location,
-                        Path::new(&ptr.coverage_path),
-                        &recovered,
-                    )
-                    .await;
-
-                    Ok(recovered)
-                }
-            }
-        }
-    }
 }
 
 impl TimeSeriesTable {
@@ -212,8 +116,7 @@ impl TimeSeriesTable {
         };
 
         // 3) Load current table snapshot coverage (or empty if first append).
-        let table_cov =
-            load_table_snapshot_coverage(&self.location, &self.state, &bucket_spec).await?;
+        let table_cov = self.load_table_snapshot_coverage_with_heal().await?;
 
         // 4) Compute segment coverage.
         let segment_cov = compute_segment_coverage_from_parquet_bytes(
@@ -406,10 +309,13 @@ mod tests {
     use super::super::test_util::*;
     use super::*;
     use crate::common::time_column::TimeColumnError;
+    use crate::coverage::Coverage;
+    use crate::helpers::coverage_sidecar::read_coverage_sidecar;
+    use crate::storage::TableLocation;
     use crate::transaction_log::segments::SegmentMetaError;
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
-        CommitError, TableKind, TableMeta, TimeIndexSpec, TransactionLogStore,
+        CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
     };
     use tempfile::TempDir;
 
@@ -913,7 +819,6 @@ mod tests {
         table.append_parquet_segment(rel1, "ts").await?;
         table.append_parquet_segment(rel2, "ts").await?;
 
-        let bucket_spec = table.index_spec().bucket.clone();
         let state = table.state.clone();
         let ptr = state
             .table_coverage
@@ -925,7 +830,7 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered = load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
+        let recovered = table.load_table_snapshot_coverage_with_heal().await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
@@ -972,7 +877,6 @@ mod tests {
         table.append_parquet_segment(rel1, "ts").await?;
         table.append_parquet_segment(rel2, "ts").await?;
 
-        let bucket_spec = table.index_spec().bucket.clone();
         let state = table.state.clone();
         let ptr = state
             .table_coverage
@@ -984,7 +888,7 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered = load_table_snapshot_coverage(&location, &state, &bucket_spec).await?;
+        let recovered = table.load_table_snapshot_coverage_with_heal().await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
@@ -1018,7 +922,6 @@ mod tests {
 
         table.append_parquet_segment(rel1, "ts").await?;
 
-        let bucket_spec = table.index_spec().bucket.clone();
         let mut state = table.state.clone();
         state.table_coverage = None;
 
@@ -1034,7 +937,8 @@ mod tests {
             .expect("segment present")
             .coverage_path = None;
 
-        let err = load_table_snapshot_coverage(&location, &state, &bucket_spec)
+        let err = table
+            .load_table_snapshot_coverage_with_heal()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -1079,7 +983,6 @@ mod tests {
         table.append_parquet_segment(rel1, "ts").await?;
         table.append_parquet_segment(rel2, "ts").await?;
 
-        let bucket_spec = table.index_spec().bucket.clone();
         let mut state = table.state.clone();
         state.table_coverage = None;
 
@@ -1100,7 +1003,8 @@ mod tests {
         };
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
-        let err = load_table_snapshot_coverage(&location, &state, &bucket_spec)
+        let err = table
+            .load_table_snapshot_coverage_with_heal()
             .await
             .expect_err("corrupt sidecar should error");
 

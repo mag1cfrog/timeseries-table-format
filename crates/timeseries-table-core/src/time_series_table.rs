@@ -22,8 +22,10 @@
 //! - commit `AddSegment` with `coverage_path` plus `UpdateTableCoverage` atomically,
 //! - fail fast if the table state is missing coverage pointers or has segments without `coverage_path`.
 pub mod append;
+pub mod coverage_state;
 pub mod error;
 pub mod scan;
+
 #[cfg(test)]
 pub(crate) mod test_util;
 
@@ -32,6 +34,7 @@ use std::pin::Pin;
 use arrow::array::RecordBatch;
 
 use futures::Stream;
+
 use snafu::prelude::*;
 
 use crate::time_series_table::error::{
