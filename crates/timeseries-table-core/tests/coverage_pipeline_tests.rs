@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arrow::array::{Float64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
+use chrono::{TimeZone, Utc};
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_core::{
@@ -20,6 +21,12 @@ use timeseries_table_core::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn ts_from_secs(secs: i64) -> chrono::DateTime<Utc> {
+    Utc.timestamp_opt(secs, 0)
+        .single()
+        .expect("valid timestamp")
+}
 
 #[tokio::test]
 async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
@@ -99,6 +106,88 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
     let snapshot_after =
         read_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
     assert_eq!(snapshot_after.present(), expected.present());
+    Ok(())
+}
+
+#[tokio::test]
+async fn coverage_queries_work_end_to_end() -> TestResult {
+    // Build a table with coverage over buckets 0, 1, 3, 4, and 5 (gap at 2).
+    let tmp = TempDir::new()?;
+    let location = TableLocation::local(tmp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()?).await?;
+
+    write_parquet_rows(
+        &tmp.path().join("data/cov-query-a.parquet"),
+        &[(1_000, "A", 1.0), (61_000, "B", 2.0)],
+    )?;
+    write_parquet_rows(
+        &tmp.path().join("data/cov-query-b.parquet"),
+        &[(180_000, "C", 3.0)],
+    )?;
+    write_parquet_rows(
+        &tmp.path().join("data/cov-query-c.parquet"),
+        &[(240_000, "D", 4.0), (300_000, "E", 5.0)],
+    )?;
+    write_parquet_rows(
+        &tmp.path().join("data/cov-query-d.parquet"),
+        &[(480_000, "F", 6.0)], // isolated bucket 8
+    )?;
+
+    table.append_parquet_segment("data/cov-query-a.parquet", "ts").await?;
+    table.append_parquet_segment("data/cov-query-b.parquet", "ts").await?;
+    table.append_parquet_segment("data/cov-query-c.parquet", "ts").await?;
+    table.append_parquet_segment("data/cov-query-d.parquet", "ts").await?;
+
+    // Re-open to exercise snapshot loading path.
+    let table = TimeSeriesTable::open(location.clone()).await?;
+
+    let start = ts_from_secs(0);
+    let end = ts_from_secs(360); // [0, 360) spans buckets 0..=5
+
+    let ratio = table.coverage_ratio_for_range(start, end).await?;
+    assert!((ratio - (5.0 / 6.0)).abs() < 1e-12);
+
+    let gap_len = table.max_gap_len_for_range(start, end).await?;
+    assert_eq!(gap_len, 1);
+
+    let last_window = table
+        .last_fully_covered_window(end, 2)
+        .await?
+        .expect("should find contiguous window");
+    assert_eq!(last_window, 4u32..=5u32);
+
+    // Check a shorter range that ends on a bucket boundary to exercise half-open logic.
+    let short_end = ts_from_secs(180); // start of bucket 3; expected buckets 0,1,2
+    let short_ratio = table
+        .coverage_ratio_for_range(start, short_end)
+        .await?;
+    assert!((short_ratio - (2.0 / 3.0)).abs() < 1e-12);
+
+    let short_gap = table
+        .max_gap_len_for_range(start, short_end)
+        .await?;
+    assert_eq!(short_gap, 1);
+
+    let short_window = table.last_fully_covered_window(short_end, 2).await?;
+    assert_eq!(short_window, Some(0u32..=1u32));
+
+    // With a trailing single-bucket run (bucket 8), len should skip the short tail
+    // and return the last contiguous run of sufficient length.
+    let later_end = ts_from_secs(600); // start of bucket 10; covers up to bucket 9
+    let window_len = 2;
+    let window = table
+        .last_fully_covered_window(later_end, window_len)
+        .await?
+        .expect("window of len >=2 should be found");
+    assert_eq!(window, 4u32..=5u32);
+
+    let window_len_three = 3;
+    let window_three = table
+        .last_fully_covered_window(later_end, window_len_three)
+        .await?
+        .expect("window of len >=3 should be found");
+    assert_eq!(window_three, 3u32..=5u32);
+
     Ok(())
 }
 
