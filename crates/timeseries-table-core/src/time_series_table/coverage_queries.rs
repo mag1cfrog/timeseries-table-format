@@ -61,7 +61,12 @@ impl TimeSeriesTable {
         // For half-open semantics [.., ts_end), subtract 1ns so we pick the
         // last bucket that still intersects the interval.
 
-        let end_adj = ts_end - Duration::nanoseconds(1);
+        let end_adj = ts_end.checked_sub_signed(Duration::nanoseconds(1)).ok_or(
+            TableError::InvalidRange {
+                start: ts_end,
+                end: ts_end,
+            },
+        )?;
         Ok(bucket_id(&self.index.bucket, end_adj))
     }
 
