@@ -22,6 +22,7 @@
 //! - commit `AddSegment` with `coverage_path` plus `UpdateTableCoverage` atomically,
 //! - fail fast if the table state is missing coverage pointers or has segments without `coverage_path`.
 pub mod append;
+pub mod coverage_queries;
 pub mod coverage_state;
 pub mod error;
 pub mod scan;
