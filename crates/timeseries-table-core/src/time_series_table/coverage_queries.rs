@@ -31,7 +31,7 @@ impl TimeSeriesTable {
                 max: u32::MAX,
             });
         }
-        Ok(RoaringBitmap::from_iter((first..last).map(|b| b as Bucket)))
+        Ok(RoaringBitmap::from_iter((first..=last).map(|b| b as Bucket)))
     }
 
     /// Build an "expected" bitmap for `[start, end)` with validation.
@@ -108,5 +108,312 @@ impl TimeSeriesTable {
         let end_bucket = self.end_bucket_for_half_open_end(ts_end)?;
 
         Ok(cov.last_window_at_or_before(end_bucket as u32, window_len_buckets))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        storage::TableLocation,
+        time_series_table::test_util::{
+            TestResult, make_basic_table_meta, utc_datetime, write_test_parquet, TestRow,
+        },
+        transaction_log::TimeBucket,
+    };
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    type HelperResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    fn ts_from_secs(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(secs, 0).single().expect("valid timestamp")
+    }
+
+    async fn make_table() -> HelperResult<(TempDir, TimeSeriesTable)> {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        Ok((tmp, table))
+    }
+
+    async fn append_segment(
+        table: &mut TimeSeriesTable,
+        tmp: &TempDir,
+        rel_path: &str,
+        rows: &[TestRow],
+    ) -> HelperResult<()> {
+        let abs = tmp.path().join(rel_path);
+        write_test_parquet(&abs, true, false, rows)?;
+        table.append_parquet_segment(rel_path, "ts").await?;
+        Ok(())
+    }
+
+    async fn table_with_sparse_coverage() -> HelperResult<(TempDir, TimeSeriesTable)> {
+        // Buckets covered: 0, 1, 3 (gap at 2).
+        let (tmp, mut table) = make_table().await?;
+        append_segment(
+            &mut table,
+            &tmp,
+            "data/sparse.parquet",
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 1.0,
+                },
+                TestRow {
+                    ts_millis: 61_000,
+                    symbol: "B",
+                    price: 2.0,
+                },
+                TestRow {
+                    ts_millis: 180_000,
+                    symbol: "C",
+                    price: 3.0,
+                },
+            ],
+        )
+        .await?;
+        Ok((tmp, table))
+    }
+
+    async fn table_with_contiguous_run() -> HelperResult<(TempDir, TimeSeriesTable)> {
+        // Buckets covered: 4 and 5 (contiguous run).
+        let (tmp, mut table) = make_table().await?;
+        append_segment(
+            &mut table,
+            &tmp,
+            "data/window.parquet",
+            &[
+                TestRow {
+                    ts_millis: 240_000,
+                    symbol: "A",
+                    price: 1.0,
+                },
+                TestRow {
+                    ts_millis: 300_000,
+                    symbol: "B",
+                    price: 2.0,
+                },
+            ],
+        )
+        .await?;
+        Ok((tmp, table))
+    }
+
+    #[tokio::test]
+    async fn expected_bitmap_rejects_invalid_range() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        let ts = utc_datetime(2024, 1, 1, 0, 0, 0);
+
+        let err = table
+            .expected_bitmap_for_time_range_checked(ts, ts)
+            .expect_err("start >= end should be invalid");
+        assert!(matches!(err, TableError::InvalidRange { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expected_bitmap_errors_on_bucket_overflow() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        let start = ts_from_secs(0);
+        // Choose an end far enough in the future that the bucket id exceeds u32::MAX.
+        let end = ts_from_secs(((u32::MAX as i64) + 2) * 60);
+
+        let err = table
+            .expected_bitmap_for_time_range_checked(start, end)
+            .expect_err("bucket domain overflow should error");
+
+        match err {
+            TableError::BucketDomainOverflow { last_bucket_id, .. } => {
+                assert!(last_bucket_id > u32::MAX as u64);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expected_bitmap_covers_inclusive_bucket_range() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        let start = ts_from_secs(0);
+        let end = ts_from_secs(180); // covers buckets 0,1,2 with 1-minute bucket spec
+
+        let bitmap = table.expected_bitmap_for_time_range_checked(start, end)?;
+        let first = bucket_id(&table.index.bucket, start);
+        let last = bucket_id(&table.index.bucket, end - Duration::nanoseconds(1));
+        assert_eq!(bitmap.len(), (last - first + 1) as u64);
+        for b in first..=last {
+            assert!(bitmap.contains(b as Bucket));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coverage_ratio_uses_snapshot_when_present() -> TestResult {
+        let (_tmp, table) = table_with_sparse_coverage().await?;
+        let start = ts_from_secs(0);
+        let end = ts_from_secs(240); // buckets 0,1,2,3 expected
+
+        let ratio = table.coverage_ratio_for_range(start, end).await?;
+        assert!((ratio - 0.75).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coverage_ratio_recovers_when_snapshot_missing() -> TestResult {
+        let (_tmp, mut table) = table_with_sparse_coverage().await?;
+        table.state.table_coverage = None;
+
+        let ratio = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
+            .await?;
+        assert!((ratio - 0.75).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coverage_ratio_errors_when_recovery_missing_segment_coverage_path() -> TestResult {
+        let (_tmp, mut table) = table_with_sparse_coverage().await?;
+        table.state.table_coverage = None;
+        let seg_id = table
+            .state
+            .segments
+            .keys()
+            .next()
+            .cloned()
+            .expect("segment present");
+        table
+            .state
+            .segments
+            .get_mut(&seg_id)
+            .expect("segment present")
+            .coverage_path = None;
+
+        let err = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
+            .await
+            .expect_err("missing segment coverage_path should bubble up");
+        assert!(matches!(
+            err,
+            TableError::ExistingSegmentMissingCoverage { segment_id } if segment_id == seg_id
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coverage_ratio_errors_on_bucket_mismatch() -> TestResult {
+        let (_tmp, mut table) = table_with_sparse_coverage().await?;
+        let mut ptr = table
+            .state
+            .table_coverage
+            .clone()
+            .expect("snapshot pointer present");
+        ptr.bucket_spec = TimeBucket::Hours(1);
+        table.state.table_coverage = Some(ptr.clone());
+
+        let err = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
+            .await
+            .expect_err("mismatched bucket spec should error");
+
+        match err {
+            TableError::TableCoverageBucketMismatch { expected, actual, .. } => {
+                assert_eq!(expected, table.index.bucket);
+                assert_eq!(actual, ptr.bucket_spec);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coverage_ratio_handles_empty_table() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        let ratio = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(60))
+            .await?;
+        assert_eq!(ratio, 0.0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coverage_ratio_errors_when_bucket_domain_overflows() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        let start = ts_from_secs(0);
+        let end = ts_from_secs(((u32::MAX as i64) + 3) * 60);
+
+        let err = table
+            .coverage_ratio_for_range(start, end)
+            .await
+            .expect_err("overflow should error");
+        assert!(matches!(err, TableError::BucketDomainOverflow { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn max_gap_len_reports_missing_run() -> TestResult {
+        let (_tmp, table) = table_with_sparse_coverage().await?;
+        let gap = table
+            .max_gap_len_for_range(ts_from_secs(0), ts_from_secs(240))
+            .await?;
+        assert_eq!(gap, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn last_window_returns_none_for_zero_length() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        let res = table
+            .last_fully_covered_window(ts_from_secs(0), 0)
+            .await?;
+        assert!(res.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn last_window_respects_half_open_end_and_run_length() -> TestResult {
+        let (_tmp, table) = table_with_contiguous_run().await?;
+        let ts_end = ts_from_secs(360); // exactly at the start of bucket 6
+
+        let win = table
+            .last_fully_covered_window(ts_end, 2)
+            .await?
+            .expect("window should be present");
+        assert_eq!(win, 4u32..=5u32);
+
+        let none = table.last_fully_covered_window(ts_end, 3).await?;
+        assert!(none.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn last_window_errors_when_recovery_fails() -> TestResult {
+        let (_tmp, mut table) = table_with_contiguous_run().await?;
+        table.state.table_coverage = None;
+        let seg_id = table
+            .state
+            .segments
+            .keys()
+            .next()
+            .cloned()
+            .expect("segment present");
+        table
+            .state
+            .segments
+            .get_mut(&seg_id)
+            .expect("segment present")
+            .coverage_path = None;
+
+        let err = table
+            .last_fully_covered_window(ts_from_secs(360), 1)
+            .await
+            .expect_err("missing coverage_path should bubble up");
+        assert!(matches!(
+            err,
+            TableError::ExistingSegmentMissingCoverage { segment_id } if segment_id == seg_id
+        ));
+        Ok(())
     }
 }
