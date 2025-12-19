@@ -536,16 +536,10 @@ mod tests {
     fn last_window_contiguous_runs() {
         let cov = Coverage::from_bitmap(bm_from_range(0, 10)); // 0..=9
 
-        assert_eq!(
-            cov.last_window_at_or_before(9, 3),
-            Some(7u32..=9u32)
-        );
+        assert_eq!(cov.last_window_at_or_before(9, 3), Some(7u32..=9u32));
 
         // Move the end back by one; window should slide accordingly.
-        assert_eq!(
-            cov.last_window_at_or_before(8, 3),
-            Some(6u32..=8u32)
-        );
+        assert_eq!(cov.last_window_at_or_before(8, 3), Some(6u32..=8u32));
 
         // Request longer than available -> None.
         assert!(cov.last_window_at_or_before(9, 11).is_none());
@@ -559,27 +553,15 @@ mod tests {
         let cov = Coverage::from_bitmap(bm);
 
         // Highest contiguous run ends at 10.
-        assert_eq!(
-            cov.last_window_at_or_before(10, 3),
-            Some(8u32..=10u32)
-        );
-        assert_eq!(
-            cov.last_window_at_or_before(10, 4),
-            Some(7u32..=10u32)
-        );
+        assert_eq!(cov.last_window_at_or_before(10, 3), Some(8u32..=10u32));
+        assert_eq!(cov.last_window_at_or_before(10, 4), Some(7u32..=10u32));
 
         // If the end is inside the gap, we fall back to the previous run.
-        assert_eq!(
-            cov.last_window_at_or_before(6, 2),
-            Some(3u32..=4u32)
-        );
+        assert_eq!(cov.last_window_at_or_before(6, 2), Some(3u32..=4u32));
 
         // End inside the run but request longer than that run; should fall back
         // to the earlier run if it satisfies the length.
-        assert_eq!(
-            cov.last_window_at_or_before(9, 5),
-            Some(0u32..=4u32)
-        );
+        assert_eq!(cov.last_window_at_or_before(9, 5), Some(0u32..=4u32));
     }
 
     #[test]
