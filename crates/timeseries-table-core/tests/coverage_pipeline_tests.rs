@@ -165,7 +165,7 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     assert_eq!(last_window, 4u32..=5u32);
 
     // Check a shorter range that ends on a bucket boundary to exercise half-open logic.
-    let short_end = ts_from_secs(180)?; // start of bucket 3; expected buckets 0,1,2
+    let short_end = ts_from_secs(180)?; // start of bucket 3; expected buckets 0,1,2 (covered: 0,1)
     let short_ratio = table.coverage_ratio_for_range(start, short_end).await?;
     assert!((short_ratio - (2.0 / 3.0)).abs() < 1e-12);
 
