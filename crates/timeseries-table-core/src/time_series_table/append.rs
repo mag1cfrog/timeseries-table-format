@@ -937,6 +937,9 @@ mod tests {
             .expect("segment present")
             .coverage_path = None;
 
+        // Overwrite table state with the modified snapshot missing coverage_path.
+        table.state = state;
+
         let err = table
             .load_table_snapshot_coverage_with_heal()
             .await
