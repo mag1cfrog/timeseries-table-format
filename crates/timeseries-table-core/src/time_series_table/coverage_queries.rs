@@ -386,6 +386,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn last_window_errors_when_bucket_domain_overflows() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+        // Pick an end timestamp that maps past the u32 bucket domain to force an error.
+        let ts_end = ts_from_secs(((u32::MAX as i64) + 2) * 60);
+
+        let err = table
+            .last_fully_covered_window(ts_end, 1)
+            .await
+            .expect_err("overflow should error");
+        assert!(matches!(err, TableError::BucketDomainOverflow { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn last_window_respects_half_open_end_and_run_length() -> TestResult {
         let (_tmp, table) = table_with_contiguous_run().await?;
         let ts_end = ts_from_secs(360); // exactly at the start of bucket 6
