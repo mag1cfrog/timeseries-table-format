@@ -3,7 +3,7 @@
 //! These APIs:
 //! - derive an "expected" bucket domain from a timestamp range (half-open [start, end))
 //! - load table coverage (readonly recovery)
-//! - reuse crate::coverage APIs (coverage_ratio, max_gap_len, last_run_with_min_len)
+//! - reuse crate::coverage APIs (coverage_ratio, max_gap_len, last_window_at_or_before)
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Duration, Utc};
@@ -25,6 +25,12 @@ impl TimeSeriesTable {
         first: u64,
         last: u64,
     ) -> Result<RoaringBitmap, TableError> {
+        if first > u32::MAX as u64 {
+            return Err(TableError::BucketDomainOverflow {
+                last_bucket_id: first,
+                max: u32::MAX,
+            });
+        }
         if last > u32::MAX as u64 {
             return Err(TableError::BucketDomainOverflow {
                 last_bucket_id: last,
@@ -75,6 +81,23 @@ impl TimeSeriesTable {
     /// Coverage ratio in [0.0, 1.0] for the half-open time range [start, end).
     ///
     /// Uses the table-level coverage snapshot (with readonly recovery from segments if needed).
+    ///
+    /// # Errors
+    /// - [`TableError::InvalidRange`] if `start >= end`.
+    /// - [`TableError::BucketDomainOverflow`] if the derived bucket ids exceed `u32::MAX`.
+    ///
+    /// # Examples
+    /// ```
+    /// use chrono::{TimeZone, Utc};
+    /// # use timeseries_table_core::{time_series_table::TimeSeriesTable, storage::TableLocation};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::time_series_table::error::TableError> {
+    /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
+    /// let end = Utc.timestamp_opt(120, 0).single().unwrap();
+    /// let ratio = table.coverage_ratio_for_range(start, end).await?;
+    /// # let _ = ratio;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn coverage_ratio_for_range(
         &self,
         start: DateTime<Utc>,
@@ -278,6 +301,24 @@ mod tests {
         match err {
             TableError::BucketDomainOverflow { last_bucket_id, .. } => {
                 assert!(last_bucket_id > u32::MAX as u64);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expected_bitmap_errors_on_first_bucket_overflow() -> TestResult {
+        let (_tmp, table) = make_table().await?;
+
+        let first = (u32::MAX as u64) + 1;
+        let err = table
+            .expected_bitmap_for_bucket_range_checked(first, first)
+            .expect_err("first bucket overflow should error");
+
+        match err {
+            TableError::BucketDomainOverflow { last_bucket_id, .. } => {
+                assert_eq!(last_bucket_id, first);
             }
             other => panic!("unexpected error: {other:?}"),
         }
