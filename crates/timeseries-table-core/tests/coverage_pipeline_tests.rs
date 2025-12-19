@@ -22,10 +22,10 @@ use timeseries_table_core::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn ts_from_secs(secs: i64) -> chrono::DateTime<Utc> {
+fn ts_from_secs(secs: i64) -> Result<chrono::DateTime<Utc>, &'static str> {
     Utc.timestamp_opt(secs, 0)
         .single()
-        .expect("valid timestamp")
+        .ok_or("invalid timestamp")
 }
 
 #[tokio::test]
@@ -133,16 +133,24 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         &[(480_000, "F", 6.0)], // isolated bucket 8
     )?;
 
-    table.append_parquet_segment("data/cov-query-a.parquet", "ts").await?;
-    table.append_parquet_segment("data/cov-query-b.parquet", "ts").await?;
-    table.append_parquet_segment("data/cov-query-c.parquet", "ts").await?;
-    table.append_parquet_segment("data/cov-query-d.parquet", "ts").await?;
+    table
+        .append_parquet_segment("data/cov-query-a.parquet", "ts")
+        .await?;
+    table
+        .append_parquet_segment("data/cov-query-b.parquet", "ts")
+        .await?;
+    table
+        .append_parquet_segment("data/cov-query-c.parquet", "ts")
+        .await?;
+    table
+        .append_parquet_segment("data/cov-query-d.parquet", "ts")
+        .await?;
 
     // Re-open to exercise snapshot loading path.
     let table = TimeSeriesTable::open(location.clone()).await?;
 
-    let start = ts_from_secs(0);
-    let end = ts_from_secs(360); // [0, 360) spans buckets 0..=5
+    let start = ts_from_secs(0)?;
+    let end = ts_from_secs(360)?; // [0, 360) spans buckets 0..=5
 
     let ratio = table.coverage_ratio_for_range(start, end).await?;
     assert!((ratio - (5.0 / 6.0)).abs() < 1e-12);
@@ -157,15 +165,11 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     assert_eq!(last_window, 4u32..=5u32);
 
     // Check a shorter range that ends on a bucket boundary to exercise half-open logic.
-    let short_end = ts_from_secs(180); // start of bucket 3; expected buckets 0,1,2
-    let short_ratio = table
-        .coverage_ratio_for_range(start, short_end)
-        .await?;
+    let short_end = ts_from_secs(180)?; // start of bucket 3; expected buckets 0,1,2
+    let short_ratio = table.coverage_ratio_for_range(start, short_end).await?;
     assert!((short_ratio - (2.0 / 3.0)).abs() < 1e-12);
 
-    let short_gap = table
-        .max_gap_len_for_range(start, short_end)
-        .await?;
+    let short_gap = table.max_gap_len_for_range(start, short_end).await?;
     assert_eq!(short_gap, 1);
 
     let short_window = table.last_fully_covered_window(short_end, 2).await?;
@@ -173,7 +177,7 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
 
     // With a trailing single-bucket run (bucket 8), len should skip the short tail
     // and return the last contiguous run of sufficient length.
-    let later_end = ts_from_secs(600); // start of bucket 10; covers up to bucket 9
+    let later_end = ts_from_secs(600)?; // start of bucket 10; covers up to bucket 9
     let window_len = 2;
     let window = table
         .last_fully_covered_window(later_end, window_len)
