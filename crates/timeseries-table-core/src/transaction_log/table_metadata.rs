@@ -4,7 +4,7 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
-use std::{collections::HashSet, fmt};
+use std::{collections::{BTreeMap, HashSet}, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,11 @@ pub struct TableMeta {
     ///
     /// v0.1 can hard-code this to 1.
     pub(crate) format_version: u32,
+
+    /// v0.1: If TimeIndexSpec.entity_columns is non-empty, we pin a single entity identity
+    /// per table (map keyed by column name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_identity: Option<BTreeMap<String, String>>,
 }
 
 impl TableMeta {
@@ -87,6 +92,7 @@ impl TableMeta {
             logical_schema: None,
             created_at: Utc::now(),
             format_version: TABLE_FORMAT_VERSION,
+            entity_identity: None,
         }
     }
 
@@ -100,6 +106,7 @@ impl TableMeta {
             logical_schema: Some(logical_schema),
             created_at: Utc::now(),
             format_version: TABLE_FORMAT_VERSION,
+            entity_identity: None,
         }
     }
 }
