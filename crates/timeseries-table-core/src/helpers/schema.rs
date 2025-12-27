@@ -333,6 +333,7 @@ mod tests {
             logical_schema: None,
             created_at: chrono::Utc::now(),
             format_version: 1,
+            entity_identity: None,
         };
 
         let err = require_table_schema(&meta).unwrap_err();
@@ -373,6 +374,7 @@ mod tests {
             logical_schema: Some(schema.clone()),
             created_at: chrono::Utc::now(),
             format_version: 1,
+            entity_identity: None,
         };
 
         let result = require_table_schema(&meta).expect("should return schema");

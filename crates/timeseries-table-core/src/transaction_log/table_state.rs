@@ -152,6 +152,7 @@ mod tests {
                 .single()
                 .expect("valid sample table metadata timestamp"),
             format_version: 1,
+            entity_identity: None,
         }
     }
 

@@ -421,6 +421,7 @@ mod tests {
             logical_schema: None,
             created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
             format_version: 1,
+            entity_identity: None,
         };
 
         let mut table = TimeSeriesTable::create(location, meta).await?;

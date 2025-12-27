@@ -69,6 +69,7 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
         format_version: 1,
+        entity_identity: None,
     }
 }
 
@@ -399,6 +400,7 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
         format_version: 1,
+        entity_identity: None,
     }
 }
 

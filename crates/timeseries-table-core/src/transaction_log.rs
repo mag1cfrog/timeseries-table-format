@@ -174,6 +174,7 @@ mod tests {
             ),
             created_at: ts0,
             format_version: 1,
+            entity_identity: None,
         };
 
         let seg_meta = SegmentMeta {
