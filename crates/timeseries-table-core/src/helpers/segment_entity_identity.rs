@@ -475,3 +475,295 @@ pub fn segment_entity_identity_from_parquet_bytes(
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::Cursor, path::Path, sync::Arc};
+
+    use arrow::{
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use arrow_array::{ArrayRef, Int32Array, LargeStringArray, StringArray};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+
+    fn make_batch(schema: Arc<Schema>, columns: Vec<ArrayRef>) -> RecordBatch {
+        RecordBatch::try_new(schema, columns).expect("record batch")
+    }
+
+    fn parquet_bytes_from_batches(
+        schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+        props: WriterProperties,
+    ) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer =
+            ArrowWriter::try_new(cursor, schema, Some(props)).expect("arrow writer");
+        for batch in batches {
+            writer.write(&batch).expect("write batch");
+        }
+        let cursor = writer.into_inner().expect("finalize parquet");
+        cursor.into_inner()
+    }
+
+    fn identity_from_bytes(
+        bytes: Vec<u8>,
+        entity_columns: &[String],
+    ) -> Result<EntityIdentity, SegmentEntityIdentityError> {
+        segment_entity_identity_from_parquet_bytes(
+            Bytes::from(bytes),
+            Path::new("segment.parquet"),
+            entity_columns,
+        )
+    }
+
+    fn string_array(values: &[Option<&str>]) -> ArrayRef {
+        Arc::new(StringArray::from(values.to_vec()))
+    }
+
+    fn large_string_array(values: &[Option<&str>]) -> ArrayRef {
+        Arc::new(LargeStringArray::from(values.to_vec()))
+    }
+
+    #[test]
+    fn identity_empty_columns_returns_empty() {
+        let identity = segment_entity_identity_from_parquet_bytes(
+            Bytes::from_static(b"not parquet"),
+            Path::new("segment.parquet"),
+            &[],
+        )
+        .expect("empty columns");
+        assert!(identity.is_empty());
+    }
+
+    #[test]
+    fn identity_happy_path_utf8() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![
+                string_array(&[Some("alpha"), Some("alpha")]),
+                Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef,
+            ],
+        );
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let identity =
+            identity_from_bytes(bytes, &[String::from("entity")]).expect("identity");
+        assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn identity_happy_path_large_utf8() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::LargeUtf8,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![large_string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let identity =
+            identity_from_bytes(bytes, &[String::from("entity")]).expect("identity");
+        assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn identity_missing_column_returns_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let err = identity_from_bytes(bytes, &[String::from("missing")]).unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::EntityColumnNotFound { .. }));
+    }
+
+    #[test]
+    fn identity_unsupported_type_returns_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![1, 1])) as ArrayRef],
+        );
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(
+            err,
+            SegmentEntityIdentityError::EntityColumnUnsupportedType { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_column_has_null_returns_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            true,
+        )]));
+        let batch = make_batch(Arc::clone(&schema), vec![string_array(&[Some("alpha"), None])]);
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::EntityColumnHasNull { .. }));
+    }
+
+    #[test]
+    fn identity_multiple_values_returns_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("beta")])],
+        );
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(
+            err,
+            SegmentEntityIdentityError::EntityColumnMultipleValues { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_empty_segment_returns_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = make_batch(Arc::clone(&schema), vec![string_array(&[])]);
+        let bytes =
+            parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], WriterProperties::builder().build());
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::EntityColumnEmpty { .. }));
+    }
+
+    #[test]
+    fn identity_fallback_scan_success() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .build();
+        let bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+
+        let identity =
+            identity_from_bytes(bytes, &[String::from("entity")]).expect("identity");
+        assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn identity_fallback_scan_nulls_return_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            true,
+        )]));
+        let batch = make_batch(Arc::clone(&schema), vec![string_array(&[Some("alpha"), None])]);
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .build();
+        let bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::EntityColumnHasNull { .. }));
+    }
+
+    #[test]
+    fn identity_fallback_scan_multiple_values_return_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("beta")])],
+        );
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .build();
+        let bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(
+            err,
+            SegmentEntityIdentityError::EntityColumnMultipleValues { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_arrow_read_error_on_invalid_utf8() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .build();
+        let mut bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+
+        let needle = b"alpha";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("needle in parquet data");
+        bytes[pos] = 0xFF;
+
+        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::ArrowRead { .. }));
+    }
+
+    #[test]
+    fn identity_parquet_read_error_on_invalid_bytes() {
+        let err = segment_entity_identity_from_parquet_bytes(
+            Bytes::from_static(b"not parquet"),
+            Path::new("segment.parquet"),
+            &[String::from("entity")],
+        )
+        .unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::ParquetRead { .. }));
+    }
+}
