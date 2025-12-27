@@ -1,13 +1,17 @@
 //! Helpers for reading and validating entity identity metadata from a segment.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, vec};
 
-use arrow::{datatypes::DataType, error::ArrowError};
+use arrow::{
+    datatypes::{DataType, Schema},
+    error::ArrowError,
+};
 use arrow_array::{Array, ArrayRef, LargeStringArray, StringArray};
 use bytes::Bytes;
 use parquet::{
     arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder},
     errors::ParquetError,
+    file::metadata::ParquetMetaData,
 };
 use snafu::prelude::*;
 
@@ -99,6 +103,196 @@ pub enum SegmentEntityIdentityError {
         /// Column name that had no values.
         column: String,
     },
+}
+
+fn try_entity_identity_from_stats(
+    meta: &ParquetMetaData,
+    rel_path: &str,
+    entity_columns: &[String],
+    arrow_schema: &Schema,
+) -> Result<Option<EntityIdentity>, SegmentEntityIdentityError> {
+    if entity_columns.is_empty() {
+        return Ok(Some(EntityIdentity::new()));
+    }
+
+    // If the whole file is empty, treat as empty segment for identity purposes.
+    if meta.file_metadata().num_rows() == 0 {
+        // pick the first column for an actionable error
+        return Err(SegmentEntityIdentityError::EntityColumnEmpty {
+            path: rel_path.to_string(),
+            column: entity_columns[0].clone(),
+        });
+    }
+
+    // Map entity column name -> parquet leaf column index
+    let schema_descr = meta.file_metadata().schema_descr();
+    let mut parquet_col_idxs = Vec::with_capacity(entity_columns.len());
+
+    for col_name in entity_columns {
+        // Ensure Arrow type is supported up-front (so stats bytes -> UTF-8 makes sense4)
+        let dt = arrow_schema
+            .field_with_name(col_name)
+            .map_err(|_| SegmentEntityIdentityError::EntityColumnNotFound {
+                path: rel_path.to_string(),
+                column: col_name.clone(),
+            })?
+            .data_type();
+
+        match dt {
+            DataType::Utf8 | DataType::LargeUtf8 => {}
+            other => {
+                return Err(SegmentEntityIdentityError::EntityColumnUnsupportedType {
+                    path: rel_path.to_string(),
+                    column: col_name.clone(),
+                    datatype: other.to_string(),
+                });
+            }
+        }
+
+        let idx = schema_descr
+            .columns()
+            .iter()
+            .position(|c| c.path().string() == *col_name)
+            .ok_or_else(|| SegmentEntityIdentityError::EntityColumnNotFound {
+                path: rel_path.to_string(),
+                column: col_name.clone(),
+            })?;
+
+        parquet_col_idxs.push(idx);
+    }
+
+    let mut pinned = vec![None; entity_columns.len()];
+
+    for rg in meta.row_groups() {
+        for (i, (col_name, &col_idx)) in entity_columns
+            .iter()
+            .zip(parquet_col_idxs.iter())
+            .enumerate()
+        {
+            let col_chunk = rg.column(col_idx);
+
+            let Some(stats) = col_chunk.statistics() else {
+                // No stats => can't fast-path
+                return Ok(None);
+            };
+
+            // null_count is optional; if missing we must not assume 0 => can't fast-path safely
+            // if present and > 0, that's a definite error.
+            match stats.null_count_opt() {
+                Some(0) => {}
+                Some(_) => {
+                    return Err(SegmentEntityIdentityError::EntityColumnHasNull {
+                        path: rel_path.to_string(),
+                        column: col_name.clone(),
+                    });
+                }
+                None => return Ok(None),
+            }
+
+            // If distinct_count is present and != 1, we can fail immediately.
+            if let Some(d) = stats.distinct_count_opt()
+                && d != 1
+            {
+                // Try to give a helpful first/other if we can; else generic.
+                let (first, other) = match (stats.min_bytes_opt(), stats.max_bytes_opt()) {
+                    (Some(minb), Some(maxb)) => {
+                        let a = std::str::from_utf8(minb)
+                            .unwrap_or("<non-utf8>")
+                            .to_string();
+                        let b = std::str::from_utf8(maxb)
+                            .unwrap_or("<non-utf8>")
+                            .to_string();
+                        (a, b)
+                    }
+                    _ => ("<unknown>".to_string(), "<unknown>".to_string()),
+                };
+
+                return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
+                    path: rel_path.to_string(),
+                    column: col_name.clone(),
+                    first,
+                    other,
+                });
+            }
+
+            // For strings, Parquet may store compact bounds; require "exact" to trust equality/inequality.
+            // If not exact, fallback to scan.
+            if !stats.min_is_exact() || !stats.max_is_exact() {
+                return Ok(None);
+            }
+
+            let (Some(minb), Some(maxb)) = (stats.min_bytes_opt(), stats.max_bytes_opt()) else {
+                // Missing min/max => can't derive the value
+                return Ok(None);
+            };
+
+            // If exact and min != max, then there are definitely multiple values.
+            if minb != maxb {
+                let first = std::str::from_utf8(minb)
+                    .map_err(
+                        |_| SegmentEntityIdentityError::EntityColumnUnsupportedType {
+                            path: rel_path.to_string(),
+                            column: col_name.clone(),
+                            datatype: "non-utf8 bytes".to_string(),
+                        },
+                    )?
+                    .to_string();
+                let other = std::str::from_utf8(maxb)
+                    .map_err(
+                        |_| SegmentEntityIdentityError::EntityColumnUnsupportedType {
+                            path: rel_path.to_string(),
+                            column: col_name.clone(),
+                            datatype: "non-utf8 bytes".to_string(),
+                        },
+                    )?
+                    .to_string();
+
+                return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
+                    path: rel_path.to_string(),
+                    column: col_name.clone(),
+                    first,
+                    other,
+                });
+            }
+
+            // min == max and exact => constant value for this row group
+            let v = std::str::from_utf8(minb).map_err(|_| {
+                SegmentEntityIdentityError::EntityColumnUnsupportedType {
+                    path: rel_path.to_string(),
+                    column: col_name.clone(),
+                    datatype: "non-utf8 bytes".to_string(),
+                }
+            })?;
+
+            match pinned[i].as_deref() {
+                None => pinned[i] = Some(v.to_string()),
+                Some(first) if first == v => {}
+                Some(first) => {
+                    // Different constants across row groups => multiple values in the segment
+                    return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
+                        path: rel_path.to_string(),
+                        column: col_name.clone(),
+                        first: first.to_string(),
+                        other: v.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Ensure we actually found a value per column
+    let mut out = EntityIdentity::new();
+    for (col, v) in entity_columns.iter().zip(pinned.into_iter()) {
+        let Some(v) = v else {
+            return Err(SegmentEntityIdentityError::EntityColumnEmpty {
+                path: rel_path.to_string(),
+                column: col.clone(),
+            });
+        };
+        out.insert(col.clone(), v);
+    }
+
+    Ok(Some(out))
 }
 
 fn feed_entity_column(
@@ -222,6 +416,16 @@ pub fn segment_entity_identity_from_parquet_bytes(
                 column: c.clone(),
             });
         }
+    }
+
+    // stats fast-path (no batch decode)
+    if let Some(identity) = try_entity_identity_from_stats(
+        builder.metadata(),
+        &path_str,
+        entity_columns,
+        arrow_schema.as_ref(),
+    )? {
+        return Ok(identity);
     }
 
     // project just entity columns
