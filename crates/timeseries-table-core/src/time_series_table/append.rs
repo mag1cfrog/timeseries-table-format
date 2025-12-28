@@ -21,6 +21,7 @@ use crate::{
         parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes},
         schema::ensure_schema_exact_match,
         segment_coverage::compute_segment_coverage_from_parquet_bytes,
+        segment_entity_identity::segment_entity_identity_from_parquet_bytes,
     },
     layout::coverage::{
         segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
@@ -29,9 +30,9 @@ use crate::{
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
         error::{
-            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
-            SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu, TableError,
-            TransactionLogSnafu,
+            CoverageOverlapSnafu, EntityMismatchSnafu, ExistingSegmentMissingCoverageSnafu,
+            MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
+            SegmentEntityIdentitySnafu, StorageSnafu, TableError, TransactionLogSnafu,
         },
     },
     transaction_log::{
@@ -96,7 +97,7 @@ impl TimeSeriesTable {
         //     enforce “no schema evolution” via ensure_schema_exact_match.
         let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
 
-        let maybe_updated_meta = match maybe_table_schema {
+        let mut maybe_updated_meta = match maybe_table_schema {
             None if expected_version == 1 => {
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
@@ -114,6 +115,35 @@ impl TimeSeriesTable {
                 None
             }
         };
+
+        // 2.5) Entity identity enforcement / pinning (v0.1 single-entity-per-table)
+        if !self.index.entity_columns.is_empty() {
+            let seg_ident = segment_entity_identity_from_parquet_bytes(
+                data.clone(),
+                rel_path,
+                &self.index.entity_columns,
+            )
+            .context(SegmentEntityIdentitySnafu)?;
+
+            match &self.state.table_meta.entity_identity {
+                Some(expected) => {
+                    if expected != &seg_ident {
+                        return EntityMismatchSnafu {
+                            segment_path: relative_path.to_string(),
+                            expected: expected.clone(),
+                            found: seg_ident,
+                        }
+                        .fail();
+                    }
+                }
+                None => {
+                    // pin the first append that includes entity columns
+                    let updated =
+                        maybe_updated_meta.get_or_insert_with(|| self.state.table_meta.clone());
+                    updated.entity_identity = Some(seg_ident);
+                }
+            }
+        }
 
         // 3) Load current table snapshot coverage (or empty if first append).
         let table_cov = self.load_table_snapshot_coverage_with_heal().await?;
@@ -315,8 +345,9 @@ mod tests {
     use crate::transaction_log::segments::SegmentMetaError;
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
-        CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
+        Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
     };
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -406,6 +437,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_pins_entity_identity_and_commits_actions() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/seg-entity-a.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        let version = table
+            .append_parquet_segment_with_id(SegmentId("seg-entity-a".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(version, 2);
+
+        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
+        assert_eq!(
+            table.state.table_meta.entity_identity,
+            Some(expected_identity.clone())
+        );
+
+        let commit_path = tmp
+            .path()
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join("0000000002.json");
+        let contents = tokio::fs::read_to_string(&commit_path).await?;
+        let commit: Commit = serde_json::from_str(&contents)?;
+
+        assert_eq!(commit.actions.len(), 3);
+        match &commit.actions[0] {
+            LogAction::UpdateTableMeta(meta) => {
+                assert_eq!(meta.entity_identity.as_ref(), Some(&expected_identity));
+            }
+            other => panic!("expected UpdateTableMeta, got {other:?}"),
+        }
+        assert!(matches!(commit.actions[1], LogAction::AddSegment(_)));
+        assert!(matches!(
+            commit.actions[2],
+            LogAction::UpdateTableCoverage { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_allows_same_entity_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path1 = "data/seg-entity-a-1.parquet";
+        let abs_path1 = tmp.path().join(rel_path1);
+        write_test_parquet(
+            &abs_path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(
+                SegmentId("seg-entity-a-1".to_string()),
+                rel_path1,
+                "ts",
+            )
+            .await?;
+
+        let rel_path2 = "data/seg-entity-a-2.parquet";
+        let abs_path2 = tmp.path().join(rel_path2);
+        write_test_parquet(
+            &abs_path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "A",
+                price: 20.0,
+            }],
+        )?;
+
+        let version = table
+            .append_parquet_segment_with_id(
+                SegmentId("seg-entity-a-2".to_string()),
+                rel_path2,
+                "ts",
+            )
+            .await?;
+        assert_eq!(version, 3);
+
+        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
+        assert_eq!(
+            table.state.table_meta.entity_identity,
+            Some(expected_identity.clone())
+        );
+
+        let commit_path = tmp
+            .path()
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join("0000000003.json");
+        let contents = tokio::fs::read_to_string(&commit_path).await?;
+        let commit: Commit = serde_json::from_str(&contents)?;
+        assert_eq!(commit.actions.len(), 2);
+        assert!(matches!(commit.actions[0], LogAction::AddSegment(_)));
+        assert!(matches!(
+            commit.actions[1],
+            LogAction::UpdateTableCoverage { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_mismatched_entity_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path1 = "data/seg-entity-a.parquet";
+        let abs_path1 = tmp.path().join(rel_path1);
+        write_test_parquet(
+            &abs_path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-entity-a".to_string()), rel_path1, "ts")
+            .await?;
+
+        let rel_path2 = "data/seg-entity-b.parquet";
+        let abs_path2 = tmp.path().join(rel_path2);
+        write_test_parquet(
+            &abs_path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-entity-b".to_string()), rel_path2, "ts")
+            .await
+            .expect_err("expected entity identity mismatch");
+
+        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
+        let found_identity = BTreeMap::from([("symbol".to_string(), "B".to_string())]);
+
+        match err {
+            TableError::EntityMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, expected_identity);
+                assert_eq!(found, found_identity);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let commit_path = tmp
+            .path()
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join("0000000003.json");
+        assert!(!commit_path.exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_parquet_segment_with_id_adopts_schema_when_missing() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -421,6 +641,7 @@ mod tests {
             logical_schema: None,
             created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
             format_version: 1,
+            entity_identity: None,
         };
 
         let mut table = TimeSeriesTable::create(location, meta).await?;
@@ -543,12 +764,12 @@ mod tests {
             &[
                 TestRow {
                     ts_millis: 120_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 20.0,
                 },
                 TestRow {
                     ts_millis: 121_000,
-                    symbol: "C",
+                    symbol: "A",
                     price: 30.0,
                 },
             ],
@@ -597,7 +818,7 @@ mod tests {
                 },
                 TestRow {
                     ts_millis: 2_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 20.0,
                 },
             ],
@@ -609,12 +830,12 @@ mod tests {
             &[
                 TestRow {
                     ts_millis: 120_000,
-                    symbol: "C",
+                    symbol: "A",
                     price: 30.0,
                 },
                 TestRow {
                     ts_millis: 121_000,
-                    symbol: "D",
+                    symbol: "A",
                     price: 40.0,
                 },
             ],
@@ -701,7 +922,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 1_500,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -744,7 +965,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -811,7 +1032,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -869,7 +1090,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -978,7 +1199,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1101,7 +1322,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1161,7 +1382,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1224,7 +1445,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;

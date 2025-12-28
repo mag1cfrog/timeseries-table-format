@@ -17,4 +17,5 @@ pub mod coverage_sidecar;
 pub mod parquet;
 pub mod schema;
 pub mod segment_coverage;
+pub mod segment_entity_identity;
 pub mod time_bucket;

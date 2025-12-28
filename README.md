@@ -15,7 +15,7 @@ Time-series data deserves something better than “just more Parquet files.”
 - A log-structured, **append-only metadata layer** with versioned commits and optimistic concurrency  
   (inspired by modern open table formats like **Delta Lake** and **Apache Iceberg**),
 - A `TimeSeriesTable` abstraction over Parquet segments (not just file paths),
-- **RoaringBitmap-based coverage indexes** for gaps, coverage ratios, and “fully covered” windows,
+- **RoaringBitmap-based coverage indexes** for overlap detection, gaps, coverage ratios, and “fully covered” windows,
 - A clean foundation for integration with engines like DataFusion and backtesting tools.
 
 The core crate, `timeseries-table-core`, implements these pieces and is intended to be reused by higher-level crates.
@@ -39,7 +39,7 @@ While experimenting with backtests and custom indicators (moving averages, volat
 ## High-level architecture
 
 <p align="center">
-  <img src="docs/high-level-architecture.png" alt="high level architecture" width="1920" />
+  <img src="docs/high-level-architecture-2.png" alt="high level architecture" width="1920" />
 </p>
 
 At a high level, a time-series table in this project looks like:
@@ -60,8 +60,8 @@ At a high level, a time-series table in this project looks like:
     - `TableKind::TimeSeries(TimeIndexSpec)` (timestamp column, entity/symbol columns, bucket granularity),
     - schema info and created_at.
 - **Coverage bitmaps**  
-  - Optional RoaringBitmaps track which time buckets are present,
-  - enable gap detection, coverage ratios, and "fully covered windows" for backtests.
+  - Segment- and table-level RoaringBitmap snapshots track which time buckets are present,
+  - enable fast append overlap checks and gap/coverage queries without rescanning Parquet.
 - **Integration layers (planned)**  
   - DataFusion `TableProvider` for SQL and analytical queries,
   - Backtest tooling that asks for "last N fully-covered bars" or specific coverage constraints.
@@ -70,7 +70,7 @@ In v0.1 the focus is on:
 
 - the **core log and metadata model**,
 - a minimal `TimeSeriesTable` abstraction,
-- and basic coverage helpers.
+- coverage snapshot sidecars, overlap-safe append rules, and basic read-side gap/coverage helpers.
 
 ---
 
@@ -115,7 +115,7 @@ Early **MVP** work in progress:
 - [x] Workspace + core crate scaffolding  
 - [x] Log-based metadata layer with version-guard OCC  
 - [x] Time-series table abstraction + basic range scans  
-- [ ] Coverage helpers and simple gap/coverage metrics  
+- [x] Coverage snapshots, overlap-safe append checks, and basic gap/coverage metrics  
 - [ ] Small end-to-end example (synthetic time-series data)
 
 APIs and on-disk layouts may change until v0.1 is tagged.

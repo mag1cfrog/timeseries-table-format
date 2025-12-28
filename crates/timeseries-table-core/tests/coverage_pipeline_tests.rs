@@ -41,15 +41,15 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
     write_parquet_rows(
         &tmp.path().join(rel1),
-        &[(1_000, "A", 10.0), (2_000, "B", 20.0)],
+        &[(1_000, "A", 10.0), (2_000, "A", 20.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join(rel2),
-        &[(120_000, "C", 30.0), (121_000, "D", 40.0)],
+        &[(120_000, "A", 30.0), (121_000, "A", 40.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join(rel3),
-        &[(240_000, "E", 50.0), (241_000, "F", 60.0)],
+        &[(240_000, "A", 50.0), (241_000, "A", 60.0)],
     )?;
 
     let v2 = table.append_parquet_segment(rel1, "ts").await?;
@@ -96,7 +96,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         }
     }
 
-    write_parquet_rows(&tmp.path().join(rel_overlap), &[(121_500, "Z", 70.0)])?;
+    write_parquet_rows(&tmp.path().join(rel_overlap), &[(121_500, "A", 70.0)])?;
     let err = reopened
         .append_parquet_segment(rel_overlap, "ts")
         .await
@@ -118,19 +118,19 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
 
     write_parquet_rows(
         &tmp.path().join("data/cov-query-a.parquet"),
-        &[(1_000, "A", 1.0), (61_000, "B", 2.0)],
+        &[(1_000, "A", 1.0), (61_000, "A", 2.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join("data/cov-query-b.parquet"),
-        &[(180_000, "C", 3.0)],
+        &[(180_000, "A", 3.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join("data/cov-query-c.parquet"),
-        &[(240_000, "D", 4.0), (300_000, "E", 5.0)],
+        &[(240_000, "A", 4.0), (300_000, "A", 5.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join("data/cov-query-d.parquet"),
-        &[(480_000, "F", 6.0)], // isolated bucket 8
+        &[(480_000, "A", 6.0)], // isolated bucket 8
     )?;
 
     table

@@ -237,12 +237,12 @@ mod tests {
                 },
                 TestRow {
                     ts_millis: 61_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 2.0,
                 },
                 TestRow {
                     ts_millis: 180_000,
-                    symbol: "C",
+                    symbol: "A",
                     price: 3.0,
                 },
             ],
@@ -266,7 +266,7 @@ mod tests {
                 },
                 TestRow {
                     ts_millis: 300_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 2.0,
                 },
             ],
