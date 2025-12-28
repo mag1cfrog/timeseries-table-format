@@ -39,7 +39,7 @@ While experimenting with backtests and custom indicators (moving averages, volat
 ## High-level architecture
 
 <p align="center">
-  <img src="docs/high-level-architecture.png" alt="high level architecture" width="1920" />
+  <img src="docs/high-level-architecture-2.png" alt="high level architecture" width="1920" />
 </p>
 
 At a high level, a time-series table in this project looks like:
