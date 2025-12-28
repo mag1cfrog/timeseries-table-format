@@ -233,7 +233,7 @@ pub enum TableError {
 
     /// Segment entity identity does not match the expected table identity.
     #[snafu(display(
-        "Entity mismatch while appending {segment_path}: expected={expected:?}, found={found:?}4"
+        "Entity mismatch while appending {segment_path}: expected={expected:?}, found={found:?}"
     ))]
     EntityMismatch {
         /// Relative path of the segment being appended.
