@@ -129,7 +129,7 @@ fn try_entity_identity_from_stats(
     let mut parquet_col_idxs = Vec::with_capacity(entity_columns.len());
 
     for col_name in entity_columns {
-        // Ensure Arrow type is supported up-front (so stats bytes -> UTF-8 makes sense4)
+        // Ensure Arrow type is supported up-front (so stats bytes -> UTF-8 makes sense)
         let dt = arrow_schema
             .field_with_name(col_name)
             .map_err(|_| SegmentEntityIdentityError::EntityColumnNotFound {
