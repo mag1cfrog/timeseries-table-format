@@ -297,3 +297,74 @@ pub struct TimeIndexSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::Value;
+
+    fn utc_datetime(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid UTC timestamp")
+    }
+
+    fn sample_time_index_spec() -> TimeIndexSpec {
+        TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string()],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        }
+    }
+
+    #[test]
+    fn table_meta_json_roundtrip_with_entity_identity_none() {
+        let meta = TableMeta {
+            kind: TableKind::TimeSeries(sample_time_index_spec()),
+            logical_schema: None,
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: TABLE_FORMAT_VERSION,
+            entity_identity: None,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("entity_identity").is_none());
+
+        let back: TableMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entity_identity, None);
+        assert_eq!(back, meta);
+    }
+
+    #[test]
+    fn table_meta_json_roundtrip_with_entity_identity_some() {
+        let entity_identity = BTreeMap::from([
+            ("symbol".to_string(), "AAPL".to_string()),
+            ("venue".to_string(), "NASDAQ".to_string()),
+        ]);
+        let meta = TableMeta {
+            kind: TableKind::TimeSeries(sample_time_index_spec()),
+            logical_schema: None,
+            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
+            format_version: TABLE_FORMAT_VERSION,
+            entity_identity: Some(entity_identity.clone()),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("entity_identity").is_some());
+
+        let back: TableMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entity_identity, Some(entity_identity));
+        assert_eq!(back, meta);
+    }
+}
