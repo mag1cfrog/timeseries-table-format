@@ -21,6 +21,7 @@ use crate::{
         parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes},
         schema::ensure_schema_exact_match,
         segment_coverage::compute_segment_coverage_from_parquet_bytes,
+        segment_entity_identity::segment_entity_identity_from_parquet_bytes,
     },
     layout::coverage::{
         segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
@@ -29,9 +30,9 @@ use crate::{
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
         error::{
-            CoverageOverlapSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
-            SchemaCompatibilitySnafu, SegmentCoverageSnafu, StorageSnafu, TableError,
-            TransactionLogSnafu,
+            CoverageOverlapSnafu, EntityMismatchSnafu, ExistingSegmentMissingCoverageSnafu,
+            MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
+            SegmentEntityIdentitySnafu, StorageSnafu, TableError, TransactionLogSnafu,
         },
     },
     transaction_log::{
@@ -96,7 +97,7 @@ impl TimeSeriesTable {
         //     enforce “no schema evolution” via ensure_schema_exact_match.
         let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
 
-        let maybe_updated_meta = match maybe_table_schema {
+        let mut maybe_updated_meta = match maybe_table_schema {
             None if expected_version == 1 => {
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
@@ -114,6 +115,35 @@ impl TimeSeriesTable {
                 None
             }
         };
+
+        // 2.5) Entity identity enforcement / pinning (v0.1 single-entity-per-table)
+        if !self.index.entity_columns.is_empty() {
+            let seg_ident = segment_entity_identity_from_parquet_bytes(
+                data.clone(),
+                rel_path,
+                &self.index.entity_columns,
+            )
+            .context(SegmentEntityIdentitySnafu)?;
+
+            match &self.state.table_meta.entity_identity {
+                Some(expected) => {
+                    if expected != &seg_ident {
+                        return EntityMismatchSnafu {
+                            segment_path: relative_path.to_string(),
+                            expected: expected.clone(),
+                            found: seg_ident,
+                        }
+                        .fail();
+                    }
+                }
+                None => {
+                    // pin the first append that includes entity columns
+                    let updated =
+                        maybe_updated_meta.get_or_insert_with(|| self.state.table_meta.clone());
+                    updated.entity_identity = Some(seg_ident);
+                }
+            }
+        }
 
         // 3) Load current table snapshot coverage (or empty if first append).
         let table_cov = self.load_table_snapshot_coverage_with_heal().await?;
