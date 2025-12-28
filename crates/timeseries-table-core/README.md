@@ -40,6 +40,8 @@ streams that higher layers can plug into DataFusion or custom backtest code.
   - `schema.rs`: v0.1 schema rules (exact match, time column validation).
   - `time_bucket.rs`: deterministic timestamp -> bucket ID mapping and expected
     range helpers.
+  - `segment_entity_identity.rs`: extract and validate entity identity from
+    segment Parquet data, with stats-based fast path and scan fallback.
 - `common/time_column.rs`
   - Shared errors for validating time columns in Parquet/Arrow schemas.
 - `time_series_table/*`
