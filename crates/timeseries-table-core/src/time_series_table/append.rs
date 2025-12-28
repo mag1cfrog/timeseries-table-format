@@ -345,8 +345,9 @@ mod tests {
     use crate::transaction_log::segments::SegmentMetaError;
     use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
-        CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
+        Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
     };
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -432,6 +433,195 @@ mod tests {
                 .segments
                 .contains_key(&SegmentId("seg-1".to_string()))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_pins_entity_identity_and_commits_actions() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path = "data/seg-entity-a.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        let version = table
+            .append_parquet_segment_with_id(SegmentId("seg-entity-a".to_string()), rel_path, "ts")
+            .await?;
+        assert_eq!(version, 2);
+
+        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
+        assert_eq!(
+            table.state.table_meta.entity_identity,
+            Some(expected_identity.clone())
+        );
+
+        let commit_path = tmp
+            .path()
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join("0000000002.json");
+        let contents = tokio::fs::read_to_string(&commit_path).await?;
+        let commit: Commit = serde_json::from_str(&contents)?;
+
+        assert_eq!(commit.actions.len(), 3);
+        match &commit.actions[0] {
+            LogAction::UpdateTableMeta(meta) => {
+                assert_eq!(meta.entity_identity.as_ref(), Some(&expected_identity));
+            }
+            other => panic!("expected UpdateTableMeta, got {other:?}"),
+        }
+        assert!(matches!(commit.actions[1], LogAction::AddSegment(_)));
+        assert!(matches!(
+            commit.actions[2],
+            LogAction::UpdateTableCoverage { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_allows_same_entity_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path1 = "data/seg-entity-a-1.parquet";
+        let abs_path1 = tmp.path().join(rel_path1);
+        write_test_parquet(
+            &abs_path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        table
+            .append_parquet_segment_with_id(
+                SegmentId("seg-entity-a-1".to_string()),
+                rel_path1,
+                "ts",
+            )
+            .await?;
+
+        let rel_path2 = "data/seg-entity-a-2.parquet";
+        let abs_path2 = tmp.path().join(rel_path2);
+        write_test_parquet(
+            &abs_path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "A",
+                price: 20.0,
+            }],
+        )?;
+
+        let version = table
+            .append_parquet_segment_with_id(
+                SegmentId("seg-entity-a-2".to_string()),
+                rel_path2,
+                "ts",
+            )
+            .await?;
+        assert_eq!(version, 3);
+
+        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
+        assert_eq!(
+            table.state.table_meta.entity_identity,
+            Some(expected_identity.clone())
+        );
+
+        let commit_path = tmp
+            .path()
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join("0000000003.json");
+        let contents = tokio::fs::read_to_string(&commit_path).await?;
+        let commit: Commit = serde_json::from_str(&contents)?;
+        assert_eq!(commit.actions.len(), 2);
+        assert!(matches!(commit.actions[0], LogAction::AddSegment(_)));
+        assert!(matches!(
+            commit.actions[1],
+            LogAction::UpdateTableCoverage { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_mismatched_entity_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let rel_path1 = "data/seg-entity-a.parquet";
+        let abs_path1 = tmp.path().join(rel_path1);
+        write_test_parquet(
+            &abs_path1,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        table
+            .append_parquet_segment_with_id(SegmentId("seg-entity-a".to_string()), rel_path1, "ts")
+            .await?;
+
+        let rel_path2 = "data/seg-entity-b.parquet";
+        let abs_path2 = tmp.path().join(rel_path2);
+        write_test_parquet(
+            &abs_path2,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "B",
+                price: 20.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment_with_id(SegmentId("seg-entity-b".to_string()), rel_path2, "ts")
+            .await
+            .expect_err("expected entity identity mismatch");
+
+        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
+        let found_identity = BTreeMap::from([("symbol".to_string(), "B".to_string())]);
+
+        match err {
+            TableError::EntityMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, expected_identity);
+                assert_eq!(found, found_identity);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let commit_path = tmp
+            .path()
+            .join(TransactionLogStore::LOG_DIR_NAME)
+            .join("0000000003.json");
+        assert!(!commit_path.exists());
+
         Ok(())
     }
 
@@ -574,12 +764,12 @@ mod tests {
             &[
                 TestRow {
                     ts_millis: 120_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 20.0,
                 },
                 TestRow {
                     ts_millis: 121_000,
-                    symbol: "C",
+                    symbol: "A",
                     price: 30.0,
                 },
             ],
@@ -628,7 +818,7 @@ mod tests {
                 },
                 TestRow {
                     ts_millis: 2_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 20.0,
                 },
             ],
@@ -640,12 +830,12 @@ mod tests {
             &[
                 TestRow {
                     ts_millis: 120_000,
-                    symbol: "C",
+                    symbol: "A",
                     price: 30.0,
                 },
                 TestRow {
                     ts_millis: 121_000,
-                    symbol: "D",
+                    symbol: "A",
                     price: 40.0,
                 },
             ],
@@ -732,7 +922,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 1_500,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -775,7 +965,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -842,7 +1032,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -900,7 +1090,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1009,7 +1199,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1132,7 +1322,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1192,7 +1382,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;
@@ -1255,7 +1445,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B",
+                symbol: "A",
                 price: 20.0,
             }],
         )?;

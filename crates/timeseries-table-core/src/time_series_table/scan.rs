@@ -484,7 +484,7 @@ mod tests {
                 },
                 TestRow {
                     ts_millis: 2_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 20.0,
                 },
             ],
@@ -499,12 +499,12 @@ mod tests {
             &[
                 TestRow {
                     ts_millis: 61_000,
-                    symbol: "C",
+                    symbol: "A",
                     price: 30.0,
                 },
                 TestRow {
                     ts_millis: 62_000,
-                    symbol: "D",
+                    symbol: "A",
                     price: 40.0,
                 },
             ],
@@ -526,8 +526,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (2_000, "B".to_string(), 20.0),
-                (61_000, "C".to_string(), 30.0),
+                (2_000, "A".to_string(), 20.0),
+                (61_000, "A".to_string(), 30.0),
             ]
         );
 
@@ -555,7 +555,7 @@ mod tests {
                 },
                 TestRow {
                     ts_millis: 2_000,
-                    symbol: "B",
+                    symbol: "A",
                     price: 20.0,
                 },
             ],
@@ -607,7 +607,7 @@ mod tests {
             &path,
             ArrowTimeUnit::Microsecond,
             &[Some(1_000_000), Some(2_000_000), Some(3_000_000)],
-            &["A", "B", "C"],
+            &["A", "A", "A"],
             &[1.0, 2.0, 3.0],
         )?;
 
@@ -625,7 +625,7 @@ mod tests {
             .expect("valid end");
         let rows = collect_scan_rows(&table, start, end).await?;
 
-        assert_eq!(rows, vec![(2_000_000, "B".to_string(), 2.0)]);
+        assert_eq!(rows, vec![(2_000_000, "A".to_string(), 2.0)]);
         Ok(())
     }
 
@@ -646,7 +646,7 @@ mod tests {
                 Some(1_500_000_000),
                 Some(2_000_000_000),
             ],
-            &["A", "B", "C"],
+            &["A", "A", "A"],
             &[1.0, 2.0, 3.0],
         )?;
 
@@ -664,7 +664,7 @@ mod tests {
             .expect("valid end");
         let rows = collect_scan_rows(&table, start, end).await?;
 
-        assert_eq!(rows, vec![(1_500_000_000, "B".to_string(), 2.0)]);
+        assert_eq!(rows, vec![(1_500_000_000, "A".to_string(), 2.0)]);
         Ok(())
     }
 
@@ -681,7 +681,7 @@ mod tests {
             &path,
             ArrowTimeUnit::Millisecond,
             &[Some(1_000), None, Some(2_000)],
-            &["A", "B", "C"],
+            &["A", "A", "A"],
             &[1.0, 2.0, 3.0],
         )?;
 
@@ -695,7 +695,7 @@ mod tests {
 
         assert_eq!(
             rows,
-            vec![(1_000, "A".to_string(), 1.0), (2_000, "C".to_string(), 3.0)]
+            vec![(1_000, "A".to_string(), 1.0), (2_000, "A".to_string(), 3.0)]
         );
         Ok(())
     }
@@ -876,7 +876,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 120_000,
-                symbol: "B1",
+                symbol: "A",
                 price: 2.0,
             }],
         )?;
@@ -889,7 +889,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 60_000,
-                symbol: "A1",
+                symbol: "A",
                 price: 1.0,
             }],
         )?;
@@ -909,8 +909,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (60_000, "A1".to_string(), 1.0),
-                (120_000, "B1".to_string(), 2.0)
+                (60_000, "A".to_string(), 1.0),
+                (120_000, "A".to_string(), 2.0)
             ]
         );
         Ok(())
@@ -944,7 +944,7 @@ mod tests {
             false,
             &[TestRow {
                 ts_millis: 70_000,
-                symbol: "Z",
+                symbol: "A",
                 price: 9.0,
             }],
         )?;
