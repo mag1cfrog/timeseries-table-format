@@ -9,3 +9,9 @@ missing_docs = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[workspace.dependencies]
+arrow = "57.1.0"
+arrow-array = "57.1.0"
+arrow-select = "57.1.0"
+parquet = "57.1.0"
