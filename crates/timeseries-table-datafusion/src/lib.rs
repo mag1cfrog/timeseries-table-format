@@ -4,3 +4,4 @@
 //! The main entry point is [`TsTableProvider`].
 
 mod ts_table_provider;
+pub use ts_table_provider::TsTableProvider;
