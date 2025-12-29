@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.1.0" }
+
 datafusion = { workspace = true }
 
 [lints]
