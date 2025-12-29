@@ -74,40 +74,6 @@ In v0.1 the focus is on:
 
 ---
 
-## Repository layout
-
-Planned structure (early v0.1):
-
-```text
-timeseries-table-format/
-  Cargo.toml            # workspace
-  LICENSE
-  README.md
-  crates/
-    timeseries-table-core/
-      Cargo.toml
-      src/
-        lib.rs
-        log.rs
-        table.rs
-        coverage.rs
-        fs.rs
-  .github/
-    workflows/
-      ci.yml            # fmt + clippy + nextest
-```
-
-- `crates/timeseries-table-core`  
-  Core engine: metadata log, optimistic concurrency, table metadata, coverage utilities.
-
-Future crates (not in v0.1 yet) might include:
-
-- DataFusion integration (e.g. `timeseries-table-datafusion`),
-- A small CLI or backtest driver,
-- Example projects that consume the format.
-
----
-
 ## Status
 
 Early **MVP** work in progress:
