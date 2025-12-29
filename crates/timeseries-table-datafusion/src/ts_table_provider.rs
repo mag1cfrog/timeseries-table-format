@@ -8,12 +8,14 @@ use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 
+/// DataFusion table provider for a timeseries table schema.
 #[derive(Debug)]
 pub struct TsTableProvider {
     schema: Arc<Schema>,
 }
 
 impl TsTableProvider {
+    /// Creates a new provider backed by the given Arrow schema.
     pub fn new(schema: Arc<Schema>) -> Self {
         Self { schema }
     }
