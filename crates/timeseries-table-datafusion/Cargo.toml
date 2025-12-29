@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-datafusion = "51.0.0"
+datafusion = { workspace = true }
 
 [lints]
 workspace = true
