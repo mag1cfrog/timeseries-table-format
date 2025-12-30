@@ -866,6 +866,34 @@ mod tests {
     }
 
     #[test]
+    fn logical_schema_decimal_validation_errors() {
+        let cases = vec![
+            ("dec_precision_zero", 0, 0, "precision must be > 0"),
+            ("dec_scale_negative", 10, -1, "scale must be >= 0"),
+            ("dec_scale_gt_precision", 4, 5, "scale must be <= precision"),
+        ];
+
+        for (name, precision, scale, details_substr) in cases {
+            let logical = LogicalSchema::new(vec![LogicalColumn {
+                name: name.to_string(),
+                data_type: LogicalDataType::Decimal { precision, scale },
+                nullable: false,
+            }])
+            .expect("valid schema structure");
+
+            let err = logical.to_arrow_schema().unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    SchemaConvertError::DecimalInvalid { column, precision: p, scale: s, details }
+                        if column == name && *p == precision && *s == scale && details.contains(details_substr)
+                ),
+                "unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn logical_schema_fixed_binary_json_roundtrip() {
         let logical = LogicalSchema::new(vec![LogicalColumn {
             name: "fixed".to_string(),
