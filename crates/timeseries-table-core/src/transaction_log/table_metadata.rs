@@ -313,6 +313,48 @@ pub struct TimeIndexSpec {
     pub timezone: Option<String>,
 }
 
+/// Errors encountered while converting between logical schema representations.
+#[derive(Debug, Snafu)]
+pub enum SchemaConvertError {
+    /// The logical type is not supported by the target representation.
+    #[snafu(display("unsupported logical type for column '{column}': {type_name} ({details})"))]
+    UnsupportedLogicalType {
+        /// Column name that failed conversion.
+        column: String,
+        /// High-level type name (for diagnostics).
+        type_name: String,
+        /// Additional details describing why it is unsupported.
+        details: String,
+    },
+
+    /// FixedBinary fields must declare a positive byte width.
+    #[snafu(display(
+        "invalid FixedBinary byte_width for column '{column}': {byte_width} (must be > 0)"
+    ))]
+    FixedBinaryInvalidWidth {
+        /// Column name that failed validation.
+        column: String,
+        /// Declared byte width.
+        byte_width: i32,
+    },
+
+    /// Int96 is rejected for now to avoid legacy timestamp ambiguity.
+    #[snafu(display("Int96 is not supported in v0.1 for column '{column}'"))]
+    Int96Unsupported {
+        /// Column name that failed conversion.
+        column: String,
+    },
+
+    /// Catch-all "Other" types are not accepted in v0.1.
+    #[snafu(display("Other type '{name}' is not supported in v0.1 for column '{column}'"))]
+    OtherTypeUnsupported {
+        /// Column name that failed conversion.
+        column: String,
+        /// Type name reported by the source.
+        name: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
