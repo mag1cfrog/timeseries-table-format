@@ -9,6 +9,7 @@ use std::{
     fmt,
 };
 
+use arrow::datatypes::TimeUnit;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -130,6 +131,16 @@ pub enum LogicalTimestampUnit {
     Micros,
     /// Nanosecond precision timestamps.
     Nanos,
+}
+
+impl LogicalTimestampUnit {
+    fn to_arrow_time_unit(self) -> TimeUnit {
+        match self {
+            LogicalTimestampUnit::Millis => TimeUnit::Millisecond,
+            LogicalTimestampUnit::Micros => TimeUnit::Microsecond,
+            LogicalTimestampUnit::Nanos => TimeUnit::Nanosecond,
+        }
+    }
 }
 
 /// Logical data types that can be stored in the table schema metadata.
