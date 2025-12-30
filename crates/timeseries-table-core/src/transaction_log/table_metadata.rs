@@ -7,9 +7,10 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fmt,
+    sync::Arc,
 };
 
-use arrow::datatypes::TimeUnit;
+use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -143,6 +144,16 @@ impl LogicalTimestampUnit {
     }
 }
 
+impl fmt::Display for LogicalTimestampUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalTimestampUnit::Millis => write!(f, "ms"),
+            LogicalTimestampUnit::Micros => write!(f, "us"),
+            LogicalTimestampUnit::Nanos => write!(f, "ns"),
+        }
+    }
+}
+
 /// Logical data types that can be stored in the table schema metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogicalDataType {
@@ -188,13 +199,87 @@ pub enum LogicalDataType {
     Other(String),
 }
 
-impl fmt::Display for LogicalTimestampUnit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LogicalTimestampUnit::Millis => write!(f, "ms"),
-            LogicalTimestampUnit::Micros => write!(f, "us"),
-            LogicalTimestampUnit::Nanos => write!(f, "ns"),
-        }
+impl LogicalDataType {
+    fn to_arrow_datatype(&self, column: &str) -> Result<DataType, SchemaConvertError> {
+        Ok(match self {
+            LogicalDataType::Bool => DataType::Boolean,
+            LogicalDataType::Int32 => DataType::Int32,
+            LogicalDataType::Int64 => DataType::Int64,
+            LogicalDataType::Float32 => DataType::Float32,
+            LogicalDataType::Float64 => DataType::Float64,
+            LogicalDataType::Binary => DataType::Binary,
+            LogicalDataType::Utf8 => DataType::Utf8,
+
+            LogicalDataType::FixedBinary { byte_width } => {
+                if *byte_width <= 0 {
+                    return Err(SchemaConvertError::FixedBinaryInvalidWidth {
+                        column: column.to_string(),
+                        byte_width: *byte_width,
+                    });
+                }
+                DataType::FixedSizeBinary(*byte_width)
+            }
+
+            LogicalDataType::Timestamp { unit, timezone } => {
+                let tz: Option<Arc<str>> = timezone.as_ref().map(|s| Arc::<str>::from(s.as_str()));
+                DataType::Timestamp(unit.to_arrow_time_unit(), tz)
+            }
+
+            LogicalDataType::Int96 => {
+                return Err(SchemaConvertError::Int96Unsupported {
+                    column: column.to_string(),
+                });
+            }
+
+            LogicalDataType::Decimal { precision, scale } => {
+                let precision = *precision;
+                let scale = *scale;
+                if precision <= 0 {
+                    return Err(SchemaConvertError::DecimalInvalid {
+                        column: column.to_string(),
+                        precision,
+                        scale,
+                        details: "precision must be > 0".to_string(),
+                    });
+                }
+                if scale < 0 {
+                    return Err(SchemaConvertError::DecimalInvalid {
+                        column: column.to_string(),
+                        precision,
+                        scale,
+                        details: "scale must be >= 0".to_string(),
+                    });
+                }
+                if scale > precision {
+                    return Err(SchemaConvertError::DecimalInvalid {
+                        column: column.to_string(),
+                        precision,
+                        scale,
+                        details: "scale must be <= precision".to_string(),
+                    });
+                }
+
+                if precision <= 38 {
+                    DataType::Decimal128(precision as u8, scale as i8)
+                } else if precision <= 76 {
+                    DataType::Decimal256(precision as u8, scale as i8)
+                } else {
+                    return Err(SchemaConvertError::DecimalInvalid {
+                        column: column.to_string(),
+                        precision,
+                        scale,
+                        details: "precision exceeds Arrow maximum (76 digits)".to_string(),
+                    });
+                }
+            }
+
+            LogicalDataType::Other(name) => {
+                return Err(SchemaConvertError::OtherTypeUnsupported {
+                    column: column.to_string(),
+                    name: name.clone(),
+                });
+            }
+        })
     }
 }
 
@@ -363,6 +448,21 @@ pub enum SchemaConvertError {
         column: String,
         /// Type name reported by the source.
         name: String,
+    },
+
+    /// Decimal precision/scale is out of supported bounds for Arrow conversion.
+    #[snafu(display(
+        "invalid decimal definition for column '{column}': precision={precision}, scale={scale} ({details})"
+    ))]
+    DecimalInvalid {
+        /// Column name that failed conversion.
+        column: String,
+        /// Declared total precision.
+        precision: i32,
+        /// Declared scale (digits to the right of the decimal point).
+        scale: i32,
+        /// Human-readable details describing the constraint violation.
+        details: String,
     },
 }
 
