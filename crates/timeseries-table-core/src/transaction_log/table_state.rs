@@ -8,7 +8,7 @@
 //! version.
 use std::collections::HashMap;
 
-use crate::transaction_log::*;
+use crate::{helpers::segment_order::cmp_segment_meta_by_time, transaction_log::*};
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,18 @@ pub struct TableState {
 
     /// Optional pointer to the latest table coverage metadata.
     pub table_coverage: Option<TableCoveragePointer>,
+}
+
+impl TableState {
+    /// Return live segments sorted deterministically by time.
+    ///
+    /// Ordering is by `ts_min`, then `ts_max`, and finally `segment_id` as a
+    /// stable tie-breaker.
+    pub fn segments_sorted_by_time(&self) -> Vec<&SegmentMeta> {
+        let mut v: Vec<&SegmentMeta> = self.segments.values().collect();
+        v.sort_unstable_by(|a, b| cmp_segment_meta_by_time(a, b));
+        v
+    }
 }
 
 impl TransactionLogStore {
