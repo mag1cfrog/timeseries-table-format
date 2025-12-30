@@ -18,4 +18,5 @@ pub mod parquet;
 pub mod schema;
 pub mod segment_coverage;
 pub mod segment_entity_identity;
+pub mod segment_order;
 pub mod time_bucket;
