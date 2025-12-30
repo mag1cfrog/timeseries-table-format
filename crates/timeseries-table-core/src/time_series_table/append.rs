@@ -180,7 +180,7 @@ impl TimeSeriesTable {
             segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
                 source: CoverageError::Layout { source },
             })?;
-        match write_coverage_sidecar_new_bytes(&self.location, &seg_cov_path, &seg_cov_bytes).await
+        match write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes).await
         {
             Ok(()) => {}
             Err(CoverageError::Storage {
@@ -207,7 +207,7 @@ impl TimeSeriesTable {
             }
         })?;
 
-        match write_coverage_sidecar_new_bytes(&self.location, &snapshot_path, &new_snap_cov_bytes)
+        match write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
             .await
         {
             Ok(()) => {}
@@ -297,7 +297,7 @@ impl TimeSeriesTable {
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
 
-        let bytes = storage::read_all_bytes(&self.location, rel_path)
+        let bytes = storage::read_all_bytes(self.location(), rel_path)
             .await
             .context(StorageSnafu)?;
 
@@ -323,7 +323,7 @@ impl TimeSeriesTable {
         time_column: &str,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
-        let bytes = storage::read_all_bytes(&self.location, rel_path)
+        let bytes = storage::read_all_bytes(self.location(), rel_path)
             .await
             .context(StorageSnafu)?;
         let data = Bytes::from(bytes);

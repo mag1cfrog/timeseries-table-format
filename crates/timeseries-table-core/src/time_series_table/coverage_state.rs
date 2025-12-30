@@ -37,7 +37,7 @@ impl TimeSeriesTable {
                 }
             })?;
 
-            let cov = read_coverage_sidecar(&self.location, Path::new(path))
+            let cov = read_coverage_sidecar(self.location(), Path::new(path))
                 .await
                 .map_err(|source| TableError::SegmentCoverageSidecarRead {
                     segment_id: seg.segment_id.clone(),
@@ -82,7 +82,7 @@ impl TimeSeriesTable {
             }
             Some(ptr) => {
                 self.ensure_table_coverage_bucket_matches(ptr)?;
-                read_coverage_sidecar(&self.location, Path::new(&ptr.coverage_path))
+                read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
                     .await
                     .map_err(|source| TableError::CoverageSidecar { source })
             }
@@ -109,7 +109,7 @@ impl TimeSeriesTable {
             Some(ptr) => {
                 self.ensure_table_coverage_bucket_matches(ptr)?;
 
-                match read_coverage_sidecar(&self.location, Path::new(&ptr.coverage_path)).await {
+                match read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path)).await {
                     Ok(cov) => Ok(cov),
                     Err(snapshot_err) => {
                         warn!(
@@ -149,7 +149,7 @@ impl TimeSeriesTable {
             Some(ptr) => {
                 self.ensure_table_coverage_bucket_matches(ptr)?;
 
-                match read_coverage_sidecar(&self.location, Path::new(&ptr.coverage_path)).await {
+                match read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path)).await {
                     Ok(cov) => Ok(cov),
 
                     Err(snapshot_err) => {
@@ -164,7 +164,7 @@ impl TimeSeriesTable {
 
                         // Optional: heal snapshot best-effort (do not fail open if this fails)
                         let _ = write_coverage_sidecar_atomic(
-                            &self.location,
+                            self.location(),
                             Path::new(&ptr.coverage_path),
                             &recovered,
                         )

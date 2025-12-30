@@ -333,7 +333,7 @@ impl TimeSeriesTable {
         //    Unstable is fine here; we only care about ordering by ts_min.
         candidates.sort_unstable_by(cmp_segment_meta_by_time);
 
-        let location = self.location.clone();
+        let location = self.location().clone();
 
         // 3) Build stream: for each segment, read + filter
         let stream = futures::stream::iter(candidates.into_iter())
