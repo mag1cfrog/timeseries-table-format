@@ -394,6 +394,26 @@ pub enum LogicalSchemaError {
         /// The duplicate column name.
         column: String,
     },
+
+    /// FixedBinary columns must include a positive byte width.
+    #[snafu(display(
+        "invalid FixedBinary byte_width for column '{column}': {byte_width} (must be > 0)"
+    ))]
+    FixedBinaryInvalidWidthInSchema {
+        /// Column name that failed validation.
+        column: String,
+        /// Declared byte width.
+        byte_width: i32,
+    },
+
+    /// Parquet FIXED_LEN_BYTE_ARRAY columns must include a type_length.
+    #[snafu(display(
+        "FIXED_LEN_BYTE_ARRAY column '{column}' missing type_length in Parquet schema"
+    ))]
+    FixedBinaryMissingLength {
+        /// Column name that failed validation.
+        column: String,
+    },
 }
 
 impl LogicalSchema {
@@ -851,6 +871,23 @@ mod tests {
             name: "fixed".to_string(),
             data_type: LogicalDataType::FixedBinary { byte_width: 8 },
             nullable: false,
+        }])
+        .expect("valid schema structure");
+
+        let json = serde_json::to_string(&logical).unwrap();
+        let back: LogicalSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, logical);
+    }
+
+    #[test]
+    fn logical_schema_decimal_json_roundtrip() {
+        let logical = LogicalSchema::new(vec![LogicalColumn {
+            name: "amount".to_string(),
+            data_type: LogicalDataType::Decimal {
+                precision: 18,
+                scale: 4,
+            },
+            nullable: true,
         }])
         .expect("valid schema structure");
 
