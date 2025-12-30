@@ -524,6 +524,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use serde_json::Value;
+    use std::sync::Arc;
 
     fn utc_datetime(
         year: i32,
@@ -545,6 +546,60 @@ mod tests {
             bucket: TimeBucket::Minutes(1),
             timezone: None,
         }
+    }
+
+    fn sample_logical_schema_all_supported() -> LogicalSchema {
+        LogicalSchema::new(vec![
+            LogicalColumn {
+                name: "flag".to_string(),
+                data_type: LogicalDataType::Bool,
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "i32".to_string(),
+                data_type: LogicalDataType::Int32,
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "i64".to_string(),
+                data_type: LogicalDataType::Int64,
+                nullable: true,
+            },
+            LogicalColumn {
+                name: "f32".to_string(),
+                data_type: LogicalDataType::Float32,
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "f64".to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: true,
+            },
+            LogicalColumn {
+                name: "text".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: true,
+            },
+            LogicalColumn {
+                name: "bytes".to_string(),
+                data_type: LogicalDataType::Binary,
+                nullable: true,
+            },
+            LogicalColumn {
+                name: "fixed".to_string(),
+                data_type: LogicalDataType::FixedBinary { byte_width: 16 },
+                nullable: false,
+            },
+            LogicalColumn {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Micros,
+                    timezone: Some("UTC".to_string()),
+                },
+                nullable: false,
+            },
+        ])
+        .expect("valid logical schema")
     }
 
     #[test]
@@ -587,5 +642,220 @@ mod tests {
         let back: TableMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entity_identity, Some(entity_identity));
         assert_eq!(back, meta);
+    }
+
+    #[test]
+    fn logical_schema_to_arrow_schema_happy_path() {
+        let logical = sample_logical_schema_all_supported();
+        let schema = logical.to_arrow_schema().expect("arrow schema conversion");
+
+        let expected = Schema::new(vec![
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("i32", DataType::Int32, false),
+            Field::new("i64", DataType::Int64, true),
+            Field::new("f32", DataType::Float32, false),
+            Field::new("f64", DataType::Float64, true),
+            Field::new("text", DataType::Utf8, true),
+            Field::new("bytes", DataType::Binary, true),
+            Field::new("fixed", DataType::FixedSizeBinary(16), false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::<str>::from("UTC"))),
+                false,
+            ),
+        ]);
+
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn logical_schema_rejects_fixed_binary_invalid_width() {
+        for width in [0, -1] {
+            let logical = LogicalSchema::new(vec![LogicalColumn {
+                name: "bad_fixed".to_string(),
+                data_type: LogicalDataType::FixedBinary { byte_width: width },
+                nullable: false,
+            }])
+            .expect("valid schema structure");
+
+            let err = logical.to_arrow_schema().unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    SchemaConvertError::FixedBinaryInvalidWidth {
+                        column,
+                        byte_width
+                    } if column == "bad_fixed" && *byte_width == width
+                ),
+                "unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_schema_rejects_int96() {
+        let logical = LogicalSchema::new(vec![LogicalColumn {
+            name: "legacy_ts".to_string(),
+            data_type: LogicalDataType::Int96,
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+
+        let err = logical.to_arrow_schema().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SchemaConvertError::Int96Unsupported { column } if column == "legacy_ts"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn logical_schema_rejects_other_type() {
+        let logical = LogicalSchema::new(vec![LogicalColumn {
+            name: "opaque".to_string(),
+            data_type: LogicalDataType::Other("parquet::Map".to_string()),
+            nullable: true,
+        }])
+        .expect("valid schema structure");
+
+        let err = logical.to_arrow_schema().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SchemaConvertError::OtherTypeUnsupported { column, name }
+                    if column == "opaque" && name == "parquet::Map"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn table_meta_arrow_schema_ref_requires_logical_schema() {
+        let meta = TableMeta::new_time_series(sample_time_index_spec());
+        let err = meta.arrow_schema_ref().unwrap_err();
+        assert!(matches!(err, TableMetaSchemaError::MissingCanonicalSchema));
+    }
+
+    #[test]
+    fn table_meta_arrow_schema_ref_propagates_convert_error() {
+        let logical = LogicalSchema::new(vec![LogicalColumn {
+            name: "legacy_ts".to_string(),
+            data_type: LogicalDataType::Int96,
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+        let meta = TableMeta::new_time_series_with_schema(sample_time_index_spec(), logical);
+
+        let err = meta.arrow_schema_ref().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                TableMetaSchemaError::Convert {
+                    source: SchemaConvertError::Int96Unsupported { column }
+                } if column == "legacy_ts"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn logical_schema_timestamp_without_timezone() {
+        let logical = LogicalSchema::new(vec![LogicalColumn {
+            name: "ts".to_string(),
+            data_type: LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            },
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+
+        let schema = logical.to_arrow_schema().expect("arrow schema conversion");
+        let expected = Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]);
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn logical_schema_decimal_conversion_bounds() {
+        let valid_128 = LogicalSchema::new(vec![LogicalColumn {
+            name: "dec128".to_string(),
+            data_type: LogicalDataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+        let schema = valid_128
+            .to_arrow_schema()
+            .expect("arrow schema conversion");
+        assert_eq!(
+            schema,
+            Schema::new(vec![Field::new(
+                "dec128",
+                DataType::Decimal128(38, 10),
+                false
+            )])
+        );
+
+        let valid_256 = LogicalSchema::new(vec![LogicalColumn {
+            name: "dec256".to_string(),
+            data_type: LogicalDataType::Decimal {
+                precision: 76,
+                scale: 5,
+            },
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+        let schema = valid_256
+            .to_arrow_schema()
+            .expect("arrow schema conversion");
+        assert_eq!(
+            schema,
+            Schema::new(vec![Field::new(
+                "dec256",
+                DataType::Decimal256(76, 5),
+                false
+            )])
+        );
+
+        let invalid = LogicalSchema::new(vec![LogicalColumn {
+            name: "dec_too_large".to_string(),
+            data_type: LogicalDataType::Decimal {
+                precision: 77,
+                scale: 0,
+            },
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+        let err = invalid.to_arrow_schema().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SchemaConvertError::DecimalInvalid { column, precision, scale, .. }
+                    if column == "dec_too_large" && *precision == 77 && *scale == 0
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn logical_schema_fixed_binary_json_roundtrip() {
+        let logical = LogicalSchema::new(vec![LogicalColumn {
+            name: "fixed".to_string(),
+            data_type: LogicalDataType::FixedBinary { byte_width: 8 },
+            nullable: false,
+        }])
+        .expect("valid schema structure");
+
+        let json = serde_json::to_string(&logical).unwrap();
+        let back: LogicalSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, logical);
     }
 }
