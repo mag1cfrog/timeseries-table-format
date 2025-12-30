@@ -197,6 +197,55 @@ impl TimeSeriesTable {
             index,
         })
     }
+
+    /// Load the current log version from disk without mutating in-memory state.
+    pub async fn current_version(&self) -> Result<u64, TableError> {
+        self.log
+            .load_current_version()
+            .await
+            .context(TransactionLogSnafu)
+    }
+
+    /// Rebuild and return the latest table state from the transaction log.
+    pub async fn load_latest_state(&self) -> Result<TableState, TableError> {
+        self.log
+            .rebuild_table_state()
+            .await
+            .context(TransactionLogSnafu)
+    }
+
+    /// Refresh in-memory state if the log has advanced; returns true if updated.
+    pub async fn refresh(&mut self) -> Result<bool, TableError> {
+        let current = self
+            .log
+            .load_current_version()
+            .await
+            .context(TransactionLogSnafu)?;
+
+        if current == self.state.version {
+            return Ok(false);
+        }
+
+        let state = self
+            .log
+            .rebuild_table_state()
+            .await
+            .context(TransactionLogSnafu)?;
+
+        let index = match &state.table_meta.kind {
+            TableKind::TimeSeries(spec) => spec.clone(),
+            other => {
+                return NotTimeSeriesSnafu {
+                    kind: other.clone(),
+                }
+                .fail();
+            }
+        };
+
+        self.state = state;
+        self.index = index;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
