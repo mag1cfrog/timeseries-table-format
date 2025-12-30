@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -330,6 +330,29 @@ pub struct LogicalColumn {
 pub struct LogicalSchema {
     /// All logical columns that compose the schema in their defined order.
     columns: Vec<LogicalColumn>,
+}
+
+impl LogicalSchema {
+    /// Convert this logical schema to an owned Arrow [`Schema`].
+    ///
+    /// Fails if any column uses a logical type that cannot be represented in
+    /// Arrow (see [`SchemaConvertError`]).
+    pub fn to_arrow_schema(&self) -> Result<Schema, SchemaConvertError> {
+        let mut fields = Vec::with_capacity(self.columns.len());
+        for c in &self.columns {
+            let dt = c.data_type.to_arrow_datatype(&c.name)?;
+            fields.push(Field::new(c.name.clone(), dt, c.nullable));
+        }
+
+        Ok(Schema::new(fields))
+    }
+
+    /// Convert this logical schema to a shared Arrow [`SchemaRef`].
+    ///
+    /// This is a convenience wrapper around [`Self::to_arrow_schema`].
+    pub fn to_arrow_schema_ref(&self) -> Result<SchemaRef, SchemaConvertError> {
+        Ok(Arc::new(self.to_arrow_schema()?))
+    }
 }
 
 /// Errors that can occur while constructing or validating a logical schema.
