@@ -343,6 +343,7 @@ pub async fn segment_meta_from_parquet_location(
 fn map_parquet_col_to_logical_type(
     physical: PhysicalType,
     logical: Option<&LogicalType>,
+    fixed_len_byte_array_len: Option<i32>,
 ) -> LogicalDataType {
     // First: look at logical annotation when present
     if let Some(logical) = logical {
@@ -389,7 +390,10 @@ fn map_parquet_col_to_logical_type(
         PhysicalType::FLOAT => LogicalDataType::Float32,
         PhysicalType::DOUBLE => LogicalDataType::Float64,
         PhysicalType::BYTE_ARRAY => LogicalDataType::Binary,
-        PhysicalType::FIXED_LEN_BYTE_ARRAY => LogicalDataType::FixedBinary,
+        PhysicalType::FIXED_LEN_BYTE_ARRAY => {
+            let byte_width = fixed_len_byte_array_len.unwrap_or(0);
+            LogicalDataType::FixedBinary { byte_width }
+        }
         PhysicalType::INT96 => LogicalDataType::Int96,
     }
 }
@@ -411,7 +415,13 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
         let physical = col.physical_type();
         let logical = col.logical_type_ref();
 
-        let data_type = map_parquet_col_to_logical_type(physical, logical);
+        let fixed_len_byte_array_len = if physical == PhysicalType::FIXED_LEN_BYTE_ARRAY {
+            Some(col.type_length())
+        } else {
+            None
+        };
+        let data_type =
+            map_parquet_col_to_logical_type(physical, logical, fixed_len_byte_array_len);
 
         let nullable = column_nullable(col);
         cols.push(LogicalColumn {
@@ -601,7 +611,7 @@ mod tests {
                 unit,
             };
 
-            let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&logical));
+            let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&logical), None);
             assert_eq!(
                 mapped,
                 LogicalDataType::Timestamp {
@@ -614,26 +624,38 @@ mod tests {
 
     #[test]
     fn map_parquet_col_to_logical_type_maps_string_logical() {
-        let mapped =
-            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::String));
+        let mapped = map_parquet_col_to_logical_type(
+            PhysicalType::BYTE_ARRAY,
+            Some(&LogicalType::String),
+            None,
+        );
         assert_eq!(mapped, LogicalDataType::Utf8);
     }
 
     #[test]
     fn map_parquet_col_to_logical_type_maps_complex_logical_to_other() {
-        let map_type =
-            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::Map));
+        let map_type = map_parquet_col_to_logical_type(
+            PhysicalType::BYTE_ARRAY,
+            Some(&LogicalType::Map),
+            None,
+        );
         assert_eq!(map_type, LogicalDataType::Other("parquet::Map".to_string()));
 
-        let list_type =
-            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::List));
+        let list_type = map_parquet_col_to_logical_type(
+            PhysicalType::BYTE_ARRAY,
+            Some(&LogicalType::List),
+            None,
+        );
         assert_eq!(
             list_type,
             LogicalDataType::Other("parquet::List".to_string())
         );
 
-        let enum_type =
-            map_parquet_col_to_logical_type(PhysicalType::BYTE_ARRAY, Some(&LogicalType::Enum));
+        let enum_type = map_parquet_col_to_logical_type(
+            PhysicalType::BYTE_ARRAY,
+            Some(&LogicalType::Enum),
+            None,
+        );
         assert_eq!(
             enum_type,
             LogicalDataType::Other("parquet::Enum".to_string())
@@ -643,7 +665,8 @@ mod tests {
             scale: 2,
             precision: 10,
         };
-        let decimal_type = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&decimal));
+        let decimal_type =
+            map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&decimal), None);
         assert_eq!(
             decimal_type,
             LogicalDataType::Other("parquet::Decimal { scale: 2, precision: 10 }".to_string())
@@ -652,7 +675,8 @@ mod tests {
 
     #[test]
     fn map_parquet_col_to_logical_type_prefers_physical_for_unknown_logical() {
-        let mapped = map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&LogicalType::Json));
+        let mapped =
+            map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&LogicalType::Json), None);
         assert_eq!(mapped, LogicalDataType::Int64);
     }
 
@@ -667,13 +691,18 @@ mod tests {
             (PhysicalType::BYTE_ARRAY, LogicalDataType::Binary),
             (
                 PhysicalType::FIXED_LEN_BYTE_ARRAY,
-                LogicalDataType::FixedBinary,
+                LogicalDataType::FixedBinary { byte_width: 16 },
             ),
             (PhysicalType::INT96, LogicalDataType::Int96),
         ];
 
         for (physical, expected) in cases {
-            let mapped = map_parquet_col_to_logical_type(physical, None);
+            let fixed_len_byte_array_len = if physical == PhysicalType::FIXED_LEN_BYTE_ARRAY {
+                Some(16)
+            } else {
+                None
+            };
+            let mapped = map_parquet_col_to_logical_type(physical, None, fixed_len_byte_array_len);
             assert_eq!(mapped, expected);
         }
     }
