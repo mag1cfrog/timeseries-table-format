@@ -59,6 +59,36 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
     let latest = stale.load_latest_state().await?;
     assert_eq!(latest.version, 2);
     assert!(latest.segments.contains_key(&seg.segment_id));
+    let latest_seg = latest
+        .segments
+        .get(&seg.segment_id)
+        .expect("segment present");
+    assert_eq!(latest_seg.ts_min, seg.ts_min);
+    assert_eq!(latest_seg.ts_max, seg.ts_max);
+    assert!(latest.table_coverage.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_latest_state_no_change_returns_current_snapshot() -> TestResult {
+    let tmp = TempDir::new()?;
+    let location = TableLocation::local(tmp.path());
+
+    let meta = make_basic_table_meta();
+    let table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+    let v = table.current_version().await?;
+    assert_eq!(v, table.state().version);
+
+    let latest = table.load_latest_state().await?;
+    assert_eq!(latest.version, table.state().version);
+    assert!(latest.segments.is_empty());
+    assert!(latest.table_coverage.is_none());
+    match latest.table_meta.kind() {
+        timeseries_table_core::transaction_log::TableKind::TimeSeries(_) => {}
+        other => panic!("expected time series table kind, got {other:?}"),
+    }
 
     Ok(())
 }
