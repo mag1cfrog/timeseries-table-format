@@ -62,7 +62,6 @@ pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableErr
 /// - and the extracted time index spec.
 #[derive(Debug)]
 pub struct TimeSeriesTable {
-    location: TableLocation,
     log: TransactionLogStore,
     state: TableState,
     index: TimeIndexSpec,
@@ -81,7 +80,7 @@ impl TimeSeriesTable {
 
     /// Return the table location.
     pub fn location(&self) -> &TableLocation {
-        &self.location
+        self.log.location()
     }
 
     /// Return the transaction log store handle.
@@ -127,12 +126,7 @@ impl TimeSeriesTable {
             }
         };
 
-        Ok(Self {
-            location,
-            log,
-            state,
-            index,
-        })
+        Ok(Self { log, state, index })
     }
 
     /// Create a new time-series table at the given location.
@@ -190,12 +184,56 @@ impl TimeSeriesTable {
             .rebuild_table_state()
             .await
             .context(TransactionLogSnafu)?;
-        Ok(Self {
-            location,
-            log,
-            state,
-            index,
-        })
+        Ok(Self { log, state, index })
+    }
+
+    /// Load the current log version from disk without mutating in-memory state.
+    pub async fn current_version(&self) -> Result<u64, TableError> {
+        self.log
+            .load_current_version()
+            .await
+            .context(TransactionLogSnafu)
+    }
+
+    /// Rebuild and return the latest table state from the transaction log.
+    pub async fn load_latest_state(&self) -> Result<TableState, TableError> {
+        self.log
+            .rebuild_table_state()
+            .await
+            .context(TransactionLogSnafu)
+    }
+
+    /// Refresh in-memory state if the log has advanced; returns true if updated.
+    pub async fn refresh(&mut self) -> Result<bool, TableError> {
+        let current = self
+            .log
+            .load_current_version()
+            .await
+            .context(TransactionLogSnafu)?;
+
+        if current == self.state.version {
+            return Ok(false);
+        }
+
+        let state = self
+            .log
+            .rebuild_table_state()
+            .await
+            .context(TransactionLogSnafu)?;
+
+        let index = match &state.table_meta.kind {
+            TableKind::TimeSeries(spec) => spec.clone(),
+            other => {
+                return NotTimeSeriesSnafu {
+                    kind: other.clone(),
+                }
+                .fail();
+            }
+        };
+
+        self.state = state;
+        self.index = index;
+        Ok(true)
     }
 }
 
@@ -204,6 +242,7 @@ mod tests {
     use super::*;
     use crate::storage::TableLocation;
     use crate::time_series_table::test_util::*;
+    use crate::transaction_log::TimeBucket;
     use crate::transaction_log::TransactionLogStore;
 
     use tempfile::TempDir;
@@ -272,6 +311,51 @@ mod tests {
         // Second create should detect existing commits and fail.
         let result = TimeSeriesTable::create(location.clone(), meta).await;
         assert!(matches!(result, Err(TableError::AlreadyExists { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_returns_false_when_no_new_commits() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+        let refreshed = table.refresh().await?;
+        assert!(!refreshed);
+        assert_eq!(table.state().version, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_updates_state_and_index_on_change() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location.clone(), meta.clone()).await?;
+
+        let mut updated_meta = meta.clone();
+        if let TableKind::TimeSeries(spec) = &mut updated_meta.kind {
+            spec.bucket = TimeBucket::Minutes(5);
+        }
+
+        let log = TransactionLogStore::new(location.clone());
+        let new_version = log
+            .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(updated_meta.clone())])
+            .await?;
+        assert_eq!(new_version, 2);
+
+        let refreshed = table.refresh().await?;
+        assert!(refreshed);
+        assert_eq!(table.state().version, 2);
+
+        match &table.state().table_meta.kind {
+            TableKind::TimeSeries(spec) => assert_eq!(spec.bucket, TimeBucket::Minutes(5)),
+            other => panic!("expected time series table kind, got {other:?}"),
+        }
+        assert_eq!(table.index_spec().bucket, TimeBucket::Minutes(5));
         Ok(())
     }
 }

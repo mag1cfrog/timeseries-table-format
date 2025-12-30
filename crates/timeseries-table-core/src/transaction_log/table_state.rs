@@ -8,7 +8,7 @@
 //! version.
 use std::collections::HashMap;
 
-use crate::transaction_log::*;
+use crate::{helpers::segment_order::cmp_segment_meta_by_time, transaction_log::*};
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,18 @@ pub struct TableState {
 
     /// Optional pointer to the latest table coverage metadata.
     pub table_coverage: Option<TableCoveragePointer>,
+}
+
+impl TableState {
+    /// Return live segments sorted deterministically by time.
+    ///
+    /// Ordering is by `ts_min`, then `ts_max`, and finally `segment_id` as a
+    /// stable tie-breaker.
+    pub fn segments_sorted_by_time(&self) -> Vec<&SegmentMeta> {
+        let mut v: Vec<&SegmentMeta> = self.segments.values().collect();
+        v.sort_unstable_by(|a, b| cmp_segment_meta_by_time(a, b));
+        v
+    }
 }
 
 impl TransactionLogStore {
@@ -172,6 +184,55 @@ mod tests {
             row_count: 42,
             coverage_path: None,
         }
+    }
+
+    fn segment_with_ts(id: &str, ts_min: i64, ts_max: i64) -> SegmentMeta {
+        SegmentMeta {
+            segment_id: SegmentId(id.to_string()),
+            path: format!("data/{id}.parquet"),
+            format: FileFormat::Parquet,
+            ts_min: chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap(),
+            ts_max: chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap(),
+            row_count: 1,
+            coverage_path: None,
+        }
+    }
+
+    #[test]
+    fn segments_sorted_by_time_orders_hashmap_deterministically() {
+        let mut segments = HashMap::new();
+        let seg_c = segment_with_ts("c", 10, 30);
+        let seg_a = segment_with_ts("a", 10, 20);
+        let seg_d = segment_with_ts("d", 5, 7);
+        let seg_b = segment_with_ts("b", 10, 20);
+
+        segments.insert(seg_c.segment_id.clone(), seg_c);
+        segments.insert(seg_a.segment_id.clone(), seg_a);
+        segments.insert(seg_d.segment_id.clone(), seg_d);
+        segments.insert(seg_b.segment_id.clone(), seg_b);
+
+        let state = TableState {
+            version: 3,
+            table_meta: sample_table_meta(),
+            segments,
+            table_coverage: None,
+        };
+
+        let ordered: Vec<(i64, i64, String)> = state
+            .segments_sorted_by_time()
+            .iter()
+            .map(|seg| {
+                (
+                    seg.ts_min.timestamp(),
+                    seg.ts_max.timestamp(),
+                    seg.segment_id.0.clone(),
+                )
+            })
+            .collect();
+
+        let mut expected = ordered.clone();
+        expected.sort();
+        assert_eq!(ordered, expected);
     }
 
     #[tokio::test]

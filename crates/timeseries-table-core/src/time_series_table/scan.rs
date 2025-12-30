@@ -32,6 +32,7 @@ use futures::{StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use snafu::prelude::*;
 
+use crate::helpers::segment_order::cmp_segment_meta_by_time;
 use crate::{
     storage::{self, TableLocation},
     time_series_table::{
@@ -330,9 +331,9 @@ impl TimeSeriesTable {
         // 2) Sort by ts_min to ensure segments are processed in chronological order.
         //    In v0.1 we assume non-overlapping segments, so sorting guarantees scan order.
         //    Unstable is fine here; we only care about ordering by ts_min.
-        candidates.sort_unstable_by_key(|seg| seg.ts_min);
+        candidates.sort_unstable_by(cmp_segment_meta_by_time);
 
-        let location = self.location.clone();
+        let location = self.location().clone();
 
         // 3) Build stream: for each segment, read + filter
         let stream = futures::stream::iter(candidates.into_iter())
