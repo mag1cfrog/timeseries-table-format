@@ -62,7 +62,6 @@ pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableErr
 /// - and the extracted time index spec.
 #[derive(Debug)]
 pub struct TimeSeriesTable {
-    location: TableLocation,
     log: TransactionLogStore,
     state: TableState,
     index: TimeIndexSpec,
@@ -81,7 +80,7 @@ impl TimeSeriesTable {
 
     /// Return the table location.
     pub fn location(&self) -> &TableLocation {
-        &self.location
+        self.log.location()
     }
 
     /// Return the transaction log store handle.
@@ -127,12 +126,7 @@ impl TimeSeriesTable {
             }
         };
 
-        Ok(Self {
-            location,
-            log,
-            state,
-            index,
-        })
+        Ok(Self { log, state, index })
     }
 
     /// Create a new time-series table at the given location.
@@ -190,12 +184,7 @@ impl TimeSeriesTable {
             .rebuild_table_state()
             .await
             .context(TransactionLogSnafu)?;
-        Ok(Self {
-            location,
-            log,
-            state,
-            index,
-        })
+        Ok(Self { log, state, index })
     }
 
     /// Load the current log version from disk without mutating in-memory state.
