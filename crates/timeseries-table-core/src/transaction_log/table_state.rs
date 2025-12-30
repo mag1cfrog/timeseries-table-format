@@ -186,6 +186,47 @@ mod tests {
         }
     }
 
+    fn segment_with_ts(id: &str, ts_min: i64, ts_max: i64) -> SegmentMeta {
+        SegmentMeta {
+            segment_id: SegmentId(id.to_string()),
+            path: format!("data/{id}.parquet"),
+            format: FileFormat::Parquet,
+            ts_min: chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap(),
+            ts_max: chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap(),
+            row_count: 1,
+            coverage_path: None,
+        }
+    }
+
+    #[test]
+    fn segments_sorted_by_time_orders_hashmap_deterministically() {
+        let mut segments = HashMap::new();
+        let seg_c = segment_with_ts("c", 10, 30);
+        let seg_a = segment_with_ts("a", 10, 20);
+        let seg_d = segment_with_ts("d", 5, 7);
+        let seg_b = segment_with_ts("b", 10, 20);
+
+        segments.insert(seg_c.segment_id.clone(), seg_c);
+        segments.insert(seg_a.segment_id.clone(), seg_a);
+        segments.insert(seg_d.segment_id.clone(), seg_d);
+        segments.insert(seg_b.segment_id.clone(), seg_b);
+
+        let state = TableState {
+            version: 3,
+            table_meta: sample_table_meta(),
+            segments,
+            table_coverage: None,
+        };
+
+        let ids: Vec<String> = state
+            .segments_sorted_by_time()
+            .iter()
+            .map(|seg| seg.segment_id.0.clone())
+            .collect();
+
+        assert_eq!(ids, vec!["d", "a", "b", "c"]);
+    }
+
     #[tokio::test]
     async fn rebuild_table_state_happy_path() -> TestResult {
         let (_tmp, store) = create_test_log_store();
