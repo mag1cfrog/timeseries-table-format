@@ -148,7 +148,10 @@ pub enum LogicalDataType {
     /// Variable-length binary data.
     Binary,
     /// Fixed-length binary data.
-    FixedBinary,
+    FixedBinary {
+        /// Fixed byte width for each value (in bytes).
+        byte_width: i32,
+    },
     /// UTF-8 encoded string.
     Utf8,
     /// Legacy 96-bit integer (primarily for Parquet compatibility).
@@ -185,7 +188,7 @@ impl fmt::Display for LogicalDataType {
             LogicalDataType::Float32 => write!(f, "float32"),
             LogicalDataType::Float64 => write!(f, "float64"),
             LogicalDataType::Binary => write!(f, "binary"),
-            LogicalDataType::FixedBinary => write!(f, "fixed_binary"),
+            LogicalDataType::FixedBinary { byte_width } => write!(f, "fixed_binary[{byte_width}]"),
             LogicalDataType::Utf8 => write!(f, "utf8"),
             LogicalDataType::Int96 => write!(f, "int96"),
 
