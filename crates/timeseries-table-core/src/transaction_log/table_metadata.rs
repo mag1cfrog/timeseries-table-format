@@ -165,6 +165,14 @@ pub enum LogicalDataType {
         timezone: Option<String>, // keep Option for future TZ support
     },
 
+    /// Fixed-precision decimal value with declared precision and scale.
+    Decimal {
+        /// Total number of decimal digits (both sides of the decimal point).
+        precision: i32,
+        /// Number of digits to the right of the decimal point.
+        scale: i32,
+    },
+
     /// Catch-all logical data type referenced by name.
     Other(String),
 }
@@ -196,6 +204,10 @@ impl fmt::Display for LogicalDataType {
                 Some(tz) => write!(f, "timestamp[{}]({})", unit, tz),
                 None => write!(f, "timestamp[{}]", unit),
             },
+
+            LogicalDataType::Decimal { precision, scale } => {
+                write!(f, "decimal(precision={precision}, scale={scale})")
+            }
 
             LogicalDataType::Other(s) => write!(f, "{s}"),
         }
