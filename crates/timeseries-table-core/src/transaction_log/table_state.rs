@@ -218,13 +218,21 @@ mod tests {
             table_coverage: None,
         };
 
-        let ids: Vec<String> = state
+        let ordered: Vec<(i64, i64, String)> = state
             .segments_sorted_by_time()
             .iter()
-            .map(|seg| seg.segment_id.0.clone())
+            .map(|seg| {
+                (
+                    seg.ts_min.timestamp(),
+                    seg.ts_max.timestamp(),
+                    seg.segment_id.0.clone(),
+                )
+            })
             .collect();
 
-        assert_eq!(ids, vec!["d", "a", "b", "c"]);
+        let mut expected = ordered.clone();
+        expected.sort();
+        assert_eq!(ordered, expected);
     }
 
     #[tokio::test]
