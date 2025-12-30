@@ -64,6 +64,21 @@ pub struct TableMeta {
     pub entity_identity: Option<BTreeMap<String, String>>,
 }
 
+/// Errors encountered while retrieving or converting a table's logical schema.
+#[derive(Debug, Snafu)]
+pub enum TableMetaSchemaError {
+    /// The table metadata has not yet recorded a canonical logical schema.
+    #[snafu(display("table has no canonical logical schema yet (logical_schema is None)"))]
+    MissingCanonicalSchema,
+
+    /// Failed to convert the logical schema to Arrow types.
+    #[snafu(transparent)]
+    Convert {
+        /// Underlying conversion error.
+        source: SchemaConvertError,
+    },
+}
+
 impl TableMeta {
     /// Returns the table kind (e.g. time series or generic).
     pub fn kind(&self) -> &TableKind {
@@ -113,6 +128,21 @@ impl TableMeta {
             format_version: TABLE_FORMAT_VERSION,
             entity_identity: None,
         }
+    }
+
+    /// Convert the table's logical schema to a shared Arrow [`SchemaRef`].
+    ///
+    /// Returns [`TableMetaSchemaError::MissingCanonicalSchema`] if the schema has
+    /// not yet been established for the table.
+    pub fn arrow_schema_ref(&self) -> Result<SchemaRef, TableMetaSchemaError> {
+        let logical = self
+            .logical_schema
+            .as_ref()
+            .ok_or(TableMetaSchemaError::MissingCanonicalSchema)?;
+
+        logical
+            .to_arrow_schema_ref()
+            .map_err(|source| TableMetaSchemaError::Convert { source })
     }
 }
 
