@@ -50,6 +50,11 @@ impl TransactionLogStore {
         Self::log_rel_dir().join(Self::CURRENT_FILE_NAME)
     }
 
+    /// Get the TableLocation of the LogStore.
+    pub fn location(&self) -> &TableLocation {
+        &self.location
+    }
+
     fn commit_rel_path(version: u64) -> PathBuf {
         let file_name = format!(
             "{:0width$}.json",
