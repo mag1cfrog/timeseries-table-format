@@ -368,15 +368,15 @@ fn map_parquet_col_to_logical_type(
                 // Semantically a UTF-8 string, even though it's BYTE_ARRAY underneath
                 return LogicalDataType::Utf8;
             }
-            LogicalType::Map
-            | LogicalType::List
-            | LogicalType::Enum
-            | LogicalType::Decimal {
-                scale: _,
-                precision: _,
-            } => {
+            LogicalType::Map | LogicalType::List | LogicalType::Enum => {
                 // For now, treat “complex” logical types as Other – v0.1 doesn’t need to fully support them.
                 return LogicalDataType::Other(format!("parquet::{logical:?}"));
+            }
+            LogicalType::Decimal { scale, precision } => {
+                return LogicalDataType::Decimal {
+                    precision: *precision,
+                    scale: *scale,
+                };
             }
 
             _ => {}
@@ -934,7 +934,10 @@ mod tests {
             enum_type,
             LogicalDataType::Other("parquet::Enum".to_string())
         );
+    }
 
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_decimal() {
         let decimal = LogicalType::Decimal {
             scale: 2,
             precision: 10,
@@ -943,7 +946,10 @@ mod tests {
             map_parquet_col_to_logical_type(PhysicalType::INT64, Some(&decimal), None);
         assert_eq!(
             decimal_type,
-            LogicalDataType::Other("parquet::Decimal { scale: 2, precision: 10 }".to_string())
+            LogicalDataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
         );
     }
 
@@ -1069,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn logical_schema_maps_decimal_logical_to_other() -> TestResult {
+    fn logical_schema_maps_decimal_logical() -> TestResult {
         let tmp = TempDir::new()?;
         let rel_path = Path::new("data/decimal-int64.parquet");
         let abs = tmp.path().join(rel_path);
@@ -1084,7 +1090,10 @@ mod tests {
         assert_eq!(cols[0].name, "dec");
         assert_eq!(
             cols[0].data_type,
-            LogicalDataType::Other("parquet::Decimal { scale: 2, precision: 10 }".to_string())
+            LogicalDataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
         );
         assert!(!cols[0].nullable);
         Ok(())
