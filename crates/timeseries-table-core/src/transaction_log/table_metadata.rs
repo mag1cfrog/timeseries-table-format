@@ -280,7 +280,7 @@ pub enum LogicalDataType {
         /// Value field definition.
         value: Box<LogicalField>,
         /// Whether entries are sorted by key.
-        key_sorted: bool,
+        keys_sorted: bool,
     },
 
     /// Catch-all logical data type referenced by name.
@@ -379,7 +379,7 @@ impl LogicalDataType {
             LogicalDataType::Map {
                 key,
                 value,
-                key_sorted,
+                keys_sorted,
             } => {
                 if key.nullable {
                     return Err(SchemaConvertError::MapKeyMustBeNonNull {
@@ -400,7 +400,7 @@ impl LogicalDataType {
                 let entries_dt = DataType::Struct(Fields::from(vec![key_field, val_field]));
                 let entries_field: FieldRef = Arc::new(Field::new("entries", entries_dt, false));
 
-                DataType::Map(entries_field, *key_sorted)
+                DataType::Map(entries_field, *keys_sorted)
             }
 
             LogicalDataType::Other(name) => {
@@ -453,9 +453,9 @@ impl fmt::Display for LogicalDataType {
             LogicalDataType::Map {
                 key,
                 value,
-                key_sorted,
+                keys_sorted,
             } => {
-                write!(f, "Map<{}, {}, key_sorted={}>", key, value, key_sorted)
+                write!(f, "Map<{}, {}, keys_sorted={}>", key, value, keys_sorted)
             }
 
             LogicalDataType::Other(s) => write!(f, "{s}"),
