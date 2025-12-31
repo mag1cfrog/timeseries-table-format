@@ -32,7 +32,7 @@ use crate::storage::{self, TableLocation, read_all_bytes};
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
 use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
 use crate::transaction_log::{
-    FileFormat, LogicalColumn, LogicalSchema, LogicalSchemaError, SegmentId, SegmentMeta,
+    FileFormat, LogicalField, LogicalSchema, LogicalSchemaError, SegmentId, SegmentMeta,
 };
 
 /// Convert little-endian i64 bytes into i64 with proper error handling.
@@ -435,7 +435,7 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
             map_parquet_col_to_logical_type(&name, physical, logical, fixed_len_byte_array_len)?;
 
         let nullable = column_nullable(col);
-        cols.push(LogicalColumn {
+        cols.push(LogicalField {
             name,
             data_type,
             nullable,
@@ -488,6 +488,7 @@ pub async fn logical_schema_from_parquet_location(
 
     logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
