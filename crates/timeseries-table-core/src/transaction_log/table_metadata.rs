@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -184,6 +184,42 @@ impl fmt::Display for LogicalTimestampUnit {
     }
 }
 
+/// Logical column definition in a schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogicalField {
+    /// Column name as stored in the schema.
+    pub name: String,
+    /// Logical data type for the column.
+    pub data_type: LogicalDataType,
+    /// Whether the column allows null values.
+    pub nullable: bool,
+}
+
+impl LogicalField {
+    fn to_arrow_field_ref(&self, path: &str) -> Result<FieldRef, SchemaConvertError> {
+        let dt = self.data_type.to_arrow_datatype(path)?;
+        Ok(Arc::new(Field::new(self.name.clone(), dt, self.nullable)))
+    }
+}
+
+impl fmt::Display for LogicalField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.nullable {
+            write!(f, "{}?: {}", self.name, self.data_type)
+        } else {
+            write!(f, "{}: {}", self.name, self.data_type)
+        }
+    }
+}
+
+fn join_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
 /// Logical data types that can be stored in the table schema metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogicalDataType {
@@ -223,6 +259,28 @@ pub enum LogicalDataType {
         precision: i32,
         /// Number of digits to the right of the decimal point.
         scale: i32,
+    },
+
+    /// Struct with named child fields.
+    Struct {
+        /// Ordered set of child fields for the struct.
+        fields: Vec<LogicalField>,
+    },
+
+    /// List (array) with a single element field definition.
+    List {
+        /// Element field definition for list items.
+        elements: Box<LogicalField>,
+    },
+
+    /// Map with key/value field definitions.
+    Map {
+        /// Key field definition (must be non-nullable for Arrow compatibility).
+        key: Box<LogicalField>,
+        /// Value field definition.
+        value: Box<LogicalField>,
+        /// Whether entries are sorted by key.
+        key_sorted: bool,
     },
 
     /// Catch-all logical data type referenced by name.
@@ -303,6 +361,50 @@ impl LogicalDataType {
                 }
             }
 
+            LogicalDataType::Struct { fields } => {
+                let mut arrow_children: Vec<FieldRef> = Vec::with_capacity(fields.len());
+                for f in fields {
+                    let child_path = join_path(column, &f.name);
+                    arrow_children.push(f.to_arrow_field_ref(&child_path)?);
+                }
+                DataType::Struct(Fields::from(arrow_children))
+            }
+
+            LogicalDataType::List { elements } => {
+                let child_path = join_path(column, &elements.name);
+                let element_field = elements.to_arrow_field_ref(&child_path)?;
+                DataType::List(element_field)
+            }
+
+            LogicalDataType::Map {
+                key,
+                value,
+                key_sorted,
+            } => {
+                if key.nullable {
+                    return Err(SchemaConvertError::UnsupportedLogicalType {
+                        column: column.to_string(),
+                        type_name: "map".to_string(),
+                        details: "map key must be non-nullable".to_string(),
+                    });
+                }
+
+                // Canonical Arrow Map field names are "entries", "key", "value"
+                let key_path = format!("{column}.key");
+                let val_path = format!("{column}.value");
+
+                let key_dt = key.data_type.to_arrow_datatype(&key_path)?;
+                let val_dt = value.data_type.to_arrow_datatype(&val_path)?;
+
+                let key_field: FieldRef = Arc::new(Field::new("key", key_dt, false));
+                let val_field: FieldRef = Arc::new(Field::new("value", val_dt, value.nullable));
+
+                let entries_dt = DataType::Struct(Fields::from(vec![key_field, val_field]));
+                let entries_field: FieldRef = Arc::new(Field::new("entries", entries_dt, false));
+
+                DataType::Map(entries_field, *key_sorted)
+            }
+
             LogicalDataType::Other(name) => {
                 return Err(SchemaConvertError::OtherTypeUnsupported {
                     column: column.to_string(),
@@ -335,31 +437,39 @@ impl fmt::Display for LogicalDataType {
                 write!(f, "decimal(precision={precision}, scale={scale})")
             }
 
+            LogicalDataType::Struct { fields } => {
+                write!(f, "Struct{{")?;
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", field)?;
+                }
+                write!(f, "}}")
+            }
+
+            LogicalDataType::List { elements } => {
+                write!(f, "List<{}>", elements)
+            }
+
+            LogicalDataType::Map {
+                key,
+                value,
+                key_sorted,
+            } => {
+                write!(f, "Map<{}, {}, key_sorted={}>", key, value, key_sorted)
+            }
+
             LogicalDataType::Other(s) => write!(f, "{s}"),
         }
     }
-}
-/// A minimal logical schema representation.
-///
-/// This is intentionally simple in v0.1: it records column names, types as
-/// strings, and nullability. A future version may align this more closely
-/// with Arrow or another schema model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LogicalColumn {
-    /// Column name as it appears in the data.
-    pub name: String,
-    /// Logical data type as a strongly-typed enum (e.g. `LogicalDataType::Int64`, `LogicalDataType::Timestamp { ... }`).
-    pub data_type: LogicalDataType,
-    /// Whether the column may contain NULLs.
-    #[serde(default)]
-    pub nullable: bool,
 }
 
 /// Logical schema metadata describing the ordered collection of logical columns.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogicalSchema {
     /// All logical columns that compose the schema in their defined order.
-    columns: Vec<LogicalColumn>,
+    columns: Vec<LogicalField>,
 }
 
 impl LogicalSchema {
@@ -418,7 +528,7 @@ pub enum LogicalSchemaError {
 
 impl LogicalSchema {
     /// Construct a validated logical schema (rejects duplicate column names).
-    pub fn new(columns: Vec<LogicalColumn>) -> Result<Self, LogicalSchemaError> {
+    pub fn new(columns: Vec<LogicalField>) -> Result<Self, LogicalSchemaError> {
         let mut seen = HashSet::new();
         for col in &columns {
             if !seen.insert(col.name.clone()) {
@@ -433,7 +543,7 @@ impl LogicalSchema {
     }
 
     /// Borrow the logical columns.
-    pub fn columns(&self) -> &[LogicalColumn] {
+    pub fn columns(&self) -> &[LogicalField] {
         &self.columns
     }
 }
@@ -570,47 +680,47 @@ mod tests {
 
     fn sample_logical_schema_all_supported() -> LogicalSchema {
         LogicalSchema::new(vec![
-            LogicalColumn {
+            LogicalField {
                 name: "flag".to_string(),
                 data_type: LogicalDataType::Bool,
                 nullable: false,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "i32".to_string(),
                 data_type: LogicalDataType::Int32,
                 nullable: false,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "i64".to_string(),
                 data_type: LogicalDataType::Int64,
                 nullable: true,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "f32".to_string(),
                 data_type: LogicalDataType::Float32,
                 nullable: false,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "f64".to_string(),
                 data_type: LogicalDataType::Float64,
                 nullable: true,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "text".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: true,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "bytes".to_string(),
                 data_type: LogicalDataType::Binary,
                 nullable: true,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "fixed".to_string(),
                 data_type: LogicalDataType::FixedBinary { byte_width: 16 },
                 nullable: false,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Micros,
@@ -691,7 +801,7 @@ mod tests {
     #[test]
     fn logical_schema_rejects_fixed_binary_invalid_width() {
         for width in [0, -1] {
-            let logical = LogicalSchema::new(vec![LogicalColumn {
+            let logical = LogicalSchema::new(vec![LogicalField {
                 name: "bad_fixed".to_string(),
                 data_type: LogicalDataType::FixedBinary { byte_width: width },
                 nullable: false,
@@ -714,7 +824,7 @@ mod tests {
 
     #[test]
     fn logical_schema_rejects_int96() {
-        let logical = LogicalSchema::new(vec![LogicalColumn {
+        let logical = LogicalSchema::new(vec![LogicalField {
             name: "legacy_ts".to_string(),
             data_type: LogicalDataType::Int96,
             nullable: false,
@@ -733,7 +843,7 @@ mod tests {
 
     #[test]
     fn logical_schema_rejects_other_type() {
-        let logical = LogicalSchema::new(vec![LogicalColumn {
+        let logical = LogicalSchema::new(vec![LogicalField {
             name: "opaque".to_string(),
             data_type: LogicalDataType::Other("parquet::Map".to_string()),
             nullable: true,
@@ -760,7 +870,7 @@ mod tests {
 
     #[test]
     fn table_meta_arrow_schema_ref_propagates_convert_error() {
-        let logical = LogicalSchema::new(vec![LogicalColumn {
+        let logical = LogicalSchema::new(vec![LogicalField {
             name: "legacy_ts".to_string(),
             data_type: LogicalDataType::Int96,
             nullable: false,
@@ -782,7 +892,7 @@ mod tests {
 
     #[test]
     fn logical_schema_timestamp_without_timezone() {
-        let logical = LogicalSchema::new(vec![LogicalColumn {
+        let logical = LogicalSchema::new(vec![LogicalField {
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -803,7 +913,7 @@ mod tests {
 
     #[test]
     fn logical_schema_decimal_conversion_bounds() {
-        let valid_128 = LogicalSchema::new(vec![LogicalColumn {
+        let valid_128 = LogicalSchema::new(vec![LogicalField {
             name: "dec128".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 38,
@@ -824,7 +934,7 @@ mod tests {
             )])
         );
 
-        let valid_256 = LogicalSchema::new(vec![LogicalColumn {
+        let valid_256 = LogicalSchema::new(vec![LogicalField {
             name: "dec256".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 76,
@@ -845,7 +955,7 @@ mod tests {
             )])
         );
 
-        let invalid = LogicalSchema::new(vec![LogicalColumn {
+        let invalid = LogicalSchema::new(vec![LogicalField {
             name: "dec_too_large".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 77,
@@ -874,7 +984,7 @@ mod tests {
         ];
 
         for (name, precision, scale, details_substr) in cases {
-            let logical = LogicalSchema::new(vec![LogicalColumn {
+            let logical = LogicalSchema::new(vec![LogicalField {
                 name: name.to_string(),
                 data_type: LogicalDataType::Decimal { precision, scale },
                 nullable: false,
@@ -895,7 +1005,7 @@ mod tests {
 
     #[test]
     fn logical_schema_fixed_binary_json_roundtrip() {
-        let logical = LogicalSchema::new(vec![LogicalColumn {
+        let logical = LogicalSchema::new(vec![LogicalField {
             name: "fixed".to_string(),
             data_type: LogicalDataType::FixedBinary { byte_width: 8 },
             nullable: false,
@@ -909,7 +1019,7 @@ mod tests {
 
     #[test]
     fn logical_schema_decimal_json_roundtrip() {
-        let logical = LogicalSchema::new(vec![LogicalColumn {
+        let logical = LogicalSchema::new(vec![LogicalField {
             name: "amount".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 18,
