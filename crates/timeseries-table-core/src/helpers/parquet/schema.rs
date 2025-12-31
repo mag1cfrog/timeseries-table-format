@@ -1588,6 +1588,184 @@ mod tests {
     }
 
     #[test]
+    fn logical_schema_map_nested_map_value_preserves_map() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/map-map.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let inner_key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let inner_value = Type::primitive_type_builder("value", PhysicalType::INT32)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let inner_kv = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(inner_key), Arc::new(inner_value)])
+            .build()?;
+        let inner_map = Type::group_type_builder("value")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(inner_kv)])
+            .build()?;
+
+        let outer_key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let outer_kv = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(outer_key), Arc::new(inner_map)])
+            .build()?;
+        let outer_map = Type::group_type_builder("col")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(outer_kv)])
+            .build()?;
+
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(outer_map)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Binary,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Map {
+                        key: Box::new(LogicalField {
+                            name: "key".to_string(),
+                            data_type: LogicalDataType::Binary,
+                            nullable: false,
+                        }),
+                        value: Some(Box::new(LogicalField {
+                            name: "value".to_string(),
+                            data_type: LogicalDataType::Int32,
+                            nullable: true,
+                        })),
+                        keys_sorted: false,
+                    },
+                    nullable: true,
+                })),
+                keys_sorted: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_list_struct_list_preserves_nested_list() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/list-struct-list.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let inner_elem = Type::primitive_type_builder("element", PhysicalType::INT32)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let inner_repeated = Type::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(inner_elem)])
+            .build()?;
+        let inner_list = Type::group_type_builder("nums")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(inner_repeated)])
+            .build()?;
+
+        let struct_group = Type::group_type_builder("element")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![Arc::new(inner_list)])
+            .build()?;
+
+        let repeated = Type::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(struct_group)])
+            .build()?;
+        let list_group = Type::group_type_builder("col")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(repeated)])
+            .build()?;
+
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(list_group)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::Struct {
+                        fields: vec![LogicalField {
+                            name: "nums".to_string(),
+                            data_type: LogicalDataType::List {
+                                elements: Box::new(LogicalField {
+                                    name: "element".to_string(),
+                                    data_type: LogicalDataType::Int32,
+                                    nullable: false,
+                                }),
+                            },
+                            nullable: true,
+                        }],
+                    },
+                    nullable: true,
+                }),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_map_rejects_non_group_child() -> TestResult {
+        let rel_path = Path::new("data/map-non-group-child.parquet");
+        let child = Type::primitive_type_builder("key_value", PhysicalType::INT32)
+            .with_repetition(Repetition::REPEATED)
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(child)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(map_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::UnsupportedParquetMapEncoding {
+                column_path: "attrs".to_string(),
+                details: "MAP child must be a REPEATED group (key_value); observed primitive(REPEATED, INT32)".to_string(),
+            },
+        )
+    }
+
+    #[test]
     fn logical_schema_list_rejects_list_on_primitive() -> TestResult {
         let list_primitive = Type::primitive_type_builder("values", PhysicalType::INT32)
             .with_repetition(Repetition::OPTIONAL)

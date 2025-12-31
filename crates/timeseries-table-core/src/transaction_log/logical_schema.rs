@@ -801,6 +801,31 @@ mod tests {
     }
 
     #[test]
+    fn logical_schema_rejects_empty_struct_field_name() {
+        let err = LogicalSchema::new(vec![LogicalField {
+            name: "root".to_string(),
+            data_type: LogicalDataType::Struct {
+                fields: vec![LogicalField {
+                    name: "".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: false,
+                }],
+            },
+            nullable: false,
+        }])
+        .expect_err("expected invalid schema");
+
+        assert!(
+            matches!(
+                &err,
+                LogicalSchemaError::StructFieldNameEmpty { column_path, field }
+                if column_path == "root" && field.is_empty()
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
     fn logical_schema_rejects_other_type() {
         let logical = LogicalSchema::new(vec![LogicalField {
             name: "opaque".to_string(),
