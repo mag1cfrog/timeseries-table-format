@@ -82,6 +82,10 @@ fn make_rows(start: i64, count: usize, symbol: &'static str, price_base: f64) ->
         .collect()
 }
 
+fn minutes_to_millis(minutes: i64) -> i64 {
+    minutes * 60_000
+}
+
 fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestResult {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -150,8 +154,8 @@ fn write_segment(
 async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
     let mut table = create_table(tmp, false).await?;
 
-    let rows_a = make_rows(1_000, 5, "A", 10.0);
-    let rows_b = make_rows(10_000, 5, "A", 20.0);
+    let rows_a = make_rows(minutes_to_millis(1), 5, "A", 10.0);
+    let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
 
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
     table
@@ -363,12 +367,18 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     let meta = make_table_meta(false)?;
     let _table = TimeSeriesTable::create(location.clone(), meta).await?;
 
-    let rows = make_rows(1_000, 5, "A", 10.0);
+    let rows = make_rows(minutes_to_millis(1), 5, "A", 10.0);
     let rel_path = "data/seg-missing-size.parquet";
     write_segment(tmp.path(), rel_path, &rows, false)?;
 
-    let ts_min = Utc.timestamp_millis_opt(1_000).single().unwrap();
-    let ts_max = Utc.timestamp_millis_opt(1_004).single().unwrap();
+    let ts_min = Utc
+        .timestamp_millis_opt(minutes_to_millis(1))
+        .single()
+        .unwrap();
+    let ts_max = Utc
+        .timestamp_millis_opt(minutes_to_millis(1) + 4)
+        .single()
+        .unwrap();
 
     let seg = SegmentMeta {
         segment_id: SegmentId("seg-missing-size".to_string()),
@@ -402,7 +412,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
     let meta = make_table_meta(false)?;
 
     let mut writer = TimeSeriesTable::create(location.clone(), meta).await?;
-    let rows_a = make_rows(1_000, 5, "A", 10.0);
+    let rows_a = make_rows(minutes_to_millis(1), 5, "A", 10.0);
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
     writer
         .append_parquet_segment("data/seg-a.parquet", "ts")
@@ -416,7 +426,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
     let initial_count = scalar_u64(&initial_batches)?;
     assert_eq!(initial_count, 5);
 
-    let rows_b = make_rows(10_000, 5, "A", 20.0);
+    let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
     write_segment(tmp.path(), "data/seg-b.parquet", &rows_b, false)?;
     writer
         .append_parquet_segment("data/seg-b.parquet", "ts")
@@ -455,7 +465,7 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
     let batch = first_batch(&batches)?;
     let min_ts = scalar_i64_from_array(batch.column(0).as_ref())?;
     let max_ts = scalar_i64_from_array(batch.column(1).as_ref())?;
-    assert_eq!(min_ts, 1_000);
-    assert_eq!(max_ts, 10_004);
+    assert_eq!(min_ts, minutes_to_millis(1));
+    assert_eq!(max_ts, minutes_to_millis(3) + 4);
     Ok(())
 }
