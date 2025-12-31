@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use snafu::prelude::*;
 
 use crate::transaction_log::{
-    LogicalField, LogicalSchema, LogicalSchemaError, TableMeta, TimeIndexSpec,
-    table_metadata::LogicalDataType,
+    TableMeta, TimeIndexSpec,
+    logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
 };
 
 /// Errors raised when a segment's schema is not compatible with the table.
@@ -171,7 +171,7 @@ pub fn ensure_schema_exact_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction_log::{TimeBucket, table_metadata::LogicalTimestampUnit};
+    use crate::transaction_log::{TimeBucket, logical_schema::LogicalTimestampUnit};
 
     fn schema(cols: Vec<(&str, LogicalDataType, bool)>) -> LogicalSchema {
         LogicalSchema::new(

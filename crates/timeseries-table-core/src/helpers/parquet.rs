@@ -29,11 +29,11 @@ use snafu::Backtrace;
 
 use crate::common::time_column::TimeColumnError;
 use crate::storage::{self, TableLocation, read_all_bytes};
-use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
-use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
-use crate::transaction_log::{
-    FileFormat, LogicalField, LogicalSchema, LogicalSchemaError, SegmentId, SegmentMeta,
+use crate::transaction_log::logical_schema::{
+    LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
+use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
+use crate::transaction_log::{FileFormat, SegmentId, SegmentMeta};
 
 /// Convert little-endian i64 bytes into i64 with proper error handling.
 fn le_bytes_to_i64(

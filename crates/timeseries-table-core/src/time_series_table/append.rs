@@ -342,8 +342,8 @@ mod tests {
     use crate::coverage::Coverage;
     use crate::helpers::coverage_sidecar::read_coverage_sidecar;
     use crate::storage::TableLocation;
+    use crate::transaction_log::logical_schema::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::segments::SegmentMetaError;
-    use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::{
         Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
     };
