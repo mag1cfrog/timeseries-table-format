@@ -235,6 +235,8 @@ pub fn segment_meta_from_parquet_bytes(
         return Err(SegmentMetaError::TooShort { path: path_str });
     }
 
+    let file_size = data.len() as u64;
+
     // Parquet reader works on any Read + Seek.
     let reader =
         SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
@@ -298,6 +300,7 @@ pub fn segment_meta_from_parquet_bytes(
         ts_min,
         ts_max,
         row_count,
+        file_size: Some(file_size),
         coverage_path: None,
     })
 }
@@ -330,6 +333,7 @@ mod tests {
     use std::fs::File;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::fs;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -465,6 +469,8 @@ mod tests {
         assert_eq!(meta.ts_min.timestamp_millis(), 10);
         assert_eq!(meta.ts_max.timestamp_millis(), 30);
         assert_eq!(meta.row_count, 3);
+        let len = fs::metadata(&abs).await?.len();
+        assert_eq!(meta.file_size, Some(len));
         Ok(())
     }
 

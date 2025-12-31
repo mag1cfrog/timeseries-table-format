@@ -43,6 +43,7 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
         ts_min: Utc.timestamp_opt(10, 0).single().unwrap(),
         ts_max: Utc.timestamp_opt(20, 0).single().unwrap(),
         row_count: 1,
+        file_size: None,
         coverage_path: None,
     };
 

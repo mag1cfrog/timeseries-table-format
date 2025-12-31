@@ -30,6 +30,7 @@ mod tests {
             ts_min: Utc.timestamp_opt(ts_min, 0).single().unwrap(),
             ts_max: Utc.timestamp_opt(ts_max, 0).single().unwrap(),
             row_count: 1,
+            file_size: None,
             coverage_path: None,
         }
     }

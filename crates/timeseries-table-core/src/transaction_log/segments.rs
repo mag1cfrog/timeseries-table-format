@@ -77,6 +77,10 @@ pub struct SegmentMeta {
     /// Number of rows in this segment.
     pub row_count: u64,
 
+    /// Optional file size in bytes at the time metadata was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+
     /// Coverage sidecar pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_path: Option<String>,
@@ -273,6 +277,7 @@ impl SegmentMeta {
             ts_min,
             ts_max,
             row_count,
+            file_size: Some(probe.len),
             coverage_path: None,
         })
     }
@@ -334,6 +339,7 @@ mod tests {
             ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
             row_count: 123,
+            file_size: None,
             coverage_path: None,
         }
     }
@@ -345,15 +351,18 @@ mod tests {
         let json = serde_json::to_string(&seg).unwrap();
         let back: SegmentMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.coverage_path, None);
+        assert_eq!(back.file_size, None);
 
         // With coverage_path
-        let seg2 = sample_segment_meta().with_coverage_path("_coverage/segments/a.roar");
+        let mut seg2 = sample_segment_meta().with_coverage_path("_coverage/segments/a.roar");
+        seg2.file_size = Some(42);
         let json2 = serde_json::to_string(&seg2).unwrap();
         let back2: SegmentMeta = serde_json::from_str(&json2).unwrap();
         assert_eq!(
             back2.coverage_path.as_deref(),
             Some("_coverage/segments/a.roar")
         );
+        assert_eq!(back2.file_size, Some(42));
     }
 
     async fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Error> {
@@ -395,6 +404,7 @@ mod tests {
         assert_eq!(meta.ts_min, ts_min);
         assert_eq!(meta.ts_max, ts_max);
         assert_eq!(meta.row_count, 1_234);
+        assert_eq!(meta.file_size, Some(8));
 
         Ok(())
     }
