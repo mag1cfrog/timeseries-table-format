@@ -94,6 +94,26 @@ fn rep_nullable(rep: Repetition) -> bool {
     matches!(rep, Repetition::OPTIONAL)
 }
 
+fn type_shape(t: &Type) -> String {
+    let rep = t.get_basic_info().repetition();
+    if t.is_group() {
+        let children: Vec<String> = t
+            .get_fields()
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}:{:?}",
+                    c.get_basic_info().name(),
+                    c.get_basic_info().repetition()
+                )
+            })
+            .collect();
+        format!("group({rep:?}, children=[{}])", children.join(", "))
+    } else {
+        format!("primitive({rep:?}, {:?})", t.get_physical_type())
+    }
+}
+
 fn parquet_primitive_to_logical_datatype(
     t: &Type,
     column_path: &str,
@@ -134,7 +154,10 @@ fn parse_parquet_list(t: &Type, column_path: &str) -> Result<LogicalDataType, Lo
     if !t.is_group() {
         return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
             column_path: column_path.to_string(),
-            details: "LIST annotation on a primitive is unsupported".to_string(),
+            details: format!(
+                "LIST annotation on a primitive is unsupported; observed {}",
+                type_shape(t)
+            ),
         });
     }
 
@@ -142,7 +165,11 @@ fn parse_parquet_list(t: &Type, column_path: &str) -> Result<LogicalDataType, Lo
     if outer.len() != 1 {
         return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
             column_path: column_path.to_string(),
-            details: format!("LIST group must have exactly 1 child, got {}", outer.len()),
+            details: format!(
+                "LIST group must have exactly 1 child, got {}; observed {}",
+                outer.len(),
+                type_shape(t)
+            ),
         });
     }
 
@@ -150,7 +177,10 @@ fn parse_parquet_list(t: &Type, column_path: &str) -> Result<LogicalDataType, Lo
     if !matches!(repeated.get_basic_info().repetition(), Repetition::REPEATED) {
         return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
             column_path: column_path.to_string(),
-            details: "LIST child must be REPEATED".to_string(),
+            details: format!(
+                "LIST child must be REPEATED; observed {}",
+                type_shape(repeated)
+            ),
         });
     }
 
@@ -181,7 +211,10 @@ fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, Log
     if !t.is_group() {
         return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
             column_path: column_path.to_string(),
-            details: "MAP annotation on a primitive is unsupported".to_ascii_lowercase(),
+            details: format!(
+                "MAP annotation on a primitive is unsupported; observed {}",
+                type_shape(t)
+            ),
         });
     }
 
@@ -189,7 +222,11 @@ fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, Log
     if outer.len() != 1 {
         return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
             column_path: column_path.to_string(),
-            details: format!("MAP group must have exactly 1 child, got {}", outer.len()),
+            details: format!(
+                "MAP group must have exactly 1 child, got {}; observed {}",
+                outer.len(),
+                type_shape(t)
+            ),
         });
     }
 
@@ -197,7 +234,10 @@ fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, Log
     if !kv.is_group() || !matches!(kv.get_basic_info().repetition(), Repetition::REPEATED) {
         return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
             column_path: column_path.to_string(),
-            details: "MAP child must be a REPEATED group (key_value)".to_string(),
+            details: format!(
+                "MAP child must be a REPEATED group (key_value); observed {}",
+                type_shape(kv)
+            ),
         });
     }
 
@@ -206,8 +246,9 @@ fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, Log
         return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
             column_path: column_path.to_string(),
             details: format!(
-                "key_value group must have 1 or 2 children, got {}",
-                kv_fields.len()
+                "key_value group must have 1 or 2 children, got {}; observed {}",
+                kv_fields.len(),
+                type_shape(kv)
             ),
         });
     }
@@ -1288,7 +1329,7 @@ mod tests {
             schema,
             LogicalSchemaError::UnsupportedParquetListEncoding {
                 column_path: "values".to_string(),
-                details: "LIST group must have exactly 1 child, got 2".to_string(),
+                details: "LIST group must have exactly 1 child, got 2; observed group(OPTIONAL, children=[a:REPEATED, b:REPEATED])".to_string(),
             },
         )
     }
@@ -1315,7 +1356,8 @@ mod tests {
             schema,
             LogicalSchemaError::UnsupportedParquetListEncoding {
                 column_path: "values".to_string(),
-                details: "LIST child must be REPEATED".to_string(),
+                details: "LIST child must be REPEATED; observed primitive(OPTIONAL, INT32)"
+                    .to_string(),
             },
         )
     }
@@ -1445,7 +1487,9 @@ mod tests {
             schema,
             LogicalSchemaError::UnsupportedParquetMapEncoding {
                 column_path: "attrs".to_string(),
-                details: "MAP child must be a REPEATED group (key_value)".to_string(),
+                details:
+                    "MAP child must be a REPEATED group (key_value); observed group(OPTIONAL, children=[key:REQUIRED])"
+                        .to_string(),
             },
         )
     }
@@ -1482,7 +1526,8 @@ mod tests {
             schema,
             LogicalSchemaError::UnsupportedParquetMapEncoding {
                 column_path: "attrs".to_string(),
-                details: "key_value group must have 1 or 2 children, got 3".to_string(),
+                details: "key_value group must have 1 or 2 children, got 3; observed group(REPEATED, children=[key:REQUIRED, v1:OPTIONAL, v2:OPTIONAL])"
+                    .to_string(),
             },
         )
     }
