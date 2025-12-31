@@ -20,6 +20,9 @@ use timeseries_table_core::transaction_log::TableState;
 use tokio::sync::RwLock;
 
 /// DataFusion table provider for a timeseries table schema.
+///
+/// The schema is captured when the provider is constructed. If the table schema
+/// evolves, re-register a new provider to pick up the updated schema.
 #[derive(Debug)]
 pub struct TsTableProvider {
     table: Arc<TimeSeriesTable>,
