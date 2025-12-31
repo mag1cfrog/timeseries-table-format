@@ -382,10 +382,8 @@ impl LogicalDataType {
                 key_sorted,
             } => {
                 if key.nullable {
-                    return Err(SchemaConvertError::UnsupportedLogicalType {
+                    return Err(SchemaConvertError::MapKeyMustBeNonNull {
                         column: column.to_string(),
-                        type_name: "map".to_string(),
-                        details: "map key must be non-nullable".to_string(),
                     });
                 }
 
@@ -646,6 +644,13 @@ pub enum SchemaConvertError {
         scale: i32,
         /// Human-readable details describing the constraint violation.
         details: String,
+    },
+
+    /// Map keys must be non-nullable when converting to Arrow.
+    #[snafu(display("map key must be non-nullable for column '{column}'"))]
+    MapKeyMustBeNonNull {
+        /// Column name that failed conversion.
+        column: String,
     },
 }
 
