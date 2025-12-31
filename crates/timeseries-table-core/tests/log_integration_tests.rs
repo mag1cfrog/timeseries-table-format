@@ -9,12 +9,13 @@
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 use timeseries_table_core::storage::{StorageError, TableLocation};
-use timeseries_table_core::transaction_log::table_metadata::{
-    LogicalDataType, LogicalTimestampUnit, TABLE_FORMAT_VERSION,
+use timeseries_table_core::transaction_log::{
+    CommitError, FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
+    TimeIndexSpec, TransactionLogStore,
 };
 use timeseries_table_core::transaction_log::{
-    CommitError, FileFormat, LogAction, LogicalField, LogicalSchema, SegmentId, SegmentMeta,
-    TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
+    logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+    table_metadata::TABLE_FORMAT_VERSION,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;

@@ -15,8 +15,8 @@ use timeseries_table_core::{
     storage::TableLocation,
     time_series_table::{TimeSeriesTable, error::TableError},
     transaction_log::{
-        LogicalField, LogicalSchema, TableMeta, TimeBucket, TimeIndexSpec,
-        table_metadata::{LogicalDataType, LogicalTimestampUnit},
+        TableMeta, TimeBucket, TimeIndexSpec,
+        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
     },
 };
 
@@ -226,7 +226,7 @@ fn make_basic_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
         LogicalField {
             name: "ts".to_string(),
             data_type:
-                timeseries_table_core::transaction_log::table_metadata::LogicalDataType::Timestamp {
+                timeseries_table_core::transaction_log::logical_schema::LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
                     timezone: None,
                 },
