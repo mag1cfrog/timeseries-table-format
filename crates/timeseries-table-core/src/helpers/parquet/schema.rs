@@ -1497,6 +1497,97 @@ mod tests {
     }
 
     #[test]
+    fn logical_schema_struct_with_list_and_map_fields() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/struct-list-map.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let list_elem = Type::primitive_type_builder("element", PhysicalType::INT32)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let list_repeated = Type::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(list_elem)])
+            .build()?;
+        let list_group = Type::group_type_builder("nums")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(list_repeated)])
+            .build()?;
+
+        let key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let value = Type::primitive_type_builder("value", PhysicalType::INT64)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let key_value = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(key), Arc::new(value)])
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(key_value)])
+            .build()?;
+
+        let struct_group = Type::group_type_builder("s")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![Arc::new(list_group), Arc::new(map_group)])
+            .build()?;
+
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(struct_group)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::Struct {
+                fields: vec![
+                    LogicalField {
+                        name: "nums".to_string(),
+                        data_type: LogicalDataType::List {
+                            elements: Box::new(LogicalField {
+                                name: "element".to_string(),
+                                data_type: LogicalDataType::Int32,
+                                nullable: false,
+                            }),
+                        },
+                        nullable: true,
+                    },
+                    LogicalField {
+                        name: "attrs".to_string(),
+                        data_type: LogicalDataType::Map {
+                            key: Box::new(LogicalField {
+                                name: "key".to_string(),
+                                data_type: LogicalDataType::Binary,
+                                nullable: false,
+                            }),
+                            value: Some(Box::new(LogicalField {
+                                name: "value".to_string(),
+                                data_type: LogicalDataType::Int64,
+                                nullable: true,
+                            })),
+                            keys_sorted: false,
+                        },
+                        nullable: true,
+                    },
+                ],
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn logical_schema_list_rejects_list_on_primitive() -> TestResult {
         let list_primitive = Type::primitive_type_builder("values", PhysicalType::INT32)
             .with_repetition(Repetition::OPTIONAL)
