@@ -691,18 +691,17 @@ mod tests {
     #[test]
     fn logical_schema_rejects_fixed_binary_invalid_width() {
         for width in [0, -1] {
-            let logical = LogicalSchema::new(vec![LogicalField {
+            let err = LogicalSchema::new(vec![LogicalField {
                 name: "bad_fixed".to_string(),
                 data_type: LogicalDataType::FixedBinary { byte_width: width },
                 nullable: false,
             }])
-            .expect("valid schema structure");
+            .expect_err("expected invalid schema to be rejected");
 
-            let err = logical.to_arrow_schema().unwrap_err();
             assert!(
                 matches!(
                     &err,
-                    SchemaConvertError::FixedBinaryInvalidWidth {
+                    LogicalSchemaError::FixedBinaryInvalidWidthInSchema {
                         column,
                         byte_width
                     } if column == "bad_fixed" && *byte_width == width
