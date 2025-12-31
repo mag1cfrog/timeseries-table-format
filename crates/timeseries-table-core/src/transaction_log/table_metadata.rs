@@ -274,6 +274,7 @@ pub enum LogicalDataType {
     },
 
     /// Map with key/value field definitions.
+    /// If `value` is None, this represents Parquet MAP "keys-only" semantics (set of keys).
     Map {
         /// Key field definition (must be non-nullable for Arrow compatibility).
         key: Box<LogicalField>,
