@@ -137,6 +137,16 @@ fn parquet_type_to_logical_datatype(
     t: &Type,
     path: &str,
 ) -> Result<LogicalDataType, LogicalSchemaError> {
+    // If this group is annotated as LIST/MAP, preserve semantics.
+    if let Some(logical) = t.get_basic_info().logical_type_ref() {
+        match logical {
+            LogicalType::List => return parse_parquet_list(t, path),
+            LogicalType::Map => return parse_parquet_map(t, path),
+            _ => {}
+        }
+    }
+
+    // Otherwise: group => Struct, primitive => primitive mapping
     if t.is_group() {
         let children = t
             .get_fields()
@@ -1282,6 +1292,67 @@ mod tests {
                     name: "element".to_string(),
                     data_type: LogicalDataType::Int32,
                     nullable: false,
+                }),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_list_nested_list_element_preserves_list() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/list-nested.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let inner_element = Type::primitive_type_builder("element", PhysicalType::INT32)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let inner_repeated = Type::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(inner_element)])
+            .build()?;
+        let inner_list = Type::group_type_builder("element")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(inner_repeated)])
+            .build()?;
+
+        let outer_repeated = Type::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(inner_list)])
+            .build()?;
+        let outer_list = Type::group_type_builder("col")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(outer_repeated)])
+            .build()?;
+
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(outer_list)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::List {
+                        elements: Box::new(LogicalField {
+                            name: "element".to_string(),
+                            data_type: LogicalDataType::Int32,
+                            nullable: false,
+                        }),
+                    },
+                    nullable: true,
                 }),
             }
         );
