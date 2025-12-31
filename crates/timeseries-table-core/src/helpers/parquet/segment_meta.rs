@@ -235,6 +235,8 @@ pub fn segment_meta_from_parquet_bytes(
         return Err(SegmentMetaError::TooShort { path: path_str });
     }
 
+    let file_size = data.len() as u64;
+
     // Parquet reader works on any Read + Seek.
     let reader =
         SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
@@ -298,6 +300,7 @@ pub fn segment_meta_from_parquet_bytes(
         ts_min,
         ts_max,
         row_count,
+        file_size: Some(file_size),
         coverage_path: None,
     })
 }

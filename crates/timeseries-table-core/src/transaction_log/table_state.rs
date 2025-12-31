@@ -182,6 +182,7 @@ mod tests {
                 .single()
                 .expect("valid sample segment ts_max"),
             row_count: 42,
+            file_size: None,
             coverage_path: None,
         }
     }
@@ -194,6 +195,7 @@ mod tests {
             ts_min: chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap(),
             ts_max: chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap(),
             row_count: 1,
+            file_size: None,
             coverage_path: None,
         }
     }

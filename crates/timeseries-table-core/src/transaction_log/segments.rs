@@ -77,6 +77,10 @@ pub struct SegmentMeta {
     /// Number of rows in this segment.
     pub row_count: u64,
 
+    /// Optional file size in bytes at the time metadata was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+    
     /// Coverage sidecar pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_path: Option<String>,
@@ -273,8 +277,10 @@ impl SegmentMeta {
             ts_min,
             ts_max,
             row_count,
+            file_size: Some(probe.len),
             coverage_path: None,
         })
+        
     }
 
     /// Set the coverage sidecar path for this segment metadata.
@@ -334,6 +340,7 @@ mod tests {
             ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
             ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
             row_count: 123,
+            file_size: None,
             coverage_path: None,
         }
     }
@@ -395,6 +402,7 @@ mod tests {
         assert_eq!(meta.ts_min, ts_min);
         assert_eq!(meta.ts_max, ts_max);
         assert_eq!(meta.row_count, 1_234);
+        assert_eq!(meta.file_size, Some(8));
 
         Ok(())
     }
