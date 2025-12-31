@@ -427,6 +427,24 @@ pub enum LogicalSchemaError {
         /// Empty field name.
         field: String,
     },
+
+    /// Parquet LIST encoding does not match the supported layout.
+    #[snafu(display("Unsupported Parquet LIST encoding: column={column_path}, details={details}"))]
+    UnsupportedParquetListEncoding {
+        /// Column path for the list with unsupported encoding.
+        column_path: String,
+        /// Details describing why the LIST encoding is unsupported.
+        details: String,
+    },
+
+    /// Parquet MAP encoding does not match the supported layout.
+    #[snafu(display("Unsupported Parquet MAP encoding: column={column_path}, details={details}"))]
+    UnsupportedParquetMapEncoding {
+        /// Column path for the map with unsupported encoding.
+        column_path: String,
+        /// Details describing why the MAP encoding is unsupported.
+        details: String,
+    },
 }
 
 impl LogicalSchema {
