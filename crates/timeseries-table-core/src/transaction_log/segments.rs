@@ -17,7 +17,7 @@ use snafu::{Backtrace, prelude::*};
 use crate::{
     common::time_column::TimeColumnError,
     storage::{self, StorageError, TableLocation},
-    transaction_log::LogicalSchemaError,
+    transaction_log::logical_schema::LogicalSchemaError,
 };
 
 /// Identifier for a physical segment (e.g. a Parquet file or group).

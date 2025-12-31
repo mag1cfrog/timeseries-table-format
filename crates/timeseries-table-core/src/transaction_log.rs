@@ -64,6 +64,7 @@
 //! and an API for committing changes safely.
 pub mod actions;
 pub mod log_store;
+pub mod logical_schema;
 pub mod segments;
 pub mod table_metadata;
 pub mod table_state;
@@ -71,10 +72,7 @@ pub mod table_state;
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
 pub use segments::{FileFormat, SegmentId, SegmentMeta};
-pub use table_metadata::{
-    LogicalField, LogicalSchema, LogicalSchemaError, TableKind, TableMeta, TableMetaDelta,
-    TimeBucket, TimeIndexSpec,
-};
+pub use table_metadata::{TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec};
 pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};
@@ -118,7 +116,9 @@ pub enum CommitError {
 #[cfg(test)]
 mod tests {
     use crate::transaction_log::{
-        table_metadata::{LogicalDataType, LogicalTimestampUnit},
+        logical_schema::{
+            LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
+        },
         *,
     };
 
