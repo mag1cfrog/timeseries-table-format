@@ -194,7 +194,7 @@ fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, Log
     }
 
     let kv = &outer[0];
-    if !kv.is_group() || matches!(kv.get_basic_info().repetition(), Repetition::REPEATED) {
+    if !kv.is_group() || !matches!(kv.get_basic_info().repetition(), Repetition::REPEATED) {
         return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
             column_path: column_path.to_string(),
             details: "MAP child must be a REPEATED group (key_value)".to_string(),
@@ -663,6 +663,25 @@ mod tests {
         Ok(())
     }
 
+    fn assert_schema_err(
+        rel_path: &Path,
+        schema: Arc<Type>,
+        expected: LogicalSchemaError,
+    ) -> TestResult {
+        let tmp = TempDir::new()?;
+        let abs = tmp.path().join(rel_path);
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        match logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes)) {
+            Err(SegmentMetaError::LogicalSchemaInvalid { source, .. }) => {
+                assert_eq!(source, expected);
+                Ok(())
+            }
+            other => Err(format!("expected LogicalSchemaInvalid, got {other:?}").into()),
+        }
+    }
+
     #[test]
     fn map_parquet_col_to_logical_type_maps_timestamp_units() {
         let cases = vec![
@@ -1078,7 +1097,16 @@ mod tests {
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
-        assert_eq!(cols[0].data_type, LogicalDataType::Int32);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: false,
+                }),
+            }
+        );
         Ok(())
     }
 
@@ -1115,10 +1143,429 @@ mod tests {
         let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
         let cols = schema.columns();
 
-        assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].data_type, LogicalDataType::Binary);
-        assert_eq!(cols[1].data_type, LogicalDataType::Int64);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Binary,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Int64,
+                    nullable: true,
+                })),
+                keys_sorted: false,
+            }
+        );
         Ok(())
+    }
+
+    #[test]
+    fn logical_schema_list_canonical_optional_element() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/list-canonical.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let element = Type::primitive_type_builder("element", PhysicalType::INT64)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let repeated = Type::group_type_builder("list")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(element)])
+            .build()?;
+        let list_group = Type::group_type_builder("values")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(repeated)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(list_group)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::Int64,
+                    nullable: true,
+                }),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_list_tolerates_repeated_primitive_child() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/list-2-level.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let repeated = Type::primitive_type_builder("element", PhysicalType::INT32)
+            .with_repetition(Repetition::REPEATED)
+            .build()?;
+        let list_group = Type::group_type_builder("values")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(repeated)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(list_group)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: false,
+                }),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_list_rejects_list_on_primitive() -> TestResult {
+        let list_primitive = Type::primitive_type_builder("values", PhysicalType::INT32)
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .build();
+
+        let err = list_primitive.expect_err("expected parquet builder to reject LIST on primitive");
+        assert!(
+            err.to_string()
+                .contains("List cannot be applied to a primitive type for field 'values'"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_list_rejects_multiple_children() -> TestResult {
+        let rel_path = Path::new("data/list-multi-children.parquet");
+        let child1 = Type::primitive_type_builder("a", PhysicalType::INT32)
+            .with_repetition(Repetition::REPEATED)
+            .build()?;
+        let child2 = Type::primitive_type_builder("b", PhysicalType::INT32)
+            .with_repetition(Repetition::REPEATED)
+            .build()?;
+        let list_group = Type::group_type_builder("values")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(child1), Arc::new(child2)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(list_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::UnsupportedParquetListEncoding {
+                column_path: "values".to_string(),
+                details: "LIST group must have exactly 1 child, got 2".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn logical_schema_list_rejects_non_repeated_child() -> TestResult {
+        let rel_path = Path::new("data/list-non-repeated.parquet");
+        let child = Type::primitive_type_builder("element", PhysicalType::INT32)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let list_group = Type::group_type_builder("values")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .with_fields(vec![Arc::new(child)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(list_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::UnsupportedParquetListEncoding {
+                column_path: "values".to_string(),
+                details: "LIST child must be REPEATED".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn logical_schema_map_canonical() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/map-canonical.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let value = Type::primitive_type_builder("value", PhysicalType::INT32)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let key_value = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(key), Arc::new(value)])
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(key_value)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(map_group)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Binary,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: true,
+                })),
+                keys_sorted: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_map_keys_only() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/map-keys-only.parquet");
+        let abs = tmp.path().join(rel_path);
+
+        let key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let key_value = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(key)])
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(key_value)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(map_group)])
+                .build()?,
+        );
+
+        write_schema_only_parquet(&abs, schema)?;
+
+        let bytes = std::fs::read(&abs)?;
+        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let cols = schema.columns();
+
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].data_type,
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Binary,
+                    nullable: false,
+                }),
+                value: None,
+                keys_sorted: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_schema_map_rejects_non_repeated_child() -> TestResult {
+        let rel_path = Path::new("data/map-non-repeated.parquet");
+        let key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let kv = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![Arc::new(key)])
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(kv)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(map_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::UnsupportedParquetMapEncoding {
+                column_path: "attrs".to_string(),
+                details: "MAP child must be a REPEATED group (key_value)".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn logical_schema_map_rejects_kv_child_count() -> TestResult {
+        let rel_path = Path::new("data/map-kv-child-count.parquet");
+        let key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let v1 = Type::primitive_type_builder("v1", PhysicalType::INT32)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let v2 = Type::primitive_type_builder("v2", PhysicalType::INT32)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let kv = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(key), Arc::new(v1), Arc::new(v2)])
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(kv)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(map_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::UnsupportedParquetMapEncoding {
+                column_path: "attrs".to_string(),
+                details: "key_value group must have 1 or 2 children, got 3".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn logical_schema_map_rejects_nullable_key() -> TestResult {
+        let rel_path = Path::new("data/map-nullable-key.parquet");
+        let key = Type::primitive_type_builder("key", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::OPTIONAL)
+            .build()?;
+        let kv = Type::group_type_builder("key_value")
+            .with_repetition(Repetition::REPEATED)
+            .with_fields(vec![Arc::new(key)])
+            .build()?;
+        let map_group = Type::group_type_builder("attrs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Map))
+            .with_fields(vec![Arc::new(kv)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(map_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::InvalidMapKeyNullability {
+                column_path: "attrs".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn logical_schema_struct_rejects_empty_group() -> TestResult {
+        let rel_path = Path::new("data/struct-empty.parquet");
+        let empty_group = Type::group_type_builder("s")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(empty_group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::EmptyStruct {
+                column_path: "s".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn logical_schema_struct_rejects_duplicate_fields() -> TestResult {
+        let rel_path = Path::new("data/struct-duplicate.parquet");
+        let a1 = Type::primitive_type_builder("a", PhysicalType::INT32)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let a2 = Type::primitive_type_builder("a", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let group = Type::group_type_builder("s")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![Arc::new(a1), Arc::new(a2)])
+            .build()?;
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(group)])
+                .build()?,
+        );
+
+        assert_schema_err(
+            rel_path,
+            schema,
+            LogicalSchemaError::DuplicatedFieldName {
+                column_path: "s".to_string(),
+                field: "a".to_string(),
+            },
+        )
     }
 
     #[test]
