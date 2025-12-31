@@ -80,7 +80,7 @@ pub struct SegmentMeta {
     /// Optional file size in bytes at the time metadata was captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_size: Option<u64>,
-    
+
     /// Coverage sidecar pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_path: Option<String>,
@@ -280,7 +280,6 @@ impl SegmentMeta {
             file_size: Some(probe.len),
             coverage_path: None,
         })
-        
     }
 
     /// Set the coverage sidecar path for this segment metadata.
