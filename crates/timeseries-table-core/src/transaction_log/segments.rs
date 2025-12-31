@@ -352,15 +352,18 @@ mod tests {
         let json = serde_json::to_string(&seg).unwrap();
         let back: SegmentMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.coverage_path, None);
+        assert_eq!(back.file_size, None);
 
         // With coverage_path
-        let seg2 = sample_segment_meta().with_coverage_path("_coverage/segments/a.roar");
+        let mut seg2 = sample_segment_meta().with_coverage_path("_coverage/segments/a.roar");
+        seg2.file_size = Some(42);
         let json2 = serde_json::to_string(&seg2).unwrap();
         let back2: SegmentMeta = serde_json::from_str(&json2).unwrap();
         assert_eq!(
             back2.coverage_path.as_deref(),
             Some("_coverage/segments/a.roar")
         );
+        assert_eq!(back2.file_size, Some(42));
     }
 
     async fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Error> {

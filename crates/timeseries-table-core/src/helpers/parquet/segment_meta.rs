@@ -333,6 +333,7 @@ mod tests {
     use std::fs::File;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::fs;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -468,6 +469,8 @@ mod tests {
         assert_eq!(meta.ts_min.timestamp_millis(), 10);
         assert_eq!(meta.ts_max.timestamp_millis(), 30);
         assert_eq!(meta.row_count, 3);
+        let len = fs::metadata(&abs).await?.len();
+        assert_eq!(meta.file_size, Some(len));
         Ok(())
     }
 
