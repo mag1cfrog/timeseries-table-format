@@ -278,7 +278,7 @@ pub enum LogicalDataType {
         /// Key field definition (must be non-nullable for Arrow compatibility).
         key: Box<LogicalField>,
         /// Value field definition.
-        value: Box<LogicalField>,
+        value: Option<Box<LogicalField>>,
         /// Whether entries are sorted by key.
         keys_sorted: bool,
     },
@@ -392,10 +392,14 @@ impl LogicalDataType {
                 let val_path = format!("{column}.value");
 
                 let key_dt = key.data_type.to_arrow_datatype(&key_path)?;
-                let val_dt = value.data_type.to_arrow_datatype(&val_path)?;
+
+                let (val_dt, val_nullable) = match value.as_deref() {
+                    Some(v) => (v.data_type.to_arrow_datatype(&val_path)?, v.nullable),
+                    None => (DataType::Null, true),
+                };
 
                 let key_field: FieldRef = Arc::new(Field::new("key", key_dt, false));
-                let val_field: FieldRef = Arc::new(Field::new("value", val_dt, value.nullable));
+                let val_field: FieldRef = Arc::new(Field::new("value", val_dt, val_nullable));
 
                 let entries_dt = DataType::Struct(Fields::from(vec![key_field, val_field]));
                 let entries_field: FieldRef = Arc::new(Field::new("entries", entries_dt, false));
@@ -454,9 +458,14 @@ impl fmt::Display for LogicalDataType {
                 key,
                 value,
                 keys_sorted,
-            } => {
-                write!(f, "Map<{}, {}, keys_sorted={}>", key, value, keys_sorted)
-            }
+            } => match value.as_deref() {
+                Some(v) => write!(f, "Map<{}, {}, keys_sorted={}>", key, v, keys_sorted),
+                None => write!(
+                    f,
+                    "Map<{}, value=omitted, keys_sorted={}>",
+                    key, keys_sorted
+                ),
+            },
 
             LogicalDataType::Other(s) => write!(f, "{s}"),
         }
@@ -596,7 +605,10 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaE
                 });
             }
             validate_field(key, &format!("{}.key", path))?;
-            validate_field(value.as_ref(), &format!("{}.value", path))?;
+            if let Some(v) = value.as_deref() {
+                validate_field(v, &format!("{}.value", path))?;
+            }
+
             Ok(())
         }
 
