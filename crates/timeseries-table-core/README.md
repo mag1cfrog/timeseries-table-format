@@ -17,36 +17,6 @@ storage layout, transaction log, coverage math, and the user-facing
 This crate does not implement a query engine; it exposes metadata and scan
 streams that higher layers can plug into DataFusion or custom backtest code.
 
-## Module map (with responsibilities)
-- `transaction_log/*`
-  - `actions.rs`: typed log actions (AddSegment, UpdateTableMeta, UpdateTableCoverage).
-  - `log_store.rs`: append-only log store with version-guard OCC commits.
-  - `table_state.rs`: in-memory snapshot rebuilt from the log.
-  - `table_metadata.rs`: typed table metadata (`TableMeta`, `TimeIndexSpec`).
-  - `segments.rs`: segment descriptors (`SegmentMeta`, `SegmentDescriptor`).
-- `storage.rs`
-  - Local filesystem backend with `write_atomic`, `write_new`, and small reads
-    (`read_head_tail_4`). All on-disk reads/writes flow through this layer.
-- `coverage/*`
-  - `coverage.rs`: in-memory coverage wrapper around `roaring::RoaringBitmap`.
-  - `serde.rs`: bitmap <-> bytes serialization in Roaring's binary format.
-  - `layout/coverage.rs`: canonical sidecar layout and deterministic ID helpers.
-- `helpers/*`
-  - `parquet.rs`: derive `SegmentMeta` and `LogicalSchema` from Parquet bytes,
-    with stats-based fast path and scan fallback for timestamp min/max.
-  - `segment_coverage.rs`: compute per-segment coverage by streaming Arrow
-    batches and mapping timestamps to bucket IDs.
-  - `coverage_sidecar.rs`: read/write coverage sidecars via `storage`.
-  - `schema.rs`: v0.1 schema rules (exact match, time column validation).
-  - `time_bucket.rs`: deterministic timestamp -> bucket ID mapping and expected
-    range helpers.
-  - `segment_entity_identity.rs`: extract and validate entity identity from
-    segment Parquet data, with stats-based fast path and scan fallback.
-- `common/time_column.rs`
-  - Shared errors for validating time columns in Parquet/Arrow schemas.
-- `time_series_table/*`
-  - Public `TimeSeriesTable` API, append/scan wiring, and error types.
-
 ## On-disk layout (local backend)
 ```
 <table_root>/
