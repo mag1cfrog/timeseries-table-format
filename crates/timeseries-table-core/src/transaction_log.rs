@@ -265,14 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn logical_column_nullable_defaults_to_false() {
+    fn logical_column_nullable_requires_explicit_value() {
         let json = r#"{ "name": "price", "data_type": "Float64" }"#;
 
-        let col: LogicalField = serde_json::from_str(json).expect("deserialize");
-
-        assert_eq!(col.name, "price");
-        assert_eq!(col.data_type, LogicalDataType::Float64);
-        assert!(!col.nullable); // default is false
+        let err = serde_json::from_str::<LogicalField>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("missing field `nullable`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
