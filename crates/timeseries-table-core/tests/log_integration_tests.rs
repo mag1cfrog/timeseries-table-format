@@ -13,7 +13,7 @@ use timeseries_table_core::transaction_log::table_metadata::{
     LogicalDataType, LogicalTimestampUnit, TABLE_FORMAT_VERSION,
 };
 use timeseries_table_core::transaction_log::{
-    CommitError, FileFormat, LogAction, LogicalColumn, LogicalSchema, SegmentId, SegmentMeta,
+    CommitError, FileFormat, LogAction, LogicalField, LogicalSchema, SegmentId, SegmentMeta,
     TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
 };
 
@@ -41,7 +41,7 @@ fn sample_time_index_spec() -> TimeIndexSpec {
 
 fn sample_table_meta() -> TableMeta {
     let schema = LogicalSchema::new(vec![
-        LogicalColumn {
+        LogicalField {
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Micros,
@@ -49,12 +49,12 @@ fn sample_table_meta() -> TableMeta {
             },
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: true,

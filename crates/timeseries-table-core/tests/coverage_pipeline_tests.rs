@@ -15,7 +15,7 @@ use timeseries_table_core::{
     storage::TableLocation,
     time_series_table::{TimeSeriesTable, error::TableError},
     transaction_log::{
-        LogicalColumn, LogicalSchema, TableMeta, TimeBucket, TimeIndexSpec,
+        LogicalField, LogicalSchema, TableMeta, TimeBucket, TimeIndexSpec,
         table_metadata::{LogicalDataType, LogicalTimestampUnit},
     },
 };
@@ -223,7 +223,7 @@ fn make_basic_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
     };
 
     let logical_schema = LogicalSchema::new(vec![
-        LogicalColumn {
+        LogicalField {
             name: "ts".to_string(),
             data_type:
                 timeseries_table_core::transaction_log::table_metadata::LogicalDataType::Timestamp {
@@ -232,12 +232,12 @@ fn make_basic_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
                 },
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: false,

@@ -72,7 +72,7 @@ pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
 pub use segments::{FileFormat, SegmentId, SegmentMeta};
 pub use table_metadata::{
-    LogicalColumn, LogicalSchema, LogicalSchemaError, TableKind, TableMeta, TableMetaDelta,
+    LogicalField, LogicalSchema, LogicalSchemaError, TableKind, TableMeta, TableMetaDelta,
     TimeBucket, TimeIndexSpec,
 };
 pub use table_state::TableState;
@@ -156,7 +156,7 @@ mod tests {
             kind: TableKind::TimeSeries(time_index),
             logical_schema: Some(
                 LogicalSchema::new(vec![
-                    LogicalColumn {
+                    LogicalField {
                         name: "ts".to_string(),
                         data_type: LogicalDataType::Timestamp {
                             unit: LogicalTimestampUnit::Micros,
@@ -164,7 +164,7 @@ mod tests {
                         },
                         nullable: false,
                     },
-                    LogicalColumn {
+                    LogicalField {
                         name: "symbol".to_string(),
                         data_type: LogicalDataType::Utf8,
                         nullable: false,
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn logical_schema_rejects_duplicate_columns() {
         let dup = LogicalSchema::new(vec![
-            LogicalColumn {
+            LogicalField {
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Micros,
@@ -219,7 +219,7 @@ mod tests {
                 },
                 nullable: false,
             },
-            LogicalColumn {
+            LogicalField {
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Micros,
@@ -268,7 +268,7 @@ mod tests {
     fn logical_column_nullable_defaults_to_false() {
         let json = r#"{ "name": "price", "data_type": "Float64" }"#;
 
-        let col: LogicalColumn = serde_json::from_str(json).expect("deserialize");
+        let col: LogicalField = serde_json::from_str(json).expect("deserialize");
 
         assert_eq!(col.name, "price");
         assert_eq!(col.data_type, LogicalDataType::Float64);

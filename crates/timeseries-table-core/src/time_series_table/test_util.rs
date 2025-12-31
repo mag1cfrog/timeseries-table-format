@@ -1,7 +1,7 @@
 use super::*;
 use crate::transaction_log::table_metadata::{LogicalDataType, LogicalTimestampUnit};
 use crate::transaction_log::{
-    LogicalColumn, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+    LogicalField, LogicalSchema, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
 };
 use arrow::array::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
@@ -43,7 +43,7 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
     };
 
     let logical_schema = LogicalSchema::new(vec![
-        LogicalColumn {
+        LogicalField {
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit,
@@ -51,12 +51,12 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
             },
             nullable: true,
         },
-        LogicalColumn {
+        LogicalField {
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: false,
@@ -374,7 +374,7 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
     };
 
     let logical_schema = LogicalSchema::new(vec![
-        LogicalColumn {
+        LogicalField {
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -382,12 +382,12 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
             },
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
-        LogicalColumn {
+        LogicalField {
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: false,

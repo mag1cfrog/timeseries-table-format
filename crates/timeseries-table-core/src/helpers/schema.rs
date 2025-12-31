@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use snafu::prelude::*;
 
 use crate::transaction_log::{
-    LogicalColumn, LogicalSchema, LogicalSchemaError, TableMeta, TimeIndexSpec,
+    LogicalField, LogicalSchema, LogicalSchemaError, TableMeta, TimeIndexSpec,
     table_metadata::LogicalDataType,
 };
 
@@ -93,7 +93,7 @@ pub fn require_table_schema(meta: &TableMeta) -> SchemaResult<&LogicalSchema> {
 }
 
 // ---- core comparison helpers ----
-fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalColumn> {
+fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalField> {
     schema
         .columns()
         .iter()
@@ -176,7 +176,7 @@ mod tests {
     fn schema(cols: Vec<(&str, LogicalDataType, bool)>) -> LogicalSchema {
         LogicalSchema::new(
             cols.into_iter()
-                .map(|(name, dtype, nullable)| LogicalColumn {
+                .map(|(name, dtype, nullable)| LogicalField {
                     name: name.to_string(),
                     data_type: dtype,
                     nullable,
