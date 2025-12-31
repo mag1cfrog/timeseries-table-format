@@ -763,6 +763,44 @@ mod tests {
     }
 
     #[test]
+    fn logical_schema_map_value_none_maps_to_null_field() {
+        let logical = LogicalSchema::new(vec![LogicalField {
+            name: "attrs".to_string(),
+            data_type: LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                }),
+                value: None,
+                keys_sorted: false,
+            },
+            nullable: false,
+        }])
+        .expect("valid schema");
+
+        let schema = logical.to_arrow_schema().expect("arrow schema conversion");
+        let field = schema.field(0);
+        let DataType::Map(entries_field, _) = field.data_type() else {
+            panic!("expected map type, got {:?}", field.data_type());
+        };
+        let DataType::Struct(fields) = entries_field.data_type() else {
+            panic!(
+                "expected entries struct, got {:?}",
+                entries_field.data_type()
+            );
+        };
+        let value_field = fields
+            .iter()
+            .find(|f| f.name() == "value")
+            .expect("value field");
+        assert!(
+            matches!(value_field.data_type(), DataType::Null) && value_field.is_nullable(),
+            "value field should be Null and nullable"
+        );
+    }
+
+    #[test]
     fn logical_schema_rejects_other_type() {
         let logical = LogicalSchema::new(vec![LogicalField {
             name: "opaque".to_string(),
