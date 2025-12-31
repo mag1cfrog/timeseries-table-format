@@ -51,7 +51,7 @@ fn df_exec(msg: impl Into<String>) -> DataFusionError {
 }
 
 impl TsTableProvider {
-    /// Creates a new provider backed by the given Arrow schema.
+    /// Creates a new provider backed by the given `TimeSeriesTable`.
     pub fn try_new(table: Arc<TimeSeriesTable>) -> DFResult<Self> {
         // Use the table's current in-memory snapshot to get schema.
         // (No schema evolution in v0.1, so this is stable.)
@@ -101,7 +101,7 @@ impl TsTableProvider {
         }
     }
 
-    fn segment_file_size(&self, seg: &SegmentMeta) -> datafusion::error::Result<u64> {
+    async fn segment_file_size(&self, seg: &SegmentMeta) -> datafusion::error::Result<u64> {
         if let Some(sz) = seg.file_size {
             return Ok(sz);
         }
@@ -110,7 +110,7 @@ impl TsTableProvider {
         match self.table.location() {
             TableLocation::Local(root) => {
                 let abs = root.join(&seg.path);
-                let meta = std::fs::metadata(&abs).map_err(|e| {
+                let meta = tokio::fs::metadata(&abs).await.map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
                         "missing SegmentMeta.file_size and failed to stat file: {} ({})",
                         abs.display(),
@@ -162,7 +162,7 @@ impl TableProvider for TsTableProvider {
 
         for seg in segments {
             let abs = self.segment_abs_path(seg)?;
-            let abs = abs.canonicalize().map_err(|e| {
+            let abs = tokio::fs::canonicalize(&abs).await.map_err(|e| {
                 df_exec(format!(
                     "failed to canonicalize segment path {}: {}",
                     abs.display(),
@@ -170,7 +170,7 @@ impl TableProvider for TsTableProvider {
                 ))
             })?;
 
-            let file_size = self.segment_file_size(seg)?;
+            let file_size = self.segment_file_size(seg).await?;
 
             // PartitionedFile takes a "location" string. For local filesystem Parquet scans, passing
             // an absolute path is fine (DataFusion's local filesystem object store can open it).
