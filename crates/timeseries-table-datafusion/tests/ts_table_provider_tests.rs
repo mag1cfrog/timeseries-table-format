@@ -454,8 +454,7 @@ async fn order_by_limit_returns_descending_rows() -> TestResult {
     let ctx = SessionContext::new();
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
-    let batches =
-        collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts DESC LIMIT 3").await?;
+    let batches = collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts DESC LIMIT 3").await?;
     let values = collect_ts_values(&batches)?;
     assert_eq!(values.len(), 3);
     assert_eq!(
@@ -623,9 +622,7 @@ async fn provider_schema_supports_nested_types() -> TestResult {
                     assert_eq!(fields[0].name(), "key");
                     assert_eq!(fields[1].name(), "value");
                 }
-                other => {
-                    return Err(format!("metrics entries type mismatch: {other:?}").into())
-                }
+                other => return Err(format!("metrics entries type mismatch: {other:?}").into()),
             }
         }
         other => return Err(format!("metrics type mismatch: {other:?}").into()),
