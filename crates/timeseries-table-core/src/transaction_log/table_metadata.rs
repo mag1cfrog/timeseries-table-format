@@ -548,6 +548,29 @@ pub enum LogicalSchemaError {
         /// Column path for the map with an invalid key nullability.
         column_path: String,
     },
+
+    /// Struct fields must be non-empty.
+    #[snafu(display("Struct must have at least one field: column={column_path}"))]
+    EmptyStruct {
+        /// Column path for the empty struct.
+        column_path: String,
+    },
+
+    /// List element fields must have a non-empty name.
+    #[snafu(display("List element field name must be non-empty: column={column_path}"))]
+    ListElementNameEmpty {
+        /// Column path for the list with an empty element name.
+        column_path: String,
+    },
+
+    /// Struct fields must have a non-empty name.
+    #[snafu(display("Struct field name must be non-empty: column={column_path}, field={field}"))]
+    StructFieldNameEmpty {
+        /// Column path for the struct with an empty field name.
+        column_path: String,
+        /// Empty field name.
+        field: String,
+    },
 }
 
 impl LogicalSchema {
@@ -579,9 +602,32 @@ fn validate_field(field: &LogicalField, path: &str) -> Result<(), LogicalSchemaE
 
 fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaError> {
     match dt {
+        LogicalDataType::FixedBinary { byte_width } => {
+            if *byte_width <= 0 {
+                return Err(LogicalSchemaError::FixedBinaryInvalidWidthInSchema {
+                    column: path.to_string(),
+                    byte_width: *byte_width,
+                });
+            }
+            Ok(())
+        }
+
         LogicalDataType::Struct { fields } => {
+            if fields.is_empty() {
+                return Err(LogicalSchemaError::EmptyStruct {
+                    column_path: path.to_string(),
+                });
+            }
+
             let mut seen = HashSet::with_capacity(fields.len());
             for child in fields {
+                if child.name.trim().is_empty() {
+                    return Err(LogicalSchemaError::StructFieldNameEmpty {
+                        column_path: path.to_string(),
+                        field: child.name.clone(),
+                    });
+                }
+
                 if !seen.insert(child.name.clone()) {
                     return Err(LogicalSchemaError::DuplicatedFieldName {
                         column_path: path.to_string(),
@@ -595,6 +641,11 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaE
         }
 
         LogicalDataType::List { elements } => {
+            if elements.name.trim().is_empty() {
+                return Err(LogicalSchemaError::ListElementNameEmpty {
+                    column_path: path.to_string(),
+                });
+            }
             let child_path = format!("{}.{}", path, elements.name);
             validate_field(elements, &child_path)
         }
