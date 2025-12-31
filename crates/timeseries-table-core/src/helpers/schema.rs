@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use snafu::prelude::*;
 
 use crate::transaction_log::{
-    LogicalColumn, LogicalSchema, LogicalSchemaError, TableMeta, TimeIndexSpec,
-    table_metadata::LogicalDataType,
+    TableMeta, TimeIndexSpec,
+    logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
 };
 
 /// Errors raised when a segment's schema is not compatible with the table.
@@ -93,7 +93,7 @@ pub fn require_table_schema(meta: &TableMeta) -> SchemaResult<&LogicalSchema> {
 }
 
 // ---- core comparison helpers ----
-fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalColumn> {
+fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalField> {
     schema
         .columns()
         .iter()
@@ -171,12 +171,12 @@ pub fn ensure_schema_exact_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction_log::{TimeBucket, table_metadata::LogicalTimestampUnit};
+    use crate::transaction_log::{TimeBucket, logical_schema::LogicalTimestampUnit};
 
     fn schema(cols: Vec<(&str, LogicalDataType, bool)>) -> LogicalSchema {
         LogicalSchema::new(
             cols.into_iter()
-                .map(|(name, dtype, nullable)| LogicalColumn {
+                .map(|(name, dtype, nullable)| LogicalField {
                     name: name.to_string(),
                     data_type: dtype,
                     nullable,
@@ -356,6 +356,164 @@ mod tests {
         let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
         assert!(
             matches!(err, SchemaCompatibilityError::MissingColumn { column } if column == "Price")
+        );
+    }
+
+    #[test]
+    fn nested_list_element_nullability_mismatch_errors() {
+        let table = schema(vec![(
+            "nested",
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: false,
+                }),
+            },
+            false,
+        )]);
+        let seg = schema(vec![(
+            "nested",
+            LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: true,
+                }),
+            },
+            false,
+        )]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TypeMismatch { column, .. } if column == "nested")
+        );
+    }
+
+    #[test]
+    fn nested_map_value_presence_mismatch_errors() {
+        let table = schema(vec![(
+            "attrs",
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Int64,
+                    nullable: true,
+                })),
+                keys_sorted: false,
+            },
+            false,
+        )]);
+        let seg = schema(vec![(
+            "attrs",
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                }),
+                value: None,
+                keys_sorted: false,
+            },
+            false,
+        )]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TypeMismatch { column, .. } if column == "attrs")
+        );
+    }
+
+    #[test]
+    fn nested_map_keys_sorted_mismatch_errors() {
+        let table = schema(vec![(
+            "attrs",
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Int64,
+                    nullable: true,
+                })),
+                keys_sorted: false,
+            },
+            false,
+        )]);
+        let seg = schema(vec![(
+            "attrs",
+            LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Int64,
+                    nullable: true,
+                })),
+                keys_sorted: true,
+            },
+            false,
+        )]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TypeMismatch { column, .. } if column == "attrs")
+        );
+    }
+
+    #[test]
+    fn nested_struct_field_order_mismatch_errors() {
+        let table = schema(vec![(
+            "nested",
+            LogicalDataType::Struct {
+                fields: vec![
+                    LogicalField {
+                        name: "a".to_string(),
+                        data_type: LogicalDataType::Int32,
+                        nullable: false,
+                    },
+                    LogicalField {
+                        name: "b".to_string(),
+                        data_type: LogicalDataType::Int64,
+                        nullable: false,
+                    },
+                ],
+            },
+            false,
+        )]);
+        let seg = schema(vec![(
+            "nested",
+            LogicalDataType::Struct {
+                fields: vec![
+                    LogicalField {
+                        name: "b".to_string(),
+                        data_type: LogicalDataType::Int64,
+                        nullable: false,
+                    },
+                    LogicalField {
+                        name: "a".to_string(),
+                        data_type: LogicalDataType::Int32,
+                        nullable: false,
+                    },
+                ],
+            },
+            false,
+        )]);
+
+        let err = ensure_schema_exact_match(&table, &seg, &index("ts")).unwrap_err();
+        assert!(
+            matches!(err, SchemaCompatibilityError::TypeMismatch { column, .. } if column == "nested")
         );
     }
 

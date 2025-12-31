@@ -362,8 +362,8 @@ mod tests {
     use crate::storage::TableLocation;
     use crate::time_series_table::test_util::*;
 
+    use crate::transaction_log::logical_schema::LogicalTimestampUnit;
     use crate::transaction_log::segments::{FileFormat, SegmentId};
-    use crate::transaction_log::table_metadata::LogicalTimestampUnit;
 
     use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 
