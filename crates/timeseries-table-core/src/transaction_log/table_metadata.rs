@@ -478,8 +478,8 @@ impl LogicalSchema {
     pub fn to_arrow_schema(&self) -> Result<Schema, SchemaConvertError> {
         let mut fields = Vec::with_capacity(self.columns.len());
         for c in &self.columns {
-            let dt = c.data_type.to_arrow_datatype(&c.name)?;
-            fields.push(Field::new(c.name.clone(), dt, c.nullable));
+            let fref = c.to_arrow_field_ref(&c.name)?;
+            fields.push(fref.as_ref().clone());
         }
 
         Ok(Schema::new(fields))
@@ -522,6 +522,22 @@ pub enum LogicalSchemaError {
         /// Column name that failed validation.
         column: String,
     },
+
+    /// Duplicate field names within a struct are not allowed.
+    #[snafu(display("Duplicate field name: column={column_path}, field={field}"))]
+    DuplicatedFieldName {
+        /// Column path for the struct that contains the duplicate field.
+        column_path: String,
+        /// Duplicate field name.
+        field: String,
+    },
+
+    /// Map key fields must be non-nullable in schema validation.
+    #[snafu(display("Invalid Map Key: map key should not be null for column={column_path}"))]
+    InvalidMapKeyNullability {
+        /// Column path for the map with an invalid key nullability.
+        column_path: String,
+    },
 }
 
 impl LogicalSchema {
@@ -535,6 +551,7 @@ impl LogicalSchema {
                 }
                 .fail();
             }
+            validate_field(col, &col.name)?;
         }
 
         Ok(Self { columns })
@@ -543,6 +560,47 @@ impl LogicalSchema {
     /// Borrow the logical columns.
     pub fn columns(&self) -> &[LogicalField] {
         &self.columns
+    }
+}
+
+fn validate_field(field: &LogicalField, path: &str) -> Result<(), LogicalSchemaError> {
+    validate_dtype(&field.data_type, path)
+}
+
+fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaError> {
+    match dt {
+        LogicalDataType::Struct { fields } => {
+            let mut seen = HashSet::with_capacity(fields.len());
+            for child in fields {
+                if !seen.insert(child.name.clone()) {
+                    return Err(LogicalSchemaError::DuplicatedFieldName {
+                        column_path: path.to_string(),
+                        field: child.name.clone(),
+                    });
+                }
+                let child_path = format!("{}.{}", path, child.name);
+                validate_field(child, &child_path)?;
+            }
+            Ok(())
+        }
+
+        LogicalDataType::List { elements } => {
+            let child_path = format!("{}.{}", path, elements.name);
+            validate_field(elements, &child_path)
+        }
+
+        LogicalDataType::Map { key, value, .. } => {
+            if key.nullable {
+                return Err(LogicalSchemaError::InvalidMapKeyNullability {
+                    column_path: path.to_string(),
+                });
+            }
+            validate_field(key, &format!("{}.key", path))?;
+            validate_field(value.as_ref(), &format!("{}.value", path))?;
+            Ok(())
+        }
+
+        _ => Ok(()),
     }
 }
 
