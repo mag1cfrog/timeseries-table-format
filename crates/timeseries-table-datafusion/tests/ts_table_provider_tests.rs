@@ -72,6 +72,75 @@ fn make_table_meta(price_nullable: bool) -> Result<TableMeta, Box<dyn std::error
     ))
 }
 
+fn make_nested_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
+    let logical_schema = LogicalSchema::new(vec![
+        LogicalField {
+            name: "ts".to_string(),
+            data_type: LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            },
+            nullable: false,
+        },
+        LogicalField {
+            name: "symbol".to_string(),
+            data_type: LogicalDataType::Utf8,
+            nullable: false,
+        },
+        LogicalField {
+            name: "attrs".to_string(),
+            data_type: LogicalDataType::Struct {
+                fields: vec![
+                    LogicalField {
+                        name: "a".to_string(),
+                        data_type: LogicalDataType::Int64,
+                        nullable: false,
+                    },
+                    LogicalField {
+                        name: "b".to_string(),
+                        data_type: LogicalDataType::Utf8,
+                        nullable: true,
+                    },
+                ],
+            },
+            nullable: true,
+        },
+        LogicalField {
+            name: "tags".to_string(),
+            data_type: LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "item".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: true,
+                }),
+            },
+            nullable: true,
+        },
+        LogicalField {
+            name: "metrics".to_string(),
+            data_type: LogicalDataType::Map {
+                key: Box::new(LogicalField {
+                    name: "key".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                }),
+                value: Some(Box::new(LogicalField {
+                    name: "value".to_string(),
+                    data_type: LogicalDataType::Float64,
+                    nullable: true,
+                })),
+                keys_sorted: false,
+            },
+            nullable: true,
+        },
+    ])?;
+
+    Ok(TableMeta::new_time_series_with_schema(
+        make_index_spec(),
+        logical_schema,
+    ))
+}
+
 fn make_rows(start: i64, count: usize, symbol: &'static str, price_base: f64) -> Vec<TestRow> {
     (0..count)
         .map(|idx| TestRow {
@@ -204,6 +273,41 @@ fn field_names(batch: &RecordBatch) -> Vec<String> {
         .iter()
         .map(|f| f.name().to_string())
         .collect()
+}
+
+fn collect_ts_values(batches: &[RecordBatch]) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let array = batch.column(0);
+        match array.data_type() {
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .ok_or("expected TimestampMillisecondArray")?;
+                for idx in 0..arr.len() {
+                    if arr.is_null(idx) {
+                        return Err("unexpected null timestamp".into());
+                    }
+                    out.push(arr.value(idx));
+                }
+            }
+            DataType::Int64 => {
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or("expected Int64Array")?;
+                for idx in 0..arr.len() {
+                    if arr.is_null(idx) {
+                        return Err("unexpected null timestamp".into());
+                    }
+                    out.push(arr.value(idx));
+                }
+            }
+            other => return Err(format!("unexpected ts type {other:?}").into()),
+        }
+    }
+    Ok(out)
 }
 
 fn scalar_u64(batches: &[RecordBatch]) -> Result<u64, Box<dyn std::error::Error>> {
@@ -342,6 +446,30 @@ async fn projection_order_is_preserved() -> TestResult {
 }
 
 #[tokio::test]
+async fn order_by_limit_returns_descending_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches =
+        collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts DESC LIMIT 3").await?;
+    let values = collect_ts_values(&batches)?;
+    assert_eq!(values.len(), 3);
+    assert_eq!(
+        values,
+        vec![
+            minutes_to_millis(3) + 4,
+            minutes_to_millis(3) + 3,
+            minutes_to_millis(3) + 2,
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn empty_table_returns_zero_rows() -> TestResult {
     let tmp = TempDir::new()?;
     let table = create_table(&tmp, false).await?;
@@ -449,6 +577,60 @@ async fn provider_schema_matches_table_meta() -> TestResult {
 
     let expected = table.state().table_meta.arrow_schema_ref()?;
     assert_eq!(provider.schema().as_ref(), expected.as_ref());
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_schema_supports_nested_types() -> TestResult {
+    let tmp = TempDir::new()?;
+    let location = TableLocation::local(tmp.path());
+    let meta = make_nested_table_meta()?;
+    let table = TimeSeriesTable::create(location, meta).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let schema = provider.schema();
+
+    let attrs = schema.field_with_name("attrs")?.data_type();
+    match attrs {
+        DataType::Struct(fields) => {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name(), "a");
+            assert_eq!(fields[1].name(), "b");
+        }
+        other => return Err(format!("attrs type mismatch: {other:?}").into()),
+    }
+
+    let tags = schema.field_with_name("tags")?.data_type();
+    match tags {
+        DataType::List(field) => {
+            assert_eq!(field.name(), "item");
+            assert!(matches!(field.data_type(), DataType::Utf8));
+        }
+        other => return Err(format!("tags type mismatch: {other:?}").into()),
+    }
+
+    let metrics = schema.field_with_name("metrics")?.data_type();
+    match metrics {
+        DataType::Map(entries, keys_sorted) => {
+            assert!(!keys_sorted);
+            assert_eq!(entries.name(), "entries");
+            match entries.data_type() {
+                DataType::Struct(fields) => {
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].name(), "key");
+                    assert_eq!(fields[1].name(), "value");
+                }
+                other => {
+                    return Err(format!("metrics entries type mismatch: {other:?}").into())
+                }
+            }
+        }
+        other => return Err(format!("metrics type mismatch: {other:?}").into()),
+    }
+
     Ok(())
 }
 
