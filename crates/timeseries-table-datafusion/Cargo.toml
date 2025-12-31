@@ -10,5 +10,7 @@ arrow = { workspace = true }
 datafusion = { workspace = true }
 async-trait = "0.1.89"
 
+tokio = { workspace = true }
+
 [lints]
 workspace = true

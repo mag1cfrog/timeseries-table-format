@@ -17,3 +17,5 @@ arrow-select = "57.1.0"
 parquet = "57.1.0"
 
 datafusion = "51.0.0"
+
+tokio = { version = "1.48.0" }
