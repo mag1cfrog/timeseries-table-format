@@ -4,7 +4,7 @@ use bytes::Bytes;
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
 use parquet::file::metadata::FileMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::schema::types::ColumnDescPtr;
+use parquet::schema::types::Type;
 use snafu::Backtrace;
 
 use crate::storage::{TableLocation, read_all_bytes};
@@ -82,40 +82,253 @@ fn map_parquet_col_to_logical_type(
     })
 }
 
-fn column_nullable(desc: &ColumnDescPtr) -> bool {
-    match desc.self_type().get_basic_info().repetition() {
-        Repetition::REQUIRED => false,
-        Repetition::OPTIONAL | Repetition::REPEATED => true,
+fn join_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}.{name}")
     }
 }
 
-fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
-    let descr = meta.schema_descr();
-    let mut cols = Vec::with_capacity(descr.num_columns());
+fn rep_nullable(rep: Repetition) -> bool {
+    matches!(rep, Repetition::OPTIONAL)
+}
 
-    for col in descr.columns() {
-        let name = col.path().string();
+fn parquet_primitive_to_logical_datatype(
+    t: &Type,
+    column_path: &str,
+) -> Result<LogicalDataType, LogicalSchemaError> {
+    let physical = t.get_physical_type();
+    let logical = t.get_basic_info().logical_type_ref();
 
-        let physical = col.physical_type();
-        let logical = col.logical_type_ref();
+    let fixed_len = if physical == PhysicalType::FIXED_LEN_BYTE_ARRAY {
+        match t {
+            Type::PrimitiveType { type_length, .. } => Some(*type_length),
+            _ => None,
+        }
+    } else {
+        None
+    };
 
-        let fixed_len_byte_array_len = if physical == PhysicalType::FIXED_LEN_BYTE_ARRAY {
-            Some(col.type_length())
-        } else {
-            None
-        };
-        let data_type =
-            map_parquet_col_to_logical_type(&name, physical, logical, fixed_len_byte_array_len)?;
+    map_parquet_col_to_logical_type(column_path, physical, logical, fixed_len)
+}
 
-        let nullable = column_nullable(col);
-        cols.push(LogicalField {
+fn parquet_type_to_logical_datatype(
+    t: &Type,
+    path: &str,
+) -> Result<LogicalDataType, LogicalSchemaError> {
+    if t.is_group() {
+        let children = t
+            .get_fields()
+            .iter()
+            .map(|c| parquet_type_to_logical_field(c, path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(LogicalDataType::Struct { fields: children })
+    } else {
+        parquet_primitive_to_logical_datatype(t, path)
+    }
+}
+
+fn parse_parquet_list(t: &Type, column_path: &str) -> Result<LogicalDataType, LogicalSchemaError> {
+    if !t.is_group() {
+        return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
+            column_path: column_path.to_string(),
+            details: "LIST annotation on a primitive is unsupported".to_string(),
+        });
+    }
+
+    let outer = t.get_fields();
+    if outer.len() != 1 {
+        return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
+            column_path: column_path.to_string(),
+            details: format!("LIST group must have exactly 1 child, got {}", outer.len()),
+        });
+    }
+
+    let repeated = &outer[0];
+    if !matches!(repeated.get_basic_info().repetition(), Repetition::REPEATED) {
+        return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
+            column_path: column_path.to_string(),
+            details: "LIST child must be REPEATED".to_string(),
+        });
+    }
+
+    // Canonical: repeated group with exactly 1 child => element
+    // Tolerate: repeated primitive/group => treat that repeated node as the element
+    let (elem_type, elem_nullable) = if repeated.is_group() && repeated.get_fields().len() == 1 {
+        let elem = &repeated.get_fields()[0];
+        (
+            elem,
+            matches!(elem.get_basic_info().repetition(), Repetition::OPTIONAL),
+        )
+    } else {
+        (repeated, false)
+    };
+
+    let elem_dt = parquet_type_to_logical_datatype(elem_type, &format!("{column_path}.element"))?;
+
+    Ok(LogicalDataType::List {
+        elements: Box::new(LogicalField {
+            name: "element".to_string(),
+            data_type: elem_dt,
+            nullable: elem_nullable,
+        }),
+    })
+}
+
+fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, LogicalSchemaError> {
+    if !t.is_group() {
+        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
+            column_path: column_path.to_string(),
+            details: "MAP annotation on a primitive is unsupported".to_ascii_lowercase(),
+        });
+    }
+
+    let outer = t.get_fields();
+    if outer.len() != 1 {
+        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
+            column_path: column_path.to_string(),
+            details: format!("MAP group must have exactly 1 child, got {}", outer.len()),
+        });
+    }
+
+    let kv = &outer[0];
+    if !kv.is_group() || matches!(kv.get_basic_info().repetition(), Repetition::REPEATED) {
+        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
+            column_path: column_path.to_string(),
+            details: "MAP child must be a REPEATED group (key_value)".to_string(),
+        });
+    }
+
+    let kv_fields = kv.get_fields();
+    if !(kv_fields.len() == 1 || kv_fields.len() == 2) {
+        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
+            column_path: column_path.to_string(),
+            details: format!(
+                "key_value group must have 1 or 2 children, got {}",
+                kv_fields.len()
+            ),
+        });
+    }
+
+    let key_t = &kv_fields[0];
+    if !matches!(key_t.get_basic_info().repetition(), Repetition::REQUIRED) {
+        return Err(LogicalSchemaError::InvalidMapKeyNullability {
+            column_path: column_path.to_string(),
+        });
+    }
+
+    let key_dt = parquet_type_to_logical_datatype(key_t, &format!("{column_path}.key"))?;
+
+    let value_field = if kv_fields.len() == 2 {
+        let val_t = &kv_fields[1];
+        let val_nullable = matches!(val_t.get_basic_info().repetition(), Repetition::OPTIONAL);
+        let val_dt = parquet_type_to_logical_datatype(val_t, &format!("{column_path}.value"))?;
+        Some(Box::new(LogicalField {
+            name: "value".to_string(),
+            nullable: val_nullable,
+            data_type: val_dt,
+        }))
+    } else {
+        None // Keys-only map
+    };
+
+    Ok(LogicalDataType::Map {
+        key: Box::new(LogicalField {
+            name: "key".to_string(),
+            data_type: key_dt,
+            nullable: false,
+        }),
+        value: value_field,
+        keys_sorted: false, // Parquet schema doesn't reliably carry this; conservative default
+    })
+}
+
+fn parquet_type_to_logical_field(
+    t: &Type,
+    parent: &str,
+) -> Result<LogicalField, LogicalSchemaError> {
+    let info = t.get_basic_info();
+    let name = info.name().to_string();
+    let path = join_path(parent, &name);
+    let rep = info.repetition();
+    let nullable = rep_nullable(rep);
+
+    // 1) List/MAP are group-level logical annotations
+    if let Some(logical) = info.logical_type_ref() {
+        match logical {
+            LogicalType::List => {
+                let dt = parse_parquet_list(t, &path)?;
+                return Ok(LogicalField {
+                    name,
+                    data_type: dt,
+                    nullable,
+                });
+            }
+            LogicalType::Map => {
+                let dt = parse_parquet_map(t, &path)?;
+                return Ok(LogicalField {
+                    name,
+                    data_type: dt,
+                    nullable,
+                });
+            }
+            _ => {
+                // Other logical types handled by primitive mapping below
+            }
+        }
+    }
+
+    // 2) Optional legacy rule: unannotated REPEATED => list of required elements
+    if matches!(rep, Repetition::REPEATED) {
+        let elem_dt = parquet_type_to_logical_datatype(t, &format!("{path}.element"))?;
+        return Ok(LogicalField {
             name,
-            data_type,
+            data_type: LogicalDataType::List {
+                elements: Box::new(LogicalField {
+                    name: "element".to_string(),
+                    data_type: elem_dt,
+                    nullable: false,
+                }),
+            },
+            nullable: false,
+        });
+    }
+
+    // 3) Non-LIST/MAP groups => Struct
+    if t.is_group() {
+        let children = t
+            .get_fields()
+            .iter()
+            .map(|c| parquet_type_to_logical_field(c, &path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        return Ok(LogicalField {
+            name,
+            data_type: LogicalDataType::Struct { fields: children },
             nullable,
         });
     }
 
-    LogicalSchema::new(cols)
+    // 4) Primitive leaf
+    let dt = parquet_primitive_to_logical_datatype(t, &path)?;
+    Ok(LogicalField {
+        name,
+        data_type: dt,
+        nullable,
+    })
+}
+
+fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+    let root = meta.schema_descr().root_schema_ptr(); // schema tree root (group)
+    let fields = root
+        .get_fields()
+        .iter()
+        .map(|t| parquet_type_to_logical_field(t, ""))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    LogicalSchema::new(fields)
 }
 
 /// Build a `LogicalSchema` from Parquet bytes.
