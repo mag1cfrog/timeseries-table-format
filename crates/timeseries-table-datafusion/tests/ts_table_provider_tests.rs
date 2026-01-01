@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float64Builder, Int64Array, StringBuilder, TimestampMillisecondArray,
+    Array, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
     TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -260,6 +260,64 @@ async fn collect_batches(
 
 fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
+}
+
+fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut lines = Vec::new();
+    for batch in batches {
+        let schema = batch.schema();
+        let col_idx = schema
+            .fields()
+            .iter()
+            .position(|f| f.name() == "plan")
+            .or_else(|| {
+                schema
+                    .fields()
+                    .iter()
+                    .position(|f| f.name().contains("plan"))
+            })
+            .unwrap_or(0);
+        let col = batch.column(col_idx);
+        let strings = col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| "expected EXPLAIN output to be a string array".to_string())?;
+        for row in 0..strings.len() {
+            if strings.is_valid(row) {
+                lines.push(strings.value(row).to_string());
+            }
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+fn pretty_batches(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
+    use arrow::util::pretty::pretty_format_batches;
+    Ok(pretty_format_batches(batches)?.to_string())
+}
+
+macro_rules! assert_plan_contains {
+    ($plan_text:expr, $pretty:expr, $needle:expr) => {
+        assert!(
+            $plan_text.contains($needle),
+            "expected {needle} in plan:\n{plan_text}\n\npretty:\n{pretty}",
+            needle = $needle,
+            plan_text = $plan_text,
+            pretty = $pretty
+        );
+    };
+}
+
+macro_rules! assert_plan_not_contains {
+    ($plan_text:expr, $pretty:expr, $needle:expr) => {
+        assert!(
+            !$plan_text.contains($needle),
+            "unexpected {needle} in plan:\n{plan_text}\n\npretty:\n{pretty}",
+            needle = $needle,
+            plan_text = $plan_text,
+            pretty = $pretty
+        );
+    };
 }
 
 fn first_batch(batches: &[RecordBatch]) -> Result<&RecordBatch, Box<dyn std::error::Error>> {
@@ -628,6 +686,67 @@ async fn provider_schema_supports_nested_types() -> TestResult {
         other => return Err(format!("metrics type mismatch: {other:?}").into()),
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_filter_explain() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "EXPLAIN SELECT * FROM t \
+         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+    )
+    .await?;
+    let plan_text = explain_plan_text(&batches)?;
+    let pretty = pretty_batches(&batches)?;
+
+    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    Ok(())
+}
+
+#[tokio::test]
+async fn does_not_prune_on_unrecognized_predicate_explain() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(&ctx, "EXPLAIN SELECT * FROM t WHERE symbol = 'A'").await?;
+    let plan_text = explain_plan_text(&batches)?;
+    let pretty = pretty_batches(&batches)?;
+
+    assert_plan_contains!(plan_text, pretty, "seg-a.parquet");
+    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+    Ok(())
+}
+
+#[tokio::test]
+async fn time_filter_returns_correct_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
     Ok(())
 }
 
