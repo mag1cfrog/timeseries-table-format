@@ -12,8 +12,14 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
 use datafusion::catalog::TableProvider;
-use datafusion::prelude::SessionContext;
+use datafusion::datasource::source::DataSourceExec;
+use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
+use datafusion::physical_plan::{collect, ExecutionPlan};
+use datafusion::prelude::{col, lit, SessionConfig, SessionContext};
 use parquet::arrow::ArrowWriter;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::time_series_table::TimeSeriesTable;
@@ -156,6 +162,15 @@ fn minutes_to_millis(minutes: i64) -> i64 {
 }
 
 fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestResult {
+    write_parquet_with_props(path, rows, price_nullable, None)
+}
+
+fn write_parquet_with_props(
+    path: &Path,
+    rows: &[TestRow],
+    price_nullable: bool,
+    props: Option<WriterProperties>,
+) -> TestResult {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -196,7 +211,7 @@ fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestRes
     )?;
 
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), None)?;
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), props)?;
     writer.write(&batch)?;
     writer.close()?;
 
@@ -235,6 +250,21 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     table
         .append_parquet_segment("data/seg-b.parquet", "ts")
         .await?;
+
+    Ok(table)
+}
+
+async fn create_single_segment_table_with_props(
+    tmp: &TempDir,
+    rel_path: &str,
+    rows: &[TestRow],
+    props: WriterProperties,
+) -> TestResult<TimeSeriesTable> {
+    let mut table = create_table(tmp, false).await?;
+
+    let abs = tmp.path().join(rel_path);
+    write_parquet_with_props(&abs, rows, false, Some(props))?;
+    table.append_parquet_segment(rel_path, "ts").await?;
 
     Ok(table)
 }
@@ -298,6 +328,31 @@ fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::err
 fn pretty_batches(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
     use arrow::util::pretty::pretty_format_batches;
     Ok(pretty_format_batches(batches)?.to_string())
+}
+
+fn find_data_source_exec<'a>(plan: &'a dyn ExecutionPlan) -> Option<&'a DataSourceExec> {
+    if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
+        return Some(exec);
+    }
+    for child in plan.children() {
+        if let Some(exec) = find_data_source_exec(child.as_ref()) {
+            return Some(exec);
+        }
+    }
+    None
+}
+
+fn get_pruning_metric(
+    metrics: &MetricsSet,
+    metric_name: &str,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    match metrics.sum_by_name(metric_name) {
+        Some(MetricValue::PruningMetrics {
+            pruning_metrics, ..
+        }) => Ok((pruning_metrics.pruned(), pruning_metrics.matched())),
+        Some(_) => Err(format!("metric '{metric_name}' is not a pruning metric").into()),
+        None => Err(format!("metric '{metric_name}' not found").into()),
+    }
 }
 
 macro_rules! assert_plan_contains {
@@ -690,6 +745,100 @@ async fn provider_schema_supports_nested_types() -> TestResult {
         other => return Err(format!("metrics type mismatch: {other:?}").into()),
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn pushdown_marks_all_filters_inexact() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_table(&tmp, false).await?;
+    let provider = TsTableProvider::try_new(Arc::new(table))?;
+
+    let filters = vec![
+        col("ts").gt_eq(lit("1970-01-01T00:00:00Z")),
+        col("symbol").eq(lit("A")),
+    ];
+    let refs: Vec<&Expr> = filters.iter().collect();
+    let r = provider.supports_filters_pushdown(&refs)?;
+
+    assert_eq!(r.len(), 2);
+    assert!(r
+        .iter()
+        .all(|x| matches!(x, TableProviderFilterPushDown::Inexact)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn scan_attaches_parquet_predicate_for_non_time_filters() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let df = ctx
+        .sql("SELECT count(*) FROM t WHERE symbol = 'A'")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+    let display = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(true)
+        .to_string();
+
+    assert!(display.contains("DataSourceExec"));
+    assert!(display.contains("predicate="));
+    assert!(display.contains("symbol") || display.contains("Symbol"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_prunes_row_groups_for_non_time_predicate() -> TestResult {
+    let tmp = TempDir::new()?;
+    let mut rows = Vec::new();
+    for i in 0..5 {
+        rows.push(TestRow {
+            ts_millis: minutes_to_millis(i as i64),
+            symbol: "A",
+            price: Some(1.0),
+        });
+    }
+    for i in 5..10 {
+        rows.push(TestRow {
+            ts_millis: minutes_to_millis(i as i64),
+            symbol: "A",
+            price: Some(1000.0),
+        });
+    }
+
+    let props = WriterProperties::builder()
+        .set_max_row_group_size(5)
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .build();
+    let table =
+        create_single_segment_table_with_props(&tmp, "data/seg-rg.parquet", &rows, props).await?;
+    let table = Arc::new(table);
+
+    let config = SessionConfig::new().with_parquet_pruning(true);
+    let ctx = SessionContext::new_with_config(config);
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let df = ctx
+        .sql("SELECT count(*) FROM t WHERE price < 10.0")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+    let _ = collect(plan.clone(), ctx.task_ctx()).await?;
+
+    let exec = find_data_source_exec(plan.as_ref())
+        .ok_or_else(|| "expected DataSourceExec in physical plan".to_string())?;
+    let metrics = exec
+        .metrics()
+        .ok_or_else(|| "expected metrics for DataSourceExec".to_string())?;
+    let (pruned, matched) = get_pruning_metric(&metrics, "row_groups_pruned_statistics")?;
+
+    assert!(
+        pruned >= 1,
+        "expected at least 1 row group pruned (matched={matched}, pruned={pruned})"
+    );
     Ok(())
 }
 
