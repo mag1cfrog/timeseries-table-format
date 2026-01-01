@@ -86,21 +86,23 @@ impl TimeRange {
         }
     }
 
-    /// Segment bounds are inclusive [ts_min, ts_max]. Keep segment if it overlaps [start, end).
-    fn overlap_inclusive(&self, ts_min: DateTime<Utc>, ts_max: DateTime<Utc>) -> bool {
+    /// Segment bounds are inclusive [seg_min, seg_max].
+    /// Query bounds are half-open [start, end).
+    /// Returns true if they overlap.
+    fn overlaps_segment(&self, seg_min: DateTime<Utc>, seg_max: DateTime<Utc>) -> bool {
         if self.is_empty() {
             return false;
         }
 
         // keep if ts_max >= start AND ts_min < end
         if let Some(start) = self.start
-            && ts_max < start
+            && seg_max < start
         {
             return false;
         }
 
         if let Some(end) = self.end
-            && ts_min >= end
+            && seg_min >= end
         {
             return false;
         }
@@ -336,7 +338,7 @@ impl TsTableProvider {
 
         segments
             .into_iter()
-            .filter(|seg| combined.overlap_inclusive(seg.ts_min, seg.ts_max))
+            .filter(|seg| combined.overlaps_segment(seg.ts_min, seg.ts_max))
             .collect()
     }
 }
