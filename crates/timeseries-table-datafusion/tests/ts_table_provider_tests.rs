@@ -784,6 +784,8 @@ async fn scan_attaches_parquet_predicate_for_non_time_filters() -> TestResult {
         .indent(true)
         .to_string();
 
+    println!("{display}");
+
     assert!(display.contains("DataSourceExec"));
     assert!(display.contains("predicate="));
     assert!(display.contains("symbol") || display.contains("Symbol"));
