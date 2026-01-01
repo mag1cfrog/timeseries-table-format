@@ -12,7 +12,7 @@ arrow-array = { workspace = true }
 arrow-select = { workspace = true }
 blake3 = "1.8.2"
 bytes = "1.11.0"
-chrono = { version = "0.4.42", features = ["serde"] }
+chrono = { workspace = true }
 futures = "0.3.31"
 parquet = { workspace = true }
 roaring = "0.11.2"
