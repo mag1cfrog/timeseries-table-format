@@ -9,6 +9,7 @@ use chrono::TimeZone;
 use chrono::Utc;
 use datafusion::catalog::Session;
 use datafusion::catalog::TableProvider;
+use datafusion::common::DFSchema;
 use datafusion::common::ScalarValue;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::FileScanConfigBuilder;
@@ -19,7 +20,9 @@ use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::Operator;
 use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::lit;
 use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::time_series_table::TimeSeriesTable;
 use timeseries_table_core::transaction_log::SegmentMeta;
@@ -361,27 +364,14 @@ impl TableProvider for TsTableProvider {
         &self,
         filters: &[&Expr],
     ) -> DFResult<Vec<TableProviderFilterPushDown>> {
-        let ts_col = self.time_column_name();
-
-        let v = filters
-            .iter()
-            .map(|f| {
-                let mut r = TimeRange::default();
-                if collect_time_constraints(f, ts_col, &mut r) {
-                    // Inexact: we only use it for file pruning; DataFusion still applies the filter.
-                    TableProviderFilterPushDown::Inexact
-                } else {
-                    TableProviderFilterPushDown::Unsupported
-                }
-            })
-            .collect();
-
-        Ok(v)
+        // Inexact: we may prune files, and Parquet may prune row groups/pages,
+        // but DataFusion will still apply the filter for correctness.
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr], // will be empty until implement supports_filters_pushdown
         limit: Option<usize>,
@@ -391,10 +381,15 @@ impl TableProvider for TsTableProvider {
 
         let segments = snapshot.segments_sorted_by_time();
 
-        let selected = self.prune_segments_by_time(segments, filters);
+        let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
+        let predicate = conjunction(filters.to_vec());
+        let predicate = predicate
+            .map(|p| state.create_physical_expr(p, &df_schema))
+            .transpose()?
+            .unwrap_or_else(|| lit(true));
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
-        let parquet_source = Arc::new(ParquetSource::default());
+        let parquet_source = Arc::new(ParquetSource::default().with_predicate(predicate));
 
         let mut builder = FileScanConfigBuilder::new(
             self.object_store_url.clone(),
@@ -404,6 +399,7 @@ impl TableProvider for TsTableProvider {
         .with_projection_indices(projection.cloned())
         .with_limit(limit);
 
+        let selected = self.prune_segments_by_time(segments, filters);
         for seg in selected {
             let abs = self.segment_abs_path(seg)?;
             let abs = tokio::fs::canonicalize(&abs).await.map_err(|e| {
