@@ -16,8 +16,8 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
-use datafusion::physical_plan::{collect, ExecutionPlan};
-use datafusion::prelude::{col, lit, SessionConfig, SessionContext};
+use datafusion::physical_plan::{ExecutionPlan, collect};
+use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
@@ -330,7 +330,7 @@ fn pretty_batches(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error:
     Ok(pretty_format_batches(batches)?.to_string())
 }
 
-fn find_data_source_exec<'a>(plan: &'a dyn ExecutionPlan) -> Option<&'a DataSourceExec> {
+fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
     if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
         return Some(exec);
     }
@@ -762,9 +762,10 @@ async fn pushdown_marks_all_filters_inexact() -> TestResult {
     let r = provider.supports_filters_pushdown(&refs)?;
 
     assert_eq!(r.len(), 2);
-    assert!(r
-        .iter()
-        .all(|x| matches!(x, TableProviderFilterPushDown::Inexact)));
+    assert!(
+        r.iter()
+            .all(|x| matches!(x, TableProviderFilterPushDown::Inexact))
+    );
     Ok(())
 }
 
@@ -777,9 +778,7 @@ async fn scan_attaches_parquet_predicate_for_non_time_filters() -> TestResult {
     let ctx = SessionContext::new();
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
-    let df = ctx
-        .sql("SELECT count(*) FROM t WHERE symbol = 'A'")
-        .await?;
+    let df = ctx.sql("SELECT count(*) FROM t WHERE symbol = 'A'").await?;
     let plan = df.create_physical_plan().await?;
     let display = datafusion::physical_plan::displayable(plan.as_ref())
         .indent(true)
@@ -822,9 +821,7 @@ async fn parquet_prunes_row_groups_for_non_time_predicate() -> TestResult {
     let ctx = SessionContext::new_with_config(config);
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
-    let df = ctx
-        .sql("SELECT count(*) FROM t WHERE price < 10.0")
-        .await?;
+    let df = ctx.sql("SELECT count(*) FROM t WHERE price < 10.0").await?;
     let plan = df.create_physical_plan().await?;
     let _ = collect(plan.clone(), ctx.task_ctx()).await?;
 
