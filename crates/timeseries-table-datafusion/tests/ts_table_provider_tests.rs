@@ -280,15 +280,12 @@ fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::err
             })
             .unwrap_or(0);
         let col = batch.column(col_idx);
-        let strings = col
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                format!(
-                    "expected EXPLAIN output to be a string array (column {})",
-                    schema.field(col_idx).name()
-                )
-            })?;
+        let strings = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+            format!(
+                "expected EXPLAIN output to be a string array (column {})",
+                schema.field(col_idx).name()
+            )
+        })?;
         for row in 0..strings.len() {
             if strings.is_valid(row) {
                 lines.push(strings.value(row).to_string());
