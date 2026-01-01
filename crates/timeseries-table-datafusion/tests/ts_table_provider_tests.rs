@@ -266,6 +266,8 @@ fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::err
     let mut lines = Vec::new();
     for batch in batches {
         let schema = batch.schema();
+        // EXPLAIN output is not guaranteed to keep a stable column order across versions.
+        // Prefer the "plan" column (or any column containing "plan") rather than guessing.
         let col_idx = schema
             .fields()
             .iter()
@@ -281,7 +283,12 @@ fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::err
         let strings = col
             .as_any()
             .downcast_ref::<StringArray>()
-            .ok_or_else(|| "expected EXPLAIN output to be a string array".to_string())?;
+            .ok_or_else(|| {
+                format!(
+                    "expected EXPLAIN output to be a string array (column {})",
+                    schema.field(col_idx).name()
+                )
+            })?;
         for row in 0..strings.len() {
             if strings.is_valid(row) {
                 lines.push(strings.value(row).to_string());
