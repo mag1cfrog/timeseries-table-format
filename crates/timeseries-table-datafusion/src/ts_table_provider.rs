@@ -373,7 +373,7 @@ impl TableProvider for TsTableProvider {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr], // will be empty until implement supports_filters_pushdown
+        filters: &[Expr], // may include all WHERE predicates
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         // 1) Get a snapshot (TableState) from core table
