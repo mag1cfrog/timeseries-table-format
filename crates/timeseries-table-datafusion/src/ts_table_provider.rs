@@ -228,33 +228,6 @@ fn parse_ts_literal(expr: &Expr) -> Option<DateTime<Utc>> {
     }
 }
 
-/// If the expression is `ts OP literal`, return the operator and timestamp.
-fn match_time_comparison(
-    col_expr: &Expr,
-    op: Operator,
-    lit_expr: &Expr,
-    ts_col: &str,
-) -> Option<(Operator, DateTime<Utc>)> {
-    if !expr_is_ts(col_expr, ts_col) {
-        return None;
-    }
-
-    if !matches!(
-        op,
-        Operator::Gt
-            | Operator::GtEq
-            | Operator::Lt
-            | Operator::LtEq
-            | Operator::Eq
-            | Operator::NotEq
-    ) {
-        return None;
-    }
-
-    let dt = parse_ts_literal(lit_expr)?;
-    Some((op, dt))
-}
-
 /// Flip comparison direction when operands are swapped.
 fn flip_op(op: Operator) -> Option<Operator> {
     match op {
