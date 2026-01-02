@@ -21,6 +21,7 @@ use datafusion::logical_expr::Between;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::Operator;
 use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
@@ -226,6 +227,10 @@ fn contains_ts(expr: &Expr, ts_col: &str) -> bool {
                 || contains_ts(&b.high, ts_col)
         }
 
+        Expr::InList(il) => {
+            contains_ts(&il.expr, ts_col) || il.list.iter().any(|e| contains_ts(e, ts_col))
+        }
+
         Expr::Alias(a) => contains_ts(&a.expr, ts_col),
         Expr::Cast(c) => contains_ts(&c.expr, ts_col),
         Expr::TryCast(c) => contains_ts(&c.expr, ts_col),
@@ -272,6 +277,49 @@ fn compile_between(b: &Between, ts_col: &str) -> TimePred {
     } else {
         inner
     }
+}
+
+fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
+    if !is_ts_column(&il.expr, ts_col) {
+        return TimePred::Unknown;
+    }
+
+    // Only handle literal datetime values. Otherwise: Unknown(safe)
+    let mut dts = Vec::with_capacity(il.list.len());
+    for e in &il.list {
+        match expr_to_utc_datetime(e) {
+            Some(dt) => dts.push(dt),
+            None => return TimePred::Unknown,
+        }
+    }
+
+    // IN () edge-case:
+    // - expr IN () is always false
+    // - expr NOT IN () is always true (no constraint)
+    if dts.is_empty() {
+        return if il.negated {
+            TimePred::Unknown
+        } else {
+            TimePred::False
+        };
+    }
+
+    // Build OR chian of Eq comparisons
+    let mut p = TimePred::Cmp {
+        op: Operator::Eq,
+        ts: dts[0],
+    };
+    for dt in dts.into_iter().skip(1) {
+        p = TimePred::or(
+            p,
+            TimePred::Cmp {
+                op: Operator::Eq,
+                ts: dt,
+            },
+        );
+    }
+
+    if il.negated { TimePred::not(p) } else { p }
 }
 
 fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
@@ -324,6 +372,8 @@ fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
         Expr::TryCast(c) => compile_time_pred(&c.expr, ts_col),
 
         Expr::Between(b) => compile_between(b, ts_col),
+
+        Expr::InList(il) => compile_in_list(il, ts_col),
 
         _ => TimePred::Unknown,
     }
@@ -653,6 +703,7 @@ impl TableProvider for TsTableProvider {
 mod tests {
     use super::*;
     use datafusion::common::Column;
+    use datafusion::logical_expr::expr::InList;
     use datafusion::logical_expr::Between;
     use datafusion::logical_expr::BinaryExpr;
 
@@ -684,6 +735,14 @@ mod tests {
             negated,
             low: Box::new(low),
             high: Box::new(high),
+        })
+    }
+
+    fn in_list(expr: Expr, list: Vec<Expr>, negated: bool) -> Expr {
+        Expr::InList(InList {
+            expr: Box::new(expr),
+            list,
+            negated,
         })
     }
 
@@ -962,6 +1021,63 @@ mod tests {
         assert_eq!(
             eval_time_pred_on_segment(&pred, seg_min, seg_max),
             IntervalTruth::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn compile_in_list_prunes_outside_values() {
+        let expr = in_list(
+            col("ts"),
+            vec![
+                lit_str("2024-01-08T00:00:00Z"),
+                lit_str("2024-01-10T00:00:00Z"),
+            ],
+            false,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-07T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn compile_in_list_keeps_overlap() {
+        let expr = in_list(
+            col("ts"),
+            vec![
+                lit_str("2024-01-08T00:00:00Z"),
+                lit_str("2024-01-10T00:00:00Z"),
+            ],
+            false,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-07T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
+    }
+
+    #[test]
+    fn compile_not_in_list_keeps_segments() {
+        let expr = in_list(
+            col("ts"),
+            vec![lit_str("2024-01-08T00:00:00Z")],
+            true,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
         );
     }
 }
