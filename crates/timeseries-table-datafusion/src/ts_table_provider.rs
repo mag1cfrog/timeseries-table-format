@@ -156,7 +156,8 @@ fn flip_op(op: Operator) -> Option<Operator> {
 enum TimePred {
     True,
     False,
-    Unknown,                                 // "could match"; we do not know
+    Unknown, // "could match"; we do not know
+
     Cmp { op: Operator, ts: DateTime<Utc> }, // ts_col OP literal
     And(Box<TimePred>, Box<TimePred>),
     Or(Box<TimePred>, Box<TimePred>),
@@ -591,11 +592,29 @@ impl TableProvider for TsTableProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::common::Column;
+    use datafusion::logical_expr::BinaryExpr;
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
             .expect("valid rfc3339")
             .with_timezone(&Utc)
+    }
+
+    fn col(name: &str) -> Expr {
+        Expr::Column(Column::from_name(name))
+    }
+
+    fn lit_str(value: &str) -> Expr {
+        Expr::Literal(ScalarValue::Utf8(Some(value.to_string())), None)
+    }
+
+    fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
+        Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        })
     }
 
     #[test]
@@ -757,6 +776,50 @@ mod tests {
         assert_eq!(
             eval_cmp_on_interval(Operator::NotEq, lit, seg_min, seg_max),
             IntervalTruth::MaybeTrue
+        );
+    }
+
+    #[test]
+    fn compile_time_pred_and_preserves_ts_constraint() {
+        let expr = binary(
+            binary(col("symbol"), Operator::Eq, lit_str("AAPL")),
+            Operator::And,
+            binary(col("ts"), Operator::GtEq, lit_str("2024-01-08T00:00:00Z")),
+        );
+
+        let pred = compile_time_pred(&expr, "ts");
+
+        // Segment fully before the literal: should be prunable if AND preserves the ts constraint.
+        let seg_min = dt("2024-01-01T00:00:00Z");
+        let seg_max = dt("2024-01-02T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn compile_time_pred_or_disables_pruning() {
+        let expr = binary(
+            binary(col("symbol"), Operator::Eq, lit_str("AAPL")),
+            Operator::Or,
+            binary(col("ts"), Operator::GtEq, lit_str("2024-01-08T00:00:00Z")),
+        );
+
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-01T00:00:00Z");
+        let seg_max = dt("2024-01-02T00:00:00Z");
+        assert_ne!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-10T00:00:00Z");
+        let seg_max = dt("2024-01-11T00:00:00Z");
+        assert_ne!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
         );
     }
 }
