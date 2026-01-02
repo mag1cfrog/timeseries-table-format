@@ -215,12 +215,21 @@ impl TimePred {
 /// (optionally wrapped by alias/cast).
 fn contains_ts(expr: &Expr, ts_col: &str) -> bool {
     match expr {
+        Expr::Column(c) => c.name == ts_col,
         Expr::BinaryExpr(be) => contains_ts(&be.left, ts_col) || contains_ts(&be.right, ts_col),
         Expr::Not(e) => contains_ts(e, ts_col),
+
+        Expr::Between(b) => {
+            contains_ts(&b.expr, ts_col)
+                || contains_ts(&b.low, ts_col)
+                || contains_ts(&b.high, ts_col)
+        }
+
         Expr::Alias(a) => contains_ts(&a.expr, ts_col),
         Expr::Cast(c) => contains_ts(&c.expr, ts_col),
         Expr::TryCast(c) => contains_ts(&c.expr, ts_col),
-        _ => is_ts_column(expr, ts_col),
+
+        _ => false,
     }
 }
 
