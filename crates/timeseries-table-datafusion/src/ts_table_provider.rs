@@ -175,10 +175,8 @@ impl TimePred {
 
             (NonTime, x) | (x, NonTime) => x,
 
-            (Unknown, x) | (x, Unknown) => match x {
-                False => False,
-                _ => Unknown, // Can't simplify further safely
-            },
+            // don't let Unknown erase usable constraints in AND.
+            (Unknown, x) | (x, Unknown) => x,
             (x, y) => And(Box::new(x), Box::new(y)),
         }
     }
@@ -703,9 +701,9 @@ impl TableProvider for TsTableProvider {
 mod tests {
     use super::*;
     use datafusion::common::Column;
-    use datafusion::logical_expr::expr::InList;
     use datafusion::logical_expr::Between;
     use datafusion::logical_expr::BinaryExpr;
+    use datafusion::logical_expr::expr::InList;
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
@@ -719,6 +717,10 @@ mod tests {
 
     fn lit_str(value: &str) -> Expr {
         Expr::Literal(ScalarValue::Utf8(Some(value.to_string())), None)
+    }
+
+    fn lit_i64(value: i64) -> Expr {
+        Expr::Literal(ScalarValue::Int64(Some(value)), None)
     }
 
     fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
@@ -1066,11 +1068,7 @@ mod tests {
 
     #[test]
     fn compile_not_in_list_keeps_segments() {
-        let expr = in_list(
-            col("ts"),
-            vec![lit_str("2024-01-08T00:00:00Z")],
-            true,
-        );
+        let expr = in_list(col("ts"), vec![lit_str("2024-01-08T00:00:00Z")], true);
         let pred = compile_time_pred(&expr, "ts");
 
         let seg_min = dt("2024-01-08T00:00:00Z");
@@ -1078,6 +1076,23 @@ mod tests {
         assert_eq!(
             eval_time_pred_on_segment(&pred, seg_min, seg_max),
             IntervalTruth::MaybeTrue
+        );
+    }
+
+    #[test]
+    fn compile_unknown_and_cmp_keeps_cmp_for_pruning() {
+        let unknown = binary(col("ts"), Operator::Plus, lit_i64(1));
+        let cmp = binary(col("ts"), Operator::GtEq, lit_str("2024-01-08T00:00:00Z"));
+        let expr = binary(unknown, Operator::And, cmp);
+
+        let pred = compile_time_pred(&expr, "ts");
+
+        // Segment fully before the literal: should be prunable if AND keeps the time constraint.
+        let seg_min = dt("2024-01-01T00:00:00Z");
+        let seg_max = dt("2024-01-02T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
         );
     }
 }
