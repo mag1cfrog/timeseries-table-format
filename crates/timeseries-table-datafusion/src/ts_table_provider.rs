@@ -137,13 +137,13 @@ fn scalar_to_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
             Some(Utc.timestamp_millis_opt(*x).single()?)
         }
         ScalarValue::TimestampMicrosecond(Some(x), _) => {
-            let secs = *x / 1_000_000;
-            let micros = (*x % 1_000_000) as u32;
+            let secs = x.div_euclid(1_000_000);
+            let micros = x.rem_euclid(1_000_000) as u32;
             Some(Utc.timestamp_opt(secs, micros * 1000).single()?)
         }
         ScalarValue::TimestampNanosecond(Some(x), _) => {
-            let secs = *x / 1_000_000_000;
-            let nanos = (*x % 1_000_000_000) as u32;
+            let secs = x.div_euclid(1_000_000_000);
+            let nanos = x.rem_euclid(1_000_000_000) as u32;
             Some(Utc.timestamp_opt(secs, nanos).single()?)
         }
 
