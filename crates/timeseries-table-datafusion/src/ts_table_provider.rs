@@ -176,6 +176,14 @@ fn match_time_comparison(
     if !is_ts_column(col_expr, ts_col) {
         return None;
     }
+
+    if !matches!(
+        op,
+        Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq | Operator::Eq
+    ) {
+        return None;
+    }
+
     let dt = expr_to_datetime(lit_expr)?;
     Some((op, dt))
 }
