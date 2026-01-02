@@ -158,7 +158,7 @@ fn flip_op(op: Operator) -> Option<Operator> {
 enum TimePred {
     True,
     False,
-    Unknown,                                 // "could match"; we do not know
+    Unknown, // mentions ts but we can't reason about it; in AND it is neutral for pruning
     NonTime, // does NOT mention ts at all (time-independent predicate)
     Cmp { op: Operator, ts: DateTime<Utc> }, // ts_col OP literal
     And(Box<TimePred>, Box<TimePred>),
