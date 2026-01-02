@@ -140,6 +140,39 @@ fn scalar_to_utc_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
     }
 }
 
+fn expr_to_numeric(expr: &Expr) -> Option<f64> {
+    match unwrap_expr(expr) {
+        Expr::Literal(v, _) => match v {
+            ScalarValue::Int64(Some(x)) => Some(*x as f64),
+            ScalarValue::Int32(Some(x)) => Some(*x as f64),
+            ScalarValue::UInt64(Some(x)) => Some(*x as f64),
+            ScalarValue::UInt32(Some(x)) => Some(*x as f64),
+            ScalarValue::Float64(Some(x)) => Some(*x),
+            ScalarValue::Float32(Some(x)) => Some(*x as f64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn unix_seconds_to_datetime(secs: f64) -> Option<DateTime<Utc>> {
+    if !secs.is_finite() {
+        return None;
+    }
+    let whole = secs.trunc() as i64;
+    let frac = secs - (whole as f64);
+    let nanos = (frac * 1e9).round() as i64;
+    let (adj_secs, adj_nanos) = if nanos > 1_000_000_000 {
+        (whole + 1, nanos - 1_000_000_000)
+    } else if nanos <0 {
+        (whole - 1, nanos + 1_000_000_000)
+    } else {
+        (whole, nanos)
+    };
+
+    Utc.timestamp_opt(adj_secs, adj_nanos as u32).single()
+}
+
 fn parse_date_str(s: &str) -> Option<DateTime<Utc>> {
     // Accept YYYY-MM-DD as midnight UTC
     let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
@@ -157,6 +190,38 @@ fn parse_ts_literal(expr: &Expr) -> Option<DateTime<Utc>> {
                 None
             }
         }),
+
+        Expr::ScalarFunction(sf) => {
+            let name = sf.name().to_ascii_lowercase();
+            let args = &sf.args;
+
+            // Support: to_timestamp*(literal)
+            if name == "to_timestamp" || name == "to_timestamp_seconds"
+                || name == "to_timestamp_millis"
+                || name == "to_timestamp_micros"
+                || name == "to_timestamp_nanos"
+            {
+                if args.len() != 1 {
+                    return None;
+                }
+
+                // numeric seconds/millis/micros/nanos OR RFC3339 string
+                if let Some(dt) = parse_ts_literal(&args[0]) {
+                    return Some(dt);
+                }
+
+                let n = expr_to_numeric(&args[0])?;
+                return match name.as_str() {
+                    "to_timestamp" | "to_timestamp_seconds" => unix_seconds_to_datetime(n),
+                    "to_timestamp_millis" => unix_seconds_to_datetime(n / 1_000.0),
+                    "to_timestamp_micros" => unix_seconds_to_datetime(n / 1_000_000.0),
+                    "to_timestamp_nanos" => unix_seconds_to_datetime(n / 1_000_000_000.0),
+                    _ => None,
+                };
+            }
+
+            None
+        }
         
         _ => None,
     }
