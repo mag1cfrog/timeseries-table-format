@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use chrono::DateTime;
-use chrono::Duration;
+
 use chrono::TimeZone;
 use chrono::Utc;
 use datafusion::catalog::Session;
@@ -60,60 +60,6 @@ where
 /// Build a DataFusion execution error from a message.
 fn df_exec(msg: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(msg.into())
-}
-
-#[derive(Debug, Clone, Default)]
-struct TimeRange {
-    // [start, end)
-    start: Option<DateTime<Utc>>,
-    end: Option<DateTime<Utc>>,
-}
-
-impl TimeRange {
-    fn intersect(&mut self, other: &TimeRange) {
-        self.start = match (self.start, other.start) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (None, x) => x,
-            (x, None) => x,
-        };
-
-        self.end = match (self.end, other.end) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (None, x) => x,
-            (x, None) => x,
-        };
-    }
-
-    fn is_empty(&self) -> bool {
-        match (self.start, self.end) {
-            (Some(s), Some(e)) => s >= e,
-            _ => false,
-        }
-    }
-
-    /// Segment bounds are inclusive [seg_min, seg_max].
-    /// Query bounds are half-open [start, end).
-    /// Returns true if they overlap.
-    fn overlaps_segment(&self, seg_min: DateTime<Utc>, seg_max: DateTime<Utc>) -> bool {
-        if self.is_empty() {
-            return false;
-        }
-
-        // keep if ts_max >= start AND ts_min < end
-        if let Some(start) = self.start
-            && seg_max < start
-        {
-            return false;
-        }
-
-        if let Some(end) = self.end
-            && seg_min >= end
-        {
-            return false;
-        }
-
-        true
-    }
 }
 
 /// Returns true if the expression is the timestamp column reference.
@@ -179,7 +125,12 @@ fn match_time_comparison(
 
     if !matches!(
         op,
-        Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq | Operator::Eq
+        Operator::Gt
+            | Operator::GtEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Eq
+            | Operator::NotEq
     ) {
         return None;
     }
@@ -195,70 +146,257 @@ fn flip_op(op: Operator) -> Option<Operator> {
         Operator::GtEq => Some(Operator::LtEq),
         Operator::Lt => Some(Operator::Gt),
         Operator::LtEq => Some(Operator::GtEq),
+        Operator::Eq => Some(Operator::Eq),
+        Operator::NotEq => Some(Operator::NotEq),
         _ => None,
     }
 }
 
-/// Tighten a time range based on a single comparison operator.
-fn apply_constraint(range: &mut TimeRange, op: Operator, dt: DateTime<Utc>) {
-    match op {
-        Operator::GtEq => range.start = Some(range.start.map_or(dt, |s| s.max(dt))),
-        Operator::Gt => {
-            let dt2 = dt
-                .checked_add_signed(Duration::nanoseconds(1))
-                .unwrap_or(dt);
-            range.start = Some(range.start.map_or(dt2, |s| s.max(dt2)));
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TimePred {
+    True,
+    False,
+    Unknown,                                 // "could match"; we do not know
+    Cmp { op: Operator, ts: DateTime<Utc> }, // ts_col OP literal
+    And(Box<TimePred>, Box<TimePred>),
+    Or(Box<TimePred>, Box<TimePred>),
+    Not(Box<TimePred>),
+}
+
+impl TimePred {
+    fn and(a: TimePred, b: TimePred) -> TimePred {
+        use TimePred::*;
+        match (a, b) {
+            (False, _) | (_, False) => False,
+            (True, x) | (x, True) => x,
+            (Unknown, x) | (x, Unknown) => match x {
+                False => False,
+                _ => Unknown, // Can't simplify further safely
+            },
+            (x, y) => And(Box::new(x), Box::new(y)),
         }
-        Operator::Lt => {
-            range.end = Some(range.end.map_or(dt, |e| e.min(dt)));
+    }
+
+    fn or(a: TimePred, b: TimePred) -> TimePred {
+        use TimePred::*;
+        match (a, b) {
+            (True, _) | (_, True) => True,
+            (False, x) | (x, False) => x,
+            (Unknown, x) | (x, Unknown) => match x {
+                True => True,
+                _ => Unknown,
+            },
+            (x, y) => Or(Box::new(x), Box::new(y)),
         }
-        Operator::LtEq => {
-            let dt2 = dt
-                .checked_add_signed(Duration::nanoseconds(1))
-                .unwrap_or(dt);
-            range.end = Some(range.end.map_or(dt2, |e| e.min(dt2)));
+    }
+
+    fn not(x: TimePred) -> TimePred {
+        use TimePred::*;
+        match x {
+            True => False,
+            False => True,
+            Unknown => Unknown,
+            Not(inner) => *inner,
+            other => Not(Box::new(other)),
         }
-        Operator::Eq => {
-            let dt2 = dt.checked_add_signed(Duration::nanoseconds(1));
-            range.start = Some(range.start.map_or(dt, |s| s.max(dt)));
-            if let Some(dt2) = dt2 {
-                range.end = Some(range.end.map_or(dt2, |e| e.min(dt2)));
-            }
-        }
-        _ => {}
     }
 }
 
-/// Walk an expression and accumulate time bounds into `range`.
-fn collect_time_constraints(expr: &Expr, ts_col: &str, range: &mut TimeRange) -> bool {
+fn contains_ts(expr: &Expr, ts_col: &str) -> bool {
+    match expr {
+        Expr::BinaryExpr(be) => contains_ts(&be.left, ts_col) || contains_ts(&be.right, ts_col),
+        Expr::Not(e) => contains_ts(e, ts_col),
+        Expr::Alias(a) => contains_ts(&a.expr, ts_col),
+        Expr::Cast(c) => contains_ts(&c.expr, ts_col),
+        Expr::TryCast(c) => contains_ts(&c.expr, ts_col),
+        _ => is_ts_column(expr, ts_col),
+    }
+}
+
+fn scalar_to_bool(v: &ScalarValue) -> Option<bool> {
+    match v {
+        ScalarValue::Boolean(Some(b)) => Some(*b),
+        _ => None,
+    }
+}
+
+fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
     match expr {
         Expr::BinaryExpr(be) => {
             if be.op == Operator::And {
-                let a = collect_time_constraints(&be.left, ts_col, range);
-                let b = collect_time_constraints(&be.right, ts_col, range);
-                return a || b;
+                return TimePred::and(
+                    compile_time_pred(&be.left, ts_col),
+                    compile_time_pred(&be.right, ts_col),
+                );
+            }
+            if be.op == Operator::Or {
+                return TimePred::or(
+                    compile_time_pred(&be.left, ts_col),
+                    compile_time_pred(&be.right, ts_col),
+                );
             }
 
-            // Comparison: try to interpret (ts OP literal) or (literal OP ts)
-            if let Some((op, lit_dt)) = match_time_comparison(&be.left, be.op, &be.right, ts_col)
+            // Comparisons: (ts OP lit) or (lit OP ts)
+            if let Some((op, dt)) = match_time_comparison(&be.left, be.op, &be.right, ts_col)
                 .or_else(|| {
                     match_time_comparison(&be.right, be.op, &be.left, ts_col)
                         .and_then(|(op, dt)| flip_op(op).map(|op| (op, dt)))
                 })
             {
-                apply_constraint(range, op, lit_dt);
-                return true;
+                return TimePred::Cmp { op, ts: dt };
             }
 
-            false
+            // Any other binary expression: unknown w.r.t time pruning.
+            TimePred::Unknown
         }
 
-        // DataFusion may wrap comparisons in aliases/casts; handle those by drilling down.
-        Expr::Alias(a) => collect_time_constraints(&a.expr, ts_col, range),
-        Expr::Cast(c) => collect_time_constraints(&c.expr, ts_col, range),
-        Expr::TryCast(c) => collect_time_constraints(&c.expr, ts_col, range),
+        // DF Not variant
+        Expr::Not(e) => TimePred::not(compile_time_pred(e, ts_col)),
 
-        _ => false,
+        // Literal bool: foldable
+        Expr::Literal(v, _) => match scalar_to_bool(v) {
+            Some(true) => TimePred::True,
+            Some(false) => TimePred::False,
+            None => TimePred::Unknown,
+        },
+
+        // Wrappers
+        Expr::Alias(a) => compile_time_pred(&a.expr, ts_col),
+        Expr::Cast(c) => compile_time_pred(&c.expr, ts_col),
+        Expr::TryCast(c) => compile_time_pred(&c.expr, ts_col),
+
+        _ => TimePred::Unknown,
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum IntervalTruth {
+    AlwaysTrue,
+    AlwaysFalse,
+    MaybeTrue,
+}
+
+impl IntervalTruth {
+    fn and(self, rhs: IntervalTruth) -> IntervalTruth {
+        use IntervalTruth::*;
+        match (self, rhs) {
+            (AlwaysFalse, _) | (_, AlwaysFalse) => AlwaysFalse,
+            (AlwaysTrue, x) | (x, AlwaysTrue) => x,
+            _ => MaybeTrue,
+        }
+    }
+
+    fn or(self, rhs: IntervalTruth) -> IntervalTruth {
+        use IntervalTruth::*;
+        match (self, rhs) {
+            (AlwaysTrue, _) | (_, AlwaysTrue) => AlwaysTrue,
+            (AlwaysFalse, x) | (x, AlwaysFalse) => x,
+            _ => MaybeTrue,
+        }
+    }
+
+    fn not(self) -> IntervalTruth {
+        use IntervalTruth::*;
+        match self {
+            AlwaysTrue => AlwaysFalse,
+            AlwaysFalse => AlwaysTrue,
+            MaybeTrue => MaybeTrue,
+        }
+    }
+}
+
+fn eval_cmp_on_interval(
+    op: Operator,
+    dt: DateTime<Utc>,
+    seg_min: DateTime<Utc>,
+    seg_max: DateTime<Utc>,
+) -> IntervalTruth {
+    match op {
+        Operator::Lt => {
+            if seg_max < dt {
+                IntervalTruth::AlwaysTrue
+            } else if seg_min >= dt {
+                IntervalTruth::AlwaysFalse
+            } else {
+                IntervalTruth::MaybeTrue
+            }
+        }
+        Operator::LtEq => {
+            if seg_max <= dt {
+                IntervalTruth::AlwaysTrue
+            } else if seg_min > dt {
+                IntervalTruth::AlwaysFalse
+            } else {
+                IntervalTruth::MaybeTrue
+            }
+        }
+        Operator::Gt => {
+            if seg_min > dt {
+                IntervalTruth::AlwaysTrue
+            } else if seg_max <= dt {
+                IntervalTruth::AlwaysFalse
+            } else {
+                IntervalTruth::MaybeTrue
+            }
+        }
+        Operator::GtEq => {
+            if seg_min >= dt {
+                IntervalTruth::AlwaysTrue
+            } else if seg_max < dt {
+                IntervalTruth::AlwaysFalse
+            } else {
+                IntervalTruth::MaybeTrue
+            }
+        }
+        Operator::Eq => {
+            if dt < seg_min || dt > seg_max {
+                IntervalTruth::AlwaysFalse
+            } else if seg_min == seg_max && seg_min == dt {
+                IntervalTruth::AlwaysTrue
+            } else {
+                IntervalTruth::MaybeTrue
+            }
+        }
+        Operator::NotEq => {
+            // Only definitely false if segment is exactly one timestamp equal to dt.
+            if seg_min == seg_max && seg_min == dt {
+                IntervalTruth::AlwaysFalse
+            } else if dt < seg_min || dt > seg_max {
+                IntervalTruth::AlwaysTrue
+            } else {
+                IntervalTruth::MaybeTrue
+            }
+        }
+        _ => IntervalTruth::MaybeTrue,
+    }
+}
+
+/// Result of evaluating a time predicate against an entire segment time interval
+/// `[ts_min, ts_max]` (both inclusive).
+///
+/// IMPORTANT: this is **universal over the interval**, not "does the segment match".
+///
+/// - `AlwaysFalse`: the predicate cannot be true for any timestamp in the interval.
+///   This segment is safe to PRUNE (skip the file).
+/// - `MaybeTrue`: the predicate may be true for some timestamps in the interval.
+///   Must KEEP the segment.
+/// - `AlwaysTrue`: the predicate is true for all timestamps in the interval.
+///   Still KEEP the segment (we are deciding pruning only; execution still runs).
+fn eval_time_pred_on_segment(
+    pred: &TimePred,
+    seg_min: DateTime<Utc>,
+    seg_max: DateTime<Utc>,
+) -> IntervalTruth {
+    match pred {
+        TimePred::True => IntervalTruth::AlwaysTrue,
+        TimePred::False => IntervalTruth::AlwaysFalse,
+        TimePred::Unknown => IntervalTruth::MaybeTrue,
+        TimePred::Cmp { op, ts } => eval_cmp_on_interval(*op, *ts, seg_min, seg_max),
+        TimePred::And(a, b) => eval_time_pred_on_segment(a, seg_min, seg_max)
+            .and(eval_time_pred_on_segment(b, seg_min, seg_max)),
+        TimePred::Or(a, b) => eval_time_pred_on_segment(a, seg_min, seg_max)
+            .or(eval_time_pred_on_segment(b, seg_min, seg_max)),
+        TimePred::Not(x) => eval_time_pred_on_segment(x, seg_min, seg_max).not(),
     }
 }
 
@@ -346,30 +484,27 @@ impl TsTableProvider {
     ) -> Vec<&'a SegmentMeta> {
         let ts_col = self.time_column_name();
 
-        // Build an effective [start, end) range by intersecting constraints from filters.
-        let mut combined = TimeRange::default();
-        let mut saw_any_time_predicate = false;
+        let mut saw_any_ts = false;
+        let mut compiled = TimePred::True;
 
         for f in filters {
-            let mut r = TimeRange::default();
-            if collect_time_constraints(f, ts_col, &mut r) {
-                combined.intersect(&r);
-                saw_any_time_predicate = true;
+            if contains_ts(f, ts_col) {
+                saw_any_ts = true;
+                compiled = TimePred::and(compiled, compile_time_pred(f, ts_col))
             }
         }
 
-        if !saw_any_time_predicate {
+        if !saw_any_ts {
             return segments;
         }
 
-        // If range is contradictory, return no segments.
-        if combined.is_empty() {
-            return vec![];
-        }
-
+        // Prune only if definitely false for that segment.
         segments
             .into_iter()
-            .filter(|seg| combined.overlaps_segment(seg.ts_min, seg.ts_max))
+            .filter(|seg| {
+                eval_time_pred_on_segment(&compiled, seg.ts_min, seg.ts_max)
+                    != IntervalTruth::AlwaysFalse
+            })
             .collect()
     }
 }
@@ -450,5 +585,178 @@ impl TableProvider for TsTableProvider {
         // Produce the execution plan
         let plan = DataSourceExec::from_data_source(builder.build());
         Ok(plan)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("valid rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn eval_cmp_lt() {
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Lt, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Lt, lit, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-07T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Lt, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn eval_cmp_lte() {
+        let seg_min = dt("2024-01-09T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::LtEq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-07T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::LtEq, lit, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-08T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::LtEq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn eval_cmp_gt() {
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-08T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Gt, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Gt, lit, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
+
+        let seg_min = dt("2024-01-09T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Gt, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn eval_cmp_gte() {
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-07T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::GtEq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::GtEq, lit, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
+
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::GtEq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn eval_cmp_eq() {
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-08T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Eq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+
+        let seg_min = dt("2024-01-09T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Eq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-07T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::Eq, lit, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
+    }
+
+    #[test]
+    fn eval_cmp_neq() {
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-08T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::NotEq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+
+        let seg_min = dt("2024-01-09T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::NotEq, lit, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+
+        let seg_min = dt("2024-01-07T00:00:00Z");
+        let seg_max = dt("2024-01-10T00:00:00Z");
+        let lit = dt("2024-01-08T00:00:00Z");
+        assert_eq!(
+            eval_cmp_on_interval(Operator::NotEq, lit, seg_min, seg_max),
+            IntervalTruth::MaybeTrue
+        );
     }
 }
