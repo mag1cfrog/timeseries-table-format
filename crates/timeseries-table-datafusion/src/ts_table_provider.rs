@@ -386,6 +386,14 @@ fn compile_time_leaf_from_binary(
     right: &Expr,
     ts_col: &str,
 ) -> TimePred {
+    // Only support comparison ops we can reason about at compile time.
+    if !matches!(
+        op,
+        Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq | Operator::Eq | Operator::NotEq
+    ) {
+        return TimePred::Unknown;
+    }
+
     // 1) ts OP literal_timestamp (or literal-producing scalar fn)
     if expr_is_ts(left, ts_col)
         && let Some(dt) = parse_ts_literal(right)
