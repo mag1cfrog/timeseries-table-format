@@ -17,6 +17,7 @@ use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::logical_expr::Between;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::Operator;
 use datafusion::logical_expr::TableProviderFilterPushDown;
@@ -74,7 +75,7 @@ fn is_ts_column(expr: &Expr, ts_col: &str) -> bool {
 }
 
 /// Convert a scalar literal into a UTC DateTime, if supported.
-fn scalar_to_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
+fn scalar_to_utc_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
     match v {
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
             let dt = DateTime::parse_from_rfc3339(s).ok()?;
@@ -102,12 +103,12 @@ fn scalar_to_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
 }
 
 /// Extract a DateTime literal from expressions like aliases/casts.
-fn expr_to_datetime(expr: &Expr) -> Option<DateTime<Utc>> {
+fn expr_to_utc_datetime(expr: &Expr) -> Option<DateTime<Utc>> {
     match expr {
-        Expr::Literal(v, _) => scalar_to_datetime(v),
-        Expr::Alias(a) => expr_to_datetime(&a.expr),
-        Expr::Cast(c) => expr_to_datetime(&c.expr),
-        Expr::TryCast(c) => expr_to_datetime(&c.expr),
+        Expr::Literal(v, _) => scalar_to_utc_datetime(v),
+        Expr::Alias(a) => expr_to_utc_datetime(&a.expr),
+        Expr::Cast(c) => expr_to_utc_datetime(&c.expr),
+        Expr::TryCast(c) => expr_to_utc_datetime(&c.expr),
         _ => None,
     }
 }
@@ -135,7 +136,7 @@ fn match_time_comparison(
         return None;
     }
 
-    let dt = expr_to_datetime(lit_expr)?;
+    let dt = expr_to_utc_datetime(lit_expr)?;
     Some((op, dt))
 }
 
@@ -240,6 +241,39 @@ fn scalar_to_bool(v: &ScalarValue) -> Option<bool> {
     }
 }
 
+fn compile_between(b: &Between, ts_col: &str) -> TimePred {
+    if !is_ts_column(&b.expr, ts_col) {
+        return TimePred::Unknown;
+    }
+
+    let low = match expr_to_utc_datetime(&b.low) {
+        Some(dt) => dt,
+        None => return TimePred::Unknown,
+    };
+
+    let high = match expr_to_utc_datetime(&b.high) {
+        Some(dt) => dt,
+        None => return TimePred::Unknown,
+    };
+
+    let inner = TimePred::and(
+        TimePred::Cmp {
+            op: Operator::GtEq,
+            ts: low,
+        },
+        TimePred::Cmp {
+            op: Operator::LtEq,
+            ts: high,
+        },
+    );
+
+    if b.negated {
+        TimePred::not(inner)
+    } else {
+        inner
+    }
+}
+
 fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
     if !contains_ts(expr, ts_col) {
         return TimePred::NonTime;
@@ -288,6 +322,8 @@ fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
         Expr::Alias(a) => compile_time_pred(&a.expr, ts_col),
         Expr::Cast(c) => compile_time_pred(&c.expr, ts_col),
         Expr::TryCast(c) => compile_time_pred(&c.expr, ts_col),
+
+        Expr::Between(b) => compile_between(b, ts_col),
 
         _ => TimePred::Unknown,
     }
@@ -617,6 +653,7 @@ impl TableProvider for TsTableProvider {
 mod tests {
     use super::*;
     use datafusion::common::Column;
+    use datafusion::logical_expr::Between;
     use datafusion::logical_expr::BinaryExpr;
 
     fn dt(s: &str) -> DateTime<Utc> {
@@ -638,6 +675,15 @@ mod tests {
             left: Box::new(left),
             op,
             right: Box::new(right),
+        })
+    }
+
+    fn between(expr: Expr, low: Expr, high: Expr, negated: bool) -> Expr {
+        Expr::Between(Between {
+            expr: Box::new(expr),
+            negated,
+            low: Box::new(low),
+            high: Box::new(high),
         })
     }
 
@@ -844,6 +890,78 @@ mod tests {
         assert_ne!(
             eval_time_pred_on_segment(&pred, seg_min, seg_max),
             IntervalTruth::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn compile_between_prunes_outside_range() {
+        let expr = between(
+            col("ts"),
+            lit_str("2024-01-08T00:00:00Z"),
+            lit_str("2024-01-10T00:00:00Z"),
+            false,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-07T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn compile_between_keeps_inside_range() {
+        let expr = between(
+            col("ts"),
+            lit_str("2024-01-08T00:00:00Z"),
+            lit_str("2024-01-10T00:00:00Z"),
+            false,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-09T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn compile_not_between_prunes_inside_range() {
+        let expr = between(
+            col("ts"),
+            lit_str("2024-01-08T00:00:00Z"),
+            lit_str("2024-01-10T00:00:00Z"),
+            true,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-08T00:00:00Z");
+        let seg_max = dt("2024-01-09T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn compile_not_between_keeps_outside_range() {
+        let expr = between(
+            col("ts"),
+            lit_str("2024-01-08T00:00:00Z"),
+            lit_str("2024-01-10T00:00:00Z"),
+            true,
+        );
+        let pred = compile_time_pred(&expr, "ts");
+
+        let seg_min = dt("2024-01-05T00:00:00Z");
+        let seg_max = dt("2024-01-07T00:00:00Z");
+        assert_eq!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysTrue
         );
     }
 }
