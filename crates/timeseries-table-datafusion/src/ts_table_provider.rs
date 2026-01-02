@@ -210,6 +210,9 @@ impl TimePred {
     }
 }
 
+/// Returns true if the expression tree mentions the timestamp column anywhere.
+/// This is broader than `is_ts_column`, which only matches a direct reference
+/// (optionally wrapped by alias/cast).
 fn contains_ts(expr: &Expr, ts_col: &str) -> bool {
     match expr {
         Expr::BinaryExpr(be) => contains_ts(&be.left, ts_col) || contains_ts(&be.right, ts_col),
