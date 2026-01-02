@@ -49,6 +49,7 @@ struct Cache {
     state: Option<TableState>,
 }
 
+/// Wrap a generic error for DataFusion APIs.
 fn df_external<E>(e: E) -> DataFusionError
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -56,6 +57,7 @@ where
     DataFusionError::External(Box::new(e))
 }
 
+/// Build a DataFusion execution error from a message.
 fn df_exec(msg: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(msg.into())
 }
@@ -114,6 +116,7 @@ impl TimeRange {
     }
 }
 
+/// Returns true if the expression is the timestamp column reference.
 fn is_ts_column(expr: &Expr, ts_col: &str) -> bool {
     match expr {
         Expr::Column(c) => c.name == ts_col,
@@ -124,6 +127,7 @@ fn is_ts_column(expr: &Expr, ts_col: &str) -> bool {
     }
 }
 
+/// Convert a scalar literal into a UTC DateTime, if supported.
 fn scalar_to_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
     match v {
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
@@ -151,6 +155,7 @@ fn scalar_to_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
     }
 }
 
+/// Extract a DateTime literal from expressions like aliases/casts.
 fn expr_to_datetime(expr: &Expr) -> Option<DateTime<Utc>> {
     match expr {
         Expr::Literal(v, _) => scalar_to_datetime(v),
@@ -161,6 +166,7 @@ fn expr_to_datetime(expr: &Expr) -> Option<DateTime<Utc>> {
     }
 }
 
+/// If the expression is `ts OP literal`, return the operator and timestamp.
 fn match_time_comparison(
     col_expr: &Expr,
     op: Operator,
@@ -174,6 +180,7 @@ fn match_time_comparison(
     Some((op, dt))
 }
 
+/// Flip comparison direction when operands are swapped.
 fn flip_op(op: Operator) -> Option<Operator> {
     match op {
         Operator::Gt => Some(Operator::Lt),
@@ -184,6 +191,7 @@ fn flip_op(op: Operator) -> Option<Operator> {
     }
 }
 
+/// Tighten a time range based on a single comparison operator.
 fn apply_constraint(range: &mut TimeRange, op: Operator, dt: DateTime<Utc>) {
     match op {
         Operator::GtEq => range.start = Some(range.start.map_or(dt, |s| s.max(dt))),
@@ -202,10 +210,18 @@ fn apply_constraint(range: &mut TimeRange, op: Operator, dt: DateTime<Utc>) {
                 .unwrap_or(dt);
             range.end = Some(range.end.map_or(dt2, |e| e.min(dt2)));
         }
+        Operator::Eq => {
+            let dt2 = dt.checked_add_signed(Duration::nanoseconds(1));
+            range.start = Some(range.start.map_or(dt, |s| s.max(dt)));
+            if let Some(dt2) = dt2 {
+                range.end = Some(range.end.map_or(dt2, |e| e.min(dt2)));
+            }
+        }
         _ => {}
     }
 }
 
+/// Walk an expression and accumulate time bounds into `range`.
 fn collect_time_constraints(expr: &Expr, ts_col: &str, range: &mut TimeRange) -> bool {
     match expr {
         Expr::BinaryExpr(be) => {
