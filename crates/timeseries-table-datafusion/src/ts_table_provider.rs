@@ -188,14 +188,18 @@ fn apply_constraint(range: &mut TimeRange, op: Operator, dt: DateTime<Utc>) {
     match op {
         Operator::GtEq => range.start = Some(range.start.map_or(dt, |s| s.max(dt))),
         Operator::Gt => {
-            let dt2 = dt + Duration::nanoseconds(1);
+            let dt2 = dt
+                .checked_add_signed(Duration::nanoseconds(1))
+                .unwrap_or(dt);
             range.start = Some(range.start.map_or(dt2, |s| s.max(dt2)));
         }
         Operator::Lt => {
             range.end = Some(range.end.map_or(dt, |e| e.min(dt)));
         }
         Operator::LtEq => {
-            let dt2 = dt + Duration::nanoseconds(1);
+            let dt2 = dt
+                .checked_add_signed(Duration::nanoseconds(1))
+                .unwrap_or(dt);
             range.end = Some(range.end.map_or(dt2, |e| e.min(dt2)));
         }
         _ => {}
