@@ -413,6 +413,18 @@ fn compile_time_leaf_from_binary(left: &Expr, op: Operator, right: &Expr, ts_col
             return TimePred::Cmp { op, ts: dt }
         }
     }
+
+    // 2) literal_timestamp OP ts (flip)
+    if expr_is_ts(right, ts_col) {
+        if let Some(dt) = parse_ts_literal(left) {
+            if let Some(flop) = flip_op(op) {
+                return TimePred::Cmp { op: flop, ts: dt };
+            }
+        }
+    }
+
+    // If it mentions ts but we don't understand it, keep Unknown (do not prune).
+    TimePred::Unknown
 }
 
 fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
