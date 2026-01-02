@@ -5,6 +5,7 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use chrono::DateTime;
 
+use chrono::NaiveDate;
 use chrono::TimeZone;
 use chrono::Utc;
 use datafusion::catalog::Session;
@@ -139,13 +140,24 @@ fn scalar_to_utc_datetime(v: &ScalarValue) -> Option<DateTime<Utc>> {
     }
 }
 
+fn parse_date_str(s: &str) -> Option<DateTime<Utc>> {
+    // Accept YYYY-MM-DD as midnight UTC
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?))
+}
+
 /// Extract a DateTime literal from expressions like aliases/casts.
-fn expr_to_utc_datetime(expr: &Expr) -> Option<DateTime<Utc>> {
-    match expr {
-        Expr::Literal(v, _) => scalar_to_utc_datetime(v),
-        Expr::Alias(a) => expr_to_utc_datetime(&a.expr),
-        Expr::Cast(c) => expr_to_utc_datetime(&c.expr),
-        Expr::TryCast(c) => expr_to_utc_datetime(&c.expr),
+fn parse_ts_literal(expr: &Expr) -> Option<DateTime<Utc>> {
+    match unwrap_expr(expr) {
+        Expr::Literal(v, _) => scalar_to_utc_datetime(v).or_else(|| {
+            // allow date-only strings as midnight UTC
+            if let ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) = v {
+                parse_date_str(s)
+            } else {
+                None
+            }
+        }),
+        
         _ => None,
     }
 }
@@ -173,7 +185,7 @@ fn match_time_comparison(
         return None;
     }
 
-    let dt = expr_to_utc_datetime(lit_expr)?;
+    let dt = parse_ts_literal(lit_expr)?;
     Some((op, dt))
 }
 
@@ -258,12 +270,12 @@ fn compile_between(b: &Between, ts_col: &str) -> TimePred {
         return TimePred::Unknown;
     }
 
-    let low = match expr_to_utc_datetime(&b.low) {
+    let low = match parse_ts_literal(&b.low) {
         Some(dt) => dt,
         None => return TimePred::Unknown,
     };
 
-    let high = match expr_to_utc_datetime(&b.high) {
+    let high = match parse_ts_literal(&b.high) {
         Some(dt) => dt,
         None => return TimePred::Unknown,
     };
@@ -294,7 +306,7 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
     // Only handle literal datetime values. Otherwise: Unknown(safe)
     let mut dts = Vec::with_capacity(il.list.len());
     for e in &il.list {
-        match expr_to_utc_datetime(e) {
+        match parse_ts_literal(e) {
             Some(dt) => dts.push(dt),
             None => return TimePred::Unknown,
         }
@@ -329,6 +341,15 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
     if il.negated { TimePred::not(p) } else { p }
 }
 
+fn compile_time_leaf_from_binary(left: &Expr, op: Operator, right: &Expr, ts_col: &str) -> TimePred {
+    // 1) ts OP literal_timestamp (or literal-producing scalar fn)
+    if expr_is_ts(left, ts_col) {
+        if let Some(dt) = parse_ts_literal(right) {
+            return TimePred::Cmp { op, ts: dt }
+        }
+    }
+}
+
 fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
     if !expr_mentions_ts(expr, ts_col) {
         return TimePred::NonTime;
@@ -348,6 +369,9 @@ fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
                     compile_time_pred(&be.right, ts_col),
                 );
             }
+
+            // Leaf (comparisons, eq/ne, etc)
+            compile_time_leaf_from_binary()
 
             // Comparisons: (ts OP lit) or (lit OP ts)
             if let Some((op, dt)) = match_time_comparison(&be.left, be.op, &be.right, ts_col)
