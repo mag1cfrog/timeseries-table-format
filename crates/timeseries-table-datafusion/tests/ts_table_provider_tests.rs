@@ -865,6 +865,72 @@ async fn prunes_files_on_time_filter_explain() -> TestResult {
 }
 
 #[tokio::test]
+async fn prunes_files_on_time_eq_filter_explain() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "EXPLAIN SELECT * FROM t WHERE ts = '1970-01-01T00:03:00Z'",
+    )
+    .await?;
+    let plan_text = explain_plan_text(&batches)?;
+    let pretty = pretty_batches(&batches)?;
+
+    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_gt_filter_explain() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "EXPLAIN SELECT * FROM t WHERE ts > '1970-01-01T00:03:00Z'",
+    )
+    .await?;
+    let plan_text = explain_plan_text(&batches)?;
+    let pretty = pretty_batches(&batches)?;
+
+    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_lte_filter_explain() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "EXPLAIN SELECT * FROM t WHERE ts <= '1970-01-01T00:01:00Z'",
+    )
+    .await?;
+    let plan_text = explain_plan_text(&batches)?;
+    let pretty = pretty_batches(&batches)?;
+
+    assert_plan_contains!(plan_text, pretty, "seg-a.parquet");
+    assert_plan_not_contains!(plan_text, pretty, "seg-b.parquet");
+    Ok(())
+}
+
+#[tokio::test]
 async fn does_not_prune_on_unrecognized_predicate_explain() -> TestResult {
     let tmp = TempDir::new()?;
     let table = create_two_segment_table(&tmp).await?;
