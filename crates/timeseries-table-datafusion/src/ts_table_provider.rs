@@ -64,13 +64,49 @@ fn df_exec(msg: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(msg.into())
 }
 
-/// Returns true if the expression is the timestamp column reference.
-fn is_ts_column(expr: &Expr, ts_col: &str) -> bool {
+fn unwrap_expr(expr: &Expr) -> &Expr {
     match expr {
+        Expr::Alias(a) => unwrap_expr(&a.expr),
+        Expr::Cast(c) => unwrap_expr(&c.expr),
+        Expr::TryCast(c) => unwrap_expr(&c.expr),
+        other => other,
+    }
+}
+
+/// Returns true if the expression is the timestamp column reference.
+fn expr_is_ts(expr: &Expr, ts_col: &str) -> bool {
+    match unwrap_expr(expr) {
         Expr::Column(c) => c.name == ts_col,
-        Expr::Alias(a) => is_ts_column(&a.expr, ts_col),
-        Expr::Cast(c) => is_ts_column(&c.expr, ts_col),
-        Expr::TryCast(c) => is_ts_column(&c.expr, ts_col),
+        _ => false,
+    }
+}
+
+/// Returns true if the expression tree mentions the timestamp column anywhere.
+/// This is broader than `expr_is_ts`, which only matches a direct reference
+/// (optionally wrapped by alias/cast).
+fn expr_mentions_ts(expr: &Expr, ts_col: &str) -> bool {
+    let e = unwrap_expr(expr);
+
+    match e {
+        Expr::Column(c) => c.name == ts_col,
+
+        Expr::BinaryExpr(be) => {
+            expr_mentions_ts(&be.left, ts_col) || expr_mentions_ts(&be.right, ts_col)
+        }
+
+        Expr::Not(e) => expr_mentions_ts(e, ts_col),
+
+        Expr::Between(b) => {
+            expr_mentions_ts(&b.expr, ts_col)
+                || expr_mentions_ts(&b.low, ts_col)
+                || expr_mentions_ts(&b.high, ts_col)
+        }
+
+        Expr::InList(il) => {
+            expr_mentions_ts(&il.expr, ts_col)
+                || il.list.iter().any(|e| expr_mentions_ts(e, ts_col))
+        }
+
         _ => false,
     }
 }
@@ -121,7 +157,7 @@ fn match_time_comparison(
     lit_expr: &Expr,
     ts_col: &str,
 ) -> Option<(Operator, DateTime<Utc>)> {
-    if !is_ts_column(col_expr, ts_col) {
+    if !expr_is_ts(col_expr, ts_col) {
         return None;
     }
 
@@ -210,33 +246,6 @@ impl TimePred {
     }
 }
 
-/// Returns true if the expression tree mentions the timestamp column anywhere.
-/// This is broader than `is_ts_column`, which only matches a direct reference
-/// (optionally wrapped by alias/cast).
-fn contains_ts(expr: &Expr, ts_col: &str) -> bool {
-    match expr {
-        Expr::Column(c) => c.name == ts_col,
-        Expr::BinaryExpr(be) => contains_ts(&be.left, ts_col) || contains_ts(&be.right, ts_col),
-        Expr::Not(e) => contains_ts(e, ts_col),
-
-        Expr::Between(b) => {
-            contains_ts(&b.expr, ts_col)
-                || contains_ts(&b.low, ts_col)
-                || contains_ts(&b.high, ts_col)
-        }
-
-        Expr::InList(il) => {
-            contains_ts(&il.expr, ts_col) || il.list.iter().any(|e| contains_ts(e, ts_col))
-        }
-
-        Expr::Alias(a) => contains_ts(&a.expr, ts_col),
-        Expr::Cast(c) => contains_ts(&c.expr, ts_col),
-        Expr::TryCast(c) => contains_ts(&c.expr, ts_col),
-
-        _ => false,
-    }
-}
-
 fn scalar_to_bool(v: &ScalarValue) -> Option<bool> {
     match v {
         ScalarValue::Boolean(Some(b)) => Some(*b),
@@ -245,7 +254,7 @@ fn scalar_to_bool(v: &ScalarValue) -> Option<bool> {
 }
 
 fn compile_between(b: &Between, ts_col: &str) -> TimePred {
-    if !is_ts_column(&b.expr, ts_col) {
+    if !expr_is_ts(&b.expr, ts_col) {
         return TimePred::Unknown;
     }
 
@@ -278,7 +287,7 @@ fn compile_between(b: &Between, ts_col: &str) -> TimePred {
 }
 
 fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
-    if !is_ts_column(&il.expr, ts_col) {
+    if !expr_is_ts(&il.expr, ts_col) {
         return TimePred::Unknown;
     }
 
@@ -321,7 +330,7 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
 }
 
 fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
-    if !contains_ts(expr, ts_col) {
+    if !expr_mentions_ts(expr, ts_col) {
         return TimePred::NonTime;
     }
 
@@ -597,7 +606,7 @@ impl TsTableProvider {
         let mut compiled = TimePred::True;
 
         for f in filters {
-            if contains_ts(f, ts_col) {
+            if expr_mentions_ts(f, ts_col) {
                 saw_any_ts = true;
                 compiled = TimePred::and(compiled, compile_time_pred(f, ts_col))
             }
