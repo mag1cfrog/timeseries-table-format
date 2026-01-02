@@ -164,7 +164,7 @@ fn unix_seconds_to_datetime(secs: f64) -> Option<DateTime<Utc>> {
     let nanos = (frac * 1e9).round() as i64;
     let (adj_secs, adj_nanos) = if nanos > 1_000_000_000 {
         (whole + 1, nanos - 1_000_000_000)
-    } else if nanos <0 {
+    } else if nanos < 0 {
         (whole - 1, nanos + 1_000_000_000)
     } else {
         (whole, nanos)
@@ -196,7 +196,8 @@ fn parse_ts_literal(expr: &Expr) -> Option<DateTime<Utc>> {
             let args = &sf.args;
 
             // Support: to_timestamp*(literal)
-            if name == "to_timestamp" || name == "to_timestamp_seconds"
+            if name == "to_timestamp"
+                || name == "to_timestamp_seconds"
                 || name == "to_timestamp_millis"
                 || name == "to_timestamp_micros"
                 || name == "to_timestamp_nanos"
@@ -222,7 +223,7 @@ fn parse_ts_literal(expr: &Expr) -> Option<DateTime<Utc>> {
 
             None
         }
-        
+
         _ => None,
     }
 }
@@ -406,21 +407,25 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
     if il.negated { TimePred::not(p) } else { p }
 }
 
-fn compile_time_leaf_from_binary(left: &Expr, op: Operator, right: &Expr, ts_col: &str) -> TimePred {
+fn compile_time_leaf_from_binary(
+    left: &Expr,
+    op: Operator,
+    right: &Expr,
+    ts_col: &str,
+) -> TimePred {
     // 1) ts OP literal_timestamp (or literal-producing scalar fn)
-    if expr_is_ts(left, ts_col) {
-        if let Some(dt) = parse_ts_literal(right) {
-            return TimePred::Cmp { op, ts: dt }
-        }
+    if expr_is_ts(left, ts_col)
+        && let Some(dt) = parse_ts_literal(right)
+    {
+        return TimePred::Cmp { op, ts: dt };
     }
 
     // 2) literal_timestamp OP ts (flip)
-    if expr_is_ts(right, ts_col) {
-        if let Some(dt) = parse_ts_literal(left) {
-            if let Some(flop) = flip_op(op) {
-                return TimePred::Cmp { op: flop, ts: dt };
-            }
-        }
+    if expr_is_ts(right, ts_col)
+        && let Some(dt) = parse_ts_literal(left)
+        && let Some(flop) = flip_op(op)
+    {
+        return TimePred::Cmp { op: flop, ts: dt };
     }
 
     // If it mentions ts but we don't understand it, keep Unknown (do not prune).
@@ -448,20 +453,7 @@ fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
             }
 
             // Leaf (comparisons, eq/ne, etc)
-            compile_time_leaf_from_binary()
-
-            // Comparisons: (ts OP lit) or (lit OP ts)
-            if let Some((op, dt)) = match_time_comparison(&be.left, be.op, &be.right, ts_col)
-                .or_else(|| {
-                    match_time_comparison(&be.right, be.op, &be.left, ts_col)
-                        .and_then(|(op, dt)| flip_op(op).map(|op| (op, dt)))
-                })
-            {
-                return TimePred::Cmp { op, ts: dt };
-            }
-
-            // Any other binary expression: unknown w.r.t time pruning.
-            TimePred::Unknown
+            compile_time_leaf_from_binary(&be.left, be.op, &be.right, ts_col)
         }
 
         // DF Not variant
