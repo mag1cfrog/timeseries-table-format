@@ -108,6 +108,8 @@ fn expr_mentions_ts(expr: &Expr, ts_col: &str) -> bool {
                 || il.list.iter().any(|e| expr_mentions_ts(e, ts_col))
         }
 
+        Expr::ScalarFunction(sf) => sf.args.iter().any(|x| expr_mentions_ts(x, ts_col)),
+
         _ => false,
     }
 }
@@ -389,7 +391,12 @@ fn compile_time_leaf_from_binary(
     // Only support comparison ops we can reason about at compile time.
     if !matches!(
         op,
-        Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq | Operator::Eq | Operator::NotEq
+        Operator::Gt
+            | Operator::GtEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Eq
+            | Operator::NotEq
     ) {
         return TimePred::Unknown;
     }
