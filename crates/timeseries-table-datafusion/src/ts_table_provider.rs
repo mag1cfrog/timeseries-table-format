@@ -156,8 +156,8 @@ fn flip_op(op: Operator) -> Option<Operator> {
 enum TimePred {
     True,
     False,
-    Unknown, // "could match"; we do not know
-
+    Unknown,                                 // "could match"; we do not know
+    NonTime, // does NOT mention ts at all (time-independent predicate)
     Cmp { op: Operator, ts: DateTime<Utc> }, // ts_col OP literal
     And(Box<TimePred>, Box<TimePred>),
     Or(Box<TimePred>, Box<TimePred>),
@@ -170,6 +170,9 @@ impl TimePred {
         match (a, b) {
             (False, _) | (_, False) => False,
             (True, x) | (x, True) => x,
+
+            (NonTime, x) | (x, NonTime) => x,
+
             (Unknown, x) | (x, Unknown) => match x {
                 False => False,
                 _ => Unknown, // Can't simplify further safely
@@ -183,6 +186,9 @@ impl TimePred {
         match (a, b) {
             (True, _) | (_, True) => True,
             (False, x) | (x, False) => x,
+
+            (NonTime, _) | (_, NonTime) => Unknown,
+
             (Unknown, x) | (x, Unknown) => match x {
                 True => True,
                 _ => Unknown,
@@ -196,6 +202,7 @@ impl TimePred {
         match x {
             True => False,
             False => True,
+            NonTime => Unknown,
             Unknown => Unknown,
             Not(inner) => *inner,
             other => Not(Box::new(other)),
@@ -222,6 +229,10 @@ fn scalar_to_bool(v: &ScalarValue) -> Option<bool> {
 }
 
 fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
+    if !contains_ts(expr, ts_col) {
+        return TimePred::NonTime;
+    }
+
     match expr {
         Expr::BinaryExpr(be) => {
             if be.op == Operator::And {
@@ -392,6 +403,7 @@ fn eval_time_pred_on_segment(
         TimePred::True => IntervalTruth::AlwaysTrue,
         TimePred::False => IntervalTruth::AlwaysFalse,
         TimePred::Unknown => IntervalTruth::MaybeTrue,
+        TimePred::NonTime => IntervalTruth::MaybeTrue,
         TimePred::Cmp { op, ts } => eval_cmp_on_interval(*op, *ts, seg_min, seg_max),
         TimePred::And(a, b) => eval_time_pred_on_segment(a, seg_min, seg_max)
             .and(eval_time_pred_on_segment(b, seg_min, seg_max)),
