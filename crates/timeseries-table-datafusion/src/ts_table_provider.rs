@@ -1178,4 +1178,11 @@ mod tests {
             IntervalTruth::AlwaysFalse
         );
     }
+
+    #[test]
+    fn compile_time_leaf_rejects_unsupported_op_with_ts_literal() {
+        let expr = binary(col("ts"), Operator::Plus, lit_str("2024-01-08T00:00:00Z"));
+        let pred = compile_time_pred(&expr, "ts");
+        assert!(matches!(pred, TimePred::Unknown));
+    }
 }
