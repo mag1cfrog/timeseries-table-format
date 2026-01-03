@@ -144,7 +144,7 @@ enum TruncUnit {
 enum TsTransform {
     ToUnixtime,
     ToDate,
-    DateTruc { unit: TruncUnit },
+    DateTrunc { unit: TruncUnit },
 }
 
 // --------------------------- helpers -----------------------
@@ -480,7 +480,7 @@ fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
                 let unit = scalar_to_string_literal(&sf.args[0])?;
                 let unit = parse_trunc_unit(&unit)?;
                 if expr_is_ts(&sf.args[1], ts_col) {
-                    return Some(TsTransform::DateTruc { unit });
+                    return Some(TsTransform::DateTrunc { unit });
                 }
             }
         }
@@ -823,7 +823,7 @@ fn compile_transform_cmp(
             })
         }
 
-        TsTransform::DateTruc { unit } => {
+        TsTransform::DateTrunc { unit } => {
             let dt = parse_ts_literal(other)?;
             let (floor_utc, aligned) = floor_to_unit_tz(dt, unit, tz)?;
             let use_tz_bounds = matches!(tz, Some(ParsedTz::Olson(_)))
