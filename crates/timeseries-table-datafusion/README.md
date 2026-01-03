@@ -68,6 +68,17 @@ We also recognize `to_unixtime(ts)` when it is compared to a **numeric** literal
 
 This uses seconds since epoch. String literals are not supported here.
 
+### `to_date(ts)`
+We recognize `to_date(ts)` when it is compared to a **date literal**:
+
+- `to_date(ts) = '2024-01-01'`
+- `to_date(ts) < '2024-01-01'`
+- `to_date(ts) >= '2024-01-01'`
+
+The date literal should be `YYYY-MM-DD`. The comparison is expanded into a
+timestamp range for that whole day. If the timestamp column has a timezone,
+day boundaries are computed in that timezone.
+
 ## What does NOT prune (yet)
 
 These are intentionally treated as “unknown” to avoid incorrect pruning:
@@ -77,6 +88,7 @@ These are intentionally treated as “unknown” to avoid incorrect pruning:
 - `to_timestamp(...) + ts < ...`
 - `interval - ts` (non-commutative, ambiguous for our matcher)
 - `to_unixtime(ts) < '1704672000'` (string literal)
+- `to_date(ts) = 'not-a-date'` (invalid date literal)
 
 Queries still run correctly; they just won’t be pruned.
 
