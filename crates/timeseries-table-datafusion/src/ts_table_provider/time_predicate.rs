@@ -357,7 +357,7 @@ fn interval_from_scalar(v: &ScalarValue) -> Option<UnifiedInterval> {
 // Flatten an expression of +/- into a net interval applied to ts.
 // Supports: ts, ts + iv, iv + ts, ts + iv + iv, iv + ts - iv, etc.
 fn extract_ts_with_interval(expr: &Expr, ts_col: &str) -> Option<UnifiedInterval> {
-    // Return net interval to be ADDED to ts, puls whether subtree contains ts.
+    // Return net interval to be ADDED to ts, plus whether subtree contains ts.
     fn walk(expr: &Expr, ts_col: &str) -> Option<(UnifiedInterval, bool)> {
         if expr_is_ts(expr, ts_col) {
             return Some((UnifiedInterval::zero(), true));
@@ -732,7 +732,7 @@ fn floor_to_unit_tz(
             let flo_local = match truncated.and_local_timezone(*tz) {
                 LocalResult::Single(x) => Some(x),
                 LocalResult::Ambiguous(a, b) => {
-                    // match DF logic: choose the one wiht same offset as original
+                    // match DF logic: choose the one with same offset as original
                     let orig = dt_utc.with_timezone(tz);
                     if a.offset().fix() == orig.offset().fix() {
                         Some(a)
@@ -855,7 +855,7 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
         };
     }
 
-    // Build OR chian of Eq comparisons
+    // Build OR chain of Eq comparisons
     let mut p = TimePred::Cmp {
         op: Operator::Eq,
         ts: dts[0],
