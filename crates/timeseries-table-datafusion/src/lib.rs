@@ -5,3 +5,5 @@
 
 mod ts_table_provider;
 pub use ts_table_provider::TsTableProvider;
+/// Test-only helpers for integration tests that need internal predicate logic.
+pub mod test_utils;
