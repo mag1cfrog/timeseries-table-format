@@ -1,18 +1,40 @@
+#[cfg(test)]
+mod tests;
+mod time_predicate;
+use arrow::datatypes::DataType;
+
+use chrono::FixedOffset;
+
+use chrono_tz::Tz;
+pub(crate) use time_predicate::*;
+
+mod pruning;
+pub(crate) use pruning::*;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+
 use datafusion::catalog::Session;
 use datafusion::catalog::TableProvider;
-use datafusion::catalog::memory::DataSourceExec;
+use datafusion::common::DFSchema;
+
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::FileScanConfigBuilder;
 use datafusion::datasource::physical_plan::ParquetSource;
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::object_store::ObjectStoreUrl;
+
 use datafusion::logical_expr::Expr;
+
+use datafusion::logical_expr::TableProviderFilterPushDown;
+
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::lit;
 use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::time_series_table::TimeSeriesTable;
 use timeseries_table_core::transaction_log::SegmentMeta;
@@ -39,6 +61,27 @@ struct Cache {
     state: Option<TableState>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ParsedTz {
+    Utc,
+    Fixed(FixedOffset),
+    Olson(Tz),
+}
+
+fn parse_tz(tz: &str) -> Option<ParsedTz> {
+    if tz.eq_ignore_ascii_case("utc") {
+        return Some(ParsedTz::Utc);
+    }
+    if let Ok(offset) = tz.parse::<FixedOffset>() {
+        return Some(ParsedTz::Fixed(offset));
+    }
+    if let Ok(tz) = tz.parse::<Tz>() {
+        return Some(ParsedTz::Olson(tz));
+    }
+    None
+}
+
+/// Wrap a generic error for DataFusion APIs.
 fn df_external<E>(e: E) -> DataFusionError
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -46,6 +89,7 @@ where
     DataFusionError::External(Box::new(e))
 }
 
+/// Build a DataFusion execution error from a message.
 fn df_exec(msg: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(msg.into())
 }
@@ -121,6 +165,53 @@ impl TsTableProvider {
             }
         }
     }
+
+    /// Return the time column name from the table's index spec.
+    fn time_column_name(&self) -> &str {
+        self.table.index_spec().timestamp_column.as_str()
+    }
+
+    fn ts_timezone(&self) -> Option<String> {
+        let ts_col = self.time_column_name();
+        let field = self.schema.field_with_name(ts_col).ok()?;
+        match field.data_type() {
+            DataType::Timestamp(_, Some(tz)) => Some(tz.to_string()),
+            _ => None,
+        }
+    }
+
+    fn prune_segments_by_time<'a>(
+        &self,
+        segments: Vec<&'a SegmentMeta>,
+        filters: &[Expr],
+    ) -> Vec<&'a SegmentMeta> {
+        let ts_col = self.time_column_name();
+        let tz_opt = self.ts_timezone();
+        let parsed_tz = tz_opt.as_deref().and_then(parse_tz);
+
+        let mut saw_any_ts = false;
+        let mut compiled = TimePred::True;
+
+        for f in filters {
+            if expr_mentions_ts(f, ts_col) {
+                saw_any_ts = true;
+                compiled = TimePred::and(compiled, compile_time_pred(f, ts_col, parsed_tz.as_ref()))
+            }
+        }
+
+        if !saw_any_ts {
+            return segments;
+        }
+
+        // Prune only if definitely false for that segment.
+        segments
+            .into_iter()
+            .filter(|seg| {
+                eval_time_pred_on_segment(&compiled, seg.ts_min, seg.ts_max)
+                    != IntervalTruth::AlwaysFalse
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -137,11 +228,20 @@ impl TableProvider for TsTableProvider {
         datafusion::datasource::TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DFResult<Vec<TableProviderFilterPushDown>> {
+        // Inexact: we may prune files, and Parquet may prune row groups/pages,
+        // but DataFusion will still apply the filter for correctness.
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+    }
+
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr], // will be empty until implement supports_filters_pushdown
+        filters: &[Expr], // may include all WHERE predicates
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         // 1) Get a snapshot (TableState) from core table
@@ -149,8 +249,15 @@ impl TableProvider for TsTableProvider {
 
         let segments = snapshot.segments_sorted_by_time();
 
+        let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
+        let predicate = conjunction(filters.to_vec());
+        let predicate = predicate
+            .map(|p| state.create_physical_expr(p, &df_schema))
+            .transpose()?
+            .unwrap_or_else(|| lit(true));
+
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
-        let parquet_source = Arc::new(ParquetSource::default());
+        let parquet_source = Arc::new(ParquetSource::default().with_predicate(predicate));
 
         let mut builder = FileScanConfigBuilder::new(
             self.object_store_url.clone(),
@@ -160,7 +267,8 @@ impl TableProvider for TsTableProvider {
         .with_projection_indices(projection.cloned())
         .with_limit(limit);
 
-        for seg in segments {
+        let selected = self.prune_segments_by_time(segments, filters);
+        for seg in selected {
             let abs = self.segment_abs_path(seg)?;
             let abs = tokio::fs::canonicalize(&abs).await.map_err(|e| {
                 df_exec(format!(

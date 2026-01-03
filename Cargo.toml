@@ -16,6 +16,9 @@ arrow-array = "57.1.0"
 arrow-select = "57.1.0"
 parquet = "57.1.0"
 
+chrono = { version = "0.4.42", features = ["serde"] }
+chrono-tz = "0.10.4"
+
 datafusion = "51.0.0"
 
 tokio = { version = "1.48.0" }

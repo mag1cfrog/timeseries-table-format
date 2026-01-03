@@ -5,15 +5,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float64Builder, Int64Array, StringBuilder, TimestampMillisecondArray,
+    Array, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
     TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
 use datafusion::catalog::TableProvider;
-use datafusion::prelude::SessionContext;
+use datafusion::datasource::MemTable;
+use datafusion::datasource::source::DataSourceExec;
+use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::logical_expr::{Expr, Operator};
+use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
+use datafusion::physical_plan::{ExecutionPlan, collect};
+use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use parquet::arrow::ArrowWriter;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::time_series_table::TimeSeriesTable;
@@ -25,6 +32,10 @@ use timeseries_table_core::transaction_log::{
     TransactionLogStore,
 };
 use timeseries_table_datafusion::TsTableProvider;
+use timeseries_table_datafusion::test_utils::{
+    CompiledIntervalTruth, CompiledTimePred, TestInterval, add_interval_for_tests,
+    compile_time_pred_for_tests, eval_time_pred_on_segment_for_tests_utc,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -155,7 +166,33 @@ fn minutes_to_millis(minutes: i64) -> i64 {
     minutes * 60_000
 }
 
+fn ts_millis(s: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .expect("valid rfc3339")
+        .with_timezone(&Utc)
+        .timestamp_millis()
+}
+
 fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestResult {
+    write_parquet_with_props(path, rows, price_nullable, None)
+}
+
+fn write_parquet_with_props(
+    path: &Path,
+    rows: &[TestRow],
+    price_nullable: bool,
+    props: Option<WriterProperties>,
+) -> TestResult {
+    write_parquet_with_props_and_tz(path, rows, price_nullable, props, None)
+}
+
+fn write_parquet_with_props_and_tz(
+    path: &Path,
+    rows: &[TestRow],
+    price_nullable: bool,
+    props: Option<WriterProperties>,
+    tz: Option<&str>,
+) -> TestResult {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -163,7 +200,7 @@ fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestRes
     let schema = Schema::new(vec![
         Field::new(
             "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Millisecond, tz.map(|tz| tz.into())),
             false,
         ),
         Field::new("symbol", DataType::Utf8, false),
@@ -186,21 +223,259 @@ fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestRes
         }
     }
 
+    let mut ts_array = ts_builder.finish();
+    if let Some(tz) = tz {
+        ts_array = ts_array.with_timezone_opt(Some(Arc::from(tz)));
+    }
+
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
         vec![
-            Arc::new(ts_builder.finish()),
+            Arc::new(ts_array),
             Arc::new(sym_builder.finish()),
             Arc::new(price_builder.finish()),
         ],
     )?;
 
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), None)?;
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), props)?;
     writer.write(&batch)?;
     writer.close()?;
 
     Ok(())
+}
+
+fn unix_seconds_to_datetime_test(secs: f64) -> Option<chrono::DateTime<Utc>> {
+    if !secs.is_finite() {
+        return None;
+    }
+    let whole = secs.trunc() as i64;
+    let frac = secs - (whole as f64);
+    let nanos = (frac * 1e9).round() as i64;
+    let (adj_secs, adj_nanos) = if nanos > 1_000_000_000 {
+        (whole + 1, nanos - 1_000_000_000)
+    } else if nanos < 0 {
+        (whole - 1, nanos + 1_000_000_000)
+    } else {
+        (whole, nanos)
+    };
+
+    Utc.timestamp_opt(adj_secs, adj_nanos as u32).single()
+}
+
+fn find_filter_expr(plan: &datafusion::logical_expr::LogicalPlan) -> Option<Expr> {
+    if let datafusion::logical_expr::LogicalPlan::Filter(filter) = plan {
+        return Some(filter.predicate.clone());
+    }
+    for input in plan.inputs() {
+        if let Some(expr) = find_filter_expr(input) {
+            return Some(expr);
+        }
+    }
+    None
+}
+
+async fn sql_predicate(sql: &str) -> Expr {
+    let ctx = SessionContext::new();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            true,
+        ),
+        Field::new("symbol", DataType::Utf8, true),
+        Field::new("other", DataType::Int64, true),
+    ]));
+    let table = MemTable::try_new(schema, vec![vec![]]).expect("mem table");
+    ctx.register_table("t", Arc::new(table))
+        .expect("register table");
+    let df = ctx.sql(sql).await.expect("sql plan");
+    let plan = df.into_unoptimized_plan();
+    find_filter_expr(&plan).expect("filter predicate")
+}
+
+fn assert_cmp_dt(expr: Expr, expected_op: Operator, expected_ts: chrono::DateTime<Utc>) {
+    match compile_time_pred_for_tests(&expr, "ts") {
+        CompiledTimePred::Cmp { op, ts } => {
+            assert_eq!(op, expected_op);
+            assert_eq!(ts, expected_ts);
+        }
+        other => panic!("expected Cmp, got {other:?}"),
+    }
+}
+
+fn assert_cmp(expr: Expr, expected_op: Operator, expected_ts: &str) {
+    let ts = chrono::DateTime::parse_from_rfc3339(expected_ts)
+        .expect("valid rfc3339")
+        .with_timezone(&Utc);
+    assert_cmp_dt(expr, expected_op, ts);
+}
+
+fn assert_unknown(expr: Expr) {
+    assert!(matches!(
+        compile_time_pred_for_tests(&expr, "ts"),
+        CompiledTimePred::Unknown | CompiledTimePred::Other
+    ));
+}
+
+#[tokio::test]
+async fn sql_ts_gte_to_timestamp_seconds_numeric() {
+    let expr = sql_predicate("select * from t where ts >= to_timestamp(1704672000)").await;
+    assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn sql_ts_lt_to_timestamp_millis_numeric() {
+    let expr = sql_predicate("select * from t where ts < to_timestamp_millis(1704672000123)").await;
+    let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+    assert_cmp_dt(expr, Operator::Lt, expected);
+}
+
+#[tokio::test]
+async fn sql_ts_lte_to_timestamp_string() {
+    let expr =
+        sql_predicate("select * from t where ts <= to_timestamp('2024-01-08T00:00:00Z')").await;
+    assert_cmp(expr, Operator::LtEq, "2024-01-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn sql_ts_plus_interval_lt_to_timestamp_seconds() {
+    let expr =
+        sql_predicate("select * from t where ts + interval '1 day' < to_timestamp(1704672000)")
+            .await;
+    let expected = add_interval_for_tests(
+        chrono::DateTime::parse_from_rfc3339("2024-01-08T00:00:00Z")
+            .expect("valid rfc3339")
+            .with_timezone(&Utc),
+        TestInterval {
+            months: 0,
+            days: 1,
+            nanos: 0,
+        },
+        -1,
+    )
+    .expect("shifted");
+    assert_cmp_dt(expr, Operator::Lt, expected);
+}
+
+#[tokio::test]
+async fn sql_ts_minus_interval_lte_to_timestamp_micros() {
+    let expr = sql_predicate(
+        "select * from t where ts - interval '2 hours' <= to_timestamp_micros(1704672000123456)",
+    )
+    .await;
+    let base = unix_seconds_to_datetime_test(1_704_672_000_123_456f64 / 1_000_000.0).expect("dt");
+    let expected = add_interval_for_tests(
+        base,
+        TestInterval {
+            months: 0,
+            days: 0,
+            nanos: -2 * 3_600_000_000_000,
+        },
+        -1,
+    )
+    .expect("shifted");
+    assert_cmp_dt(expr, Operator::LtEq, expected);
+}
+
+#[tokio::test]
+async fn sql_date_trunc_minute_eq_literal() {
+    let expr =
+        sql_predicate("select * from t where date_trunc('minute', ts) = '1970-01-01T00:03:00Z'")
+            .await;
+    assert_pruning(expr, true, false);
+}
+
+#[tokio::test]
+async fn sql_date_bin_minute_eq_literal() {
+    let expr = sql_predicate(
+        "select * from t where date_bin(interval '1 minute', ts) = '1970-01-01T00:03:00Z'",
+    )
+    .await;
+    assert_pruning(expr, true, false);
+}
+
+#[tokio::test]
+async fn sql_literal_to_timestamp_millis_gt_ts() {
+    let expr = sql_predicate("select * from t where to_timestamp_millis(1704672000123) > ts").await;
+    let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+    assert_cmp_dt(expr, Operator::Lt, expected);
+}
+
+#[tokio::test]
+async fn sql_literal_to_timestamp_lte_ts_plus_interval() {
+    let expr =
+        sql_predicate("select * from t where to_timestamp(1704672000) <= ts + interval '1 hour'")
+            .await;
+    let expected = add_interval_for_tests(
+        chrono::DateTime::parse_from_rfc3339("2024-01-08T00:00:00Z")
+            .expect("valid rfc3339")
+            .with_timezone(&Utc),
+        TestInterval {
+            months: 0,
+            days: 0,
+            nanos: 3_600_000_000_000,
+        },
+        -1,
+    )
+    .expect("shifted");
+    assert_cmp_dt(expr, Operator::GtEq, expected);
+}
+
+#[tokio::test]
+async fn sql_ts_plus_numeric_is_unknown() {
+    let expr = sql_predicate("select * from t where ts + 1 < to_timestamp(1704672000)").await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_ts_plus_to_timestamp_is_unknown() {
+    let expr = sql_predicate("select * from t where ts + to_timestamp(1704672000) < ts").await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_to_timestamp_minus_ts_is_unknown() {
+    let expr = sql_predicate(
+        "select * from t where to_timestamp(1704672000) - ts < to_timestamp(1704672000)",
+    )
+    .await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_cast_to_timestamp_is_supported() {
+    let expr =
+        sql_predicate("select * from t where ts >= CAST(to_timestamp(1704672000) AS TIMESTAMP)")
+            .await;
+    assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn sql_alias_in_subquery_is_unknown() {
+    let expr = sql_predicate(
+        "select * from (select ts, to_timestamp(1704672000) as t from t) where ts >= t",
+    )
+    .await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_to_unixtime_ts_lt_numeric() {
+    let expr = sql_predicate("select * from t where to_unixtime(ts) < 1704672000").await;
+    assert_pruning(expr, false, false);
+}
+
+#[tokio::test]
+async fn sql_to_unixtime_ts_lt_string_is_unknown() {
+    let expr = sql_predicate("select * from t where to_unixtime(ts) < '1704672000'").await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_to_date_eq_prunes() {
+    let expr = sql_predicate("select * from t where to_date(ts) = '1970-01-02'").await;
+    assert_pruning(expr, true, true);
 }
 
 async fn create_table(tmp: &TempDir, price_nullable: bool) -> TestResult<TimeSeriesTable> {
@@ -239,6 +514,21 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     Ok(table)
 }
 
+async fn create_single_segment_table_with_props(
+    tmp: &TempDir,
+    rel_path: &str,
+    rows: &[TestRow],
+    props: WriterProperties,
+) -> TestResult<TimeSeriesTable> {
+    let mut table = create_table(tmp, false).await?;
+
+    let abs = tmp.path().join(rel_path);
+    write_parquet_with_props(&abs, rows, false, Some(props))?;
+    table.append_parquet_segment(rel_path, "ts").await?;
+
+    Ok(table)
+}
+
 fn register_provider(
     ctx: &SessionContext,
     table: Arc<TimeSeriesTable>,
@@ -260,6 +550,52 @@ async fn collect_batches(
 
 fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
+}
+
+fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let idx = batch.schema().index_of("plan").unwrap_or_else(|_| {
+            // Fallback: use last column if schema is unexpected.
+            batch.num_columns().saturating_sub(1)
+        });
+        let array = batch.column(idx);
+        let arr = array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("expected StringArray for explain plan")?;
+        for row in 0..arr.len() {
+            if !arr.is_null(row) {
+                out.push(arr.value(row).to_string());
+            }
+        }
+    }
+    Ok(out.join("\n"))
+}
+
+fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
+    if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
+        return Some(exec);
+    }
+    for child in plan.children() {
+        if let Some(exec) = find_data_source_exec(child.as_ref()) {
+            return Some(exec);
+        }
+    }
+    None
+}
+
+fn get_pruning_metric(
+    metrics: &MetricsSet,
+    metric_name: &str,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    match metrics.sum_by_name(metric_name) {
+        Some(MetricValue::PruningMetrics {
+            pruning_metrics, ..
+        }) => Ok((pruning_metrics.pruned(), pruning_metrics.matched())),
+        Some(_) => Err(format!("metric '{metric_name}' is not a pruning metric").into()),
+        None => Err(format!("metric '{metric_name}' not found").into()),
+    }
 }
 
 fn first_batch(batches: &[RecordBatch]) -> Result<&RecordBatch, Box<dyn std::error::Error>> {
@@ -357,6 +693,28 @@ fn scalar_i64_from_array(array: &dyn Array) -> Result<i64, Box<dyn std::error::E
         }
         other => Err(format!("unexpected scalar type {other:?}").into()),
     }
+}
+
+fn seg_bounds_minutes(
+    start_minute: i64,
+    count: i64,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let start_ms = minutes_to_millis(start_minute);
+    let end_ms = start_ms + (count - 1);
+    let min = Utc.timestamp_millis_opt(start_ms).single().expect("min ts");
+    let max = Utc.timestamp_millis_opt(end_ms).single().expect("max ts");
+    (min, max)
+}
+
+fn assert_pruning(expr: Expr, prune_a: bool, prune_b: bool) {
+    let (a_min, a_max) = seg_bounds_minutes(1, 5);
+    let (b_min, b_max) = seg_bounds_minutes(3, 5);
+
+    let a = eval_time_pred_on_segment_for_tests_utc(&expr, "ts", a_min, a_max);
+    let b = eval_time_pred_on_segment_for_tests_utc(&expr, "ts", b_min, b_max);
+
+    assert_eq!(a == CompiledIntervalTruth::AlwaysFalse, prune_a);
+    assert_eq!(b == CompiledIntervalTruth::AlwaysFalse, prune_b);
 }
 
 #[tokio::test]
@@ -628,6 +986,369 @@ async fn provider_schema_supports_nested_types() -> TestResult {
         other => return Err(format!("metrics type mismatch: {other:?}").into()),
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn pushdown_marks_all_filters_inexact() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_table(&tmp, false).await?;
+    let provider = TsTableProvider::try_new(Arc::new(table))?;
+
+    let filters = vec![
+        col("ts").gt_eq(lit("1970-01-01T00:00:00Z")),
+        col("symbol").eq(lit("A")),
+    ];
+    let refs: Vec<&Expr> = filters.iter().collect();
+    let r = provider.supports_filters_pushdown(&refs)?;
+
+    assert_eq!(r.len(), 2);
+    assert!(
+        r.iter()
+            .all(|x| matches!(x, TableProviderFilterPushDown::Inexact))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn scan_attaches_parquet_predicate_for_non_time_filters() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let df = ctx.sql("SELECT count(*) FROM t WHERE symbol = 'A'").await?;
+    let plan = df.create_physical_plan().await?;
+    let display = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(true)
+        .to_string();
+
+    println!("{display}");
+
+    assert!(display.contains("DataSourceExec"));
+    assert!(display.contains("predicate="));
+    assert!(display.contains("symbol") || display.contains("Symbol"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn parquet_prunes_row_groups_for_non_time_predicate() -> TestResult {
+    let tmp = TempDir::new()?;
+    let mut rows = Vec::new();
+    for i in 0..5 {
+        rows.push(TestRow {
+            ts_millis: minutes_to_millis(i as i64),
+            symbol: "A",
+            price: Some(1.0),
+        });
+    }
+    for i in 5..10 {
+        rows.push(TestRow {
+            ts_millis: minutes_to_millis(i as i64),
+            symbol: "A",
+            price: Some(1000.0),
+        });
+    }
+
+    let props = WriterProperties::builder()
+        .set_max_row_group_size(5)
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .build();
+    let table =
+        create_single_segment_table_with_props(&tmp, "data/seg-rg.parquet", &rows, props).await?;
+    let table = Arc::new(table);
+
+    let config = SessionConfig::new().with_parquet_pruning(true);
+    let ctx = SessionContext::new_with_config(config);
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let df = ctx.sql("SELECT count(*) FROM t WHERE price < 10.0").await?;
+    let plan = df.create_physical_plan().await?;
+    let _ = collect(plan.clone(), ctx.task_ctx()).await?;
+
+    let exec = find_data_source_exec(plan.as_ref())
+        .ok_or_else(|| "expected DataSourceExec in physical plan".to_string())?;
+    let metrics = exec
+        .metrics()
+        .ok_or_else(|| "expected metrics for DataSourceExec".to_string())?;
+    let (pruned, matched) = get_pruning_metric(&metrics, "row_groups_pruned_statistics")?;
+
+    assert!(
+        pruned >= 1,
+        "expected at least 1 row group pruned (matched={matched}, pruned={pruned})"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explain_prunes_segments_on_time_filter() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "EXPLAIN VERBOSE SELECT * FROM t \
+         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+    )
+    .await?;
+    let plan = explain_plan_text(&batches)?;
+
+    let seg_a = "seg-a.parquet";
+    let seg_b = "seg-b.parquet";
+
+    assert!(
+        plan.contains(seg_b),
+        "expected plan to include {seg_b}; plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains(seg_a),
+        "expected plan to exclude {seg_a}; plan:\n{plan}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explain_does_not_prune_on_unrecognized_predicate() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches =
+        collect_batches(&ctx, "EXPLAIN VERBOSE SELECT * FROM t WHERE symbol = 'A'").await?;
+    let plan = explain_plan_text(&batches)?;
+
+    let seg_a = "seg-a.parquet";
+    let seg_b = "seg-b.parquet";
+
+    assert!(
+        plan.contains(seg_a),
+        "expected plan to include {seg_a}; plan:\n{plan}"
+    );
+    assert!(
+        plan.contains(seg_b),
+        "expected plan to include {seg_b}; plan:\n{plan}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where ts >= '1970-01-01T00:03:00Z' and ts < '1970-01-01T00:03:01Z'",
+    )
+    .await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_eq_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where ts = '1970-01-01T00:03:00Z'").await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_gt_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where ts > '1970-01-01T00:03:00Z'").await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_lte_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where ts <= '1970-01-01T00:01:00Z'").await;
+    assert_pruning(expr, false, true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_between_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where ts between '1970-01-01T00:03:00Z' and '1970-01-01T00:03:01Z'",
+    )
+    .await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_not_between_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where ts not between '1970-01-01T00:00:00Z' and '1970-01-01T00:02:00Z'",
+    )
+    .await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_in_list_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where ts in ('1970-01-01T00:03:00Z')").await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn does_not_prune_on_time_not_in_list_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where ts not in ('1970-01-01T00:03:00Z')").await;
+    assert_pruning(expr, false, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_or_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where (ts >= '1970-01-01T00:03:00Z' and ts < '1970-01-01T00:03:01Z') \
+            or (ts >= '1970-01-01T00:04:00Z' and ts < '1970-01-01T00:04:01Z')",
+    )
+    .await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prunes_files_on_time_not_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where not (ts < '1970-01-01T00:02:00Z')").await;
+    assert_pruning(expr, true, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn does_not_prune_on_time_neq_filter() -> TestResult {
+    let expr = sql_predicate("select * from t where ts != '1970-01-01T00:03:00Z'").await;
+    assert_pruning(expr, false, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn does_not_prune_on_unrecognized_predicate() -> TestResult {
+    let expr = sql_predicate("select * from t where symbol = 'A'").await;
+    assert_pruning(expr, false, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn time_filter_returns_correct_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn date_trunc_filter_returns_correct_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE date_trunc('minute', ts) = '1970-01-01T00:03:00Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn date_bin_filter_returns_correct_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE date_bin(interval '1 minute', ts) = '1970-01-01T00:03:00Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn date_trunc_filter_returns_correct_rows_olson_tz() -> TestResult {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("America/New_York".into())),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+
+    let rows = make_rows(ts_millis("2024-03-10T05:00:00Z"), 5, "A", 10.0);
+    let mut ts_builder = TimestampMillisecondBuilder::with_capacity(rows.len());
+    let mut sym_builder =
+        StringBuilder::with_capacity(rows.len(), rows.iter().map(|r| r.symbol.len()).sum());
+    let mut price_builder = Float64Builder::with_capacity(rows.len());
+
+    for row in &rows {
+        ts_builder.append_value(row.ts_millis);
+        sym_builder.append_value(row.symbol);
+        price_builder.append_value(row.price.expect("price"));
+    }
+
+    let mut ts_array = ts_builder.finish();
+    ts_array = ts_array.with_timezone_opt(Some(Arc::from("America/New_York")));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(ts_array),
+            Arc::new(sym_builder.finish()),
+            Arc::new(price_builder.finish()),
+        ],
+    )?;
+
+    let table = MemTable::try_new(schema, vec![vec![batch]])?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE date_trunc('day', ts) = '2024-03-10T00:00:00-05:00'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
     Ok(())
 }
 
