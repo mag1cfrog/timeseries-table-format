@@ -1724,7 +1724,10 @@ fn compile_time_pred_date_bin_invalid_month_combo_is_unknown() {
 #[test]
 fn compile_time_pred_date_bin_overflow_is_unknown() {
     let expr = binary(
-        scalar_fn("date_bin", vec![lit_interval_day_time(0, i32::MAX), col("ts")]),
+        scalar_fn(
+            "date_bin",
+            vec![lit_interval_day_time(0, i32::MAX), col("ts")],
+        ),
         Operator::Eq,
         lit_str("9999-12-31T23:59:59Z"),
     );
