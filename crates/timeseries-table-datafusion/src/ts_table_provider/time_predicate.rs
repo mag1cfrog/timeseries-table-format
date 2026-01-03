@@ -1,7 +1,7 @@
 use chrono::offset::LocalResult;
 use chrono::{
-    DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone,
-    Timelike, Utc,
+    DateTime, Datelike, Duration, FixedOffset, Months, NaiveDate, NaiveDateTime, Offset, TimeDelta,
+    TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
 use datafusion::logical_expr::Expr;
@@ -140,11 +140,23 @@ enum TruncUnit {
     Day,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinStride {
+    FixedNanos(i64),
+    Months(i64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TsTransform {
     ToUnixtime,
     ToDate,
-    DateTrunc { unit: TruncUnit },
+    DateTrunc {
+        unit: TruncUnit,
+    },
+    DateBin {
+        stride: BinStride,
+        origin: DateTime<Utc>,
+    },
 }
 
 // --------------------------- helpers -----------------------
@@ -452,6 +464,92 @@ fn parse_trunc_unit(s: &str) -> Option<TruncUnit> {
     }
 }
 
+fn parse_date_bin_stride(expr: &Expr) -> Option<BinStride> {
+    match unwrap_expr(expr) {
+        Expr::Literal(ScalarValue::IntervalDayTime(Some(v)), _) => {
+            let nanos = (TimeDelta::try_days(v.days as i64)?
+                + TimeDelta::try_milliseconds(v.milliseconds as i64)?)
+            .num_nanoseconds()?;
+            if nanos == 0 {
+                None
+            } else {
+                Some(BinStride::FixedNanos(nanos))
+            }
+        }
+        Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(v)), _) => {
+            let months = v.months as i64;
+            let days = v.days as i64;
+            let nanos = v.nanoseconds;
+            if months != 0 {
+                if days != 0 || nanos != 0 {
+                    None
+                } else {
+                    Some(BinStride::Months(months))
+                }
+            } else {
+                let nanos = (TimeDelta::try_days(days)? + Duration::nanoseconds(nanos))
+                    .num_nanoseconds()?;
+                if nanos == 0 {
+                    None
+                } else {
+                    Some(BinStride::FixedNanos(nanos))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn datetime_from_nanos(nanos: i64) -> Option<DateTime<Utc>> {
+    let secs = nanos.div_euclid(1_000_000_000);
+    let sub = nanos.rem_euclid(1_000_000_000) as u32;
+    Utc.timestamp_opt(secs, sub).single()
+}
+
+fn datetime_to_nanos(dt: DateTime<Utc>) -> Option<i64> {
+    dt.timestamp_nanos_opt()
+}
+
+fn date_bin_compute_distance(time_diff: i64, stride: i64) -> i64 {
+    let time_delta = time_diff - (time_diff % stride);
+    if time_diff < 0 && stride > 1 && time_delta != time_diff {
+        time_delta - stride
+    } else {
+        time_delta
+    }
+}
+
+fn date_bin_nanos_interval(stride_nanos: i64, source: i64, origin: i64) -> Option<i64> {
+    let time_diff = source.checked_sub(origin)?;
+    let time_delta = date_bin_compute_distance(time_diff, stride_nanos);
+    origin.checked_add(time_delta)
+}
+
+fn add_months_checked(dt: DateTime<Utc>, months: i64) -> Option<DateTime<Utc>> {
+    if months < 0 {
+        dt.checked_sub_months(Months::new(months.unsigned_abs() as u32))
+    } else {
+        dt.checked_add_months(Months::new(months as u32))
+    }
+}
+
+fn date_bin_months_interval(
+    stride_months: i64,
+    source: DateTime<Utc>,
+    origin: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let month_diff =
+        (source.year() - origin.year()) * 12 + source.month() as i32 - origin.month() as i32;
+    let month_delta = date_bin_compute_distance(month_diff as i64, stride_months);
+    let mut bin_time = add_months_checked(origin, month_delta)?;
+
+    if bin_time > source {
+        bin_time = add_months_checked(origin, month_delta - stride_months)?;
+    }
+
+    Some(bin_time)
+}
+
 /// ScalarFunction handle
 fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
     // Unwrap wrappers around scalar functions
@@ -482,6 +580,22 @@ fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
                 if expr_is_ts(&sf.args[1], ts_col) {
                     return Some(TsTransform::DateTrunc { unit });
                 }
+            }
+        }
+
+        if name.eq_ignore_ascii_case("date_bin") {
+            // date_bin(interval, ts [, origin])
+            if sf.args.len() == 2 || sf.args.len() == 3 {
+                let stride = parse_date_bin_stride(&sf.args[0])?;
+                if !expr_is_ts(&sf.args[1], ts_col) {
+                    return None;
+                }
+                let origin = if sf.args.len() == 3 {
+                    parse_ts_literal(&sf.args[2])?
+                } else {
+                    Utc.timestamp_opt(0, 0).single()?
+                };
+                return Some(TsTransform::DateBin { stride, origin });
             }
         }
     }
@@ -894,6 +1008,95 @@ fn compile_transform_cmp(
                 Operator::LtEq => TimePred::Cmp {
                     op: Operator::Lt,
                     ts: end_utc,
+                },
+
+                _ => return None,
+            })
+        }
+
+        TsTransform::DateBin { stride, origin } => {
+            // NOTE: DataFusion's date_bin is UTC/epoch-based and ignores timezone for bin
+            // alignment. Any timezone metadata on the input is preserved in the result, but
+            // the bin boundaries are computed in UTC. For local-time binning, DF expects
+            // callers to use to_local_time() before date_bin().
+            let dt = parse_ts_literal(other)?;
+            let (start, end, aligned) = match stride {
+                BinStride::FixedNanos(stride_nanos) => {
+                    if stride_nanos <= 0 {
+                        return None;
+                    }
+                    let src_ns = datetime_to_nanos(dt)?;
+                    let origin_ns = datetime_to_nanos(origin)?;
+                    let bin_ns = date_bin_nanos_interval(stride_nanos, src_ns, origin_ns)?;
+                    let start = datetime_from_nanos(bin_ns)?;
+                    let end = datetime_from_nanos(bin_ns.checked_add(stride_nanos)?)?;
+                    let aligned = start == dt;
+                    (start, end, aligned)
+                }
+                BinStride::Months(stride_months) => {
+                    if stride_months <= 0 {
+                        return None;
+                    }
+                    let start = date_bin_months_interval(stride_months, dt, origin)?;
+                    let end = add_months_checked(start, stride_months)?;
+                    let aligned = start == dt;
+                    (start, end, aligned)
+                }
+            };
+
+            Some(match op {
+                Operator::Eq => {
+                    if !aligned {
+                        TimePred::False
+                    } else {
+                        TimePred::and(
+                            TimePred::Cmp {
+                                op: Operator::GtEq,
+                                ts: start,
+                            },
+                            TimePred::Cmp {
+                                op: Operator::Lt,
+                                ts: end,
+                            },
+                        )
+                    }
+                }
+
+                Operator::NotEq => {
+                    if !aligned {
+                        TimePred::True
+                    } else {
+                        TimePred::or(
+                            TimePred::Cmp {
+                                op: Operator::Lt,
+                                ts: start,
+                            },
+                            TimePred::Cmp {
+                                op: Operator::GtEq,
+                                ts: end,
+                            },
+                        )
+                    }
+                }
+
+                Operator::Gt => TimePred::Cmp {
+                    op: Operator::GtEq,
+                    ts: end,
+                },
+
+                Operator::GtEq => TimePred::Cmp {
+                    op: Operator::GtEq,
+                    ts: if aligned { start } else { end },
+                },
+
+                Operator::Lt => TimePred::Cmp {
+                    op: Operator::Lt,
+                    ts: if aligned { start } else { end },
+                },
+
+                Operator::LtEq => TimePred::Cmp {
+                    op: Operator::Lt,
+                    ts: end,
                 },
 
                 _ => return None,
