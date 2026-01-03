@@ -38,7 +38,7 @@ pub enum CompiledIntervalTruth {
 
 /// Compile a time predicate and map it into `CompiledTimePred`.
 pub fn compile_time_pred_for_tests(expr: &Expr, ts_col: &str) -> CompiledTimePred {
-    match crate::ts_table_provider::compile_time_pred(expr, ts_col) {
+    match crate::ts_table_provider::compile_time_pred(expr, ts_col, None) {
         TimePred::True => CompiledTimePred::True,
         TimePred::False => CompiledTimePred::False,
         TimePred::NonTime => CompiledTimePred::NonTime,
@@ -55,7 +55,7 @@ pub fn eval_time_pred_on_segment_for_tests(
     seg_min: DateTime<Utc>,
     seg_max: DateTime<Utc>,
 ) -> CompiledIntervalTruth {
-    let pred = crate::ts_table_provider::compile_time_pred(expr, ts_col);
+    let pred = crate::ts_table_provider::compile_time_pred(expr, ts_col, None);
     match crate::ts_table_provider::eval_time_pred_on_segment(&pred, seg_min, seg_max) {
         IntervalTruth::AlwaysTrue => CompiledIntervalTruth::AlwaysTrue,
         IntervalTruth::AlwaysFalse => CompiledIntervalTruth::AlwaysFalse,

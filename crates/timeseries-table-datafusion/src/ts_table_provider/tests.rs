@@ -115,7 +115,7 @@ fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
 }
 
 fn assert_cmp(expr: Expr, expected_op: Operator, expected_ts: &str) {
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, expected_op);
@@ -126,7 +126,7 @@ fn assert_cmp(expr: Expr, expected_op: Operator, expected_ts: &str) {
 }
 
 fn assert_cmp_dt(expr: Expr, expected_op: Operator, expected_ts: DateTime<Utc>) {
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, expected_op);
@@ -137,7 +137,7 @@ fn assert_cmp_dt(expr: Expr, expected_op: Operator, expected_ts: DateTime<Utc>) 
 }
 
 fn assert_unknown(expr: Expr) {
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     assert!(matches!(pred, TimePred::Unknown));
 }
 
@@ -328,7 +328,7 @@ fn compile_time_pred_and_preserves_ts_constraint() {
         binary(col("ts"), Operator::GtEq, lit_str("2024-01-08T00:00:00Z")),
     );
 
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     // Segment fully before the literal: should be prunable if AND preserves the ts constraint.
     let seg_min = dt("2024-01-01T00:00:00Z");
@@ -347,7 +347,7 @@ fn compile_time_pred_or_disables_pruning() {
         binary(col("ts"), Operator::GtEq, lit_str("2024-01-08T00:00:00Z")),
     );
 
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-01T00:00:00Z");
     let seg_max = dt("2024-01-02T00:00:00Z");
@@ -372,7 +372,7 @@ fn compile_between_prunes_outside_range() {
         lit_str("2024-01-10T00:00:00Z"),
         false,
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-05T00:00:00Z");
     let seg_max = dt("2024-01-07T00:00:00Z");
@@ -390,7 +390,7 @@ fn compile_between_keeps_inside_range() {
         lit_str("2024-01-10T00:00:00Z"),
         false,
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-08T00:00:00Z");
     let seg_max = dt("2024-01-09T00:00:00Z");
@@ -408,7 +408,7 @@ fn compile_not_between_prunes_inside_range() {
         lit_str("2024-01-10T00:00:00Z"),
         true,
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-08T00:00:00Z");
     let seg_max = dt("2024-01-09T00:00:00Z");
@@ -426,7 +426,7 @@ fn compile_not_between_keeps_outside_range() {
         lit_str("2024-01-10T00:00:00Z"),
         true,
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-05T00:00:00Z");
     let seg_max = dt("2024-01-07T00:00:00Z");
@@ -446,7 +446,7 @@ fn compile_in_list_prunes_outside_values() {
         ],
         false,
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-05T00:00:00Z");
     let seg_max = dt("2024-01-07T00:00:00Z");
@@ -466,7 +466,7 @@ fn compile_in_list_keeps_overlap() {
         ],
         false,
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-07T00:00:00Z");
     let seg_max = dt("2024-01-10T00:00:00Z");
@@ -479,7 +479,7 @@ fn compile_in_list_keeps_overlap() {
 #[test]
 fn compile_not_in_list_keeps_segments() {
     let expr = in_list(col("ts"), vec![lit_str("2024-01-08T00:00:00Z")], true);
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-08T00:00:00Z");
     let seg_max = dt("2024-01-10T00:00:00Z");
@@ -495,7 +495,7 @@ fn compile_unknown_and_cmp_keeps_cmp_for_pruning() {
     let cmp = binary(col("ts"), Operator::GtEq, lit_str("2024-01-08T00:00:00Z"));
     let expr = binary(unknown, Operator::And, cmp);
 
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     // Segment fully before the literal: should be prunable if AND keeps the time constraint.
     let seg_min = dt("2024-01-01T00:00:00Z");
@@ -509,7 +509,7 @@ fn compile_unknown_and_cmp_keeps_cmp_for_pruning() {
 #[test]
 fn compile_time_leaf_rejects_unsupported_op_with_ts_literal() {
     let expr = binary(col("ts"), Operator::Plus, lit_str("2024-01-08T00:00:00Z"));
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     assert!(matches!(pred, TimePred::Unknown));
 }
 
@@ -542,7 +542,7 @@ fn compile_time_pred_ts_plus_day_lt_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -573,7 +573,7 @@ fn compile_time_pred_ts_minus_hours_lte_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::LtEq);
@@ -604,7 +604,7 @@ fn compile_time_pred_literal_gt_ts_plus_minutes() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -635,7 +635,7 @@ fn compile_time_pred_literal_lte_ts_minus_hour() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::GtEq);
@@ -666,7 +666,7 @@ fn compile_time_pred_ts_plus_day_plus_hour_lt_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -697,7 +697,7 @@ fn compile_time_pred_ts_minus_day_minus_hour_lt_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -728,7 +728,7 @@ fn compile_time_pred_literal_gt_interval_plus_ts_plus_interval() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -759,7 +759,7 @@ fn compile_time_pred_mixed_intervals_month_day_hour() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -790,7 +790,7 @@ fn compile_time_pred_mixed_intervals_with_minus() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -817,7 +817,7 @@ fn compile_time_pred_interval_plus_ts_lt_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -912,7 +912,7 @@ fn compile_time_pred_interval_year_month_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -939,7 +939,7 @@ fn compile_time_pred_interval_day_time_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -966,7 +966,7 @@ fn compile_time_pred_interval_month_day_nano_literal() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -993,7 +993,7 @@ fn compile_time_pred_interval_microsecond_precision() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -1020,7 +1020,7 @@ fn compile_time_pred_month_rollover_boundary() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
@@ -1037,7 +1037,7 @@ fn compile_time_pred_overflow_returns_unknown() {
         Operator::Lt,
         lit_str("2024-01-10T00:00:00Z"),
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     assert!(matches!(pred, TimePred::Unknown));
 }
 
@@ -1052,7 +1052,7 @@ fn compile_time_pred_and_preserves_interval_constraint() {
             lit_str("2024-01-10T00:00:00Z"),
         ),
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     // Segment entirely after threshold should be pruned.
     let seg_min = dt("2024-01-10T00:00:00Z");
@@ -1074,7 +1074,7 @@ fn compile_time_pred_or_disables_interval_pruning() {
             lit_str("2024-01-10T00:00:00Z"),
         ),
     );
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
 
     let seg_min = dt("2024-01-10T00:00:00Z");
     let seg_max = dt("2024-01-11T00:00:00Z");
@@ -1334,7 +1334,7 @@ fn compile_time_pred_interval_lt_to_timestamp_seconds() {
         -1,
     )
     .expect("shifted");
-    let pred = compile_time_pred(&expr, "ts");
+    let pred = compile_time_pred(&expr, "ts", None);
     match pred {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, Operator::Lt);
