@@ -1559,3 +1559,50 @@ fn compile_time_pred_date_trunc_day_olson_dst_boundary() {
         IntervalTruth::AlwaysFalse
     );
 }
+
+#[test]
+fn compile_time_pred_date_trunc_hour_olson_dst_spring_forward() {
+    let expr = binary(
+        scalar_fn("date_trunc", vec![lit_str("hour"), col("ts")]),
+        Operator::Eq,
+        lit_str("2024-03-10T03:00:00-04:00"),
+    );
+    let tz = olson_tz("America/New_York");
+    let pred = compile_time_pred(&expr, "ts", Some(&tz));
+    let start = dt("2024-03-10T07:00:00Z");
+    let before_end = dt("2024-03-10T07:59:59Z");
+    let at_end = dt("2024-03-10T08:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, start, start),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before_end, before_end),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_end, at_end),
+        IntervalTruth::AlwaysFalse
+    );
+}
+
+#[test]
+fn compile_time_pred_date_trunc_minute_olson_ignores_tz() {
+    let expr = binary(
+        scalar_fn("date_trunc", vec![lit_str("minute"), col("ts")]),
+        Operator::Eq,
+        lit_str("2024-03-10T07:30:00Z"),
+    );
+    let tz = olson_tz("America/New_York");
+    let pred = compile_time_pred(&expr, "ts", Some(&tz));
+    let inside = dt("2024-03-10T07:30:30Z");
+    let outside = dt("2024-03-10T07:31:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, inside, inside),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, outside, outside),
+        IntervalTruth::AlwaysFalse
+    );
+}

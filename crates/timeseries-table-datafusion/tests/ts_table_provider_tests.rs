@@ -166,6 +166,13 @@ fn minutes_to_millis(minutes: i64) -> i64 {
     minutes * 60_000
 }
 
+fn ts_millis(s: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .expect("valid rfc3339")
+        .with_timezone(&Utc)
+        .timestamp_millis()
+}
+
 fn write_parquet(path: &Path, rows: &[TestRow], price_nullable: bool) -> TestResult {
     write_parquet_with_props(path, rows, price_nullable, None)
 }
@@ -176,6 +183,16 @@ fn write_parquet_with_props(
     price_nullable: bool,
     props: Option<WriterProperties>,
 ) -> TestResult {
+    write_parquet_with_props_and_tz(path, rows, price_nullable, props, None)
+}
+
+fn write_parquet_with_props_and_tz(
+    path: &Path,
+    rows: &[TestRow],
+    price_nullable: bool,
+    props: Option<WriterProperties>,
+    tz: Option<&str>,
+) -> TestResult {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -183,7 +200,7 @@ fn write_parquet_with_props(
     let schema = Schema::new(vec![
         Field::new(
             "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Millisecond, tz.map(|tz| tz.into())),
             false,
         ),
         Field::new("symbol", DataType::Utf8, false),
@@ -206,10 +223,15 @@ fn write_parquet_with_props(
         }
     }
 
+    let mut ts_array = ts_builder.finish();
+    if let Some(tz) = tz {
+        ts_array = ts_array.with_timezone_opt(Some(Arc::from(tz)));
+    }
+
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
         vec![
-            Arc::new(ts_builder.finish()),
+            Arc::new(ts_array),
             Arc::new(sym_builder.finish()),
             Arc::new(price_builder.finish()),
         ],
@@ -354,6 +376,14 @@ async fn sql_ts_minus_interval_lte_to_timestamp_micros() {
     )
     .expect("shifted");
     assert_cmp_dt(expr, Operator::LtEq, expected);
+}
+
+#[tokio::test]
+async fn sql_date_trunc_minute_eq_literal() {
+    let expr =
+        sql_predicate("select * from t where date_trunc('minute', ts) = '1970-01-01T00:03:00Z'")
+            .await;
+    assert_pruning(expr, true, false);
 }
 
 #[tokio::test]
@@ -1136,6 +1166,77 @@ async fn time_filter_returns_correct_rows() -> TestResult {
         &ctx,
         "SELECT COUNT(*) FROM t \
          WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn date_trunc_filter_returns_correct_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE date_trunc('minute', ts) = '1970-01-01T00:03:00Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn date_trunc_filter_returns_correct_rows_olson_tz() -> TestResult {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("America/New_York".into())),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+
+    let rows = make_rows(ts_millis("2024-03-10T05:00:00Z"), 5, "A", 10.0);
+    let mut ts_builder = TimestampMillisecondBuilder::with_capacity(rows.len());
+    let mut sym_builder =
+        StringBuilder::with_capacity(rows.len(), rows.iter().map(|r| r.symbol.len()).sum());
+    let mut price_builder = Float64Builder::with_capacity(rows.len());
+
+    for row in &rows {
+        ts_builder.append_value(row.ts_millis);
+        sym_builder.append_value(row.symbol);
+        price_builder.append_value(row.price.expect("price"));
+    }
+
+    let mut ts_array = ts_builder.finish();
+    ts_array = ts_array.with_timezone_opt(Some(Arc::from("America/New_York")));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(ts_array),
+            Arc::new(sym_builder.finish()),
+            Arc::new(price_builder.finish()),
+        ],
+    )?;
+
+    let table = MemTable::try_new(schema, vec![vec![batch]])?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE date_trunc('day', ts) = '2024-03-10T00:00:00-05:00'",
     )
     .await?;
     let count = scalar_u64(&batches)?;
