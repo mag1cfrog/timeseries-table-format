@@ -417,6 +417,24 @@ async fn sql_alias_in_subquery_is_unknown() {
     assert_unknown(expr);
 }
 
+#[tokio::test]
+async fn sql_to_unixtime_ts_lt_numeric() {
+    let expr = sql_predicate(
+        "select * from t where to_unixtime(ts) < 1704672000",
+    )
+    .await;
+    assert_pruning(expr, false, false);
+}
+
+#[tokio::test]
+async fn sql_to_unixtime_ts_lt_string_is_unknown() {
+    let expr = sql_predicate(
+        "select * from t where to_unixtime(ts) < '1704672000'",
+    )
+    .await;
+    assert_unknown(expr);
+}
+
 async fn create_table(tmp: &TempDir, price_nullable: bool) -> TestResult<TimeSeriesTable> {
     let location = TableLocation::local(tmp.path());
     let meta = make_table_meta(price_nullable)?;

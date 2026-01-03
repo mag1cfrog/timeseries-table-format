@@ -1368,3 +1368,43 @@ fn compile_time_pred_literal_to_timestamp_gt_ts_plus_interval() {
     .expect("shifted");
     assert_cmp_dt(expr, Operator::Lt, expected);
 }
+
+#[test]
+fn compile_time_pred_to_unixtime_ts_gte_numeric() {
+    let expr = binary(
+        scalar_fn("to_unixtime", vec![col("ts")]),
+        Operator::GtEq,
+        lit_i64(1_704_672_000),
+    );
+    assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+}
+
+#[test]
+fn compile_time_pred_numeric_lt_to_unixtime_ts() {
+    let expr = binary(
+        lit_i64(1_704_672_000),
+        Operator::Lt,
+        scalar_fn("to_unixtime", vec![col("ts")]),
+    );
+    assert_cmp(expr, Operator::Gt, "2024-01-08T00:00:00Z");
+}
+
+#[test]
+fn compile_time_pred_to_unixtime_invalid_arity_is_unknown() {
+    let expr = binary(
+        scalar_fn("to_unixtime", vec![col("ts"), lit_i64(1)]),
+        Operator::GtEq,
+        lit_i64(1_704_672_000),
+    );
+    assert_unknown(expr);
+}
+
+#[test]
+fn compile_time_pred_to_unixtime_non_numeric_literal_is_unknown() {
+    let expr = binary(
+        scalar_fn("to_unixtime", vec![col("ts")]),
+        Operator::Lt,
+        lit_str("1704672000"),
+    );
+    assert_unknown(expr);
+}
