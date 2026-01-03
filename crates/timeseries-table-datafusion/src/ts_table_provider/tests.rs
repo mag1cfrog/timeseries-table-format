@@ -4,6 +4,7 @@ use arrow::datatypes::{DataType, TimeUnit};
 use chrono::DateTime;
 use chrono::TimeZone;
 use chrono::Utc;
+use chrono_tz::Tz;
 use datafusion::common::Result as DFResult;
 use datafusion::common::{Column, TableReference};
 use datafusion::logical_expr::Between;
@@ -21,6 +22,10 @@ fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .expect("valid rfc3339")
         .with_timezone(&Utc)
+}
+
+fn olson_tz(name: &str) -> ParsedTz {
+    ParsedTz::Olson(name.parse::<Tz>().expect("valid tz"))
 }
 
 fn unix_seconds_to_datetime_test(secs: f64) -> Option<DateTime<Utc>> {
@@ -1487,4 +1492,70 @@ fn compile_time_pred_to_date_non_date_literal_is_unknown() {
         lit_str("not-a-date"),
     );
     assert_unknown(expr);
+}
+
+#[test]
+fn compile_time_pred_date_trunc_gt_non_aligned_hour() {
+    let expr = binary(
+        scalar_fn("date_trunc", vec![lit_str("hour"), col("ts")]),
+        Operator::Gt,
+        lit_str("2020-01-01T10:30:00Z"),
+    );
+    let pred = compile_time_pred(&expr, "ts", None);
+    let before = dt("2020-01-01T10:59:59Z");
+    let at_next = dt("2020-01-01T11:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before, before),
+        IntervalTruth::AlwaysFalse
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_next, at_next),
+        IntervalTruth::AlwaysTrue
+    );
+}
+
+#[test]
+fn compile_time_pred_date_trunc_hour_negative_timestamp_floor() {
+    let expr = binary(
+        scalar_fn("date_trunc", vec![lit_str("hour"), col("ts")]),
+        Operator::Eq,
+        lit_str("1969-12-31T23:00:00Z"),
+    );
+    let pred = compile_time_pred(&expr, "ts", None);
+    let inside = dt("1969-12-31T23:30:00Z");
+    let outside = dt("1970-01-01T00:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, inside, inside),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, outside, outside),
+        IntervalTruth::AlwaysFalse
+    );
+}
+
+#[test]
+fn compile_time_pred_date_trunc_day_olson_dst_boundary() {
+    let expr = binary(
+        scalar_fn("date_trunc", vec![lit_str("day"), col("ts")]),
+        Operator::Eq,
+        lit_str("2024-03-10T00:00:00-05:00"),
+    );
+    let tz = olson_tz("America/New_York");
+    let pred = compile_time_pred(&expr, "ts", Some(&tz));
+    let start = dt("2024-03-10T05:00:00Z");
+    let before_end = dt("2024-03-11T03:59:59Z");
+    let at_end = dt("2024-03-11T04:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, start, start),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before_end, before_end),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_end, at_end),
+        IntervalTruth::AlwaysFalse
+    );
 }
