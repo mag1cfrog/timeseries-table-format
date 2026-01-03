@@ -14,8 +14,8 @@ use chrono::{TimeZone, Utc};
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
 use datafusion::datasource::source::DataSourceExec;
-use datafusion::logical_expr::{Expr, Operator};
 use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::logical_expr::{Expr, Operator};
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
@@ -300,18 +300,15 @@ async fn sql_ts_gte_to_timestamp_seconds_numeric() {
 
 #[tokio::test]
 async fn sql_ts_lt_to_timestamp_millis_numeric() {
-    let expr =
-        sql_predicate("select * from t where ts < to_timestamp_millis(1704672000123)").await;
+    let expr = sql_predicate("select * from t where ts < to_timestamp_millis(1704672000123)").await;
     let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
     assert_cmp_dt(expr, Operator::Lt, expected);
 }
 
 #[tokio::test]
 async fn sql_ts_lte_to_timestamp_string() {
-    let expr = sql_predicate(
-        "select * from t where ts <= to_timestamp('2024-01-08T00:00:00Z')",
-    )
-    .await;
+    let expr =
+        sql_predicate("select * from t where ts <= to_timestamp('2024-01-08T00:00:00Z')").await;
     assert_cmp(expr, Operator::LtEq, "2024-01-08T00:00:00Z");
 }
 
@@ -357,8 +354,7 @@ async fn sql_ts_minus_interval_lte_to_timestamp_micros() {
 
 #[tokio::test]
 async fn sql_literal_to_timestamp_millis_gt_ts() {
-    let expr =
-        sql_predicate("select * from t where to_timestamp_millis(1704672000123) > ts").await;
+    let expr = sql_predicate("select * from t where to_timestamp_millis(1704672000123) > ts").await;
     let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
     assert_cmp_dt(expr, Operator::Lt, expected);
 }
@@ -385,15 +381,13 @@ async fn sql_literal_to_timestamp_lte_ts_plus_interval() {
 
 #[tokio::test]
 async fn sql_ts_plus_numeric_is_unknown() {
-    let expr =
-        sql_predicate("select * from t where ts + 1 < to_timestamp(1704672000)").await;
+    let expr = sql_predicate("select * from t where ts + 1 < to_timestamp(1704672000)").await;
     assert_unknown(expr);
 }
 
 #[tokio::test]
 async fn sql_ts_plus_to_timestamp_is_unknown() {
-    let expr =
-        sql_predicate("select * from t where ts + to_timestamp(1704672000) < ts").await;
+    let expr = sql_predicate("select * from t where ts + to_timestamp(1704672000) < ts").await;
     assert_unknown(expr);
 }
 
@@ -408,10 +402,9 @@ async fn sql_to_timestamp_minus_ts_is_unknown() {
 
 #[tokio::test]
 async fn sql_cast_to_timestamp_is_supported() {
-    let expr = sql_predicate(
-        "select * from t where ts >= CAST(to_timestamp(1704672000) AS TIMESTAMP)",
-    )
-    .await;
+    let expr =
+        sql_predicate("select * from t where ts >= CAST(to_timestamp(1704672000) AS TIMESTAMP)")
+            .await;
     assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
 }
 
@@ -1020,24 +1013,21 @@ async fn prunes_files_on_time_filter() -> TestResult {
 
 #[tokio::test]
 async fn prunes_files_on_time_eq_filter() -> TestResult {
-    let expr =
-        sql_predicate("select * from t where ts = '1970-01-01T00:03:00Z'").await;
+    let expr = sql_predicate("select * from t where ts = '1970-01-01T00:03:00Z'").await;
     assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
 async fn prunes_files_on_time_gt_filter() -> TestResult {
-    let expr =
-        sql_predicate("select * from t where ts > '1970-01-01T00:03:00Z'").await;
+    let expr = sql_predicate("select * from t where ts > '1970-01-01T00:03:00Z'").await;
     assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
 async fn prunes_files_on_time_lte_filter() -> TestResult {
-    let expr =
-        sql_predicate("select * from t where ts <= '1970-01-01T00:01:00Z'").await;
+    let expr = sql_predicate("select * from t where ts <= '1970-01-01T00:01:00Z'").await;
     assert_pruning(expr, false, true);
     Ok(())
 }
@@ -1066,20 +1056,14 @@ async fn prunes_files_on_time_not_between_filter() -> TestResult {
 
 #[tokio::test]
 async fn prunes_files_on_time_in_list_filter() -> TestResult {
-    let expr = sql_predicate(
-        "select * from t where ts in ('1970-01-01T00:03:00Z')",
-    )
-    .await;
+    let expr = sql_predicate("select * from t where ts in ('1970-01-01T00:03:00Z')").await;
     assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
 async fn does_not_prune_on_time_not_in_list_filter() -> TestResult {
-    let expr = sql_predicate(
-        "select * from t where ts not in ('1970-01-01T00:03:00Z')",
-    )
-    .await;
+    let expr = sql_predicate("select * from t where ts not in ('1970-01-01T00:03:00Z')").await;
     assert_pruning(expr, false, false);
     Ok(())
 }
@@ -1098,18 +1082,14 @@ async fn prunes_files_on_time_or_filter() -> TestResult {
 
 #[tokio::test]
 async fn prunes_files_on_time_not_filter() -> TestResult {
-    let expr = sql_predicate(
-        "select * from t where not (ts < '1970-01-01T00:02:00Z')",
-    )
-    .await;
+    let expr = sql_predicate("select * from t where not (ts < '1970-01-01T00:02:00Z')").await;
     assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
 async fn does_not_prune_on_time_neq_filter() -> TestResult {
-    let expr =
-        sql_predicate("select * from t where ts != '1970-01-01T00:03:00Z'").await;
+    let expr = sql_predicate("select * from t where ts != '1970-01-01T00:03:00Z'").await;
     assert_pruning(expr, false, false);
     Ok(())
 }
