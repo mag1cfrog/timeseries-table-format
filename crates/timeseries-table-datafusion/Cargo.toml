@@ -13,6 +13,7 @@ async-trait = "0.1.89"
 tokio = { workspace = true }
 
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 [dev-dependencies]
 chrono = "0.4.42"
