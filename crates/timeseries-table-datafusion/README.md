@@ -79,6 +79,22 @@ The date literal should be `YYYY-MM-DD`. The comparison is expanded into a
 timestamp range for that whole day. If the timestamp column has a timezone,
 day boundaries are computed in that timezone.
 
+### `date_trunc(precision, ts)`
+We recognize `date_trunc` when it is compared to a **timestamp literal**:
+
+- `date_trunc('hour', ts) = '2024-01-01T10:00:00Z'`
+- `date_trunc('minute', ts) > '2024-01-01T10:30:00Z'`
+- `date_trunc('day', ts) <= '2024-01-01T00:00:00Z'`
+
+Supported precisions: `second`, `minute`, `hour`, `day`.
+
+Behavior notes:
+- Non-aligned literals (e.g. `10:30` for hour) are handled by moving the
+  comparison to the next bucket boundary.
+- If the timestamp column has an Olson timezone, hour/day boundaries are
+  computed in that timezone (DST-aware). Fine granularity (second/minute) uses
+  UTC arithmetic, matching DataFusion’s fast path.
+
 ## What does NOT prune (yet)
 
 These are intentionally treated as “unknown” to avoid incorrect pruning:
