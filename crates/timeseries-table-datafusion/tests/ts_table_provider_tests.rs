@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float64Builder, Int64Array, StringBuilder, TimestampMillisecondArray,
+    Array, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
     TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -552,6 +552,27 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
 }
 
+fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let idx = batch.schema().index_of("plan").unwrap_or_else(|_| {
+            // Fallback: use last column if schema is unexpected.
+            batch.num_columns().saturating_sub(1)
+        });
+        let array = batch.column(idx);
+        let arr = array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("expected StringArray for explain plan")?;
+        for row in 0..arr.len() {
+            if !arr.is_null(row) {
+                out.push(arr.value(row).to_string());
+            }
+        }
+    }
+    Ok(out.join("\n"))
+}
+
 fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
     if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
         return Some(exec);
@@ -1057,6 +1078,64 @@ async fn parquet_prunes_row_groups_for_non_time_predicate() -> TestResult {
     assert!(
         pruned >= 1,
         "expected at least 1 row group pruned (matched={matched}, pruned={pruned})"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explain_prunes_segments_on_time_filter() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "EXPLAIN VERBOSE SELECT * FROM t \
+         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+    )
+    .await?;
+    let plan = explain_plan_text(&batches)?;
+
+    let seg_a = "seg-a.parquet";
+    let seg_b = "seg-b.parquet";
+
+    assert!(
+        plan.contains(seg_b),
+        "expected plan to include {seg_b}; plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains(seg_a),
+        "expected plan to exclude {seg_a}; plan:\n{plan}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explain_does_not_prune_on_unrecognized_predicate() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches =
+        collect_batches(&ctx, "EXPLAIN VERBOSE SELECT * FROM t WHERE symbol = 'A'").await?;
+    let plan = explain_plan_text(&batches)?;
+
+    let seg_a = "seg-a.parquet";
+    let seg_b = "seg-b.parquet";
+
+    assert!(
+        plan.contains(seg_a),
+        "expected plan to include {seg_a}; plan:\n{plan}"
+    );
+    assert!(
+        plan.contains(seg_b),
+        "expected plan to include {seg_b}; plan:\n{plan}"
     );
     Ok(())
 }
