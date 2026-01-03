@@ -1,8 +1,14 @@
-use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use chrono::offset::LocalResult;
+use chrono::{
+    DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone,
+    Timelike, Utc,
+};
+use chrono_tz::Tz;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{Between, Operator};
 use datafusion::scalar::ScalarValue;
+use std::ops::{Add, Sub};
 
 use crate::ts_table_provider::ParsedTz;
 
@@ -126,10 +132,19 @@ impl IntervalTruth {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TruncUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TsTransform {
     ToUnixtime,
     ToDate,
+    DateTruc { unit: TruncUnit },
 }
 
 // --------------------------- helpers -----------------------
@@ -419,6 +434,24 @@ fn flip_op(op: Operator) -> Option<Operator> {
     }
 }
 
+fn scalar_to_string_literal(expr: &Expr) -> Option<String> {
+    match unwrap_expr(expr) {
+        Expr::Literal(ScalarValue::Utf8(Some(s)), _) => Some(s.clone()),
+        Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn parse_trunc_unit(s: &str) -> Option<TruncUnit> {
+    match s.to_ascii_lowercase().as_str() {
+        "second" | "seconds" => Some(TruncUnit::Second),
+        "minute" | "minutes" => Some(TruncUnit::Minute),
+        "hour" | "hours" => Some(TruncUnit::Hour),
+        "day" | "days" => Some(TruncUnit::Day),
+        _ => None,
+    }
+}
+
 /// ScalarFunction handle
 fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
     // Unwrap wrappers around scalar functions
@@ -439,6 +472,17 @@ fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
             && expr_is_ts(&sf.args[0], ts_col)
         {
             return Some(TsTransform::ToDate);
+        }
+
+        if name.eq_ignore_ascii_case("date_trunc") {
+            // date_trunc('hour', ts)
+            if sf.args.len() == 2 {
+                let unit = scalar_to_string_literal(&sf.args[0])?;
+                let unit = parse_trunc_unit(&unit)?;
+                if expr_is_ts(&sf.args[1], ts_col) {
+                    return Some(TsTransform::DateTruc { unit });
+                }
+            }
         }
     }
 
@@ -500,6 +544,141 @@ fn date_bounds_utc(
             Some((min_start, max_end))
         }
     }
+}
+
+fn floor_to_unit(dt: DateTime<Utc>, unit: TruncUnit) -> Option<(DateTime<Utc>, bool)> {
+    let ts = dt.timestamp();
+    let nanos = dt.timestamp_subsec_nanos();
+
+    match unit {
+        TruncUnit::Second => {
+            let flo = Utc.timestamp_opt(ts, 0).single()?;
+            Some((flo, nanos == 0))
+        }
+        TruncUnit::Minute => {
+            let flo_secs = (ts.div_euclid(60)) * 60;
+            let flo = Utc.timestamp_opt(flo_secs, 0).single()?;
+            let aligned = (ts == flo_secs) && nanos == 0;
+            Some((flo, aligned))
+        }
+        TruncUnit::Hour => {
+            let flo_secs = (ts.div_euclid(3600)) * 3600;
+            let flo = Utc.timestamp_opt(flo_secs, 0).single()?;
+            let aligned = (ts == flo_secs) && nanos == 0;
+            Some((flo, aligned))
+        }
+        TruncUnit::Day => {
+            // UTC day boundary
+            let date = dt.date_naive();
+            let flo = Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0)?);
+            let aligned = dt == flo;
+            Some((flo, aligned))
+        }
+    }
+}
+
+fn trunc_local_naive(local: NaiveDateTime, unit: TruncUnit) -> Option<NaiveDateTime> {
+    match unit {
+        TruncUnit::Second => local.with_nanosecond(0),
+        TruncUnit::Minute => local.with_nanosecond(0)?.with_second(0),
+        TruncUnit::Hour => local.with_nanosecond(0)?.with_second(0)?.with_minute(0),
+        TruncUnit::Day => local
+            .with_nanosecond(0)?
+            .with_second(0)?
+            .with_minute(0)?
+            .with_hour(0),
+    }
+}
+
+fn floor_to_unit_tz(
+    dt_utc: DateTime<Utc>,
+    unit: TruncUnit,
+    tz: Option<&ParsedTz>,
+) -> Option<(DateTime<Utc>, bool)> {
+    if tz.is_none()
+        || matches!(tz, Some(ParsedTz::Utc))
+        || matches!(unit, TruncUnit::Second | TruncUnit::Minute)
+    {
+        return floor_to_unit(dt_utc, unit);
+    }
+
+    match tz? {
+        ParsedTz::Fixed(off) => {
+            let local = dt_utc.with_timezone(off).naive_local();
+            let truncated = trunc_local_naive(local, unit)?;
+            // FixedOffset is always single
+            let local_dt = off.from_local_datetime(&truncated).single()?;
+            let flo = local_dt.with_timezone(&Utc);
+            Some((flo, dt_utc == flo))
+        }
+        ParsedTz::Olson(tz) => {
+            let local = dt_utc.with_timezone(tz).naive_local();
+            let truncated = trunc_local_naive(local, unit)?;
+            let adjusted = TimeDelta::try_hours(3)?;
+            let flo_local = match truncated.and_local_timezone(*tz) {
+                LocalResult::Single(x) => Some(x),
+                LocalResult::Ambiguous(a, b) => {
+                    // match DF logic: choose the one wiht same offset as original
+                    let orig = dt_utc.with_timezone(tz);
+                    if a.offset().fix() == orig.offset().fix() {
+                        Some(a)
+                    } else {
+                        Some(b)
+                    }
+                }
+                LocalResult::None => {
+                    // mirror DF: adjust by a few hours then back
+
+                    truncated
+                        .sub(adjusted)
+                        .and_local_timezone(*tz)
+                        .single()
+                        .map(|v| v.add(adjusted))
+                }
+            }?;
+            let flo = flo_local.with_timezone(&Utc);
+            Some((flo, dt_utc == flo))
+        }
+        ParsedTz::Utc => floor_to_unit(dt_utc, unit),
+    }
+}
+
+fn unit_duration(u: TruncUnit) -> Option<Duration> {
+    Some(match u {
+        TruncUnit::Second => Duration::seconds(1),
+        TruncUnit::Minute => Duration::minutes(1),
+        TruncUnit::Hour => Duration::hours(1),
+        TruncUnit::Day => Duration::days(1),
+    })
+}
+
+fn next_boundary_local(local: NaiveDateTime, unit: TruncUnit) -> Option<NaiveDateTime> {
+    Some(match unit {
+        TruncUnit::Second => local + Duration::seconds(1),
+        TruncUnit::Minute => local + Duration::minutes(1),
+        TruncUnit::Hour => local + Duration::hours(1),
+        TruncUnit::Day => (local.date() + Duration::days(1)).and_hms_opt(0, 0, 0)?,
+    })
+}
+
+fn local_to_utc(tz: &Tz, local: NaiveDateTime, orig_offset: FixedOffset) -> Option<DateTime<Utc>> {
+    let adjusted = TimeDelta::try_hours(3)?;
+    let local_dt = match local.and_local_timezone(*tz) {
+        LocalResult::Single(x) => Some(x),
+        LocalResult::Ambiguous(a, b) => {
+            if a.offset().fix() == orig_offset {
+                Some(a)
+            } else {
+                Some(b)
+            }
+        }
+        LocalResult::None => local
+            .sub(adjusted)
+            .and_local_timezone(*tz)
+            .single()
+            .map(|v| v.add(adjusted)),
+    }?;
+    Some(local_dt.with_timezone(&Utc))
 }
 
 // --------------------------- compile ---------------------------------------
@@ -638,6 +817,83 @@ fn compile_transform_cmp(
                 Operator::GtEq => TimePred::Cmp {
                     op: Operator::GtEq,
                     ts: start,
+                },
+
+                _ => return None,
+            })
+        }
+
+        TsTransform::DateTruc { unit } => {
+            let dt = parse_ts_literal(other)?;
+            let (floor_utc, aligned) = floor_to_unit_tz(dt, unit, tz)?;
+            let use_tz_bounds = matches!(tz, Some(ParsedTz::Olson(_)))
+                && matches!(unit, TruncUnit::Hour | TruncUnit::Day);
+            let end_utc = if use_tz_bounds {
+                let tz = match tz {
+                    Some(ParsedTz::Olson(tz)) => tz,
+                    _ => return None,
+                };
+                let orig = dt.with_timezone(tz);
+                let floor_local = trunc_local_naive(orig.naive_local(), unit)?;
+                let next_local = next_boundary_local(floor_local, unit)?;
+                local_to_utc(tz, next_local, orig.offset().fix())?
+            } else {
+                floor_utc + unit_duration(unit)?
+            };
+
+            Some(match op {
+                Operator::Eq => {
+                    if !aligned {
+                        TimePred::False
+                    } else {
+                        TimePred::and(
+                            TimePred::Cmp {
+                                op: Operator::GtEq,
+                                ts: floor_utc,
+                            },
+                            TimePred::Cmp {
+                                op: Operator::Lt,
+                                ts: end_utc,
+                            },
+                        )
+                    }
+                }
+
+                Operator::NotEq => {
+                    if !aligned {
+                        TimePred::True
+                    } else {
+                        TimePred::or(
+                            TimePred::Cmp {
+                                op: Operator::Lt,
+                                ts: floor_utc,
+                            },
+                            TimePred::Cmp {
+                                op: Operator::GtEq,
+                                ts: end_utc,
+                            },
+                        )
+                    }
+                }
+
+                Operator::Gt => TimePred::Cmp {
+                    op: Operator::GtEq,
+                    ts: end_utc,
+                },
+
+                Operator::GtEq => TimePred::Cmp {
+                    op: Operator::GtEq,
+                    ts: if aligned { floor_utc } else { end_utc },
+                },
+
+                Operator::Lt => TimePred::Cmp {
+                    op: Operator::Lt,
+                    ts: end_utc,
+                },
+
+                Operator::LtEq => TimePred::Cmp {
+                    op: Operator::Lt,
+                    ts: end_utc,
                 },
 
                 _ => return None,
