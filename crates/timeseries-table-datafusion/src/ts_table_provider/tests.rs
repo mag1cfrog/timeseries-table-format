@@ -1408,3 +1408,83 @@ fn compile_time_pred_to_unixtime_non_numeric_literal_is_unknown() {
     );
     assert_unknown(expr);
 }
+
+#[test]
+fn compile_time_pred_to_date_eq_literal_range() {
+    let expr = binary(
+        scalar_fn("to_date", vec![col("ts")]),
+        Operator::Eq,
+        lit_str("2024-01-01"),
+    );
+    let pred = compile_time_pred(&expr, "ts", Some(&ParsedTz::Utc));
+    let start = dt("2024-01-01T00:00:00Z");
+    let end = dt("2024-01-02T00:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, start, start),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, end, end),
+        IntervalTruth::AlwaysFalse
+    );
+}
+
+#[test]
+fn compile_time_pred_to_date_lt_literal() {
+    let expr = binary(
+        scalar_fn("to_date", vec![col("ts")]),
+        Operator::Lt,
+        lit_str("2024-01-01"),
+    );
+    let pred = compile_time_pred(&expr, "ts", Some(&ParsedTz::Utc));
+    let before = dt("2023-12-31T23:59:59Z");
+    let at_start = dt("2024-01-01T00:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before, before),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_start, at_start),
+        IntervalTruth::AlwaysFalse
+    );
+}
+
+#[test]
+fn compile_time_pred_to_date_gte_literal() {
+    let expr = binary(
+        scalar_fn("to_date", vec![col("ts")]),
+        Operator::GtEq,
+        lit_str("2024-01-01"),
+    );
+    let pred = compile_time_pred(&expr, "ts", Some(&ParsedTz::Utc));
+    let before = dt("2023-12-31T23:59:59Z");
+    let at_start = dt("2024-01-01T00:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before, before),
+        IntervalTruth::AlwaysFalse
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_start, at_start),
+        IntervalTruth::AlwaysTrue
+    );
+}
+
+#[test]
+fn compile_time_pred_to_date_invalid_arity_is_unknown() {
+    let expr = binary(
+        scalar_fn("to_date", vec![col("ts"), lit_str("2024-01-01")]),
+        Operator::Eq,
+        lit_str("2024-01-01"),
+    );
+    assert_unknown(expr);
+}
+
+#[test]
+fn compile_time_pred_to_date_non_date_literal_is_unknown() {
+    let expr = binary(
+        scalar_fn("to_date", vec![col("ts")]),
+        Operator::Eq,
+        lit_str("not-a-date"),
+    );
+    assert_unknown(expr);
+}

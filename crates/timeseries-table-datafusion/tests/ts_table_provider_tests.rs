@@ -34,7 +34,7 @@ use timeseries_table_core::transaction_log::{
 use timeseries_table_datafusion::TsTableProvider;
 use timeseries_table_datafusion::test_utils::{
     CompiledIntervalTruth, CompiledTimePred, TestInterval, add_interval_for_tests,
-    compile_time_pred_for_tests, eval_time_pred_on_segment_for_tests,
+    compile_time_pred_for_tests, eval_time_pred_on_segment_for_tests_utc,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -256,7 +256,11 @@ fn find_filter_expr(plan: &datafusion::logical_expr::LogicalPlan) -> Option<Expr
 async fn sql_predicate(sql: &str) -> Expr {
     let ctx = SessionContext::new();
     let schema = Arc::new(Schema::new(vec![
-        Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            true,
+        ),
         Field::new("symbol", DataType::Utf8, true),
         Field::new("other", DataType::Int64, true),
     ]));
@@ -427,6 +431,12 @@ async fn sql_to_unixtime_ts_lt_numeric() {
 async fn sql_to_unixtime_ts_lt_string_is_unknown() {
     let expr = sql_predicate("select * from t where to_unixtime(ts) < '1704672000'").await;
     assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_to_date_eq_prunes() {
+    let expr = sql_predicate("select * from t where to_date(ts) = '1970-01-02'").await;
+    assert_pruning(expr, true, true);
 }
 
 async fn create_table(tmp: &TempDir, price_nullable: bool) -> TestResult<TimeSeriesTable> {
@@ -640,8 +650,8 @@ fn assert_pruning(expr: Expr, prune_a: bool, prune_b: bool) {
     let (a_min, a_max) = seg_bounds_minutes(1, 5);
     let (b_min, b_max) = seg_bounds_minutes(3, 5);
 
-    let a = eval_time_pred_on_segment_for_tests(&expr, "ts", a_min, a_max);
-    let b = eval_time_pred_on_segment_for_tests(&expr, "ts", b_min, b_max);
+    let a = eval_time_pred_on_segment_for_tests_utc(&expr, "ts", a_min, a_max);
+    let b = eval_time_pred_on_segment_for_tests_utc(&expr, "ts", b_min, b_max);
 
     assert_eq!(a == CompiledIntervalTruth::AlwaysFalse, prune_a);
     assert_eq!(b == CompiledIntervalTruth::AlwaysFalse, prune_b);
