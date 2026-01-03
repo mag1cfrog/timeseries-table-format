@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{Between, Operator};
@@ -127,6 +127,7 @@ impl IntervalTruth {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TsTransform {
     ToUnixtime,
+    ToDate,
 }
 
 // --------------------------- helpers -----------------------
@@ -416,6 +417,7 @@ fn flip_op(op: Operator) -> Option<Operator> {
     }
 }
 
+/// ScalarFunction handle
 fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
     // Unwrap wrappers around scalar functions
     let e = unwrap_expr(expr);
@@ -429,9 +431,33 @@ fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
         {
             return Some(TsTransform::ToUnixtime);
         }
+
+        if name.eq_ignore_ascii_case("to_date")
+            && sf.args.len() == 1
+            && expr_is_ts(&sf.args[0], ts_col)
+        {
+            return Some(TsTransform::ToDate);
+        }
     }
 
     None
+}
+
+fn parse_date_literal(expr: &Expr) -> Option<NaiveDate> {
+    match unwrap_expr(expr) {
+        Expr::Literal(v, _) => match v {
+            ScalarValue::Date32(Some(days)) => {
+                // Date32 is days since epoch
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+                Some(epoch.checked_add_signed(Duration::days(*days as i64))?)
+            }
+            ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+                NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+            }
+            _ => scalar_to_utc_datetime(v).map(|dt| dt.date_naive()),
+        },
+        _ => None,
+    }
 }
 
 // --------------------------- compile ---------------------------------------
@@ -518,6 +544,58 @@ fn compile_transform_cmp(tx: TsTransform, op: Operator, other: &Expr) -> Option<
             let secs = expr_to_numeric(other)?;
             let dt = unix_seconds_to_datetime(secs)?;
             Some(TimePred::Cmp { op, ts: dt })
+        }
+
+        TsTransform::ToDate => {
+            let day0 = parse_date_literal(other)?;
+            let start = Utc.from_utc_datetime(&day0.and_hms_opt(0, 0, 0)?);
+            let end = start + Duration::days(1);
+
+            Some(match op {
+                Operator::Eq => TimePred::and(
+                    TimePred::Cmp {
+                        op: Operator::GtEq,
+                        ts: start,
+                    },
+                    TimePred::Cmp {
+                        op: Operator::Lt,
+                        ts: end,
+                    },
+                ),
+
+                Operator::NotEq => TimePred::or(
+                    TimePred::Cmp {
+                        op: Operator::Lt,
+                        ts: start,
+                    },
+                    TimePred::Cmp {
+                        op: Operator::GtEq,
+                        ts: end,
+                    },
+                ),
+
+                Operator::Lt => TimePred::Cmp {
+                    op: Operator::Lt,
+                    ts: start,
+                },
+
+                Operator::LtEq => TimePred::Cmp {
+                    op: Operator::Lt,
+                    ts: end,
+                },
+
+                Operator::Gt => TimePred::Cmp {
+                    op: Operator::GtEq,
+                    ts: end,
+                },
+
+                Operator::GtEq => TimePred::Cmp {
+                    op: Operator::GtEq,
+                    ts: start,
+                },
+
+                _ => return None,
+            })
         }
     }
 }
