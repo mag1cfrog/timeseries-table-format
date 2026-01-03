@@ -95,6 +95,20 @@ Behavior notes:
   computed in that timezone (DST-aware). Fine granularity (second/minute) uses
   UTC arithmetic, matching DataFusion’s fast path.
 
+### `date_bin(interval, ts[, origin])`
+We recognize `date_bin` when all arguments are **literals**:
+
+- `date_bin(interval '15 minutes', ts) = '2024-01-01T10:30:00Z'`
+- `date_bin(interval '1 day', ts, '2024-01-01T03:00:00Z') > '2024-01-02T03:00:00Z'`
+
+Supported interval forms:
+- Day/time intervals (days, hours, minutes, seconds, millis, micros, nanos)
+- Month intervals (months only; no mixed month+day+nanos)
+
+Behavior notes:
+- Default origin is the Unix epoch (`1970-01-01T00:00:00Z`) when omitted.
+- Binning uses UTC arithmetic (timezone is not applied to bin boundaries).
+
 ## What does NOT prune (yet)
 
 These are intentionally treated as “unknown” to avoid incorrect pruning:
