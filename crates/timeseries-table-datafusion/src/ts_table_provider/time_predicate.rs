@@ -4,6 +4,8 @@ use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{Between, Operator};
 use datafusion::scalar::ScalarValue;
 
+use crate::ts_table_provider::ParsedTz;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TimePred {
     True,
@@ -460,6 +462,46 @@ fn parse_date_literal(expr: &Expr) -> Option<NaiveDate> {
     }
 }
 
+fn date_bounds_utc(
+    date: NaiveDate,
+    tz: Option<&ParsedTz>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let tz = tz?;
+    let start_naive = date.and_hms_opt(0, 0, 0)?;
+    let end_naive = (date + Duration::days(1)).and_hms_opt(0, 0, 0)?;
+
+    match tz {
+        ParsedTz::Utc => {
+            let s = Utc.from_utc_datetime(&start_naive);
+            let e = Utc.from_utc_datetime(&end_naive);
+            Some((s, e))
+        }
+        ParsedTz::Fixed(off) => {
+            let s = off.from_local_datetime(&start_naive).single()?;
+            let e = off.from_local_datetime(&end_naive).single()?;
+            Some((s.with_timezone(&Utc), e.with_timezone(&Utc)))
+        }
+        ParsedTz::Olson(tz) => {
+            let start = tz.from_local_datetime(&start_naive);
+            let end = tz.from_local_datetime(&end_naive);
+
+            let pick = |res| match res {
+                chrono::LocalResult::Single(x) => Some(vec![x]),
+                chrono::LocalResult::Ambiguous(a, b) => Some(vec![a, b]),
+                chrono::LocalResult::None => None,
+            };
+
+            let starts = pick(start)?;
+            let ends = pick(end)?;
+
+            let min_start = starts.iter().min().map(|dt| dt.with_timezone(&Utc))?;
+            let max_end = ends.iter().max().map(|dt| dt.with_timezone(&Utc))?;
+
+            Some((min_start, max_end))
+        }
+    }
+}
+
 // --------------------------- compile ---------------------------------------
 
 fn compile_between(b: &Between, ts_col: &str) -> TimePred {
@@ -538,7 +580,12 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
     if il.negated { TimePred::not(p) } else { p }
 }
 
-fn compile_transform_cmp(tx: TsTransform, op: Operator, other: &Expr) -> Option<TimePred> {
+fn compile_transform_cmp(
+    tx: TsTransform,
+    op: Operator,
+    other: &Expr,
+    tz: Option<&ParsedTz>,
+) -> Option<TimePred> {
     match tx {
         TsTransform::ToUnixtime => {
             let secs = expr_to_numeric(other)?;
@@ -548,8 +595,7 @@ fn compile_transform_cmp(tx: TsTransform, op: Operator, other: &Expr) -> Option<
 
         TsTransform::ToDate => {
             let day0 = parse_date_literal(other)?;
-            let start = Utc.from_utc_datetime(&day0.and_hms_opt(0, 0, 0)?);
-            let end = start + Duration::days(1);
+            let (start, end) = date_bounds_utc(day0, tz)?;
 
             Some(match op {
                 Operator::Eq => TimePred::and(
@@ -605,6 +651,7 @@ fn compile_time_leaf_from_binary(
     op: Operator,
     right: &Expr,
     ts_col: &str,
+    tz: Option<&ParsedTz>,
 ) -> TimePred {
     // Only support comparison ops we can reason about at compile time.
     if !matches!(
@@ -658,13 +705,13 @@ fn compile_time_leaf_from_binary(
 
     // 5) scalar functions handle
     if let Some(tx) = match_ts_transform(left, ts_col)
-        && let Some(tp) = compile_transform_cmp(tx, op, right)
+        && let Some(tp) = compile_transform_cmp(tx, op, right, tz)
     {
         return tp;
     }
     if let Some(tx) = match_ts_transform(right, ts_col)
         && let Some(flop) = flip_op(op)
-        && let Some(tp) = compile_transform_cmp(tx, flop, left)
+        && let Some(tp) = compile_transform_cmp(tx, flop, left, tz)
     {
         return tp;
     }
@@ -673,7 +720,7 @@ fn compile_time_leaf_from_binary(
     TimePred::Unknown
 }
 
-pub(crate) fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
+pub(crate) fn compile_time_pred(expr: &Expr, ts_col: &str, tz: Option<&ParsedTz>) -> TimePred {
     if !expr_mentions_ts(expr, ts_col) {
         return TimePred::NonTime;
     }
@@ -682,23 +729,23 @@ pub(crate) fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
         Expr::BinaryExpr(be) => {
             if be.op == Operator::And {
                 return TimePred::and(
-                    compile_time_pred(&be.left, ts_col),
-                    compile_time_pred(&be.right, ts_col),
+                    compile_time_pred(&be.left, ts_col, tz),
+                    compile_time_pred(&be.right, ts_col, tz),
                 );
             }
             if be.op == Operator::Or {
                 return TimePred::or(
-                    compile_time_pred(&be.left, ts_col),
-                    compile_time_pred(&be.right, ts_col),
+                    compile_time_pred(&be.left, ts_col, tz),
+                    compile_time_pred(&be.right, ts_col, tz),
                 );
             }
 
             // Leaf (comparisons, eq/ne, etc)
-            compile_time_leaf_from_binary(&be.left, be.op, &be.right, ts_col)
+            compile_time_leaf_from_binary(&be.left, be.op, &be.right, ts_col, tz)
         }
 
         // DF Not variant
-        Expr::Not(e) => TimePred::not(compile_time_pred(e, ts_col)),
+        Expr::Not(e) => TimePred::not(compile_time_pred(e, ts_col, tz)),
 
         // Literal bool: foldable
         Expr::Literal(v, _) => match scalar_to_bool(v) {
@@ -708,9 +755,9 @@ pub(crate) fn compile_time_pred(expr: &Expr, ts_col: &str) -> TimePred {
         },
 
         // Wrappers
-        Expr::Alias(a) => compile_time_pred(&a.expr, ts_col),
-        Expr::Cast(c) => compile_time_pred(&c.expr, ts_col),
-        Expr::TryCast(c) => compile_time_pred(&c.expr, ts_col),
+        Expr::Alias(a) => compile_time_pred(&a.expr, ts_col, tz),
+        Expr::Cast(c) => compile_time_pred(&c.expr, ts_col, tz),
+        Expr::TryCast(c) => compile_time_pred(&c.expr, ts_col, tz),
 
         Expr::Between(b) => compile_between(b, ts_col),
 

@@ -1,6 +1,11 @@
 #[cfg(test)]
 mod tests;
 mod time_predicate;
+use arrow::datatypes::DataType;
+
+use chrono::FixedOffset;
+
+use chrono_tz::Tz;
 pub(crate) use time_predicate::*;
 
 mod pruning;
@@ -54,6 +59,26 @@ pub struct TsTableProvider {
 struct Cache {
     version: Option<u64>,
     state: Option<TableState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ParsedTz {
+    Utc,
+    Fixed(FixedOffset),
+    Olson(Tz),
+}
+
+fn parse_tz(tz: &str) -> Option<ParsedTz> {
+    if tz.eq_ignore_ascii_case("utc") {
+        return Some(ParsedTz::Utc);
+    }
+    if let Ok(offset) = tz.parse::<FixedOffset>() {
+        return Some(ParsedTz::Fixed(offset));
+    }
+    if let Ok(tz) = tz.parse::<Tz>() {
+        return Some(ParsedTz::Olson(tz));
+    }
+    None
 }
 
 /// Wrap a generic error for DataFusion APIs.
@@ -146,12 +171,23 @@ impl TsTableProvider {
         self.table.index_spec().timestamp_column.as_str()
     }
 
+    fn ts_timezone(&self) -> Option<String> {
+        let ts_col = self.time_column_name();
+        let field = self.schema.field_with_name(ts_col).ok()?;
+        match field.data_type() {
+            DataType::Timestamp(_, Some(tz)) => Some(tz.to_string()),
+            _ => None,
+        }
+    }
+
     fn prune_segments_by_time<'a>(
         &self,
         segments: Vec<&'a SegmentMeta>,
         filters: &[Expr],
     ) -> Vec<&'a SegmentMeta> {
         let ts_col = self.time_column_name();
+        let tz_opt = self.ts_timezone();
+        let parsed_tz = tz_opt.as_deref().and_then(parse_tz);
 
         let mut saw_any_ts = false;
         let mut compiled = TimePred::True;
@@ -159,7 +195,7 @@ impl TsTableProvider {
         for f in filters {
             if expr_mentions_ts(f, ts_col) {
                 saw_any_ts = true;
-                compiled = TimePred::and(compiled, compile_time_pred(f, ts_col))
+                compiled = TimePred::and(compiled, compile_time_pred(f, ts_col, parsed_tz.as_ref()))
             }
         }
 
