@@ -60,6 +60,14 @@ Example:
 WHERE ts < to_timestamp_millis(1704672000123)
 ```
 
+### `to_unixtime(ts)`
+We also recognize `to_unixtime(ts)` when it is compared to a **numeric** literal:
+
+- `to_unixtime(ts) >= 1704672000`
+- `1704672000 < to_unixtime(ts)`
+
+This uses seconds since epoch. String literals are not supported here.
+
 ## What does NOT prune (yet)
 
 These are intentionally treated as “unknown” to avoid incorrect pruning:
@@ -68,6 +76,7 @@ These are intentionally treated as “unknown” to avoid incorrect pruning:
 - `ts + other_column < ...`
 - `to_timestamp(...) + ts < ...`
 - `interval - ts` (non-commutative, ambiguous for our matcher)
+- `to_unixtime(ts) < '1704672000'` (string literal)
 
 Queries still run correctly; they just won’t be pruned.
 
