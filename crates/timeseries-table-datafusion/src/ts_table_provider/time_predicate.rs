@@ -124,6 +124,11 @@ impl IntervalTruth {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TsTransform {
+    ToUnixtime,
+}
+
 // --------------------------- helpers -----------------------
 
 fn unwrap_expr(expr: &Expr) -> &Expr {
@@ -411,6 +416,24 @@ fn flip_op(op: Operator) -> Option<Operator> {
     }
 }
 
+fn match_ts_transform(expr: &Expr, ts_col: &str) -> Option<TsTransform> {
+    // Unwrap wrappers around scalar functions
+    let e = unwrap_expr(expr);
+
+    if let Expr::ScalarFunction(sf) = e {
+        let name = sf.name();
+
+        if name.eq_ignore_ascii_case("to_unixtime")
+            && sf.args.len() == 1
+            && expr_is_ts(&sf.args[0], ts_col)
+        {
+            return Some(TsTransform::ToUnixtime);
+        }
+    }
+
+    None
+}
+
 // --------------------------- compile ---------------------------------------
 
 fn compile_between(b: &Between, ts_col: &str) -> TimePred {
@@ -489,6 +512,16 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
     if il.negated { TimePred::not(p) } else { p }
 }
 
+fn compile_transform_cmp(tx: TsTransform, op: Operator, other: &Expr) -> Option<TimePred> {
+    match tx {
+        TsTransform::ToUnixtime => {
+            let secs = expr_to_numeric(other)?;
+            let dt = unix_seconds_to_datetime(secs)?;
+            Some(TimePred::Cmp { op, ts: dt })
+        }
+    }
+}
+
 fn compile_time_leaf_from_binary(
     left: &Expr,
     op: Operator,
@@ -543,6 +576,19 @@ fn compile_time_leaf_from_binary(
             op: flop,
             ts: shifted,
         };
+    }
+
+    // 5) scalar functions handle
+    if let Some(tx) = match_ts_transform(left, ts_col)
+        && let Some(tp) = compile_transform_cmp(tx, op, right)
+    {
+        return tp;
+    }
+    if let Some(tx) = match_ts_transform(right, ts_col)
+        && let Some(flop) = flip_op(op)
+        && let Some(tp) = compile_transform_cmp(tx, flop, left)
+    {
+        return tp;
     }
 
     // If it mentions ts but we don't understand it, keep Unknown (do not prune).
