@@ -12,8 +12,9 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
 use datafusion::catalog::TableProvider;
+use datafusion::datasource::MemTable;
 use datafusion::datasource::source::DataSourceExec;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, Operator};
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{ExecutionPlan, collect};
@@ -31,6 +32,9 @@ use timeseries_table_core::transaction_log::{
     TransactionLogStore,
 };
 use timeseries_table_datafusion::TsTableProvider;
+use timeseries_table_datafusion::test_utils::{
+    CompiledTimePred, TestInterval, add_interval_for_tests, compile_time_pred_for_tests,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -216,6 +220,207 @@ fn write_parquet_with_props(
     writer.close()?;
 
     Ok(())
+}
+
+fn unix_seconds_to_datetime_test(secs: f64) -> Option<chrono::DateTime<Utc>> {
+    if !secs.is_finite() {
+        return None;
+    }
+    let whole = secs.trunc() as i64;
+    let frac = secs - (whole as f64);
+    let nanos = (frac * 1e9).round() as i64;
+    let (adj_secs, adj_nanos) = if nanos > 1_000_000_000 {
+        (whole + 1, nanos - 1_000_000_000)
+    } else if nanos < 0 {
+        (whole - 1, nanos + 1_000_000_000)
+    } else {
+        (whole, nanos)
+    };
+
+    Utc.timestamp_opt(adj_secs, adj_nanos as u32).single()
+}
+
+fn find_filter_expr(plan: &datafusion::logical_expr::LogicalPlan) -> Option<Expr> {
+    if let datafusion::logical_expr::LogicalPlan::Filter(filter) = plan {
+        return Some(filter.predicate.clone());
+    }
+    for input in plan.inputs() {
+        if let Some(expr) = find_filter_expr(input) {
+            return Some(expr);
+        }
+    }
+    None
+}
+
+async fn sql_predicate(sql: &str) -> Expr {
+    let ctx = SessionContext::new();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+        Field::new("symbol", DataType::Utf8, true),
+        Field::new("other", DataType::Int64, true),
+    ]));
+    let table = MemTable::try_new(schema, vec![vec![]]).expect("mem table");
+    ctx.register_table("t", Arc::new(table))
+        .expect("register table");
+    let df = ctx.sql(sql).await.expect("sql plan");
+    let plan = df.into_unoptimized_plan();
+    find_filter_expr(&plan).expect("filter predicate")
+}
+
+fn assert_cmp_dt(expr: Expr, expected_op: Operator, expected_ts: chrono::DateTime<Utc>) {
+    match compile_time_pred_for_tests(&expr, "ts") {
+        CompiledTimePred::Cmp { op, ts } => {
+            assert_eq!(op, expected_op);
+            assert_eq!(ts, expected_ts);
+        }
+        other => panic!("expected Cmp, got {other:?}"),
+    }
+}
+
+fn assert_cmp(expr: Expr, expected_op: Operator, expected_ts: &str) {
+    let ts = chrono::DateTime::parse_from_rfc3339(expected_ts)
+        .expect("valid rfc3339")
+        .with_timezone(&Utc);
+    assert_cmp_dt(expr, expected_op, ts);
+}
+
+fn assert_unknown(expr: Expr) {
+    assert!(matches!(
+        compile_time_pred_for_tests(&expr, "ts"),
+        CompiledTimePred::Unknown | CompiledTimePred::Other
+    ));
+}
+
+#[tokio::test]
+async fn sql_ts_gte_to_timestamp_seconds_numeric() {
+    let expr = sql_predicate("select * from t where ts >= to_timestamp(1704672000)").await;
+    assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn sql_ts_lt_to_timestamp_millis_numeric() {
+    let expr =
+        sql_predicate("select * from t where ts < to_timestamp_millis(1704672000123)").await;
+    let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+    assert_cmp_dt(expr, Operator::Lt, expected);
+}
+
+#[tokio::test]
+async fn sql_ts_lte_to_timestamp_string() {
+    let expr = sql_predicate(
+        "select * from t where ts <= to_timestamp('2024-01-08T00:00:00Z')",
+    )
+    .await;
+    assert_cmp(expr, Operator::LtEq, "2024-01-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn sql_ts_plus_interval_lt_to_timestamp_seconds() {
+    let expr =
+        sql_predicate("select * from t where ts + interval '1 day' < to_timestamp(1704672000)")
+            .await;
+    let expected = add_interval_for_tests(
+        chrono::DateTime::parse_from_rfc3339("2024-01-08T00:00:00Z")
+            .expect("valid rfc3339")
+            .with_timezone(&Utc),
+        TestInterval {
+            months: 0,
+            days: 1,
+            nanos: 0,
+        },
+        -1,
+    )
+    .expect("shifted");
+    assert_cmp_dt(expr, Operator::Lt, expected);
+}
+
+#[tokio::test]
+async fn sql_ts_minus_interval_lte_to_timestamp_micros() {
+    let expr = sql_predicate(
+        "select * from t where ts - interval '2 hours' <= to_timestamp_micros(1704672000123456)",
+    )
+    .await;
+    let base = unix_seconds_to_datetime_test(1_704_672_000_123_456f64 / 1_000_000.0).expect("dt");
+    let expected = add_interval_for_tests(
+        base,
+        TestInterval {
+            months: 0,
+            days: 0,
+            nanos: -2 * 3_600_000_000_000,
+        },
+        -1,
+    )
+    .expect("shifted");
+    assert_cmp_dt(expr, Operator::LtEq, expected);
+}
+
+#[tokio::test]
+async fn sql_literal_to_timestamp_millis_gt_ts() {
+    let expr =
+        sql_predicate("select * from t where to_timestamp_millis(1704672000123) > ts").await;
+    let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+    assert_cmp_dt(expr, Operator::Lt, expected);
+}
+
+#[tokio::test]
+async fn sql_literal_to_timestamp_lte_ts_plus_interval() {
+    let expr =
+        sql_predicate("select * from t where to_timestamp(1704672000) <= ts + interval '1 hour'")
+            .await;
+    let expected = add_interval_for_tests(
+        chrono::DateTime::parse_from_rfc3339("2024-01-08T00:00:00Z")
+            .expect("valid rfc3339")
+            .with_timezone(&Utc),
+        TestInterval {
+            months: 0,
+            days: 0,
+            nanos: 3_600_000_000_000,
+        },
+        -1,
+    )
+    .expect("shifted");
+    assert_cmp_dt(expr, Operator::GtEq, expected);
+}
+
+#[tokio::test]
+async fn sql_ts_plus_numeric_is_unknown() {
+    let expr =
+        sql_predicate("select * from t where ts + 1 < to_timestamp(1704672000)").await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_ts_plus_to_timestamp_is_unknown() {
+    let expr =
+        sql_predicate("select * from t where ts + to_timestamp(1704672000) < ts").await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_to_timestamp_minus_ts_is_unknown() {
+    let expr = sql_predicate(
+        "select * from t where to_timestamp(1704672000) - ts < to_timestamp(1704672000)",
+    )
+    .await;
+    assert_unknown(expr);
+}
+
+#[tokio::test]
+async fn sql_cast_to_timestamp_is_supported() {
+    let expr = sql_predicate(
+        "select * from t where ts >= CAST(to_timestamp(1704672000) AS TIMESTAMP)",
+    )
+    .await;
+    assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn sql_alias_in_subquery_is_unknown() {
+    let expr = sql_predicate(
+        "select * from (select ts, to_timestamp(1704672000) as t from t) where ts >= t",
+    )
+    .await;
+    assert_unknown(expr);
 }
 
 async fn create_table(tmp: &TempDir, price_nullable: bool) -> TestResult<TimeSeriesTable> {
