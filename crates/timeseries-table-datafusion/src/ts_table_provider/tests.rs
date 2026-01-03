@@ -1,9 +1,13 @@
 use super::*;
 use arrow::array::types::{IntervalDayTime, IntervalMonthDayNano};
+use chrono::DateTime;
+use chrono::Utc;
 use datafusion::common::Column;
 use datafusion::logical_expr::Between;
 use datafusion::logical_expr::BinaryExpr;
+use datafusion::logical_expr::Operator;
 use datafusion::logical_expr::expr::InList;
+use datafusion::scalar::ScalarValue;
 
 fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
