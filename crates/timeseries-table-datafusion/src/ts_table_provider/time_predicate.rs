@@ -888,7 +888,7 @@ fn compile_transform_cmp(
 
                 Operator::Lt => TimePred::Cmp {
                     op: Operator::Lt,
-                    ts: end_utc,
+                    ts: if aligned { floor_utc } else { end_utc },
                 },
 
                 Operator::LtEq => TimePred::Cmp {
