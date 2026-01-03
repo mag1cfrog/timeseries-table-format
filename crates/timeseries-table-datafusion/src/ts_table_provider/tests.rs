@@ -1626,3 +1626,124 @@ fn compile_time_pred_date_trunc_lt_aligned_hour() {
         IntervalTruth::AlwaysFalse
     );
 }
+
+#[test]
+fn compile_time_pred_date_bin_eq_fixed_minutes() {
+    let expr = binary(
+        scalar_fn(
+            "date_bin",
+            vec![lit_interval_day_time(0, 15 * 60 * 1000), col("ts")],
+        ),
+        Operator::Eq,
+        lit_str("2024-01-01T10:30:00Z"),
+    );
+    let pred = compile_time_pred(&expr, "ts", None);
+    let inside = dt("2024-01-01T10:44:59Z");
+    let at_end = dt("2024-01-01T10:45:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, inside, inside),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_end, at_end),
+        IntervalTruth::AlwaysFalse
+    );
+}
+
+#[test]
+fn compile_time_pred_date_bin_ignores_tz_alignment() {
+    let expr = binary(
+        scalar_fn("date_bin", vec![lit_interval_day_time(1, 0), col("ts")]),
+        Operator::Eq,
+        lit_str("2024-03-10T00:00:00-05:00"),
+    );
+    let pred = compile_time_pred(&expr, "ts", Some(&olson_tz("America/New_York")));
+    assert!(matches!(pred, TimePred::False));
+}
+
+#[test]
+fn compile_time_pred_date_bin_gt_non_aligned() {
+    let expr = binary(
+        scalar_fn(
+            "date_bin",
+            vec![lit_interval_day_time(0, 15 * 60 * 1000), col("ts")],
+        ),
+        Operator::Gt,
+        lit_str("2024-01-01T10:37:00Z"),
+    );
+    let pred = compile_time_pred(&expr, "ts", None);
+    let before = dt("2024-01-01T10:44:59Z");
+    let at_next = dt("2024-01-01T10:45:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before, before),
+        IntervalTruth::AlwaysFalse
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_next, at_next),
+        IntervalTruth::AlwaysTrue
+    );
+}
+
+#[test]
+fn compile_time_pred_date_bin_months_with_origin() {
+    let expr = binary(
+        scalar_fn(
+            "date_bin",
+            vec![
+                lit_interval_mdn(3, 0, 0),
+                col("ts"),
+                lit_str("2020-01-01T00:00:00Z"),
+            ],
+        ),
+        Operator::Eq,
+        lit_str("2020-04-01T00:00:00Z"),
+    );
+    let pred = compile_time_pred(&expr, "ts", None);
+    let inside = dt("2020-05-15T00:00:00Z");
+    let at_end = dt("2020-07-01T00:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, inside, inside),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_end, at_end),
+        IntervalTruth::AlwaysFalse
+    );
+}
+
+#[test]
+fn compile_time_pred_date_bin_invalid_month_combo_is_unknown() {
+    let expr = binary(
+        scalar_fn("date_bin", vec![lit_interval_mdn(1, 1, 0), col("ts")]),
+        Operator::Eq,
+        lit_str("2024-01-01T00:00:00Z"),
+    );
+    assert_unknown(expr);
+}
+
+#[test]
+fn compile_time_pred_date_bin_overflow_is_unknown() {
+    let expr = binary(
+        scalar_fn("date_bin", vec![lit_interval_day_time(0, i32::MAX), col("ts")]),
+        Operator::Eq,
+        lit_str("9999-12-31T23:59:59Z"),
+    );
+    assert_unknown(expr);
+}
+
+#[test]
+fn compile_time_pred_date_bin_underflow_is_unknown() {
+    let expr = binary(
+        scalar_fn(
+            "date_bin",
+            vec![
+                lit_interval_day_time(0, 1000),
+                col("ts"),
+                lit_str("2262-04-11T23:47:16.854775807Z"),
+            ],
+        ),
+        Operator::Eq,
+        lit_str("1677-09-21T00:12:43.145224192Z"),
+    );
+    assert_unknown(expr);
+}

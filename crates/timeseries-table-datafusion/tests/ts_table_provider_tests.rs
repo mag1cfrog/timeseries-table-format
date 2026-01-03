@@ -387,6 +387,15 @@ async fn sql_date_trunc_minute_eq_literal() {
 }
 
 #[tokio::test]
+async fn sql_date_bin_minute_eq_literal() {
+    let expr = sql_predicate(
+        "select * from t where date_bin(interval '1 minute', ts) = '1970-01-01T00:03:00Z'",
+    )
+    .await;
+    assert_pruning(expr, true, false);
+}
+
+#[tokio::test]
 async fn sql_literal_to_timestamp_millis_gt_ts() {
     let expr = sql_predicate("select * from t where to_timestamp_millis(1704672000123) > ts").await;
     let expected = unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
@@ -1186,6 +1195,26 @@ async fn date_trunc_filter_returns_correct_rows() -> TestResult {
         &ctx,
         "SELECT COUNT(*) FROM t \
          WHERE date_trunc('minute', ts) = '1970-01-01T00:03:00Z'",
+    )
+    .await?;
+    let count = scalar_u64(&batches)?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn date_bin_filter_returns_correct_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_two_segment_table(&tmp).await?;
+    let table = Arc::new(table);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT COUNT(*) FROM t \
+         WHERE date_bin(interval '1 minute', ts) = '1970-01-01T00:03:00Z'",
     )
     .await?;
     let count = scalar_u64(&batches)?;
