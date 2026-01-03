@@ -382,6 +382,129 @@ fn compile_in_list(il: &InList, ts_col: &str) -> TimePred {
     if il.negated { TimePred::not(p) } else { p }
 }
 
+// Unified interval representation (calendar-aware months + days + nanos).
+#[derive(Debug, Clone, Copy)]
+struct UnifiedInterval {
+    months: i32,
+    days: i32,
+    nanos: i64,
+}
+
+impl UnifiedInterval {
+    fn zero() -> Self {
+        Self {
+            months: 0,
+            days: 0,
+            nanos: 0,
+        }
+    }
+
+    fn add(self, rhs: Self, sign: i32) -> Self {
+        Self {
+            months: self.months.saturating_add(rhs.months.saturating_mul(sign)),
+            days: self.days.saturating_add(rhs.days.saturating_mul(sign)),
+            nanos: self
+                .nanos
+                .saturating_add(rhs.nanos.saturating_mul(sign as i64)),
+        }
+    }
+}
+
+fn interval_from_scalar(v: &ScalarValue) -> Option<UnifiedInterval> {
+    match v {
+        ScalarValue::IntervalMonthDayNano(Some(v)) => Some(UnifiedInterval {
+            months: v.months,
+            days: v.days,
+            nanos: v.nanoseconds,
+        }),
+        ScalarValue::IntervalDayTime(Some(v)) => Some(UnifiedInterval {
+            months: 0,
+            days: v.days,
+            nanos: (v.milliseconds as i64) * 1_000_000,
+        }),
+        ScalarValue::IntervalYearMonth(Some(v)) => Some(UnifiedInterval {
+            months: *v,
+            days: 0,
+            nanos: 0,
+        }),
+        _ => None,
+    }
+}
+
+// Flatten an expression of +/- into a net interval applied to ts.
+// Supports: ts, ts + iv, iv + ts, ts + iv + iv, iv + ts - iv, etc.
+fn extract_ts_with_interval(expr: &Expr, ts_col: &str) -> Option<UnifiedInterval> {
+    // Return net interval to be ADDED to ts, puls whether subtree contains ts.
+    fn walk(expr: &Expr, ts_col: &str) -> Option<(UnifiedInterval, bool)> {
+        if expr_is_ts(expr, ts_col) {
+            return Some((UnifiedInterval::zero(), true));
+        }
+
+        if let Expr::BinaryExpr(be) = expr
+            && matches!(be.op, Operator::Plus | Operator::Minus)
+        {
+            let (left_iv, left_has_ts) = walk(&be.left, ts_col)?;
+            let (right_iv, right_has_ts) = walk(&be.right, ts_col)?;
+
+            // Reject if ts appears on both sides or neither side.
+            if left_has_ts == right_has_ts {
+                return None;
+            }
+
+            let op_sign = if be.op == Operator::Plus { 1 } else { -1 };
+
+            if left_has_ts {
+                // (ts + L) +/- R => net = L +/- R
+                let net = left_iv.add(right_iv, op_sign);
+                return Some((net, true));
+            } else {
+                // L +/- (ts + R) => ts + (R -/+ L)
+                // L + (ts + R) => ts + (R - L)
+                // L - (ts + R) => ts + (-R - L)
+                let net = right_iv.add(left_iv, -op_sign);
+                return Some((net, true));
+            }
+        }
+
+        // Not ts, not +/: if it's an interval literal, return it (no ts).
+        if let Expr::Literal(v, _) = expr
+            && let Some(iv) = interval_from_scalar(v)
+        {
+            return Some((iv, false));
+        }
+        None
+    }
+
+    let (net, has_ts) = walk(expr, ts_col)?;
+    if has_ts { Some(net) } else { None }
+}
+
+fn add_interval(dt: DateTime<Utc>, iv: UnifiedInterval, sign: i32) -> Option<DateTime<Utc>> {
+    use chrono::{Duration, Months};
+
+    let mut out = dt;
+    let months = iv.months.saturating_mul(sign);
+    if months != 0 {
+        if months > 0 {
+            out = out.checked_add_months(Months::new(months as u32))?;
+        } else {
+            out = out.checked_sub_months(Months::new((-months) as u32))?;
+        }
+    }
+
+    let days = iv.days.saturating_mul(sign);
+    if days != 0 {
+        out = out.checked_add_signed(Duration::days(days as i64))?;
+    }
+
+    let nanos = iv.nanos.saturating_mul(sign as i64);
+    if nanos != 0 {
+        out = out.checked_add_signed(Duration::nanoseconds(nanos))?;
+    }
+
+    Some(out)
+}
+
 fn compile_time_leaf_from_binary(
     left: &Expr,
     op: Operator,
@@ -414,6 +537,28 @@ fn compile_time_leaf_from_binary(
         && let Some(flop) = flip_op(op)
     {
         return TimePred::Cmp { op: flop, ts: dt };
+    }
+
+    // 3) (ts +/- interval +/- interval ...) OP literal_ts
+    if let Some(net_iv) = extract_ts_with_interval(left, ts_col)
+        && let Some(dt) = parse_ts_literal(right)
+    {
+        // ts + net_iv OP dt => ts OP (dt - net_iv)
+        if let Some(shifted) = add_interval(dt, net_iv, -1) {
+            return TimePred::Cmp { op, ts: shifted };
+        }
+    }
+
+    // 4) literal_ts OP (ts +/- interval +/- interval ...) (flip)
+    if let Some(net_iv) = extract_ts_with_interval(right, ts_col)
+        && let Some(dt) = parse_ts_literal(left)
+        && let Some(flop) = flip_op(op)
+        && let Some(shifted) = add_interval(dt, net_iv, -1)
+    {
+        return TimePred::Cmp {
+            op: flop,
+            ts: shifted,
+        };
     }
 
     // If it mentions ts but we don't understand it, keep Unknown (do not prune).
