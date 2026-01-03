@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
+    Array, Float64Builder, Int64Array, StringBuilder, TimestampMillisecondArray,
     TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -33,7 +33,8 @@ use timeseries_table_core::transaction_log::{
 };
 use timeseries_table_datafusion::TsTableProvider;
 use timeseries_table_datafusion::test_utils::{
-    CompiledTimePred, TestInterval, add_interval_for_tests, compile_time_pred_for_tests,
+    CompiledIntervalTruth, CompiledTimePred, TestInterval, add_interval_for_tests,
+    compile_time_pred_for_tests, eval_time_pred_on_segment_for_tests,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -497,44 +498,6 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
 }
 
-fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
-    let mut lines = Vec::new();
-    for batch in batches {
-        let schema = batch.schema();
-        // EXPLAIN output is not guaranteed to keep a stable column order across versions.
-        // Prefer the "plan" column (or any column containing "plan") rather than guessing.
-        let col_idx = schema
-            .fields()
-            .iter()
-            .position(|f| f.name() == "plan")
-            .or_else(|| {
-                schema
-                    .fields()
-                    .iter()
-                    .position(|f| f.name().contains("plan"))
-            })
-            .unwrap_or(0);
-        let col = batch.column(col_idx);
-        let strings = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            format!(
-                "expected EXPLAIN output to be a string array (column {})",
-                schema.field(col_idx).name()
-            )
-        })?;
-        for row in 0..strings.len() {
-            if strings.is_valid(row) {
-                lines.push(strings.value(row).to_string());
-            }
-        }
-    }
-    Ok(lines.join("\n"))
-}
-
-fn pretty_batches(batches: &[RecordBatch]) -> Result<String, Box<dyn std::error::Error>> {
-    use arrow::util::pretty::pretty_format_batches;
-    Ok(pretty_format_batches(batches)?.to_string())
-}
-
 fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
     if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
         return Some(exec);
@@ -558,30 +521,6 @@ fn get_pruning_metric(
         Some(_) => Err(format!("metric '{metric_name}' is not a pruning metric").into()),
         None => Err(format!("metric '{metric_name}' not found").into()),
     }
-}
-
-macro_rules! assert_plan_contains {
-    ($plan_text:expr, $pretty:expr, $needle:expr) => {
-        assert!(
-            $plan_text.contains($needle),
-            "expected {needle} in plan:\n{plan_text}\n\npretty:\n{pretty}",
-            needle = $needle,
-            plan_text = $plan_text,
-            pretty = $pretty
-        );
-    };
-}
-
-macro_rules! assert_plan_not_contains {
-    ($plan_text:expr, $pretty:expr, $needle:expr) => {
-        assert!(
-            !$plan_text.contains($needle),
-            "unexpected {needle} in plan:\n{plan_text}\n\npretty:\n{pretty}",
-            needle = $needle,
-            plan_text = $plan_text,
-            pretty = $pretty
-        );
-    };
 }
 
 fn first_batch(batches: &[RecordBatch]) -> Result<&RecordBatch, Box<dyn std::error::Error>> {
@@ -679,6 +618,28 @@ fn scalar_i64_from_array(array: &dyn Array) -> Result<i64, Box<dyn std::error::E
         }
         other => Err(format!("unexpected scalar type {other:?}").into()),
     }
+}
+
+fn seg_bounds_minutes(
+    start_minute: i64,
+    count: i64,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let start_ms = minutes_to_millis(start_minute);
+    let end_ms = start_ms + (count - 1);
+    let min = Utc.timestamp_millis_opt(start_ms).single().expect("min ts");
+    let max = Utc.timestamp_millis_opt(end_ms).single().expect("max ts");
+    (min, max)
+}
+
+fn assert_pruning(expr: Expr, prune_a: bool, prune_b: bool) {
+    let (a_min, a_max) = seg_bounds_minutes(1, 5);
+    let (b_min, b_max) = seg_bounds_minutes(3, 5);
+
+    let a = eval_time_pred_on_segment_for_tests(&expr, "ts", a_min, a_max);
+    let b = eval_time_pred_on_segment_for_tests(&expr, "ts", b_min, b_max);
+
+    assert_eq!(a == CompiledIntervalTruth::AlwaysFalse, prune_a);
+    assert_eq!(b == CompiledIntervalTruth::AlwaysFalse, prune_b);
 }
 
 #[tokio::test]
@@ -1047,267 +1008,116 @@ async fn parquet_prunes_row_groups_for_non_time_predicate() -> TestResult {
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t \
-         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+async fn prunes_files_on_time_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where ts >= '1970-01-01T00:03:00Z' and ts < '1970-01-01T00:03:01Z'",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    .await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_eq_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE ts = '1970-01-01T00:03:00Z'",
-    )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+async fn prunes_files_on_time_eq_filter() -> TestResult {
+    let expr =
+        sql_predicate("select * from t where ts = '1970-01-01T00:03:00Z'").await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_gt_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE ts > '1970-01-01T00:03:00Z'",
-    )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+async fn prunes_files_on_time_gt_filter() -> TestResult {
+    let expr =
+        sql_predicate("select * from t where ts > '1970-01-01T00:03:00Z'").await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_lte_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE ts <= '1970-01-01T00:01:00Z'",
-    )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-a.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-b.parquet");
+async fn prunes_files_on_time_lte_filter() -> TestResult {
+    let expr =
+        sql_predicate("select * from t where ts <= '1970-01-01T00:01:00Z'").await;
+    assert_pruning(expr, false, true);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_between_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t \
-         WHERE ts BETWEEN '1970-01-01T00:03:00Z' AND '1970-01-01T00:03:01Z'",
+async fn prunes_files_on_time_between_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where ts between '1970-01-01T00:03:00Z' and '1970-01-01T00:03:01Z'",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    .await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_not_between_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t \
-         WHERE ts NOT BETWEEN '1970-01-01T00:00:00Z' AND '1970-01-01T00:02:00Z'",
+async fn prunes_files_on_time_not_between_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where ts not between '1970-01-01T00:00:00Z' and '1970-01-01T00:02:00Z'",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    .await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_in_list_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE ts IN ('1970-01-01T00:03:00Z')",
+async fn prunes_files_on_time_in_list_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t where ts in ('1970-01-01T00:03:00Z')",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    .await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn does_not_prune_on_time_not_in_list_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE ts NOT IN ('1970-01-01T00:03:00Z')",
+async fn does_not_prune_on_time_not_in_list_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t where ts not in ('1970-01-01T00:03:00Z')",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-a.parquet");
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+    .await;
+    assert_pruning(expr, false, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_or_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t \
-         WHERE (ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z') \
-            OR (ts >= '1970-01-01T00:04:00Z' AND ts < '1970-01-01T00:04:01Z')",
+async fn prunes_files_on_time_or_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t \
+         where (ts >= '1970-01-01T00:03:00Z' and ts < '1970-01-01T00:03:01Z') \
+            or (ts >= '1970-01-01T00:04:00Z' and ts < '1970-01-01T00:04:01Z')",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    .await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn prunes_files_on_time_not_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE NOT (ts < '1970-01-01T00:02:00Z')",
+async fn prunes_files_on_time_not_filter() -> TestResult {
+    let expr = sql_predicate(
+        "select * from t where not (ts < '1970-01-01T00:02:00Z')",
     )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
-    assert_plan_not_contains!(plan_text, pretty, "seg-a.parquet");
+    .await;
+    assert_pruning(expr, true, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn does_not_prune_on_time_neq_filter_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(
-        &ctx,
-        "EXPLAIN SELECT * FROM t WHERE ts != '1970-01-01T00:03:00Z'",
-    )
-    .await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-a.parquet");
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+async fn does_not_prune_on_time_neq_filter() -> TestResult {
+    let expr =
+        sql_predicate("select * from t where ts != '1970-01-01T00:03:00Z'").await;
+    assert_pruning(expr, false, false);
     Ok(())
 }
 
 #[tokio::test]
-async fn does_not_prune_on_unrecognized_predicate_explain() -> TestResult {
-    let tmp = TempDir::new()?;
-    let table = create_two_segment_table(&tmp).await?;
-    let table = Arc::new(table);
-
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
-
-    let batches = collect_batches(&ctx, "EXPLAIN SELECT * FROM t WHERE symbol = 'A'").await?;
-    let plan_text = explain_plan_text(&batches)?;
-    let pretty = pretty_batches(&batches)?;
-
-    assert_plan_contains!(plan_text, pretty, "seg-a.parquet");
-    assert_plan_contains!(plan_text, pretty, "seg-b.parquet");
+async fn does_not_prune_on_unrecognized_predicate() -> TestResult {
+    let expr = sql_predicate("select * from t where symbol = 'A'").await;
+    assert_pruning(expr, false, false);
     Ok(())
 }
 
