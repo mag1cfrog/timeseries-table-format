@@ -1606,3 +1606,23 @@ fn compile_time_pred_date_trunc_minute_olson_ignores_tz() {
         IntervalTruth::AlwaysFalse
     );
 }
+
+#[test]
+fn compile_time_pred_date_trunc_lt_aligned_hour() {
+    let expr = binary(
+        scalar_fn("date_trunc", vec![lit_str("hour"), col("ts")]),
+        Operator::Lt,
+        lit_str("2024-01-01T10:00:00Z"),
+    );
+    let pred = compile_time_pred(&expr, "ts", None);
+    let before = dt("2024-01-01T09:59:59Z");
+    let at_floor = dt("2024-01-01T10:00:00Z");
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, before, before),
+        IntervalTruth::AlwaysTrue
+    );
+    assert_eq!(
+        eval_time_pred_on_segment(&pred, at_floor, at_floor),
+        IntervalTruth::AlwaysFalse
+    );
+}
