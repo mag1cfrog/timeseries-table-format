@@ -1,18 +1,44 @@
 use super::*;
 use arrow::array::types::{IntervalDayTime, IntervalMonthDayNano};
+use arrow::datatypes::{DataType, TimeUnit};
 use chrono::DateTime;
+use chrono::TimeZone;
 use chrono::Utc;
-use datafusion::common::Column;
+use datafusion::common::{Column, TableReference};
 use datafusion::logical_expr::Between;
 use datafusion::logical_expr::BinaryExpr;
 use datafusion::logical_expr::Operator;
+use datafusion::logical_expr::expr::{Alias, Cast, ScalarFunction};
 use datafusion::logical_expr::expr::InList;
 use datafusion::scalar::ScalarValue;
+use datafusion::common::Result as DFResult;
+use datafusion::logical_expr::Volatility;
+use datafusion::logical_expr::expr_fn::create_udf;
+use datafusion::logical_expr_common::columnar_value::ColumnarValue;
+use std::sync::Arc;
 
 fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .expect("valid rfc3339")
         .with_timezone(&Utc)
+}
+
+fn unix_seconds_to_datetime_test(secs: f64) -> Option<DateTime<Utc>> {
+    if !secs.is_finite() {
+        return None;
+    }
+    let whole = secs.trunc() as i64;
+    let frac = secs - (whole as f64);
+    let nanos = (frac * 1e9).round() as i64;
+    let (adj_secs, adj_nanos) = if nanos > 1_000_000_000 {
+        (whole + 1, nanos - 1_000_000_000)
+    } else if nanos < 0 {
+        (whole - 1, nanos + 1_000_000_000)
+    } else {
+        (whole, nanos)
+    };
+
+    Utc.timestamp_opt(adj_secs, adj_nanos as u32).single()
 }
 
 fn col(name: &str) -> Expr {
@@ -25,6 +51,10 @@ fn lit_str(value: &str) -> Expr {
 
 fn lit_i64(value: i64) -> Expr {
     Expr::Literal(ScalarValue::Int64(Some(value)), None)
+}
+
+fn lit_f64(value: f64) -> Expr {
+    Expr::Literal(ScalarValue::Float64(Some(value)), None)
 }
 
 fn lit_interval_mdn(months: i32, days: i32, nanos: i64) -> Expr {
@@ -52,6 +82,30 @@ fn lit_interval_year_month(months: i32) -> Expr {
     Expr::Literal(ScalarValue::IntervalYearMonth(Some(months)), None)
 }
 
+fn scalar_fn(name: &str, args: Vec<Expr>) -> Expr {
+    let udf = create_udf(
+        name,
+        vec![],
+        DataType::Timestamp(TimeUnit::Nanosecond, None),
+        Volatility::Immutable,
+        Arc::new(|_: &[ColumnarValue]| -> DFResult<ColumnarValue> {
+            unreachable!("udf should not execute in tests")
+        }),
+    );
+    Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(udf), args))
+}
+
+fn cast(expr: Expr, data_type: DataType) -> Expr {
+    Expr::Cast(Cast {
+        expr: Box::new(expr),
+        data_type,
+    })
+}
+
+fn alias(expr: Expr, name: &str) -> Expr {
+    Expr::Alias(Alias::new(expr, None::<TableReference>, name))
+}
+
 fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
     Expr::BinaryExpr(BinaryExpr {
         left: Box::new(left),
@@ -66,6 +120,17 @@ fn assert_cmp(expr: Expr, expected_op: Operator, expected_ts: &str) {
         TimePred::Cmp { op, ts } => {
             assert_eq!(op, expected_op);
             assert_eq!(ts, dt(expected_ts));
+        }
+        other => panic!("expected TimePred::Cmp, got {other:?}"),
+    }
+}
+
+fn assert_cmp_dt(expr: Expr, expected_op: Operator, expected_ts: DateTime<Utc>) {
+    let pred = compile_time_pred(&expr, "ts");
+    match pred {
+        TimePred::Cmp { op, ts } => {
+            assert_eq!(op, expected_op);
+            assert_eq!(ts, expected_ts);
         }
         other => panic!("expected TimePred::Cmp, got {other:?}"),
     }
@@ -999,10 +1064,10 @@ fn compile_time_pred_and_preserves_interval_constraint() {
 }
 
 #[test]
-fn compile_time_pred_or_disables_interval_pruning() {
-    let expr = binary(
-        binary(col("symbol"), Operator::Eq, lit_str("AAPL")),
-        Operator::Or,
+    fn compile_time_pred_or_disables_interval_pruning() {
+        let expr = binary(
+            binary(col("symbol"), Operator::Eq, lit_str("AAPL")),
+            Operator::Or,
         binary(
             binary(col("ts"), Operator::Plus, lit_interval_day_time(1, 0)),
             Operator::Lt,
@@ -1013,8 +1078,293 @@ fn compile_time_pred_or_disables_interval_pruning() {
 
     let seg_min = dt("2024-01-10T00:00:00Z");
     let seg_max = dt("2024-01-11T00:00:00Z");
-    assert_ne!(
-        eval_time_pred_on_segment(&pred, seg_min, seg_max),
-        IntervalTruth::AlwaysFalse
-    );
-}
+        assert_ne!(
+            eval_time_pred_on_segment(&pred, seg_min, seg_max),
+            IntervalTruth::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_to_timestamp_string() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp", vec![lit_str("2024-01-08T00:00:00Z")]),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_lt_to_timestamp_seconds_string() {
+        let expr = binary(
+            col("ts"),
+            Operator::Lt,
+            scalar_fn(
+                "to_timestamp_seconds",
+                vec![lit_str("2024-01-08T00:00:00Z")],
+            ),
+        );
+        assert_cmp(expr, Operator::Lt, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_eq_to_timestamp_millis_string() {
+        let expr = binary(
+            col("ts"),
+            Operator::Eq,
+            scalar_fn(
+                "to_timestamp_millis",
+                vec![lit_str("2024-01-08T00:00:00.123Z")],
+            ),
+        );
+        assert_cmp(expr, Operator::Eq, "2024-01-08T00:00:00.123Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gt_to_timestamp_micros_string() {
+        let expr = binary(
+            col("ts"),
+            Operator::Gt,
+            scalar_fn(
+                "to_timestamp_micros",
+                vec![lit_str("2024-01-08T00:00:00.123456Z")],
+            ),
+        );
+        assert_cmp(expr, Operator::Gt, "2024-01-08T00:00:00.123456Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_lte_to_timestamp_nanos_string() {
+        let expr = binary(
+            col("ts"),
+            Operator::LtEq,
+            scalar_fn(
+                "to_timestamp_nanos",
+                vec![lit_str("2024-01-08T00:00:00.123456789Z")],
+            ),
+        );
+        assert_cmp(expr, Operator::LtEq, "2024-01-08T00:00:00.123456789Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_to_timestamp_seconds_numeric() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp", vec![lit_i64(1_704_672_000)]),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_to_timestamp_seconds_alias_numeric() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp_seconds", vec![lit_i64(1_704_672_000)]),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_to_timestamp_millis_numeric() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp_millis", vec![lit_i64(1_704_672_000_123)]),
+        );
+        let expected =
+            unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+        assert_cmp_dt(expr, Operator::GtEq, expected);
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_to_timestamp_micros_numeric() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp_micros", vec![lit_i64(1_704_672_000_123_456)]),
+        );
+        let expected =
+            unix_seconds_to_datetime_test(1_704_672_000_123_456f64 / 1_000_000.0).expect("dt");
+        assert_cmp_dt(expr, Operator::GtEq, expected);
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_to_timestamp_nanos_numeric() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp_nanos", vec![lit_i64(1_704_672_000_123_456_789)]),
+        );
+        let expected =
+            unix_seconds_to_datetime_test(1_704_672_000_123_456_789f64 / 1_000_000_000.0)
+                .expect("dt");
+        assert_cmp_dt(expr, Operator::GtEq, expected);
+    }
+
+    #[test]
+    fn compile_time_pred_literal_to_timestamp_lte_ts() {
+        let expr = binary(
+            scalar_fn("to_timestamp", vec![lit_i64(1_704_672_000)]),
+            Operator::LtEq,
+            col("ts"),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_literal_to_timestamp_millis_gt_ts() {
+        let expr = binary(
+            scalar_fn("to_timestamp_millis", vec![lit_i64(1_704_672_000_123)]),
+            Operator::Gt,
+            col("ts"),
+        );
+        let expected =
+            unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+        assert_cmp_dt(expr, Operator::Lt, expected);
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_no_args_is_unknown() {
+        let expr = binary(col("ts"), Operator::GtEq, scalar_fn("to_timestamp", vec![]));
+        assert_unknown(expr);
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_too_many_args_is_unknown() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp", vec![lit_i64(1), lit_i64(2)]),
+        );
+        assert_unknown(expr);
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_non_literal_is_unknown() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp", vec![col("other")]),
+        );
+        assert_unknown(expr);
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_millis_invalid_string_is_unknown() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp_millis", vec![lit_str("not a timestamp")]),
+        );
+        assert_unknown(expr);
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_micros_bad_date_is_unknown() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn(
+                "to_timestamp_micros",
+                vec![lit_str("2024-13-99T00:00:00Z")],
+            ),
+        );
+        assert_unknown(expr);
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_nan_is_unknown() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp", vec![lit_f64(f64::NAN)]),
+        );
+        assert_unknown(expr);
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_casted_to_timestamp() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            cast(
+                scalar_fn("to_timestamp", vec![lit_i64(1_704_672_000)]),
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+            ),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_ts_gte_aliased_to_timestamp() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            alias(
+                scalar_fn("to_timestamp", vec![lit_i64(1_704_672_000)]),
+                "ts_alias",
+            ),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00Z");
+    }
+
+    #[test]
+    fn compile_time_pred_to_timestamp_seconds_fractional() {
+        let expr = binary(
+            col("ts"),
+            Operator::GtEq,
+            scalar_fn("to_timestamp_seconds", vec![lit_f64(1_704_672_000.5)]),
+        );
+        assert_cmp(expr, Operator::GtEq, "2024-01-08T00:00:00.500000000Z");
+    }
+
+    #[test]
+    fn compile_time_pred_interval_lt_to_timestamp_seconds() {
+        let expr = binary(
+            binary(col("ts"), Operator::Plus, lit_interval_day_time(1, 0)),
+            Operator::Lt,
+            scalar_fn("to_timestamp", vec![lit_i64(1_704_672_000)]),
+        );
+        let expected = add_interval(
+            dt("2024-01-08T00:00:00Z"),
+            UnifiedInterval {
+                months: 0,
+                days: 1,
+                nanos: 0,
+            },
+            -1,
+        )
+        .expect("shifted");
+        let pred = compile_time_pred(&expr, "ts");
+        match pred {
+            TimePred::Cmp { op, ts } => {
+                assert_eq!(op, Operator::Lt);
+                assert_eq!(ts, expected);
+            }
+            other => panic!("expected TimePred::Cmp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_time_pred_literal_to_timestamp_gt_ts_plus_interval() {
+        let expr = binary(
+            scalar_fn("to_timestamp_millis", vec![lit_i64(1_704_672_000_123)]),
+            Operator::Gt,
+            binary(col("ts"), Operator::Plus, lit_interval_mdn(0, 0, 3_600_000_000_000)),
+        );
+        let base =
+            unix_seconds_to_datetime_test(1_704_672_000_123f64 / 1_000.0).expect("dt");
+        let expected = add_interval(
+            base,
+            UnifiedInterval {
+                months: 0,
+                days: 0,
+                nanos: 3_600_000_000_000,
+            },
+            -1,
+        )
+        .expect("shifted");
+        assert_cmp_dt(expr, Operator::Lt, expected);
+    }
