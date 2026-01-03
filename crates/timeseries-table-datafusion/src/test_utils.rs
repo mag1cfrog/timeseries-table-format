@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use datafusion::logical_expr::{Expr, Operator};
 
-use crate::ts_table_provider::{TimePred, UnifiedInterval};
+use crate::ts_table_provider::{IntervalTruth, TimePred, UnifiedInterval};
 
 /// Simplified, public view of a compiled time predicate for tests.
 #[derive(Debug, PartialEq)]
@@ -25,6 +25,17 @@ pub enum CompiledTimePred {
     Other,
 }
 
+/// Result of evaluating a compiled time predicate against a segment.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompiledIntervalTruth {
+    /// Predicate always true over the segment interval.
+    AlwaysTrue,
+    /// Predicate always false over the segment interval.
+    AlwaysFalse,
+    /// Predicate may be true for some values in the segment interval.
+    MaybeTrue,
+}
+
 /// Compile a time predicate and map it into `CompiledTimePred`.
 pub fn compile_time_pred_for_tests(expr: &Expr, ts_col: &str) -> CompiledTimePred {
     match crate::ts_table_provider::compile_time_pred(expr, ts_col) {
@@ -34,6 +45,21 @@ pub fn compile_time_pred_for_tests(expr: &Expr, ts_col: &str) -> CompiledTimePre
         TimePred::Unknown => CompiledTimePred::Unknown,
         TimePred::Cmp { op, ts } => CompiledTimePred::Cmp { op, ts },
         _ => CompiledTimePred::Other,
+    }
+}
+
+/// Evaluate a time predicate against a segment interval using production logic.
+pub fn eval_time_pred_on_segment_for_tests(
+    expr: &Expr,
+    ts_col: &str,
+    seg_min: DateTime<Utc>,
+    seg_max: DateTime<Utc>,
+) -> CompiledIntervalTruth {
+    let pred = crate::ts_table_provider::compile_time_pred(expr, ts_col);
+    match crate::ts_table_provider::eval_time_pred_on_segment(&pred, seg_min, seg_max) {
+        IntervalTruth::AlwaysTrue => CompiledIntervalTruth::AlwaysTrue,
+        IntervalTruth::AlwaysFalse => CompiledIntervalTruth::AlwaysFalse,
+        IntervalTruth::MaybeTrue => CompiledIntervalTruth::MaybeTrue,
     }
 }
 
