@@ -1,4 +1,4 @@
-//! example doc
+//! CLI tool for managing time-series tables.
 
 use std::path::{Path, PathBuf};
 
