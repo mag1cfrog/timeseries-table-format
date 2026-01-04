@@ -226,7 +226,7 @@ fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn st
     assert!(!output.status.success(), "append should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Refusing to overwrite existing file"),
+        stderr.contains("Path already exists"),
         "unexpected stderr: {stderr}"
     );
     Ok(())
