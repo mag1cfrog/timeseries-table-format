@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use crate::storage::{
-    BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageResult, TableLocation,
+    BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageLocation, StorageResult,
 };
 
 /// Guard that removes a temporary file on drop unless disarmed.
@@ -43,9 +43,9 @@ impl Drop for TempFileGuard {
 /// Join a table location with a relative path into an absolute local path.
 ///
 /// v0.1: only Local is supported.
-fn join_local(location: &TableLocation, rel: &Path) -> PathBuf {
+fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
     match location {
-        TableLocation::Local(root) => root.join(rel),
+        StorageLocation::Local(root) => root.join(rel),
     }
 }
 
@@ -66,7 +66,7 @@ async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
 /// This performs a write-then-rename sequence on the local filesystem:
 /// it writes the payload to a temporary file next to the target path,
 /// syncs the file, and then renames it into place to provide an atomic
-/// replacement. Currently only `TableLocation::Local` is supported.
+/// replacement. Currently only `StorageLocation::Local` is supported.
 ///
 /// # Parameters
 ///
@@ -79,12 +79,12 @@ async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
 /// Returns `StorageError::LocalIo` when filesystem I/O fails; other internal
 /// helpers may add context to the returned error.
 pub async fn write_atomic(
-    location: &TableLocation,
+    location: &StorageLocation,
     rel_path: &Path,
     contents: &[u8],
 ) -> StorageResult<()> {
     match location {
-        TableLocation::Local(_) => {
+        StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
 
             create_parent_dir(&abs).await?;
@@ -133,12 +133,12 @@ pub async fn write_atomic(
 /// Read the file at `rel_path` within the given `location` and return its
 /// contents as a `String`.
 ///
-/// Currently only `TableLocation::Local` is supported. On success this returns
+/// Currently only `StorageLocation::Local` is supported. On success this returns
 /// the file contents; if the file cannot be found a `StorageError::NotFound` is
 /// returned, while other filesystem problems produce `StorageError::LocalIo`.
-pub async fn read_to_string(location: &TableLocation, rel_path: &Path) -> StorageResult<String> {
+pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> StorageResult<String> {
     match location {
-        TableLocation::Local(_) => {
+        StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
 
             match fs::read_to_string(&abs).await {
@@ -160,12 +160,12 @@ pub async fn read_to_string(location: &TableLocation, rel_path: &Path) -> Storag
 ///
 /// This is used for commit files where we want per-version uniqueness.
 pub async fn write_new(
-    location: &TableLocation,
+    location: &StorageLocation,
     rel_path: &Path,
     contents: &[u8],
 ) -> StorageResult<()> {
     match location {
-        TableLocation::Local(_) => {
+        StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
             create_parent_dir(&abs).await?;
 
@@ -239,7 +239,7 @@ pub struct FileHeadTail4 {
 /// Semantics:
 /// - On missing file: `StorageError::NotFound`.
 /// - On other I/O problems: `StorageError::LocalIo`.
-/// - Only `TableLocation::Local` is supported in v0.1.
+/// - Only `StorageLocation::Local` is supported in v0.1.
 ///
 /// For files shorter than 4 bytes, both `head` and `tail` remain zero-filled.
 /// For files between 4 and 7 bytes, `head` contains the first 4 bytes but
@@ -247,11 +247,11 @@ pub struct FileHeadTail4 {
 /// possible. Callers that need distinct head/tail (e.g., Parquet magic
 /// validation) should check `len >= 8` before inspecting `tail`.
 pub async fn read_head_tail_4(
-    location: &TableLocation,
+    location: &StorageLocation,
     rel_path: &Path,
 ) -> StorageResult<FileHeadTail4> {
     match location {
-        TableLocation::Local(_) => {
+        StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
             let path_str = abs.display().to_string();
 
@@ -322,14 +322,14 @@ pub async fn read_head_tail_4(
 /// Read the full contents of a file at `rel_path` within `location` and return
 /// them as a Vec<u8>.
 ///
-/// Only `TableLocation::Local` is supported in this crate version.
+/// Only `StorageLocation::Local` is supported in this crate version.
 ///
 /// Errors:
 /// - If the file does not exist this returns `StorageError::NotFound`.
 /// - On any other I/O error this returns `StorageError::OtherIo`.
-pub async fn read_all_bytes(location: &TableLocation, rel_path: &Path) -> StorageResult<Vec<u8>> {
+pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> StorageResult<Vec<u8>> {
     match location {
-        TableLocation::Local(_) => {
+        StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
             let path_str = abs.display().to_string();
 
@@ -355,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn write_atomic_creates_file_with_contents() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
 
         let rel_path = Path::new("test.txt");
         let contents = b"hello world";
@@ -372,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn write_atomic_creates_parent_directories() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
 
         let rel_path = Path::new("nested/deep/dir/file.txt");
         let contents = b"nested content";
@@ -389,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn write_atomic_overwrites_existing_file() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("overwrite.txt");
 
         // Write initial content.
@@ -407,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn write_atomic_no_leftover_tmp_file() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("clean.txt");
 
         write_atomic(&location, rel_path, b"data").await?;
@@ -421,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn read_to_string_returns_file_contents() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("readable.txt");
 
         // Create a file directly.
@@ -436,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn read_to_string_returns_not_found_for_missing_file() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("does_not_exist.txt");
 
         let result = read_to_string(&location, rel_path).await;
@@ -450,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_roundtrip() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("roundtrip.txt");
 
         let original = "roundtrip content 🎉";
@@ -464,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn write_new_creates_file_with_contents() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("new_file.txt");
 
         write_new(&location, rel_path, b"new content").await?;
@@ -478,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn write_new_fails_if_file_exists() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("existing.txt");
 
         // Create the file first.
@@ -500,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn write_new_creates_parent_directories() -> TestResult {
         let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
+        let location = StorageLocation::local(tmp.path());
         let rel_path = Path::new("nested/path/new_file.txt");
 
         write_new(&location, rel_path, b"nested new").await?;
