@@ -10,6 +10,7 @@ pub(crate) use time_predicate::*;
 
 mod pruning;
 pub(crate) use pruning::*;
+use timeseries_table_core::storage::StorageLocation;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +36,6 @@ use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
-use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::time_series_table::TimeSeriesTable;
 use timeseries_table_core::transaction_log::SegmentMeta;
 use timeseries_table_core::transaction_log::TableState;
@@ -140,8 +140,8 @@ impl TsTableProvider {
     }
 
     fn segment_abs_path(&self, seg: &SegmentMeta) -> DFResult<PathBuf> {
-        match self.table.location() {
-            TableLocation::Local(root) => Ok(root.join(&seg.path)),
+        match self.table.location().as_ref() {
+            StorageLocation::Local(root) => Ok(root.join(&seg.path)),
         }
     }
 
@@ -151,8 +151,8 @@ impl TsTableProvider {
         }
 
         // For baseline local FS, fallback to stat if missing (keeps provider usable for older tables).
-        match self.table.location() {
-            TableLocation::Local(root) => {
+        match self.table.location().as_ref() {
+            StorageLocation::Local(root) => {
                 let abs = root.join(&seg.path);
                 let meta = tokio::fs::metadata(&abs).await.map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
