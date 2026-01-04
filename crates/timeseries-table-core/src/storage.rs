@@ -43,8 +43,6 @@ use std::path::PathBuf;
 /// error information via `StorageError`.
 pub type StorageResult<T> = Result<T, StorageError>;
 
-/// Represents the location of a timeseries table.
-///
 /// This enum abstracts over different storage backends, currently supporting
 /// local filesystem paths with potential future support for object storage.
 #[derive(Clone, Debug)]
