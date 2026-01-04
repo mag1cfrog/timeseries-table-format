@@ -70,14 +70,14 @@ impl TableLocation {
                 let root = fs::canonicalize(table_root)
                     .await
                     .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
+                    .context(NotFoundSnafu {
                         path: table_root.display().to_string(),
                     })?;
 
                 let src = fs::canonicalize(parquet_path)
                     .await
                     .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
+                    .context(NotFoundSnafu {
                         path: parquet_path.display().to_string(),
                     })?;
 
@@ -107,11 +107,22 @@ impl TableLocation {
 
                 let dst = data_dir.join(file_name);
 
-                if fs::metadata(&dst).await.is_ok() {
-                    return AlreadyExistsNoSourceSnafu {
-                        path: dst.display().to_string(),
+                match fs::metadata(&dst).await {
+                    Ok(_) => {
+                        return AlreadyExistsNoSourceSnafu {
+                            path: dst.display().to_string(),
+                        }
+                        .fail();
                     }
-                    .fail();
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // ok to proceed
+                    }
+
+                    Err(e) => {
+                        return Err(BackendError::Local(e)).context(OtherIoSnafu {
+                            path: dst.display().to_string(),
+                        });
+                    }
                 }
 
                 fs::copy(&src, &dst)
@@ -156,17 +167,45 @@ impl TableLocation {
             ))));
         }
 
-        if let Some((scheme, _)) = trimmed.split_once("://") {
-            return Err(OtherIoSnafu {
-                path: trimmed.to_string(),
+        // Windows drive letter path (e.g. C:\ or C:/)
+        if trimmed.len() >= 2 {
+            let mut chars = trimmed.chars();
+            let first = chars.next();
+            let second = chars.next();
+            if let (Some(first), Some(second)) = (first, second)
+                && first.is_ascii_alphabetic()
+                && second == ':'
+            {
+                return Ok(TableLocation::Local(PathBuf::from(trimmed)));
             }
-            .into_error(BackendError::Local(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                format!("unsupported table location scheme: {scheme}"),
-            ))));
         }
 
-        Ok(TableLocation::Local(trimmed.into()))
+        // URI-like scheme (e.g. s3://, gs://, https://)
+        let scheme = trimmed.split_once("://").and_then(|(scheme, _)| {
+            if scheme.is_empty() {
+                None
+            } else {
+                Some(scheme)
+            }
+        });
+
+        if let Some(scheme) = scheme {
+            let scheme_ok = scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.');
+
+            if scheme_ok {
+                return Err(OtherIoSnafu {
+                    path: trimmed.to_string(),
+                }
+                .into_error(BackendError::Local(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!("unsupported table location scheme: {scheme}"),
+                ))));
+            }
+        }
+
+        Ok(TableLocation::Local(PathBuf::from(trimmed)))
     }
 }
 
