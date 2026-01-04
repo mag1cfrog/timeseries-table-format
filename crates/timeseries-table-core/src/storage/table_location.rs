@@ -8,6 +8,7 @@ use crate::storage::{
     StorageResult,
 };
 
+/// Represents the location of a timeseries table.
 #[derive(Debug, Clone)]
 pub struct TableLocation(StorageLocation);
 
@@ -24,14 +25,18 @@ impl AsRef<StorageLocation> for TableLocation {
 }
 
 impl TableLocation {
+    /// Creates a new `TableLocation` for a local filesystem path.
     pub fn local(root: impl Into<PathBuf>) -> Self {
         TableLocation(StorageLocation::Local(root.into()))
     }
 
+    /// Parse a user-facing table location string into a TableLocation.
+    /// v0.1: only local filesystem paths are supported.
     pub fn parse(spec: &str) -> StorageResult<Self> {
         StorageLocation::parse(spec).map(TableLocation)
     }
 
+    /// Return the underlying StorageLocation
     pub fn storage(&self) -> &StorageLocation {
         &self.0
     }
