@@ -103,9 +103,7 @@ async fn cmd_create(
     Ok(())
 }
 
-async fn open_table(table_root: &Path) -> CliResult<TimeSeriesTable> {
-    let location =
-        TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
+async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<TimeSeriesTable> {
 
     TimeSeriesTable::open(location)
         .await
@@ -115,15 +113,14 @@ async fn open_table(table_root: &Path) -> CliResult<TimeSeriesTable> {
 }
 
 async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -> CliResult<()> {
+    let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
     // Open first so we can read metadata for default ts column.
-    let mut t = open_table(table).await?;
+    let mut t = open_table(location.clone(), table).await?;
 
     let ts_col = match time_column {
         Some(c) => c,
         None => t.index_spec().timestamp_column.clone(),
     };
-
-    let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
 
     let rel = location
         .ensure_parquet_under_root(parquet)
