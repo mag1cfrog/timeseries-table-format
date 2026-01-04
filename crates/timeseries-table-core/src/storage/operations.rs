@@ -346,7 +346,6 @@ pub async fn read_all_bytes(location: &TableLocation, rel_path: &Path) -> Storag
 
 #[cfg(test)]
 mod tests {
-    use std::io;
 
     use super::*;
     use tempfile::TempDir;
