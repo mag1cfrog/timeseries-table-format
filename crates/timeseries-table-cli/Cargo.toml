@@ -10,5 +10,10 @@ tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 
 timeseries-table-core = { path = "../timeseries-table-core" }
 
+[dev-dependencies]
+arrow = { workspace = true }
+parquet = { workspace = true }
+tempfile = "3"
+
 [lints]
 workspace = true
