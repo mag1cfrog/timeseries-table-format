@@ -3,11 +3,11 @@ use timeseries_table_core::TableError;
 
 use snafu::Snafu;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type CliResult<T> = std::result::Result<T, CliError>;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub enum Error {
+pub enum CliError {
     #[snafu(display("Invalid --bucket '{spec}': {message}"))]
     InvalidBucket { spec: String, message: String },
 
@@ -65,6 +65,13 @@ pub enum Error {
 
     #[snafu(display("Internal path error: {message}"))]
     PathInvariant {
+        message: String,
+        path: Option<PathBuf>,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Internal path error: {message}"))]
+    PathInvariantNoSource {
         message: String,
         path: Option<PathBuf>,
     },
