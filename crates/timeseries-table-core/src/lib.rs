@@ -25,3 +25,4 @@ pub mod time_series_table;
 pub mod transaction_log;
 
 pub use time_series_table::error::TableError;
+pub use transaction_log::table_metadata::ParseTimeBucketError;
