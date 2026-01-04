@@ -104,7 +104,6 @@ async fn cmd_create(
 }
 
 async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<TimeSeriesTable> {
-
     TimeSeriesTable::open(location)
         .await
         .context(OpenTableSnafu {
