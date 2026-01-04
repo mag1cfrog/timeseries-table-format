@@ -127,7 +127,11 @@ async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -
         .await
         .context(StorageSnafu)?;
 
-    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let rel_str = if cfg!(windows) {
+        rel.to_string_lossy().replace('\\', "/")
+    } else {
+        rel.to_string_lossy().to_string()
+    };
 
     t.append_parquet_segment(&rel_str, &ts_col)
         .await
