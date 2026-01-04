@@ -783,4 +783,102 @@ mod tests {
         assert_eq!(read_back, "nested new");
         Ok(())
     }
+
+    #[test]
+    fn parse_rejects_empty_location() {
+        let err = TableLocation::parse("   ").expect_err("expected error");
+        match err {
+            StorageError::OtherIo { source, .. } => match source {
+                BackendError::Local(inner) => {
+                    assert_eq!(inner.kind(), io::ErrorKind::InvalidInput);
+                }
+            },
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_scheme() {
+        let err =
+            TableLocation::parse("s3://bucket/path").expect_err("expected unsupported scheme");
+        match err {
+            StorageError::OtherIo { source, .. } => match source {
+                BackendError::Local(inner) => {
+                    assert_eq!(inner.kind(), io::ErrorKind::Unsupported);
+                }
+            },
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_accepts_local_path() -> TestResult {
+        let loc = TableLocation::parse("/tmp/table")?;
+        match loc {
+            TableLocation::Local(p) => {
+                assert_eq!(p, PathBuf::from("/tmp/table"));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_parquet_under_root_returns_relative_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let rel_path = Path::new("data/seg.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        tokio::fs::create_dir_all(abs_path.parent().unwrap()).await?;
+        tokio::fs::write(&abs_path, b"parquet").await?;
+
+        let rel = location.ensure_parquet_under_root(&abs_path).await?;
+        assert_eq!(rel, rel_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_parquet_under_root_copies_outside_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        tokio::fs::create_dir_all(&table_root).await?;
+        let location = TableLocation::local(&table_root);
+
+        let src_path = tmp.path().join("outside.parquet");
+        tokio::fs::write(&src_path, b"parquet").await?;
+
+        let rel = location.ensure_parquet_under_root(&src_path).await?;
+        let expected_rel = PathBuf::from("data/outside.parquet");
+        assert_eq!(rel, expected_rel);
+
+        let dst = table_root.join(&expected_rel);
+        assert!(dst.exists());
+        let contents = tokio::fs::read(&dst).await?;
+        assert_eq!(contents, b"parquet");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_parquet_under_root_refuses_overwrite() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        tokio::fs::create_dir_all(&table_root).await?;
+        let location = TableLocation::local(&table_root);
+
+        let data_dir = table_root.join("data");
+        tokio::fs::create_dir_all(&data_dir).await?;
+        let existing_dst = data_dir.join("seg.parquet");
+        tokio::fs::write(&existing_dst, b"existing").await?;
+
+        let src_path = tmp.path().join("seg.parquet");
+        tokio::fs::write(&src_path, b"new").await?;
+
+        let err = location
+            .ensure_parquet_under_root(&src_path)
+            .await
+            .expect_err("expected AlreadyExistsNoSource");
+
+        assert!(matches!(err, StorageError::AlreadyExistsNoSource { .. }));
+        Ok(())
+    }
 }
