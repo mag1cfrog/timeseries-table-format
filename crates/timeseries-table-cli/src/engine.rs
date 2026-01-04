@@ -1,5 +1,7 @@
+use std::future::Future;
+
 #[allow(dead_code)]
-/// MIinimal engine trait.
+/// Minimal engine trait.
 pub trait Engine: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
