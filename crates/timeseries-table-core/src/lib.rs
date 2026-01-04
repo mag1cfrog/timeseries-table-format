@@ -23,3 +23,5 @@ pub mod layout;
 pub mod storage;
 pub mod time_series_table;
 pub mod transaction_log;
+
+pub use time_series_table::error::TableError;
