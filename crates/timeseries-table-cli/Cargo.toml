@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
+tokio = { workspace = true, features = ["fs"] }
 
 [lints]
 workspace = true
