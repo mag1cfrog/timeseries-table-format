@@ -1,8 +1,12 @@
 //! CLI tool for managing time-series tables.
 
+mod engine;
+mod error;
+mod query;
+
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
 use timeseries_table_core::{
     storage::TableLocation,
@@ -15,8 +19,20 @@ use crate::error::{
     StorageSnafu,
 };
 
-mod engine;
-mod error;
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormatArg {
+    Csv,
+    Jsonl,
+}
+
+impl From<OutputFormatArg> for crate::query::OutputFormat {
+    fn from(v: OutputFormatArg) -> Self {
+        match v {
+            OutputFormatArg::Csv => crate::query::OutputFormat::Csv,
+            OutputFormatArg::Jsonl => crate::query::OutputFormat::Jsonl,
+        }
+    }
+}
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -52,6 +68,30 @@ enum Command {
         /// Override timestamp column name (default: from table metadata)
         #[arg(long = "time-column")]
         time_column: Option<String>,
+    },
+
+    /// Execute a SQL query via DataFusion against the table
+    Query {
+        #[arg(long)]
+        table: PathBuf,
+
+        #[arg(long)]
+        sql: String,
+
+        #[arg(long, default_value_t = false)]
+        explain: bool,
+
+        #[arg(long, default_value_t = false)]
+        timing: bool,
+
+        #[arg(long, default_value_t = 10)]
+        max_rows: usize,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        #[arg(long, value_enum, default_value_t = OutputFormatArg::Csv)]
+        format: OutputFormatArg,
     },
 }
 
@@ -142,6 +182,33 @@ async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -
     Ok(())
 }
 
+async fn cmd_query(
+    table: &Path,
+    sql: String,
+    explain: bool,
+    timing: bool,
+    max_rows: usize,
+    output: Option<PathBuf>,
+    format: OutputFormatArg,
+) -> CliResult<()> {
+    let session = query::prepare_session(table).await?;
+
+    let opts = query::QueryOpts {
+        explain,
+        timing,
+        max_rows,
+        output,
+        format: format.into(),
+    };
+
+    eprintln!("Registered table as '{}'", session.table_name);
+
+    let res = query::run_query(&session, &sql, &opts).await?;
+    query::print_query_result(&res, &opts)?;
+
+    Ok(())
+}
+
 async fn run() -> CliResult<()> {
     let cli = Cli::parse();
 
@@ -159,6 +226,16 @@ async fn run() -> CliResult<()> {
             parquet,
             time_column,
         } => cmd_append(&table, &parquet, time_column).await,
+
+        Command::Query {
+            table,
+            sql,
+            explain,
+            timing,
+            max_rows,
+            output,
+            format,
+        } => cmd_query(&table, sql, explain, timing, max_rows, output, format).await,
     }
 }
 
