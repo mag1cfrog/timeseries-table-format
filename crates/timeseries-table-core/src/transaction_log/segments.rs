@@ -223,7 +223,9 @@ pub fn map_storage_error(err: StorageError) -> SegmentMetaError {
         StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile { path: path.clone() },
 
         // For everything else, preserve the full StorageError as the source.
-        StorageError::AlreadyExists { path, .. } | StorageError::OtherIo { path, .. } => {
+        StorageError::AlreadyExists { path, .. }
+        | StorageError::OtherIo { path, .. }
+        | StorageError::AlreadyExistsNoSource { path, .. } => {
             SegmentMetaError::Io {
                 path: path.clone(),
                 source: err, // move the full StorageError in
