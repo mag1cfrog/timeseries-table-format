@@ -41,6 +41,9 @@ jobs:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
       CLIPPY_CONF_DIR: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +52,11 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.12.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -70,6 +78,9 @@ jobs:
       
       - name: test
         run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      - name: sccache stats
+        run: sccache --show-stats
 
   ci-summary:
     # The only job to mark as "required" in branch protection.
