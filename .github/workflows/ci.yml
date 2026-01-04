@@ -71,8 +71,8 @@ jobs:
       - name: test
         run: cargo nextest run --workspace --all-features --no-fail-fast
 
-  ci-summary:
-    # The only job you mark as "required" in branch protection.
+  ci-summary:you
+    # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
     needs: [detect-rust-changes, rust-quality-gate]
     if: ${{ always() }}
