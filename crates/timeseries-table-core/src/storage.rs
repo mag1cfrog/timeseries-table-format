@@ -25,7 +25,7 @@
 //! future adapters (for example, object storage) can be introduced
 //! without rewriting the log and table logic.
 
-use snafu::{Backtrace, prelude::*};
+use snafu::{Backtrace, IntoError, prelude::*};
 use std::{
     error::Error,
     fmt,
@@ -61,7 +61,79 @@ impl TableLocation {
     pub fn local(root: impl Into<PathBuf>) -> Self {
         TableLocation::Local(root.into())
     }
+
+    /// Ensure `parquet_path` is under this table root.
+    /// If not, copy it into `data/<filename>` and return the relative path.
+    pub async fn ensure_parquet_under_root(&self, parquet_path: &Path) -> StorageResult<PathBuf> {
+        match self {
+            TableLocation::Local(table_root) => {
+                let root = fs::canonicalize(table_root)
+        .await
+        .map_err(BackendError::Local)
+        .context(OtherIoSnafu {
+            path: table_root.display().to_string(),
+        })?;
+
+    let src = fs::canonicalize(parquet_path)
+        .await
+        .map_err(BackendError::Local)
+        .context(OtherIoSnafu {
+            path: parquet_path.display().to_string(),
+        })?;
+
+    if let Ok(rel) = src.strip_prefix(&root) {
+        return Ok(rel.to_path_buf());
+    }
+
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| {
+            OtherIoSnafu {
+                path: src.display().to_string(),
+            }
+            .into_error(BackendError::Local(std::io::Error::other("parquet path has no filename")))
+        })?
+        .to_owned();
+
+    let data_dir = root.join("data");
+    fs::create_dir_all(&data_dir)
+        .await
+        .map_err(BackendError::Local)
+        .context(OtherIoSnafu {
+            path: data_dir.display().to_string(),
+        })?;
+
+    let dst = data_dir.join(file_name);
+
+    if fs::metadata(&dst).await.is_ok() {
+        return AlreadyExistsNoSourceSnafu { path: dst.display().to_string()}.fail()
+    }
+
+    fs::copy(&src, &dst).await.map_err(BackendError::Local).context(OtherIoSnafu {
+        
+        path: dst.display().to_string(),
+    })?;
+
+    let dst = fs::canonicalize(&dst).await.map_err(BackendError::Local).context(OtherIoSnafu {
+        
+        path: dst.display().to_string(),
+    })?;
+
+    let rel = dst.strip_prefix(&root).map_err(|_| {
+        OtherIoSnafu {
+            
+            path: dst.display().to_string(),
+        }
+        .into_error(BackendError::Local(std::io::Error::other("copied parquet is not under table root")))
+    })?;
+
+    Ok(rel.to_path_buf())
+            }
+        }
+    }
 }
+
+
 
 /// Errors produced by the storage backend implementation.
 ///
@@ -124,6 +196,17 @@ pub enum StorageError {
         /// Underlying backend I/O error with platform-specific details.
         source: BackendError,
         /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
+    },
+
+    /// The specified path already exists when creation was requested with
+    /// create-new semantics.
+    #[snafu(display("Path already exists: {path}"))]
+    AlreadyExistsNoSource {
+        /// The path that was found to already exist.
+        path: String,
+        
+        /// The backtrace captured when the error occurred.
         backtrace: Backtrace,
     },
 }
