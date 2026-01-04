@@ -234,22 +234,27 @@ impl FromStr for TimeBucket {
             return Err(ParseTimeBucketError::Empty);
         }
 
-        // Split into leading digits + trailing unit
-        let digit_len = spec
+        // Split into numeric prefix + unit suffix (unit starts at first alphabetic char).
+        let unit_start = spec
             .char_indices()
-            .take_while(|(_, c)| c.is_ascii_digit())
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
+            .find(|(_, c)| c.is_ascii_alphabetic())
+            .map(|(i, _)| i);
 
-        if digit_len == 0 {
+        let Some(unit_start) = unit_start else {
+            return Err(ParseTimeBucketError::MissingUnit {
+                spec: spec.to_string(),
+            });
+        };
+
+        if unit_start == 0 {
             // No leading digits (e.g. "h")
             return Err(ParseTimeBucketError::MissingNumber {
                 spec: spec.to_string(),
             });
         }
 
-        let (num_str, unit_str) = spec.split_at(digit_len);
+        let (num_str, unit_str) = spec.split_at(unit_start);
+        let num_str = num_str.trim();
         let unit_str = unit_str.trim();
 
         if unit_str.is_empty() {
@@ -437,5 +442,136 @@ mod tests {
             ),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn time_bucket_parse_accepts_basic_units() {
+        let cases = [
+            ("1s", TimeBucket::Seconds(1)),
+            ("2m", TimeBucket::Minutes(2)),
+            ("3h", TimeBucket::Hours(3)),
+            ("4d", TimeBucket::Days(4)),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(input.parse::<TimeBucket>().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_accepts_aliases_case_and_whitespace() {
+        let cases = [
+            ("1sec", TimeBucket::Seconds(1)),
+            ("1secs", TimeBucket::Seconds(1)),
+            ("1second", TimeBucket::Seconds(1)),
+            ("1seconds", TimeBucket::Seconds(1)),
+            ("1min", TimeBucket::Minutes(1)),
+            ("1mins", TimeBucket::Minutes(1)),
+            ("1minute", TimeBucket::Minutes(1)),
+            ("1minutes", TimeBucket::Minutes(1)),
+            ("1hr", TimeBucket::Hours(1)),
+            ("1hrs", TimeBucket::Hours(1)),
+            ("1hour", TimeBucket::Hours(1)),
+            ("1hours", TimeBucket::Hours(1)),
+            ("1day", TimeBucket::Days(1)),
+            ("1days", TimeBucket::Days(1)),
+            ("1H", TimeBucket::Hours(1)),
+            ("1MiN", TimeBucket::Minutes(1)),
+            ("  2h", TimeBucket::Hours(2)),
+            ("3d  ", TimeBucket::Days(3)),
+            ("  4m  ", TimeBucket::Minutes(4)),
+            ("1 h", TimeBucket::Hours(1)),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(input.parse::<TimeBucket>().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_empty_or_whitespace() {
+        let cases = ["", "   ", "\n\t"];
+        for input in cases {
+            let err = input.parse::<TimeBucket>().unwrap_err();
+            assert!(matches!(err, ParseTimeBucketError::Empty));
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_missing_number() {
+        let cases = ["h", " hr", "day", "abcmin"];
+        for input in cases {
+            let err = input.parse::<TimeBucket>().unwrap_err();
+            assert!(
+                matches!(err, ParseTimeBucketError::MissingNumber { .. }),
+                "expected MissingNumber for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_missing_unit() {
+        let cases = ["1", "  42  "];
+        for input in cases {
+            let err = input.parse::<TimeBucket>().unwrap_err();
+            assert!(
+                matches!(err, ParseTimeBucketError::MissingUnit { .. }),
+                "expected MissingUnit for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_invalid_number() {
+        let cases = ["1.5h", "1_000s"];
+        for input in cases {
+            let err = input.parse::<TimeBucket>().unwrap_err();
+            assert!(
+                matches!(err, ParseTimeBucketError::InvalidNumber { .. }),
+                "expected InvalidNumber for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_non_positive() {
+        let cases = ["0s", "0m"];
+        for input in cases {
+            let err = input.parse::<TimeBucket>().unwrap_err();
+            assert!(
+                matches!(err, ParseTimeBucketError::NonPositive { value: 0, .. }),
+                "expected NonPositive for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_too_large() {
+        let too_large = (u32::MAX as u64 + 1).to_string();
+        let input = format!("{too_large}h");
+        let err = input.parse::<TimeBucket>().unwrap_err();
+        assert!(
+            matches!(err, ParseTimeBucketError::TooLarge { value, .. } if value == u32::MAX as u64 + 1),
+            "expected TooLarge for {input:?}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn time_bucket_parse_rejects_unknown_units() {
+        let cases = ["1w", "1ms", "1mo", "10msec"];
+        for input in cases {
+            let err = input.parse::<TimeBucket>().unwrap_err();
+            assert!(
+                matches!(err, ParseTimeBucketError::UnknownUnit { .. }),
+                "expected UnknownUnit for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_bucket_parse_matches_from_str() {
+        let via_method = TimeBucket::parse("5m").unwrap();
+        let via_trait: TimeBucket = "5m".parse().unwrap();
+        assert_eq!(via_method, via_trait);
     }
 }
