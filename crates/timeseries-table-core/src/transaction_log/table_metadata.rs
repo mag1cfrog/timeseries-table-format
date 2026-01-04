@@ -4,7 +4,7 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 use arrow::datatypes::SchemaRef;
 use chrono::{DateTime, Utc};
@@ -151,6 +151,64 @@ impl TableMeta {
 /// versions (for example, partial updates or additive fields).
 pub type TableMetaDelta = TableMeta;
 
+/// Errors produced when parsing a human-friendly time bucket spec (e.g. `1h`).
+#[derive(Debug, Snafu, PartialEq, Eq)]
+pub enum ParseTimeBucketError {
+    /// The spec string was empty or only whitespace.
+    #[snafu(display("time bucket spec is empty"))]
+    Empty,
+
+    /// The spec did not include a numeric value.
+    #[snafu(display("time bucket spec '{spec}' is missing a numeric value"))]
+    MissingNumber {
+        /// The original spec string.
+        spec: String,
+    },
+
+    /// The spec did not include a required unit suffix.
+    #[snafu(display("time bucket spec '{spec}' is missing a unit suffix (expected s|m|h|d)"))]
+    MissingUnit {
+        /// The original spec string.
+        spec: String,
+    },
+
+    /// The numeric portion of the spec failed to parse.
+    #[snafu(display("invalid bucket value in '{spec}': {source}"))]
+    InvalidNumber {
+        /// The original spec string.
+        spec: String,
+        /// The parse error returned by `u64::from_str`.
+        source: std::num::ParseIntError,
+    },
+
+    /// The parsed numeric value was zero.
+    #[snafu(display("bucket value must be > 0 (got {value}) in '{spec}'"))]
+    NonPositive {
+        /// The original spec string.
+        spec: String,
+        /// The parsed numeric value.
+        value: u64,
+    },
+
+    /// The parsed numeric value did not fit in a `u32`.
+    #[snafu(display("bucket value too large for u32 (got {value}) in '{spec}'"))]
+    TooLarge {
+        /// The original spec string.
+        spec: String,
+        /// The parsed numeric value.
+        value: u64,
+    },
+
+    /// The spec used an unsupported unit suffix.
+    #[snafu(display("unknown time bucket unit '{unit}' in '{spec}' (expected s|m|h|d)"))]
+    UnknownUnit {
+        /// The original spec string.
+        spec: String,
+        /// The unrecognized unit suffix.
+        unit: String,
+    },
+}
+
 /// Granularity for time buckets used by coverage/bitmap logic.
 ///
 /// This does not affect physical storage directly, but describes how the time
@@ -165,6 +223,91 @@ pub enum TimeBucket {
     Hours(u32),
     /// A bucket spanning a fixed number of days.
     Days(u32),
+}
+
+impl FromStr for TimeBucket {
+    type Err = ParseTimeBucketError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let spec = input.trim();
+        if spec.is_empty() {
+            return Err(ParseTimeBucketError::Empty);
+        }
+
+        // Split into leading digits + trailing unit
+        let digit_len = spec
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_digit())
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+
+        if digit_len == 0 {
+            // No leading digits (e.g. "h")
+            return Err(ParseTimeBucketError::MissingNumber {
+                spec: spec.to_string(),
+            });
+        }
+
+        let (num_str, unit_str) = spec.split_at(digit_len);
+        let unit_str = unit_str.trim();
+
+        if unit_str.is_empty() {
+            return Err(ParseTimeBucketError::MissingUnit {
+                spec: spec.to_string(),
+            });
+        }
+
+        let value: u64 = num_str
+            .parse()
+            .map_err(|source| ParseTimeBucketError::InvalidNumber {
+                spec: spec.to_string(),
+                source,
+            })?;
+
+        if value == 0 {
+            return Err(ParseTimeBucketError::NonPositive {
+                spec: spec.to_string(),
+                value,
+            });
+        }
+
+        if value > u32::MAX as u64 {
+            return Err(ParseTimeBucketError::TooLarge {
+                spec: spec.to_string(),
+                value,
+            });
+        }
+
+        let v = value as u32;
+        let unit = unit_str.to_ascii_lowercase();
+
+        match unit.as_str() {
+            "s" | "sec" | "secs" | "second" | "seconds" => Ok(TimeBucket::Seconds(v)),
+            "m" | "min" | "mins" | "minute" | "minutes" => Ok(TimeBucket::Minutes(v)),
+            "h" | "hr" | "hrs" | "hour" | "hours" => Ok(TimeBucket::Hours(v)),
+            "d" | "day" | "days" => Ok(TimeBucket::Days(v)),
+            _ => Err(ParseTimeBucketError::UnknownUnit {
+                spec: spec.to_string(),
+                unit: unit_str.to_string(),
+            }),
+        }
+    }
+}
+
+impl TimeBucket {
+    /// Parse a human-friendly time bucket spec (e.g. `1h`, `15m`, `30s`, `2d`).
+    ///
+    /// This is a convenience wrapper around `str::parse` for `TimeBucket`, and
+    /// accepts common unit aliases (e.g. `sec`, `min`, `hr`, `day`).
+    ///
+    /// # Errors
+    /// Returns [`ParseTimeBucketError`] if the spec is empty, missing a unit,
+    /// has an invalid or non-positive number, overflows `u32`, or uses an
+    /// unsupported unit.
+    pub fn parse(spec: &str) -> Result<Self, ParseTimeBucketError> {
+        spec.parse()
+    }
 }
 
 /// Configuration for the time index of a time-series table.
