@@ -7,5 +7,7 @@ edition = "2024"
 clap = { version = "4.5.54", features = ["derive"] }
 tokio = { workspace = true, features = ["fs"] }
 
+timeseries-table-core = { path = "../timeseries-table-core" }
+
 [lints]
 workspace = true
