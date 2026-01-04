@@ -68,72 +68,107 @@ impl TableLocation {
         match self {
             TableLocation::Local(table_root) => {
                 let root = fs::canonicalize(table_root)
-        .await
-        .map_err(BackendError::Local)
-        .context(OtherIoSnafu {
-            path: table_root.display().to_string(),
-        })?;
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: table_root.display().to_string(),
+                    })?;
 
-    let src = fs::canonicalize(parquet_path)
-        .await
-        .map_err(BackendError::Local)
-        .context(OtherIoSnafu {
-            path: parquet_path.display().to_string(),
-        })?;
+                let src = fs::canonicalize(parquet_path)
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: parquet_path.display().to_string(),
+                    })?;
 
-    if let Ok(rel) = src.strip_prefix(&root) {
-        return Ok(rel.to_path_buf());
+                if let Ok(rel) = src.strip_prefix(&root) {
+                    return Ok(rel.to_path_buf());
+                }
+
+                let file_name = src
+                    .file_name()
+                    .ok_or_else(|| {
+                        OtherIoSnafu {
+                            path: src.display().to_string(),
+                        }
+                        .into_error(BackendError::Local(
+                            std::io::Error::other("parquet path has no filename"),
+                        ))
+                    })?
+                    .to_owned();
+
+                let data_dir = root.join("data");
+                fs::create_dir_all(&data_dir)
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: data_dir.display().to_string(),
+                    })?;
+
+                let dst = data_dir.join(file_name);
+
+                if fs::metadata(&dst).await.is_ok() {
+                    return AlreadyExistsNoSourceSnafu {
+                        path: dst.display().to_string(),
+                    }
+                    .fail();
+                }
+
+                fs::copy(&src, &dst)
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: dst.display().to_string(),
+                    })?;
+
+                let dst = fs::canonicalize(&dst)
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: dst.display().to_string(),
+                    })?;
+
+                let rel = dst.strip_prefix(&root).map_err(|_| {
+                    OtherIoSnafu {
+                        path: dst.display().to_string(),
+                    }
+                    .into_error(BackendError::Local(std::io::Error::other(
+                        "copied parquet is not under table root",
+                    )))
+                })?;
+
+                Ok(rel.to_path_buf())
+            }
+        }
     }
 
-    let file_name = src
-        .file_name()
-        .ok_or_else(|| {
-            OtherIoSnafu {
-                path: src.display().to_string(),
+    /// Parse a user-facing table location string into a TableLocation.
+    /// v0.1: only local filesystem paths are supported.
+    pub fn parse(spec: &str) -> StorageResult<Self> {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            return Err(OtherIoSnafu {
+                path: "<empty table location>".to_string(),
             }
-            .into_error(BackendError::Local(std::io::Error::other("parquet path has no filename")))
-        })?
-        .to_owned();
-
-    let data_dir = root.join("data");
-    fs::create_dir_all(&data_dir)
-        .await
-        .map_err(BackendError::Local)
-        .context(OtherIoSnafu {
-            path: data_dir.display().to_string(),
-        })?;
-
-    let dst = data_dir.join(file_name);
-
-    if fs::metadata(&dst).await.is_ok() {
-        return AlreadyExistsNoSourceSnafu { path: dst.display().to_string()}.fail()
-    }
-
-    fs::copy(&src, &dst).await.map_err(BackendError::Local).context(OtherIoSnafu {
-        
-        path: dst.display().to_string(),
-    })?;
-
-    let dst = fs::canonicalize(&dst).await.map_err(BackendError::Local).context(OtherIoSnafu {
-        
-        path: dst.display().to_string(),
-    })?;
-
-    let rel = dst.strip_prefix(&root).map_err(|_| {
-        OtherIoSnafu {
-            
-            path: dst.display().to_string(),
+            .into_error(BackendError::Local(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "table location is empty",
+            ))));
         }
-        .into_error(BackendError::Local(std::io::Error::other("copied parquet is not under table root")))
-    })?;
 
-    Ok(rel.to_path_buf())
+        if let Some((scheme, _)) = trimmed.split_once("://") {
+            return Err(OtherIoSnafu {
+                path: trimmed.to_string(),
             }
+            .into_error(BackendError::Local(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("unsupported table location scheme: {scheme}"),
+            ))));
         }
+
+        Ok(TableLocation::Local(trimmed.into()))
     }
 }
-
-
 
 /// Errors produced by the storage backend implementation.
 ///
@@ -205,7 +240,7 @@ pub enum StorageError {
     AlreadyExistsNoSource {
         /// The path that was found to already exist.
         path: String,
-        
+
         /// The backtrace captured when the error occurred.
         backtrace: Backtrace,
     },
