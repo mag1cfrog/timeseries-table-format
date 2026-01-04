@@ -419,7 +419,7 @@ pub async fn logical_schema_from_parquet_location(
     location: &TableLocation,
     rel_path: &Path,
 ) -> SegmentResult<LogicalSchema> {
-    let bytes = read_all_bytes(location, rel_path)
+    let bytes = read_all_bytes(location.as_ref(), rel_path)
         .await
         .map_err(map_storage_error)?;
 

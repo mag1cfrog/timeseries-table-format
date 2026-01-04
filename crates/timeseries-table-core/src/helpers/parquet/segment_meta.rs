@@ -315,7 +315,7 @@ pub async fn segment_meta_from_parquet_location(
     time_column: &str,
 ) -> SegmentResult<SegmentMeta> {
     // 1) Read whole file via storage abstraction.
-    let bytes = storage::read_all_bytes(location, rel_path)
+    let bytes = storage::read_all_bytes(location.as_ref(), rel_path)
         .await
         .map_err(map_storage_error)?;
 

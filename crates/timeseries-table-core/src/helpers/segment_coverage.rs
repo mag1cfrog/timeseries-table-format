@@ -318,7 +318,7 @@ pub async fn compute_segment_coverage(
     time_column: &str,
     bucket_spec: &TimeBucket,
 ) -> Result<Coverage, SegmentCoverageError> {
-    let bytes = storage::read_all_bytes(location, rel_path)
+    let bytes = storage::read_all_bytes(location.as_ref(), rel_path)
         .await
         .map_err(|source| SegmentCoverageError::Storage {
             path: rel_path.display().to_string(),

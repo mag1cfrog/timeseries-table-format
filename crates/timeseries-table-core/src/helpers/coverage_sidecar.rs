@@ -99,7 +99,7 @@ pub async fn write_coverage_sidecar_atomic(
     cov: &Coverage,
 ) -> Result<(), CoverageError> {
     let bytes = coverage_to_bytes(cov).context(SerdeSnafu)?;
-    storage::write_atomic(location, rel_path, &bytes)
+    storage::write_atomic(location.as_ref(), rel_path, &bytes)
         .await
         .context(StorageSnafu)?;
     Ok(())
@@ -135,7 +135,7 @@ pub async fn write_coverage_sidecar_new(
     cov: &Coverage,
 ) -> Result<(), CoverageError> {
     let bytes = coverage_to_bytes(cov).context(SerdeSnafu)?;
-    storage::write_new(location, rel_path, &bytes)
+    storage::write_new(location.as_ref(), rel_path, &bytes)
         .await
         .context(StorageSnafu)?;
     Ok(())
@@ -153,7 +153,7 @@ pub async fn write_coverage_sidecar_new_bytes(
     rel_path: &Path,
     bytes: &[u8],
 ) -> Result<(), CoverageError> {
-    storage::write_new(location, rel_path, bytes)
+    storage::write_new(location.as_ref(), rel_path, bytes)
         .await
         .context(StorageSnafu)?;
     Ok(())
@@ -185,7 +185,7 @@ pub async fn read_coverage_sidecar(
     location: &TableLocation,
     rel_path: &Path,
 ) -> Result<Coverage, CoverageError> {
-    match storage::read_all_bytes(location, rel_path).await {
+    match storage::read_all_bytes(location.as_ref(), rel_path).await {
         Ok(bytes) => coverage_from_bytes(&bytes).context(SerdeSnafu),
         Err(StorageError::NotFound { path, .. }) => Err(CoverageError::NotFound { path }),
         Err(e) => Err(CoverageError::Storage { source: e }),
@@ -195,7 +195,7 @@ pub async fn read_coverage_sidecar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coverage::serde::coverage_from_bytes;
+    use crate::{coverage::serde::coverage_from_bytes, storage::StorageLocation};
     use tempfile::TempDir;
 
     fn temp_location() -> (TempDir, TableLocation) {
@@ -221,8 +221,8 @@ mod tests {
             .expect("overwrite");
 
         // Read back and verify it matches the second write
-        let abs = match &loc {
-            TableLocation::Local(root) => root.join(rel),
+        let abs = match &loc.as_ref() {
+            StorageLocation::Local(root) => root.join(rel),
         };
         let bytes = std::fs::read(abs).expect("read file");
         let restored = coverage_from_bytes(&bytes).expect("deserialize");
@@ -291,8 +291,8 @@ mod tests {
         let rel = Path::new("_coverage/table/corrupt.roar");
 
         // Write garbage bytes to the expected path
-        let abs = match &loc {
-            TableLocation::Local(root) => root.join(rel),
+        let abs = match &loc.as_ref() {
+            StorageLocation::Local(root) => root.join(rel),
         };
         std::fs::create_dir_all(abs.parent().unwrap()).expect("create dirs");
         std::fs::write(&abs, b"not a bitmap").expect("write corrupt");
