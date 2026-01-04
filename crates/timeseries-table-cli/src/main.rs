@@ -12,11 +12,11 @@ use timeseries_table_core::{
 
 use crate::error::{
     AppendSegmentSnafu, CliResult, CreateTableSnafu, InvalidBucketSnafu, OpenTableSnafu,
+    StorageSnafu,
 };
 
 mod engine;
 mod error;
-mod paths;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -68,7 +68,8 @@ fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
 }
 
 async fn create_table(table_root: &Path, meta: TableMeta) -> CliResult<()> {
-    let location = TableLocation::local(table_root);
+    let location =
+        TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
 
     TimeSeriesTable::create(location, meta)
         .await
@@ -103,7 +104,8 @@ async fn cmd_create(
 }
 
 async fn open_table(table_root: &Path) -> CliResult<TimeSeriesTable> {
-    let location = TableLocation::local(table_root);
+    let location =
+        TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
 
     TimeSeriesTable::open(location)
         .await
@@ -121,7 +123,12 @@ async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -
         None => t.index_spec().timestamp_column.clone(),
     };
 
-    let rel = paths::ensure_parquet_under_table_root(table, parquet).await?;
+    let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
+
+    let rel = location
+        .ensure_parquet_under_root(parquet)
+        .await
+        .context(StorageSnafu)?;
 
     let rel_str = rel.to_string_lossy().replace('\\', "/");
 
