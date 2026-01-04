@@ -22,3 +22,5 @@ chrono-tz = "0.10.4"
 datafusion = "51.0.0"
 
 tokio = { version = "1.48.0" }
+
+snafu = { version = "0.8.9" }
