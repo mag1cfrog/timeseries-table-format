@@ -14,31 +14,6 @@ pub enum CliError {
         source: ParseTimeBucketError,
     },
 
-    #[snafu(display("Table root not found or not accessible: {path}"))]
-    TableRootMissing {
-        path: String,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Parquet file not found or not accessible: {path}"))]
-    ParquetMissing {
-        path: String,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Failed to create directory: {path}"))]
-    CreateDirAll {
-        path: String,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Failed to copy parquet into table: {src} -> {dst}"))]
-    CopyParquet {
-        src: String,
-        dst: String,
-        source: std::io::Error,
-    },
-
     #[snafu(display("Parquet path has no filename: {path}"))]
     ParquetNoFilename { path: String },
 
@@ -79,15 +54,13 @@ pub enum CliError {
     },
 
     #[snafu(display("Internal path error: {message}"))]
-    PathInvariant {
-        message: String,
-        path: Option<PathBuf>,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Internal path error: {message}"))]
     PathInvariantNoSource {
         message: String,
         path: Option<PathBuf>,
+    },
+
+    #[snafu(display("Storage error: {source}"))]
+    Storage {
+        source: timeseries_table_core::storage::StorageError,
     },
 }
