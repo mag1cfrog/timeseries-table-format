@@ -14,9 +14,7 @@ use snafu::ResultExt;
 use timeseries_table_core::{storage::TableLocation, time_series_table::TimeSeriesTable};
 use timeseries_table_datafusion::TsTableProvider;
 
-use crate::error::{
-    ArrowSnafu, CliError, CliResult, DataFusionSnafu, IoSnafu, OpenTableSnafu, StorageSnafu,
-};
+use crate::error::{ArrowSnafu, CliResult, DataFusionSnafu, IoSnafu, OpenTableSnafu, StorageSnafu};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -46,8 +44,8 @@ pub struct QuerySession {
 }
 
 enum OutputWriter {
-    Csv(arrow_csv::Writer<BufWriter<File>>),
-    Jsonl(arrow_json::LineDelimitedWriter<BufWriter<File>>),
+    Csv(Box<arrow_csv::Writer<BufWriter<File>>>),
+    Jsonl(Box<arrow_json::LineDelimitedWriter<BufWriter<File>>>),
 }
 
 impl OutputWriter {
@@ -60,11 +58,13 @@ impl OutputWriter {
                 // Arrow CSV writer wirtes RecordBatch => CSV.
                 // it does NOT support ListArray / StructArray.
                 let writer = arrow_csv::WriterBuilder::new().build(w);
-                Ok(OutputWriter::Csv(writer))
+                Ok(OutputWriter::Csv(Box::new(writer)))
             }
             OutputFormat::Jsonl => {
                 // Line delimited JSON writer.
-                Ok(OutputWriter::Jsonl(arrow_json::LineDelimitedWriter::new(w)))
+                Ok(OutputWriter::Jsonl(Box::new(
+                    arrow_json::LineDelimitedWriter::new(w),
+                )))
             }
         }
     }
@@ -73,7 +73,7 @@ impl OutputWriter {
         match self {
             OutputWriter::Csv(w) => w.write(batch).context(ArrowSnafu),
 
-            OutputWriter::Jsonl(w) => w.write_batches(&vec![batch]).context(ArrowSnafu),
+            OutputWriter::Jsonl(w) => w.write_batches(&[batch]).context(ArrowSnafu),
         }
     }
 
