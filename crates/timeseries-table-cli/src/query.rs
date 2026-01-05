@@ -5,7 +5,7 @@ use std::{
 
 use tabled::{
     builder::Builder,
-    settings::{Style, object::Rows, style::LineText},
+    settings::{Style, object::Rows, style::LineText, width::MinWidth},
 };
 
 use crate::error::CliResult;
@@ -81,6 +81,10 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
         return String::new();
     }
 
+    const PREVIEW_LABEL: &str = "Preview output";
+    const PREVIEW_OFFSET: usize = 6;
+    let min_width = PREVIEW_OFFSET + PREVIEW_LABEL.len() + 2;
+
     let mut builder = Builder::default();
     builder.push_record(columns);
     for row in rows {
@@ -89,7 +93,8 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
 
     let mut table = builder.build();
     table.with(Style::rounded());
-    table.with(LineText::new("Preview output", Rows::first()).offset(6));
+    table.with(MinWidth::new(min_width));
+    table.with(LineText::new(PREVIEW_LABEL, Rows::first()).offset(PREVIEW_OFFSET));
     table.to_string()
 }
 
@@ -141,6 +146,15 @@ mod tests {
         assert!(!lines.is_empty());
         assert!(rendered.contains("col1"));
         assert!(rendered.contains("longer"));
+    }
+
+    #[test]
+    fn render_table_includes_preview_label_for_narrow_tables() {
+        let columns = vec!["x".to_string()];
+        let rows = vec![vec!["1".to_string()]];
+
+        let rendered = render_table(&columns, &rows);
+        assert!(rendered.contains("Preview output"));
     }
 
     #[test]
