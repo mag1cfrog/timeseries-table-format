@@ -72,7 +72,4 @@ pub enum CliError {
 
     #[snafu(display("Arrow error: {source}"))]
     Arrow { source: ArrowError },
-
-    #[snafu(display("I/O error: {source}"))]
-    Io { source: std::io::Error },
 }
