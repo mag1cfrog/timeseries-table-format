@@ -149,8 +149,7 @@ pub fn write_query_summary<W: Write>(
     }
 
     if let Some(path) = &opts.output {
-        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format)
-            .map_err(&mut write_err)?;
+        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format).map_err(&mut write_err)?;
     }
 
     Ok(())

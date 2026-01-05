@@ -11,8 +11,8 @@ use crate::{
     error::{CliError, CliResult, OpenTableSnafu, StorageSnafu},
     make_engine, open_table,
     query::{
-        OutputFormat, QueryOpts, default_table_name, page_output, preview_message, render_preview,
-        print_query_result, quote_identifier, write_query_summary,
+        OutputFormat, QueryOpts, default_table_name, page_output, preview_message,
+        print_query_result, quote_identifier, render_preview, write_query_summary,
     },
 };
 
@@ -45,6 +45,8 @@ struct ShellContext {
     session: BoxedSession,
     timing: bool,
     pager: bool,
+    table_name: String,
+    alias: Option<String>,
 }
 
 fn print_help() {
@@ -57,6 +59,9 @@ fn print_help() {
   \timing           toggle per-command elapsed time
   \pager            toggle pager output (less -S)
   clear | cls
+  alias <name>      set prompt alias (SQL alias rewrite too)
+  alias             show current alias
+  alias --clear     reset alias to default
   help
   exit | quit
 notes:
@@ -100,9 +105,98 @@ async fn build_context(
             session,
             timing: false,
             pager: false,
+            table_name: table_name.clone(),
+            alias: None,
         },
         table_name,
     ))
+}
+
+fn is_valid_alias(alias: &str) -> bool {
+    let mut chars = alias.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn rewrite_sql_alias(sql: &str, alias: &str, actual: &str) -> String {
+    if alias == actual {
+        return sql.to_string();
+    }
+
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut in_single = false;
+
+    while let Some(ch) = chars.next() {
+        if in_single {
+            out.push(ch);
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+
+        if ch == '\'' {
+            in_single = true;
+            out.push(ch);
+            continue;
+        }
+
+        if ch == '"' {
+            let mut buf = String::new();
+            while let Some(n) = chars.next() {
+                if n == '"' {
+                    if let Some('"') = chars.peek().copied() {
+                        // Escaped quote inside identifier.
+                        chars.next();
+                        buf.push('"');
+                        continue;
+                    }
+                    break;
+                }
+                buf.push(n);
+            }
+            if buf == alias {
+                out.push_str(&quote_identifier(actual));
+            } else {
+                out.push('"');
+                out.push_str(&buf.replace('"', "\"\""));
+                out.push('"');
+            }
+            continue;
+        }
+
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            let mut ident = String::new();
+            ident.push(ch);
+            while let Some(n) = chars.peek().copied() {
+                if n.is_ascii_alphanumeric() || n == '_' {
+                    ident.push(n);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if ident == alias {
+                out.push_str(actual);
+            } else {
+                out.push_str(&ident);
+            }
+            continue;
+        }
+
+        out.push(ch);
+    }
+
+    out
 }
 
 fn lex_with_spans(input: &str) -> Result<Vec<TokenSpan>, String> {
@@ -309,6 +403,42 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         });
     }
 
+    if trimmed == "alias" {
+        match &ctx.alias {
+            Some(name) => println!("alias: {name}"),
+            None => println!("alias: (default)"),
+        }
+        return Ok(CommandResult {
+            action: CommandAction::Continue,
+            query_result: None,
+        });
+    }
+
+    if trimmed == "unalias" || trimmed == "alias --clear" {
+        ctx.alias = None;
+        println!("alias: (default)");
+        return Ok(CommandResult {
+            action: CommandAction::Continue,
+            query_result: None,
+        });
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("alias ") {
+        let name = rest.trim();
+        if name.is_empty() {
+            println!("alias requires a name");
+        } else if !is_valid_alias(name) {
+            println!("alias must match [A-Za-z_][A-Za-z0-9_]*");
+        } else {
+            ctx.alias = Some(name.to_string());
+            println!("alias: {name}");
+        }
+        return Ok(CommandResult {
+            action: CommandAction::Continue,
+            query_result: None,
+        });
+    }
+
     if trimmed == r"\timing" || trimmed == r"\\timing" {
         ctx.timing = !ctx.timing;
         println!("timing: {}", if ctx.timing { "on" } else { "off" });
@@ -468,6 +598,12 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             }
         }
 
+        let sql = if let Some(alias) = ctx.alias.as_deref() {
+            rewrite_sql_alias(sql.trim(), alias, &ctx.table_name)
+        } else {
+            sql.trim().to_string()
+        };
+
         let res = match ctx.session.run_query(sql.trim(), &opts).await {
             Ok(res) => {
                 if ctx.pager {
@@ -539,6 +675,12 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         }
 
         // plan-only: just run an EXPLAIN statement through the same session
+        let sql = if let Some(alias) = ctx.alias.as_deref() {
+            rewrite_sql_alias(sql.trim(), alias, &ctx.table_name)
+        } else {
+            sql.trim().to_string()
+        };
+
         let explain_sql = format!("EXPLAIN {}", sql.trim());
         opts.explain = false; // because we are explicitly running EXPLAIN
 
@@ -607,11 +749,12 @@ fn shell_blocking(
     println!("type 'help' for commands\n");
 
     loop {
+        let display_name = ctx.alias.as_deref().unwrap_or(&ctx.table_name);
         let prompt = match (ctx.timing, ctx.pager) {
-            (true, true) => format!("ts-table[{table_name}](timing,pager)> "),
-            (true, false) => format!("ts-table[{table_name}](timing)> "),
-            (false, true) => format!("ts-table[{table_name}](pager)> "),
-            (false, false) => format!("ts-table[{table_name}]> "),
+            (true, true) => format!("ts-table[{display_name}](timing,pager)> "),
+            (true, false) => format!("ts-table[{display_name}](timing)> "),
+            (false, true) => format!("ts-table[{display_name}](pager)> "),
+            (false, false) => format!("ts-table[{display_name}]> "),
         };
 
         let line = match rl.readline(&prompt) {
