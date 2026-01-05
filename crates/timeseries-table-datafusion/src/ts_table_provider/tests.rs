@@ -119,7 +119,6 @@ fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
     })
 }
 
-
 fn make_table_meta() -> timeseries_table_core::transaction_log::TableMeta {
     use timeseries_table_core::transaction_log::{
         TimeBucket, TimeIndexSpec,
