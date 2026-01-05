@@ -14,9 +14,12 @@ use timeseries_table_core::{
     transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
 };
 
-use crate::error::{
-    AppendSegmentSnafu, CliResult, CreateTableSnafu, InvalidBucketSnafu, OpenTableSnafu,
-    StorageSnafu,
+use crate::{
+    error::{
+        AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
+        OpenTableSnafu, StorageSnafu,
+    },
+    query::QueryOpts,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -31,6 +34,33 @@ impl From<OutputFormatArg> for crate::query::OutputFormat {
             OutputFormatArg::Csv => crate::query::OutputFormat::Csv,
             OutputFormatArg::Jsonl => crate::query::OutputFormat::Jsonl,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BackendKind {
+    DataFusion,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BackendArg {
+    DataFusion,
+}
+
+impl From<BackendArg> for BackendKind {
+    fn from(value: BackendArg) -> Self {
+        match value {
+            BackendArg::DataFusion => BackendKind::DataFusion,
+        }
+    }
+}
+
+fn make_engine(
+    backend: BackendKind,
+    table: &Path,
+) -> Box<dyn engine::Engine<Error = error::CliError>> {
+    match backend {
+        BackendKind::DataFusion => Box::new(engine::DataFusionEngine::new(table)),
     }
 }
 
@@ -92,6 +122,10 @@ enum Command {
 
         #[arg(long, value_enum, default_value_t = OutputFormatArg::Csv)]
         format: OutputFormatArg,
+
+        /// Query backend (default: datafusion)
+        #[arg(long, value_enum, default_value_t = BackendArg::DataFusion)]
+        backend: BackendArg,
     },
 }
 
@@ -99,6 +133,17 @@ enum Command {
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
+}
+
+struct QueryArgs {
+    table: PathBuf,
+    sql: String,
+    explain: bool,
+    timing: bool,
+    max_rows: usize,
+    output: Option<PathBuf>,
+    format: OutputFormatArg,
+    backend: BackendArg,
 }
 
 fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
@@ -182,31 +227,32 @@ async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -
     Ok(())
 }
 
-async fn cmd_query(
-    table: &Path,
+async fn cmd_query_with_engine(
+    engine: &dyn engine::Engine<Error = CliError>,
     sql: String,
-    explain: bool,
-    timing: bool,
-    max_rows: usize,
-    output: Option<PathBuf>,
-    format: OutputFormatArg,
+    opts: QueryOpts,
 ) -> CliResult<()> {
-    let session = query::prepare_session(table).await?;
+    let res = engine.execute(&sql, &opts).await?;
+    query::print_query_result(&res, &opts)?;
+    Ok(())
+}
 
+async fn cmd_query(args: QueryArgs) -> CliResult<()> {
     let opts = query::QueryOpts {
-        explain,
-        timing,
-        max_rows,
-        output,
-        format: format.into(),
+        explain: args.explain,
+        timing: args.timing,
+        max_rows: args.max_rows,
+        output: args.output,
+        format: args.format.into(),
     };
 
-    eprintln!("Registered table as '{}'", session.table_name);
+    let engine = make_engine(args.backend.into(), &args.table);
 
-    let res = query::run_query(&session, &sql, &opts).await?;
-    query::print_query_result(&res, &opts)?;
+    if let Some(name) = engine.table_name() {
+        eprintln!("Registered table as '{}'", name);
+    }
 
-    Ok(())
+    cmd_query_with_engine(engine.as_ref(), args.sql, opts).await
 }
 
 async fn run() -> CliResult<()> {
@@ -235,7 +281,20 @@ async fn run() -> CliResult<()> {
             max_rows,
             output,
             format,
-        } => cmd_query(&table, sql, explain, timing, max_rows, output, format).await,
+            backend,
+        } => {
+            cmd_query(QueryArgs {
+                table,
+                sql,
+                explain,
+                timing,
+                max_rows,
+                output,
+                format,
+                backend,
+            })
+            .await
+        }
     }
 }
 
