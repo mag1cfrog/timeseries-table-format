@@ -91,6 +91,7 @@ pub fn write_parquet_rows(path: &Path, rows: usize) -> TestResult {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn table_root(tmp: &tempfile::TempDir, name: &str) -> PathBuf {
     tmp.path().join(name)
 }
