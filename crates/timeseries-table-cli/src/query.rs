@@ -1,5 +1,7 @@
 use std::{
+    io::Write,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -8,7 +10,7 @@ use tabled::{
     settings::{Style, object::Rows, style::LineText, width::MinWidth},
 };
 
-use crate::error::CliResult;
+use crate::error::{CliError, CliResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -102,31 +104,72 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
 }
 
 pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> {
+    let mut stdout = std::io::stdout();
+    write_query_result(res, opts, &mut stdout)
+}
+
+pub fn write_query_result<W: Write>(
+    res: &QueryResult,
+    opts: &QueryOpts,
+    out: &mut W,
+) -> CliResult<()> {
+    let mut write_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to write output: {e}"),
+        path: None,
+    };
+
     if !res.preview_rows.is_empty() {
         let rendered = render_table(&res.columns, &res.preview_rows);
-        println!("{rendered}");
+        writeln!(out, "{rendered}").map_err(&mut write_err)?;
     } else if opts.max_rows == 0 && !res.columns.is_empty() {
         let rendered = render_table(&res.columns, &[]);
-        println!("{rendered}");
+        writeln!(out, "{rendered}").map_err(&mut write_err)?;
         if res.total_rows > 0 {
-            println!("(preview suppressed; use --max-rows > 0)");
+            writeln!(out, "(preview suppressed; use --max-rows > 0)").map_err(&mut write_err)?;
         }
     } else if opts.max_rows == 0 && res.total_rows > 0 {
-        println!("(preview suppressed; use --max-rows > 0)");
+        writeln!(out, "(preview suppressed; use --max-rows > 0)").map_err(&mut write_err)?;
     } else {
-        println!("(no rows)");
+        writeln!(out, "(no rows)").map_err(&mut write_err)?;
     }
 
-    println!("total_rows: {}", res.total_rows);
+    writeln!(out, "total_rows: {}", res.total_rows).map_err(&mut write_err)?;
 
     if let Some(d) = res.elapsed {
-        println!("elapsed_ms: {}", d.as_millis());
+        writeln!(out, "elapsed_ms: {}", d.as_millis()).map_err(&mut write_err)?;
     }
 
     if let Some(path) = &opts.output {
-        println!("wrote: {} ({:?})", path.display(), opts.format);
+        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format).map_err(&mut write_err)?;
     }
 
+    Ok(())
+}
+
+pub fn page_output(text: &str) -> CliResult<()> {
+    let spawn_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to spawn pager: {e}"),
+        path: None,
+    };
+    let io_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to write pager output: {e}"),
+        path: None,
+    };
+
+    let mut child = match Command::new("less").arg("-S").stdin(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            let mut stdout = std::io::stdout();
+            stdout.write_all(text.as_bytes()).map_err(io_err)?;
+            return Ok(());
+        }
+    };
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes()).map_err(io_err)?;
+    }
+
+    child.wait().map_err(spawn_err)?;
     Ok(())
 }
 
