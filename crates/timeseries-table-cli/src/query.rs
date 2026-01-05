@@ -1,6 +1,5 @@
 use std::{
-    fs::File,
-    io::BufWriter,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -11,10 +10,13 @@ use futures_util::StreamExt;
 use arrow::{array::RecordBatch, util::pretty::pretty_format_batches};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use snafu::ResultExt;
-use timeseries_table_core::{storage::TableLocation, time_series_table::TimeSeriesTable};
+use timeseries_table_core::{
+    storage::{OutputLocation, OutputSink, TableLocation, open_output_sink},
+    time_series_table::TimeSeriesTable,
+};
 use timeseries_table_datafusion::TsTableProvider;
 
-use crate::error::{ArrowSnafu, CliResult, DataFusionSnafu, IoSnafu, OpenTableSnafu, StorageSnafu};
+use crate::error::{ArrowSnafu, CliResult, DataFusionSnafu, OpenTableSnafu, StorageSnafu};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -43,27 +45,52 @@ pub struct QuerySession {
     pub table_name: String,
 }
 
+struct SinkWriter {
+    sink: OutputSink,
+}
+
+impl Write for SinkWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sink.writer().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.sink.writer().flush()
+    }
+}
+
+impl SinkWriter {
+    async fn finish(self) -> CliResult<()> {
+        self.sink.finish().await.context(StorageSnafu)
+    }
+}
+
 enum OutputWriter {
-    Csv(Box<arrow_csv::Writer<BufWriter<File>>>),
-    Jsonl(Box<arrow_json::LineDelimitedWriter<BufWriter<File>>>),
+    Csv(Box<arrow_csv::Writer<SinkWriter>>),
+    Jsonl(Box<arrow_json::LineDelimitedWriter<SinkWriter>>),
 }
 
 impl OutputWriter {
-    fn create(path: &Path, format: OutputFormat) -> CliResult<Self> {
-        let f = File::create(path).context(IoSnafu)?;
-        let w = BufWriter::new(f);
+    async fn create_output_writer(path: &Path, format: OutputFormat) -> CliResult<Self> {
+        let spec = path.to_string_lossy();
+        let out = OutputLocation::parse(&spec).context(StorageSnafu)?;
+        let sink = open_output_sink(&out.storage, &out.rel_path)
+            .await
+            .context(StorageSnafu)?;
+
+        let writer = SinkWriter { sink };
 
         match format {
             OutputFormat::Csv => {
                 // Arrow CSV writer wirtes RecordBatch => CSV.
                 // it does NOT support ListArray / StructArray.
-                let writer = arrow_csv::WriterBuilder::new().build(w);
+                let writer = arrow_csv::WriterBuilder::new().build(writer);
                 Ok(OutputWriter::Csv(Box::new(writer)))
             }
             OutputFormat::Jsonl => {
                 // Line delimited JSON writer.
                 Ok(OutputWriter::Jsonl(Box::new(
-                    arrow_json::LineDelimitedWriter::new(w),
+                    arrow_json::LineDelimitedWriter::new(writer),
                 )))
             }
         }
@@ -77,11 +104,18 @@ impl OutputWriter {
         }
     }
 
-    fn finish(mut self) -> CliResult<()> {
-        match &mut self {
-            OutputWriter::Csv(_) => Ok(()),
+    async fn finish(self) -> CliResult<()> {
+        match self {
+            OutputWriter::Csv(w) => {
+                let sink = w.into_inner();
+                sink.finish().await
+            }
 
-            OutputWriter::Jsonl(w) => w.finish().context(ArrowSnafu),
+            OutputWriter::Jsonl(mut w) => {
+                w.finish().context(ArrowSnafu)?;
+                let sink = w.into_inner();
+                sink.finish().await
+            }
         }
     }
 }
@@ -157,7 +191,7 @@ pub async fn run_query(
     let mut preview_batches: Vec<RecordBatch> = Vec::new();
 
     let mut out = if let Some(path) = &opts.output {
-        Some(OutputWriter::create(path, opts.format)?)
+        Some(OutputWriter::create_output_writer(path, opts.format).await?)
     } else {
         None
     };
@@ -186,7 +220,7 @@ pub async fn run_query(
     }
 
     if let Some(w) = out {
-        w.finish()?;
+        w.finish().await?;
     }
 
     let elapsed = opts.timing.then(|| start.elapsed());
