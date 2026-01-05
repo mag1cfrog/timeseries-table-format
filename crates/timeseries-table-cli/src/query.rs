@@ -10,7 +10,7 @@ use tabled::{
 
 use crate::error::CliResult;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Csv,
     Jsonl,
