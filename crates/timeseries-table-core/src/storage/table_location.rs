@@ -8,7 +8,11 @@ use crate::storage::{
     StorageResult,
 };
 
-/// Represents the location of a timeseries table.
+/// Table root location with table-scoped semantics.
+///
+/// This wraps `StorageLocation` and is used when callers need to treat the
+/// location as a table root (e.g. log layout, segment paths, and helpers like
+/// `ensure_parquet_under_root`).
 #[derive(Debug, Clone)]
 pub struct TableLocation(StorageLocation);
 
