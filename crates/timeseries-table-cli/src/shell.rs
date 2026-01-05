@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Instant};
+use std::{io::Write, path::PathBuf, time::Instant};
 
 use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
@@ -56,12 +56,19 @@ fn print_help() {
   explain [--max-rows N] [--format csv|jsonl] [--output PATH] [--timing] [--] <sql>
   \timing           toggle per-command elapsed time
   \pager            toggle pager output (less -S)
+  clear | cls
   help
   exit | quit
 notes:
   - use `--` to separate flags from SQL (e.g. SQL with leading `--`)
 "#
     );
+}
+
+fn clear_screen() {
+    // ANSI clear screen + cursor home; best-effort.
+    print!("\x1b[2J\x1b[H");
+    let _ = std::io::stdout().flush();
 }
 
 async fn build_context(
@@ -288,6 +295,14 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
     if trimmed == "help" {
         print_help();
+        return Ok(CommandResult {
+            action: CommandAction::Continue,
+            query_result: None,
+        });
+    }
+
+    if trimmed == "clear" || trimmed == "cls" {
+        clear_screen();
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: None,
