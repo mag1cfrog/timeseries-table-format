@@ -601,6 +601,43 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_session_rebuilds_table_state() -> TestResult<()> {
+        use crate::engine::Engine;
+        use timeseries_table_core::transaction_log::table_state::{
+            rebuild_table_state_count, reset_rebuild_table_state_count,
+        };
+
+        let (tmp, _total) = build_table_with_rows(2).await?;
+        reset_rebuild_table_state_count();
+
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let _session = engine.prepare_session().await?;
+
+        assert_eq!(rebuild_table_state_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_session_from_table_avoids_rebuild() -> TestResult<()> {
+        use crate::engine::Engine;
+        use timeseries_table_core::transaction_log::table_state::{
+            rebuild_table_state_count, reset_rebuild_table_state_count,
+        };
+
+        let (tmp, _total) = build_table_with_rows(2).await?;
+        let location = TableLocation::local(tmp.path());
+        let table = TimeSeriesTable::open(location).await?;
+
+        reset_rebuild_table_state_count();
+
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let _session = engine.prepare_session_from_table(&table).await?;
+
+        assert_eq!(rebuild_table_state_count(), 0);
+        Ok(())
+    }
+
     #[test]
     fn csv_schema_validation_rejects_nested_types() -> TestResult<()> {
         let schema = Schema::new(vec![
