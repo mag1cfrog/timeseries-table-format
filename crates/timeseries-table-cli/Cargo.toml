@@ -17,6 +17,7 @@ timeseries-table-datafusion = { path = "../timeseries-table-datafusion" }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
+rustyline = { version = "17.0.2", features = ["with-file-history"] }
 
 [dev-dependencies]
 arrow = { workspace = true }
