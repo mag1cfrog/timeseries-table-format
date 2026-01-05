@@ -22,6 +22,8 @@ tabled = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
 
 [lints]
 workspace = true
