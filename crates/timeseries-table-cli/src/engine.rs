@@ -26,33 +26,28 @@ use crate::{
     query::{OutputFormat, QueryOpts, QueryResult, default_table_name},
 };
 
+/// Backend-agnostic query session for reuse by future shells or services.
 #[async_trait::async_trait]
 pub trait QuerySession: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
     async fn run_query(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error>;
 
-    #[allow(dead_code)]
+    /// Optional table identifier registered in the session.
     fn table_name(&self) -> Option<&str> {
         None
     }
 }
 
-/// Minimal engine trait.
+/// Query execution backend abstraction for CLI and non-interactive usage.
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    async fn execute(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error>;
-
-    #[allow(dead_code)]
+    /// Prepare a reusable session (e.g., for interactive shells).
     async fn prepare_session(
         &self,
     ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error>;
-
-    fn table_name(&self) -> Option<&str> {
-        None
-    }
 }
 
 struct SinkWriter {
@@ -132,7 +127,7 @@ pub struct DataFusionEngine {
 
 pub struct DataFusionSession {
     ctx: SessionContext,
-    #[allow(dead_code)]
+    /// Retained for future session reuse and user messaging.
     table_name: String,
 }
 
@@ -269,19 +264,10 @@ impl QuerySession for DataFusionSession {
 impl Engine for DataFusionEngine {
     type Error = CliError;
 
-    async fn execute(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error> {
-        let session = self.prepare_session_internal().await?;
-        session.run_query(sql, opts).await
-    }
-
     async fn prepare_session(
         &self,
     ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
         Ok(Box::new(self.prepare_session_internal().await?))
-    }
-
-    fn table_name(&self) -> Option<&str> {
-        Some(self.table_name.as_str())
     }
 }
 
@@ -476,7 +462,8 @@ mod tests {
         };
 
         let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
-        let res = engine.execute(&sql, &opts).await?;
+        let session = engine.prepare_session().await?;
+        let res = session.run_query(&sql, &opts).await?;
 
         assert_eq!(res.total_rows, total as u64);
         assert_eq!(res.preview_rows.len(), 5);
@@ -502,7 +489,8 @@ mod tests {
             output: Some(csv_path.clone()),
             format: OutputFormat::Csv,
         };
-        let _ = engine.execute(&sql, &opts_csv).await?;
+        let session = engine.prepare_session().await?;
+        let _ = session.run_query(&sql, &opts_csv).await?;
 
         let csv_contents = std::fs::read_to_string(&csv_path)?;
         let csv_lines: Vec<&str> = csv_contents.lines().collect();
@@ -517,7 +505,8 @@ mod tests {
             output: Some(jsonl_path.clone()),
             format: OutputFormat::Jsonl,
         };
-        let _ = engine.execute(&sql, &opts_jsonl).await?;
+        let session = engine.prepare_session().await?;
+        let _ = session.run_query(&sql, &opts_jsonl).await?;
 
         let jsonl_contents = std::fs::read_to_string(&jsonl_path)?;
         let jsonl_lines: Vec<&str> = jsonl_contents.lines().collect();
@@ -548,7 +537,8 @@ mod tests {
             table_ident
         );
 
-        let res = engine.execute(&sql, &opts).await?;
+        let session = engine.prepare_session().await?;
+        let res = session.run_query(&sql, &opts).await?;
         assert_eq!(res.total_rows, total as u64);
         assert_eq!(res.preview_rows.len(), 12);
 
@@ -574,7 +564,8 @@ mod tests {
         };
 
         let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
-        let res = engine.execute(&sql, &opts).await?;
+        let session = engine.prepare_session().await?;
+        let res = session.run_query(&sql, &opts).await?;
 
         assert_eq!(res.columns.len(), 7);
         Ok(())
@@ -597,9 +588,23 @@ mod tests {
         };
 
         let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
-        let res = engine.execute(&sql, &opts).await?;
+        let session = engine.prepare_session().await?;
+        let res = session.run_query(&sql, &opts).await?;
 
         assert!(res.elapsed.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepare_session_exposes_table_name() -> TestResult<()> {
+        use crate::engine::Engine;
+        let (tmp, _total) = build_table_with_rows(2).await?;
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let table_name = default_table_name(tmp.path());
+
+        let session = engine.prepare_session().await?;
+        assert_eq!(session.table_name(), Some(table_name.as_str()));
+
         Ok(())
     }
 }
