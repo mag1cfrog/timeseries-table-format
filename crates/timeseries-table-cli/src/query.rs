@@ -97,6 +97,12 @@ pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> 
     if !res.preview_rows.is_empty() {
         let rendered = render_table(&res.columns, &res.preview_rows);
         println!("{rendered}");
+    } else if opts.max_rows == 0 && !res.columns.is_empty() {
+        let rendered = render_table(&res.columns, &[]);
+        println!("{rendered}");
+        if res.total_rows > 0 {
+            println!("(preview suppressed; use --max-rows > 0)");
+        }
     } else if opts.max_rows == 0 && res.total_rows > 0 {
         println!("(preview suppressed; use --max-rows > 0)");
     } else {
