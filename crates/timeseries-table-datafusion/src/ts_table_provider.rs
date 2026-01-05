@@ -11,7 +11,9 @@ pub(crate) use time_predicate::*;
 mod pruning;
 pub(crate) use pruning::*;
 use timeseries_table_core::storage::StorageLocation;
+use timeseries_table_core::storage::file_size;
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -150,20 +152,15 @@ impl TsTableProvider {
             return Ok(sz);
         }
 
-        // For baseline local FS, fallback to stat if missing (keeps provider usable for older tables).
-        match self.table.location().as_ref() {
-            StorageLocation::Local(root) => {
-                let abs = root.join(&seg.path);
-                let meta = tokio::fs::metadata(&abs).await.map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "missing SegmentMeta.file_size and failed to stat file: {} ({})",
-                        abs.display(),
-                        e
-                    ))
-                })?;
-                Ok(meta.len())
-            }
-        }
+        let sz = file_size(self.table.location().storage(), Path::new(&seg.path))
+            .await
+            .map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "missing Segment.file_size and failed to stat file: {} ({})",
+                    seg.path, e
+                ))
+            })?;
+        Ok(sz)
     }
 
     /// Return the time column name from the table's index spec.
