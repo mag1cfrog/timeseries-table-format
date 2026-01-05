@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
 use crate::storage::{
@@ -124,6 +124,47 @@ pub async fn open_output_sink(
             Ok(OutputSink {
                 inner: OutputSinkInner::Local(sink),
             })
+        }
+    }
+}
+
+/// Fully-qualified output target: backend + relative path/key.
+#[derive(Debug, Clone)]
+pub struct OutputLocation {
+    /// Backend where the output will be written.
+    pub storage: StorageLocation,
+    /// Path within the backend for the output object.
+    pub rel_path: PathBuf,
+}
+
+impl OutputLocation {
+    /// Parse a string specification into an `OutputLocation`, validating it is non-empty and supported.
+    pub fn parse(spec: &str) -> StorageResult<OutputLocation> {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            return Err(OtherIoSnafu {
+                path: "<empty output location>".to_string(),
+            }
+            .into_error(BackendError::Local(std::io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "output location is empty",
+            ))));
+        }
+
+        let storage = StorageLocation::parse(trimmed)?;
+
+        match &storage {
+            StorageLocation::Local(_) => {
+                let path = PathBuf::from(trimmed);
+
+                let base = PathBuf::from(".");
+                let rel_path = path;
+
+                Ok(OutputLocation {
+                    storage: StorageLocation::Local(base),
+                    rel_path,
+                })
+            }
         }
     }
 }
