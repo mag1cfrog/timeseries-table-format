@@ -33,6 +33,37 @@ pub struct QueryResult {
     pub elapsed: Option<Duration>,
 }
 
+fn sanitize_identifier(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+
+    if out.is_empty() {
+        return "t".to_string();
+    }
+
+    if out
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        out = format!("t_{out}");
+    }
+
+    out
+}
+
+pub fn quote_identifier(name: &str) -> String {
+    let escaped = name.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
 /// Pick a stable, user-friendly SQL table name from the table root path.
 /// Fallback is "t".
 pub fn default_table_name(table_root: &Path) -> String {
@@ -40,6 +71,7 @@ pub fn default_table_name(table_root: &Path) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
+        .map(|s| sanitize_identifier(&s))
         .unwrap_or_else(|| "t".to_string())
 }
 
@@ -83,7 +115,8 @@ pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::render_table;
+    use super::{default_table_name, render_table};
+    use std::path::Path;
 
     #[test]
     fn render_table_aligns_columns() {
@@ -100,5 +133,17 @@ mod tests {
         assert!(rendered.contains("Preview output"));
         assert!(rendered.contains("col1"));
         assert!(rendered.contains("longer"));
+    }
+
+    #[test]
+    fn default_table_name_sanitizes() {
+        let name = default_table_name(Path::new("/tmp/my-table 1"));
+        assert_eq!(name, "my_table_1");
+
+        let name = default_table_name(Path::new("/tmp/123-data"));
+        assert_eq!(name, "t_123_data");
+
+        let name = default_table_name(Path::new(""));
+        assert_eq!(name, "t");
     }
 }

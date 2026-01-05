@@ -249,7 +249,8 @@ async fn cmd_query(args: QueryArgs) -> CliResult<()> {
     let engine = make_engine(args.backend.into(), &args.table);
 
     if let Some(name) = engine.table_name() {
-        eprintln!("Registered table as '{}'", name);
+        let quoted = query::quote_identifier(name);
+        eprintln!("Registered table as '{}' (quoted: {quoted})", name);
     }
 
     cmd_query_with_engine(engine.as_ref(), args.sql, opts).await
