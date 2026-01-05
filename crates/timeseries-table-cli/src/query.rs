@@ -105,3 +105,26 @@ pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> 
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render_table;
+
+    #[test]
+    fn render_table_aligns_columns() {
+        let columns = vec!["col1".to_string(), "longer".to_string()];
+        let rows = vec![
+            vec!["a".to_string(), "value".to_string()],
+            vec!["bb".to_string(), "x".to_string()],
+        ];
+
+        let rendered = render_table(&columns, &rows);
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert!(lines[0].contains("col1"));
+        assert!(lines[0].contains("longer"));
+        assert!(lines[1].contains("-+-"));
+        assert!(lines[2].contains("a"));
+        assert!(lines[3].contains("bb"));
+    }
+}
