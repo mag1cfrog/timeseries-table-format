@@ -6,6 +6,7 @@ mod query;
 mod shell;
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
@@ -100,6 +101,10 @@ enum Command {
         /// Override timestamp column name (default: from table metadata)
         #[arg(long = "time-column")]
         time_column: Option<String>,
+
+        /// Print elapsed time for the append
+        #[arg(long, default_value_t = false)]
+        timing: bool,
     },
 
     /// Execute a SQL query via DataFusion against the table
@@ -212,7 +217,13 @@ async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<Tim
         })
 }
 
-async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -> CliResult<()> {
+async fn cmd_append(
+    table: &Path,
+    parquet: &Path,
+    time_column: Option<String>,
+    timing: bool,
+) -> CliResult<()> {
+    let start = Instant::now();
     let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
     // Open first so we can read metadata for default ts column.
     let mut t = open_table(location.clone(), table).await?;
@@ -239,7 +250,14 @@ async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -
             table: table.display().to_string(),
         })?;
 
-    println!("Appended segment: {rel_str}");
+    if timing {
+        println!(
+            "Appended segment: {rel_str} (elapsed_ms: {})",
+            start.elapsed().as_millis()
+        );
+    } else {
+        println!("Appended segment: {rel_str}");
+    }
     Ok(())
 }
 
@@ -288,7 +306,8 @@ async fn run() -> CliResult<()> {
             table,
             parquet,
             time_column,
-        } => cmd_append(&table, &parquet, time_column).await,
+            timing,
+        } => cmd_append(&table, &parquet, time_column, timing).await,
 
         Command::Query {
             table,
