@@ -619,7 +619,7 @@ fn shell_blocking(
             Err(ReadlineError::Interrupted) => {
                 // Ctrl-C
                 println!("^C");
-                continue;
+                break;
             }
             Err(ReadlineError::Eof) => {
                 // Ctrl-D
