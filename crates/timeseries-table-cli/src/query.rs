@@ -83,7 +83,7 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
 
     const PREVIEW_LABEL: &str = "Preview output";
     const PREVIEW_OFFSET: usize = 6;
-    let min_width = PREVIEW_OFFSET + PREVIEW_LABEL.len() + 2;
+    let min_width = PREVIEW_OFFSET + PREVIEW_LABEL.len() + 4;
 
     let mut builder = Builder::default();
     builder.push_record(columns);
@@ -92,9 +92,12 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
     }
 
     let mut table = builder.build();
+
     table.with(Style::rounded());
     table.with(MinWidth::new(min_width));
     table.with(LineText::new(PREVIEW_LABEL, Rows::first()).offset(PREVIEW_OFFSET));
+    // LineText re-estimates dimensions, so re-apply MinWidth afterwards.
+    table.with(MinWidth::new(min_width));
     table.to_string()
 }
 
