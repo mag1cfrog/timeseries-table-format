@@ -52,6 +52,15 @@ pub trait Engine: Send + Sync + 'static {
     async fn prepare_session(
         &self,
     ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error>;
+
+    /// Prepare a session using an existing table snapshot, avoiding log replay.
+    async fn prepare_session_from_table(
+        &self,
+        table: &TimeSeriesTable,
+    ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
+        let _ = table;
+        self.prepare_session().await
+    }
 }
 
 struct SinkWriter {
@@ -195,6 +204,31 @@ impl DataFusionEngine {
             table_name: self.table_name.clone(),
         })
     }
+
+    async fn prepare_session_from_table_internal(
+        &self,
+        table: &TimeSeriesTable,
+    ) -> CliResult<DataFusionSession> {
+        let state = table.state().clone();
+        let location = table.location().clone();
+        let table = TimeSeriesTable::from_state(location, state).context(OpenTableSnafu {
+            table: self.table_root.display().to_string(),
+        })?;
+
+        let table = Arc::new(table);
+        let provider = TsTableProvider::try_new(table).context(DataFusionSnafu)?;
+
+        let cfg = SessionConfig::new();
+        let ctx = SessionContext::new_with_config(cfg);
+
+        ctx.register_table(self.table_name.as_str(), Arc::new(provider))
+            .context(DataFusionSnafu)?;
+
+        Ok(DataFusionSession {
+            ctx,
+            table_name: self.table_name.clone(),
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -302,6 +336,15 @@ impl Engine for DataFusionEngine {
         &self,
     ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
         Ok(Box::new(self.prepare_session_internal().await?))
+    }
+
+    async fn prepare_session_from_table(
+        &self,
+        table: &TimeSeriesTable,
+    ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
+        Ok(Box::new(
+            self.prepare_session_from_table_internal(table).await?,
+        ))
     }
 }
 
