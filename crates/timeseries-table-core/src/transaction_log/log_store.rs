@@ -65,7 +65,7 @@ impl TransactionLogStore {
     }
 
     async fn write_atomic_rel(&self, rel: &Path, contents: &[u8]) -> Result<(), CommitError> {
-        storage::write_atomic(&self.location, rel, contents)
+        storage::write_atomic(self.location.as_ref(), rel, contents)
             .await
             .context(StorageSnafu)?;
         Ok(())
@@ -73,7 +73,7 @@ impl TransactionLogStore {
 
     /// Helper: read a log-relative file and map storage errors into CommitError.
     async fn read_to_string_rel(&self, rel: &Path) -> Result<String, CommitError> {
-        match storage::read_to_string(&self.location, rel).await {
+        match storage::read_to_string(self.location.as_ref(), rel).await {
             Ok(s) => Ok(s),
             Err(source) => Err(CommitError::Storage { source }),
         }
@@ -103,7 +103,7 @@ impl TransactionLogStore {
     pub async fn load_current_version(&self) -> Result<u64, CommitError> {
         let rel = Self::current_rel_path();
 
-        let contents = match storage::read_to_string(&self.location, &rel).await {
+        let contents = match storage::read_to_string(self.location.as_ref(), &rel).await {
             Ok(s) => s,
             Err(StorageError::NotFound { .. }) => return Ok(0),
             Err(source) => return Err(CommitError::Storage { source }),
@@ -206,7 +206,7 @@ impl TransactionLogStore {
         //    implement automatic conflict resolution (e.g., retrying with rebased
         //    changes if the operations don't actually conflict, like Delta Lake).
         let commit_rel = Self::commit_rel_path(version);
-        storage::write_new(&self.location, &commit_rel, &json)
+        storage::write_new(self.location.as_ref(), &commit_rel, &json)
             .await
             .map_err(|source| CommitError::Storage { source })?;
 

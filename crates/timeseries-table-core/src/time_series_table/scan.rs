@@ -215,7 +215,7 @@ async fn read_segment_range(
     let rel_path = Path::new(&segment.path);
 
     // 1) Use storage layer to get raw bytes.
-    let bytes = storage::read_all_bytes(location, rel_path)
+    let bytes = storage::read_all_bytes(location.as_ref(), rel_path)
         .await
         .context(StorageSnafu)?;
 

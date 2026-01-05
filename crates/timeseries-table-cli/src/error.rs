@@ -1,3 +1,4 @@
+use arrow::error::ArrowError;
 use std::path::PathBuf;
 use timeseries_table_core::{ParseTimeBucketError, TableError};
 
@@ -63,4 +64,18 @@ pub enum CliError {
     Storage {
         source: timeseries_table_core::storage::StorageError,
     },
+
+    #[snafu(display("DataFusion error: {source}"))]
+    DataFusion {
+        source: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Arrow error: {source}"))]
+    Arrow { source: ArrowError },
+
+    #[snafu(display(
+        "CSV output does not support nested field '{field}' with type {data_type}. \
+         Use --format jsonl instead."
+    ))]
+    CsvUnsupportedType { field: String, data_type: String },
 }

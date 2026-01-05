@@ -297,7 +297,7 @@ impl TimeSeriesTable {
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
 
-        let bytes = storage::read_all_bytes(self.location(), rel_path)
+        let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
             .await
             .context(StorageSnafu)?;
 
@@ -323,7 +323,7 @@ impl TimeSeriesTable {
         time_column: &str,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
-        let bytes = storage::read_all_bytes(self.location(), rel_path)
+        let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
             .await
             .context(StorageSnafu)?;
         let data = Bytes::from(bytes);
@@ -341,7 +341,7 @@ mod tests {
     use crate::common::time_column::TimeColumnError;
     use crate::coverage::Coverage;
     use crate::helpers::coverage_sidecar::read_coverage_sidecar;
-    use crate::storage::TableLocation;
+    use crate::storage::{StorageLocation, TableLocation};
     use crate::transaction_log::logical_schema::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::segments::SegmentMetaError;
     use crate::transaction_log::{
@@ -1045,8 +1045,8 @@ mod tests {
             .table_coverage
             .as_ref()
             .expect("snapshot pointer present");
-        let snapshot_abs = match &location {
-            TableLocation::Local(root) => root.join(&ptr.coverage_path),
+        let snapshot_abs = match &location.as_ref() {
+            StorageLocation::Local(root) => root.join(&ptr.coverage_path),
         };
 
         tokio::fs::remove_file(&snapshot_abs).await?;
@@ -1103,8 +1103,8 @@ mod tests {
             .table_coverage
             .as_ref()
             .expect("snapshot pointer present");
-        let snapshot_abs = match &location {
-            TableLocation::Local(root) => root.join(&ptr.coverage_path),
+        let snapshot_abs = match &location.as_ref() {
+            StorageLocation::Local(root) => root.join(&ptr.coverage_path),
         };
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
@@ -1222,8 +1222,8 @@ mod tests {
             .expect("at least one segment");
         table.state = state;
 
-        let corrupt_abs = match &location {
-            TableLocation::Local(root) => root.join(&corrupt_cov_path),
+        let corrupt_abs = match &location.as_ref() {
+            StorageLocation::Local(root) => root.join(&corrupt_cov_path),
         };
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 

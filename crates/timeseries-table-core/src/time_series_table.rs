@@ -240,6 +240,7 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageLocation;
     use crate::storage::TableLocation;
     use crate::time_series_table::test_util::*;
     use crate::transaction_log::TimeBucket;
@@ -260,8 +261,8 @@ mod tests {
         assert!(table.state().segments.is_empty());
 
         // Verify that the log layout exists on disk.
-        let root = match table.location() {
-            TableLocation::Local(p) => p.clone(),
+        let root = match table.location().storage() {
+            StorageLocation::Local(p) => p.clone(),
         };
 
         let log_dir = root.join(TransactionLogStore::LOG_DIR_NAME);

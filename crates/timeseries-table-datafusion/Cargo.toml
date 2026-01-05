@@ -8,7 +8,7 @@ timeseries-table-core = { path = "../timeseries-table-core", version = "0.1.0" }
 
 arrow = { workspace = true }
 datafusion = { workspace = true }
-async-trait = "0.1.89"
+async-trait = { workspace = true }
 
 tokio = { workspace = true }
 

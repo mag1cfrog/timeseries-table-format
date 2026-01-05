@@ -252,7 +252,7 @@ impl SegmentMeta {
         row_count: u64,
     ) -> SegmentResult<Self> {
         // Use storage layer to get len + first/last 4 bytes.
-        let probe = storage::read_head_tail_4(location, std::path::Path::new(path))
+        let probe = storage::read_head_tail_4(location.as_ref(), std::path::Path::new(path))
             .await
             .map_err(map_storage_error)?;
 

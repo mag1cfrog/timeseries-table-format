@@ -1,8 +1,12 @@
 //! CLI tool for managing time-series tables.
 
+mod engine;
+mod error;
+mod query;
+
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
 use timeseries_table_core::{
     storage::TableLocation,
@@ -10,13 +14,55 @@ use timeseries_table_core::{
     transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
 };
 
-use crate::error::{
-    AppendSegmentSnafu, CliResult, CreateTableSnafu, InvalidBucketSnafu, OpenTableSnafu,
-    StorageSnafu,
+use crate::{
+    error::{
+        AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
+        OpenTableSnafu, StorageSnafu,
+    },
+    query::QueryOpts,
 };
 
-mod engine;
-mod error;
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormatArg {
+    Csv,
+    Jsonl,
+}
+
+impl From<OutputFormatArg> for crate::query::OutputFormat {
+    fn from(v: OutputFormatArg) -> Self {
+        match v {
+            OutputFormatArg::Csv => crate::query::OutputFormat::Csv,
+            OutputFormatArg::Jsonl => crate::query::OutputFormat::Jsonl,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BackendKind {
+    DataFusion,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BackendArg {
+    DataFusion,
+}
+
+impl From<BackendArg> for BackendKind {
+    fn from(value: BackendArg) -> Self {
+        match value {
+            BackendArg::DataFusion => BackendKind::DataFusion,
+        }
+    }
+}
+
+fn make_engine(
+    backend: BackendKind,
+    table: &Path,
+) -> Box<dyn engine::Engine<Error = error::CliError>> {
+    match backend {
+        BackendKind::DataFusion => Box::new(engine::DataFusionEngine::new(table)),
+    }
+}
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -53,12 +99,51 @@ enum Command {
         #[arg(long = "time-column")]
         time_column: Option<String>,
     },
+
+    /// Execute a SQL query via DataFusion against the table
+    Query {
+        #[arg(long)]
+        table: PathBuf,
+
+        #[arg(long)]
+        sql: String,
+
+        #[arg(long, default_value_t = false)]
+        explain: bool,
+
+        #[arg(long, default_value_t = false)]
+        timing: bool,
+
+        #[arg(long, default_value_t = 10)]
+        max_rows: usize,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        #[arg(long, value_enum, default_value_t = OutputFormatArg::Csv)]
+        format: OutputFormatArg,
+
+        /// Query backend (default: datafusion)
+        #[arg(long, value_enum, default_value_t = BackendArg::DataFusion)]
+        backend: BackendArg,
+    },
 }
 
 #[derive(Debug, Parser)]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
+}
+
+struct QueryArgs {
+    table: PathBuf,
+    sql: String,
+    explain: bool,
+    timing: bool,
+    max_rows: usize,
+    output: Option<PathBuf>,
+    format: OutputFormatArg,
+    backend: BackendArg,
 }
 
 fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
@@ -142,6 +227,35 @@ async fn cmd_append(table: &Path, parquet: &Path, time_column: Option<String>) -
     Ok(())
 }
 
+async fn cmd_query_with_engine(
+    engine: &dyn engine::Engine<Error = CliError>,
+    sql: String,
+    opts: QueryOpts,
+) -> CliResult<()> {
+    let session = engine.prepare_session().await?;
+    if let Some(name) = session.table_name() {
+        let quoted = query::quote_identifier(name);
+        eprintln!("Registered table as '{}' (quoted: {quoted})", name);
+    }
+
+    let res = session.run_query(&sql, &opts).await?;
+    query::print_query_result(&res, &opts)?;
+    Ok(())
+}
+
+async fn cmd_query(args: QueryArgs) -> CliResult<()> {
+    let opts = query::QueryOpts {
+        explain: args.explain,
+        timing: args.timing,
+        max_rows: args.max_rows,
+        output: args.output,
+        format: args.format.into(),
+    };
+
+    let engine = make_engine(args.backend.into(), &args.table);
+    cmd_query_with_engine(engine.as_ref(), args.sql, opts).await
+}
+
 async fn run() -> CliResult<()> {
     let cli = Cli::parse();
 
@@ -159,6 +273,29 @@ async fn run() -> CliResult<()> {
             parquet,
             time_column,
         } => cmd_append(&table, &parquet, time_column).await,
+
+        Command::Query {
+            table,
+            sql,
+            explain,
+            timing,
+            max_rows,
+            output,
+            format,
+            backend,
+        } => {
+            cmd_query(QueryArgs {
+                table,
+                sql,
+                explain,
+                timing,
+                max_rows,
+                output,
+                format,
+                backend,
+            })
+            .await
+        }
     }
 }
 
