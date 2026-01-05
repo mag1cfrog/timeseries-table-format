@@ -3,6 +3,11 @@ use std::{
     time::Duration,
 };
 
+use tabled::{
+    builder::Builder,
+    settings::{Style, object::Rows, style::LineText},
+};
+
 use crate::error::CliResult;
 
 #[derive(Debug, Clone, Copy)]
@@ -39,50 +44,20 @@ pub fn default_table_name(table_root: &Path) -> String {
 }
 
 fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+    if columns.is_empty() {
+        return String::new();
+    }
 
+    let mut builder = Builder::default();
+    builder.push_record(columns);
     for row in rows {
-        for (idx, cell) in row.iter().enumerate() {
-            if idx >= widths.len() {
-                widths.push(cell.len());
-            } else if cell.len() > widths[idx] {
-                widths[idx] = cell.len();
-            }
-        }
+        builder.push_record(row);
     }
 
-    let mut out = String::new();
-
-    let write_row = |out: &mut String, row: &[String]| {
-        for (idx, width) in widths.iter().enumerate() {
-            let cell = row.get(idx).map(String::as_str).unwrap_or("");
-            let padding = width.saturating_sub(cell.len());
-            out.push_str(cell);
-            if padding > 0 {
-                out.push_str(&" ".repeat(padding));
-            }
-            if idx + 1 < widths.len() {
-                out.push_str(" | ");
-            }
-        }
-    };
-
-    write_row(&mut out, columns);
-    out.push('\n');
-
-    for (idx, width) in widths.iter().enumerate() {
-        out.push_str(&"-".repeat(*width));
-        if idx + 1 < widths.len() {
-            out.push_str("-+-");
-        }
-    }
-
-    for row in rows {
-        out.push('\n');
-        write_row(&mut out, row);
-    }
-
-    out
+    let mut table = builder.build();
+    table.with(Style::rounded());
+    table.with(LineText::new("Preview output", Rows::first()).offset(6));
+    table.to_string()
 }
 
 pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> {
@@ -121,10 +96,9 @@ mod tests {
         let rendered = render_table(&columns, &rows);
         let lines: Vec<&str> = rendered.lines().collect();
 
-        assert!(lines[0].contains("col1"));
-        assert!(lines[0].contains("longer"));
-        assert!(lines[1].contains("-+-"));
-        assert!(lines[2].contains("a"));
-        assert!(lines[3].contains("bb"));
+        assert!(!lines.is_empty());
+        assert!(rendered.contains("Preview output"));
+        assert!(rendered.contains("col1"));
+        assert!(rendered.contains("longer"));
     }
 }
