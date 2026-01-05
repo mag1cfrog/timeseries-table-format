@@ -6,6 +6,7 @@ use std::{
 };
 
 use arrow::{
+    datatypes::DataType,
     error::ArrowError,
     util::{
         display::{ArrayFormatter, FormatOptions},
@@ -22,7 +23,10 @@ use timeseries_table_core::{
 use timeseries_table_datafusion::TsTableProvider;
 
 use crate::{
-    error::{ArrowSnafu, CliError, CliResult, DataFusionSnafu, OpenTableSnafu, StorageSnafu},
+    error::{
+        ArrowSnafu, CliError, CliResult, CsvUnsupportedTypeSnafu, DataFusionSnafu, OpenTableSnafu,
+        StorageSnafu,
+    },
     query::{OutputFormat, QueryOpts, QueryResult, default_table_name},
 };
 
@@ -120,6 +124,31 @@ impl OutputWriter {
     }
 }
 
+fn ensure_csv_supported(schema: &arrow::datatypes::Schema) -> CliResult<()> {
+    for field in schema.fields() {
+        let dt = field.data_type();
+        let unsupported = matches!(
+            dt,
+            DataType::List(_)
+                | DataType::LargeList(_)
+                | DataType::FixedSizeList(_, _)
+                | DataType::Struct(_)
+                | DataType::Map(_, _)
+                | DataType::Union(_, _)
+        );
+
+        if unsupported {
+            return CsvUnsupportedTypeSnafu {
+                field: field.name().to_string(),
+                data_type: format!("{dt:?}"),
+            }
+            .fail();
+        }
+    }
+
+    Ok(())
+}
+
 pub struct DataFusionEngine {
     table_root: PathBuf,
     table_name: String,
@@ -190,6 +219,7 @@ impl QuerySession for DataFusionSession {
         let mut preview_rows_left = opts.max_rows;
         let mut columns: Vec<String> = Vec::new();
         let mut preview_rows: Vec<Vec<String>> = Vec::new();
+        let mut csv_checked = false;
 
         let mut out = if let Some(path) = &opts.output {
             Some(OutputWriter::create_output_writer(path, opts.format).await?)
@@ -211,6 +241,10 @@ impl QuerySession for DataFusionSession {
             }
 
             if let Some(w) = out.as_mut() {
+                if !csv_checked && opts.format == OutputFormat::Csv {
+                    ensure_csv_supported(batch.schema().as_ref())?;
+                    csv_checked = true;
+                }
                 w.write_batch(&batch)?;
             }
 
@@ -605,6 +639,40 @@ mod tests {
         let session = engine.prepare_session().await?;
         assert_eq!(session.table_name(), Some(table_name.as_str()));
 
+        Ok(())
+    }
+
+    #[test]
+    fn csv_schema_validation_rejects_nested_types() -> TestResult<()> {
+        let schema = Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new(
+                "items",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+        ]);
+
+        let err = super::ensure_csv_supported(&schema).unwrap_err();
+        match err {
+            crate::error::CliError::CsvUnsupportedType { field, .. } => {
+                assert_eq!(field, "items");
+            }
+            other => return Err(format!("unexpected error: {other:?}").into()),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn csv_schema_validation_accepts_flat_types() -> TestResult<()> {
+        let schema = Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]);
+
+        super::ensure_csv_supported(&schema)?;
         Ok(())
     }
 }
