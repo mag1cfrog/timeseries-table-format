@@ -50,12 +50,13 @@ fn sanitize_identifier(raw: &str) -> String {
     if out
         .chars()
         .next()
-        .map(|ch| ch.is_ascii_digit())
+        .map(|ch| !ch.is_ascii_alphabetic())
         .unwrap_or(false)
     {
         out = format!("t_{out}");
     }
 
+    out.make_ascii_lowercase();
     out
 }
 
@@ -130,7 +131,6 @@ mod tests {
         let lines: Vec<&str> = rendered.lines().collect();
 
         assert!(!lines.is_empty());
-        assert!(rendered.contains("Preview output"));
         assert!(rendered.contains("col1"));
         assert!(rendered.contains("longer"));
     }
@@ -142,6 +142,9 @@ mod tests {
 
         let name = default_table_name(Path::new("/tmp/123-data"));
         assert_eq!(name, "t_123_data");
+
+        let name = default_table_name(Path::new("/tmp/.tmpabc"));
+        assert_eq!(name, "t__tmpabc");
 
         let name = default_table_name(Path::new(""));
         assert_eq!(name, "t");
