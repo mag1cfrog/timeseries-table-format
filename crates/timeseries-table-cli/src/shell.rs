@@ -20,6 +20,7 @@ fn print_help() {
   query <sql>
   explain <sql>
   \timing           toggle per-command elapsed time
+  help
   exit | quit
 "#
     );
@@ -39,9 +40,10 @@ fn shell_blocking(
     let mut table =
         handle.block_on(async { open_table(location.clone(), table_root.as_path()).await })?;
 
-    // Cached query session
+    // Cached query session built from the same in-memory table snapshot.
     let engine = make_engine(backend.into(), table_root.as_path());
-    let mut session = handle.block_on(async { engine.prepare_session().await })?;
+    let mut session = handle
+        .block_on(async { engine.prepare_session_from_table(&table).await })?;
 
     let table_name = session
         .table_name()
@@ -142,8 +144,12 @@ fn shell_blocking(
                         println!("refreshed: {changed}");
                     }
 
-                    // Optional but simple: rebuild query session after refresh so schema/registration stays clean.
-                    session = handle.block_on(async { engine.prepare_session().await })?;
+                    // Rebuild query session only when the table actually changed.
+                    if changed {
+                        session = handle.block_on(async {
+                            engine.prepare_session_from_table(&table).await
+                        })?;
+                    }
                 }
                 Err(e) => println!("{e}"),
             }
@@ -192,8 +198,10 @@ fn shell_blocking(
                     } else {
                         println!("appended: {rel_str}, size: {s}.");
                     }
-                    // Rebuild query session so it surely sees the latest snapshot/provider state.
-                    session = handle.block_on(async { engine.prepare_session().await })?;
+                    // Rebuild query session from the refreshed in-memory table snapshot.
+                    session = handle.block_on(async {
+                        engine.prepare_session_from_table(&table).await
+                    })?;
                 }
 
                 Err(e) => {
@@ -210,6 +218,27 @@ fn shell_blocking(
         }
 
         if let Some(sql) = trimmed.strip_prefix("query ") {
+            // Refresh before queries so results track new commits.
+            match handle.block_on(async { table.refresh().await }) {
+                Ok(changed) => {
+                    if changed {
+                        session = handle.block_on(async {
+                            engine.prepare_session_from_table(&table).await
+                        })?;
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        CliError::OpenTable {
+                            table: table_root.display().to_string(),
+                            source: Box::new(e),
+                        }
+                    );
+                    continue;
+                }
+            }
+
             let opts = QueryOpts {
                 explain: false,
                 timing,
@@ -228,6 +257,27 @@ fn shell_blocking(
         }
 
         if let Some(sql) = trimmed.strip_prefix("explain ") {
+            // Refresh before queries so results track new commits.
+            match handle.block_on(async { table.refresh().await }) {
+                Ok(changed) => {
+                    if changed {
+                        session = handle.block_on(async {
+                            engine.prepare_session_from_table(&table).await
+                        })?;
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        CliError::OpenTable {
+                            table: table_root.display().to_string(),
+                            source: Box::new(e),
+                        }
+                    );
+                    continue;
+                }
+            }
+
             // plan-only: just run an EXPLAIN statement through the same session
             let explain_sql = format!("EXPLAIN {}", sql.trim());
             let opts = QueryOpts {
