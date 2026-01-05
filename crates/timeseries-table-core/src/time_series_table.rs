@@ -68,6 +68,25 @@ pub struct TimeSeriesTable {
 }
 
 impl TimeSeriesTable {
+    /// Construct a table handle from an existing snapshot.
+    ///
+    /// This does not replay the transaction log; callers must provide a state
+    /// derived from the same location.
+    pub fn from_state(location: TableLocation, state: TableState) -> Result<Self, TableError> {
+        let index = match &state.table_meta.kind {
+            TableKind::TimeSeries(spec) => spec.clone(),
+            other => {
+                return NotTimeSeriesSnafu {
+                    kind: other.clone(),
+                }
+                .fail();
+            }
+        };
+
+        let log = TransactionLogStore::new(location);
+        Ok(Self { log, state, index })
+    }
+
     /// Return the current committed table state.
     pub fn state(&self) -> &TableState {
         &self.state
