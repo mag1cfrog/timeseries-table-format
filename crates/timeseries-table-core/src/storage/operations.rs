@@ -34,7 +34,7 @@ impl TempFileGuard {
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if self.armed {
-            // Best-effort cleanup; ingore errors since we're likely already handling another error.
+            // Best-effort cleanup; ignore errors since we're likely already handling another error.
             let _ = std::fs::remove_file(&self.path);
         }
     }
