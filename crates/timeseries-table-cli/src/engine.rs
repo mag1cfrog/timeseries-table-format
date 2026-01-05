@@ -240,3 +240,325 @@ impl Engine for DataFusionEngine {
         Some(self.table_name.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{
+        BinaryBuilder, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder,
+        TimestampMillisecondBuilder,
+    };
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use tempfile::TempDir;
+    use timeseries_table_core::{
+        storage::TableLocation,
+        time_series_table::TimeSeriesTable,
+        transaction_log::{
+            TableMeta, TimeBucket, TimeIndexSpec,
+            logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+        },
+    };
+
+    use crate::query::{OutputFormat, QueryOpts, default_table_name, print_query_result};
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn make_table_meta() -> TestResult<TableMeta> {
+        let index = TimeIndexSpec {
+            timestamp_column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string()],
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        };
+
+        let logical_schema = LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "symbol".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: false,
+            },
+            LogicalField {
+                name: "price".to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: false,
+            },
+            LogicalField {
+                name: "volume".to_string(),
+                data_type: LogicalDataType::Int64,
+                nullable: false,
+            },
+            LogicalField {
+                name: "is_trade".to_string(),
+                data_type: LogicalDataType::Bool,
+                nullable: false,
+            },
+            LogicalField {
+                name: "venue".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: true,
+            },
+            LogicalField {
+                name: "payload".to_string(),
+                data_type: LogicalDataType::Binary,
+                nullable: false,
+            },
+        ])?;
+
+        Ok(TableMeta::new_time_series_with_schema(
+            index,
+            logical_schema,
+        ))
+    }
+
+    fn lcg_next(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        *seed
+    }
+
+    fn write_parquet_rows(path: &std::path::Path, rows: usize) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut ts_builder = TimestampMillisecondBuilder::with_capacity(rows);
+        let mut sym_builder = StringBuilder::new();
+        let mut price_builder = Float64Builder::with_capacity(rows);
+        let mut volume_builder = Int64Builder::with_capacity(rows);
+        let mut trade_builder = BooleanBuilder::with_capacity(rows);
+        let mut venue_builder = StringBuilder::new();
+        let mut payload_builder = BinaryBuilder::new();
+
+        let mut seed = 0xBAD5_EEDu64;
+        let base_ts = 1_700_000_000_000i64;
+        for i in 0..rows {
+            let rnd = lcg_next(&mut seed);
+            let ts = base_ts + (i as i64) * 1_000;
+            let symbol = "SYM1".to_string();
+            let price = 100.0 + (rnd % 10_000) as f64 / 100.0;
+            let volume = 1_000 + (rnd % 5_000) as i64;
+            let is_trade = i % 2 == 0;
+            let venue = if i % 5 == 0 {
+                None
+            } else {
+                Some(format!("X{}", (rnd % 7) + 1))
+            };
+            let payload = vec![i as u8, (i.wrapping_mul(3)) as u8];
+
+            ts_builder.append_value(ts);
+            sym_builder.append_value(symbol);
+            price_builder.append_value(price);
+            volume_builder.append_value(volume);
+            trade_builder.append_value(is_trade);
+            match venue {
+                Some(v) => venue_builder.append_value(v),
+                None => venue_builder.append_null(),
+            }
+            payload_builder.append_value(payload);
+        }
+
+        let schema = Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+            Field::new("volume", DataType::Int64, false),
+            Field::new("is_trade", DataType::Boolean, false),
+            Field::new("venue", DataType::Utf8, true),
+            Field::new("payload", DataType::Binary, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(ts_builder.finish()) as _,
+                Arc::new(sym_builder.finish()),
+                Arc::new(price_builder.finish()),
+                Arc::new(volume_builder.finish()),
+                Arc::new(trade_builder.finish()),
+                Arc::new(venue_builder.finish()),
+                Arc::new(payload_builder.finish()),
+            ],
+        )?;
+
+        let file = std::fs::File::create(path)?;
+        let props = parquet::file::properties::WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        Ok(())
+    }
+
+    async fn build_table_with_rows(rows: usize) -> TestResult<(TempDir, usize)> {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_table_meta()?).await?;
+
+        let rel = "data/segment.parquet";
+        write_parquet_rows(&tmp.path().join(rel), rows)?;
+        table.append_parquet_segment(rel, "ts").await?;
+
+        Ok((tmp, rows))
+    }
+
+    #[tokio::test]
+    async fn query_caps_preview_rows() -> TestResult<()> {
+        use crate::engine::Engine;
+        let (tmp, total) = build_table_with_rows(15).await?;
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let table_name = default_table_name(tmp.path());
+        let table_ident = format!("\"{}\"", table_name);
+
+        let opts = QueryOpts {
+            explain: false,
+            timing: false,
+            max_rows: 5,
+            output: None,
+            format: OutputFormat::Csv,
+        };
+
+        let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
+        let res = engine.execute(&sql, &opts).await?;
+
+        assert_eq!(res.total_rows, total as u64);
+        assert_eq!(res.preview_rows.len(), 5);
+        assert_eq!(res.columns.len(), 7);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_writes_csv_and_jsonl() -> TestResult<()> {
+        use crate::engine::Engine;
+        let (tmp, total) = build_table_with_rows(12).await?;
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let table_name = default_table_name(tmp.path());
+        let table_ident = format!("\"{}\"", table_name);
+        let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
+
+        let csv_path = tmp.path().join("out.csv");
+        let opts_csv = QueryOpts {
+            explain: false,
+            timing: false,
+            max_rows: 3,
+            output: Some(csv_path.clone()),
+            format: OutputFormat::Csv,
+        };
+        let _ = engine.execute(&sql, &opts_csv).await?;
+
+        let csv_contents = std::fs::read_to_string(&csv_path)?;
+        let csv_lines: Vec<&str> = csv_contents.lines().collect();
+        assert!(csv_lines.first().is_some());
+        assert!(csv_lines.len() >= total + 1);
+
+        let jsonl_path = tmp.path().join("out.jsonl");
+        let opts_jsonl = QueryOpts {
+            explain: false,
+            timing: false,
+            max_rows: 2,
+            output: Some(jsonl_path.clone()),
+            format: OutputFormat::Jsonl,
+        };
+        let _ = engine.execute(&sql, &opts_jsonl).await?;
+
+        let jsonl_contents = std::fs::read_to_string(&jsonl_path)?;
+        let jsonl_lines: Vec<&str> = jsonl_contents.lines().collect();
+        assert_eq!(jsonl_lines.len(), total);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_real_world_preview_prints() -> TestResult<()> {
+        use crate::engine::Engine;
+        let (tmp, total) = build_table_with_rows(25).await?;
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let table_name = default_table_name(tmp.path());
+        let table_ident = format!("\"{}\"", table_name);
+
+        let opts = QueryOpts {
+            explain: false,
+            timing: false,
+            max_rows: 12,
+            output: None,
+            format: OutputFormat::Csv,
+        };
+
+        let sql = format!(
+            "SELECT ts, symbol, price, volume, is_trade, venue, payload \
+             FROM {} ORDER BY ts",
+            table_ident
+        );
+
+        let res = engine.execute(&sql, &opts).await?;
+        assert_eq!(res.total_rows, total as u64);
+        assert_eq!(res.preview_rows.len(), 12);
+
+        println!("Preview output:");
+        print_query_result(&res, &opts)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_explain_runs() -> TestResult<()> {
+        use crate::engine::Engine;
+        let (tmp, _total) = build_table_with_rows(5).await?;
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let table_name = default_table_name(tmp.path());
+        let table_ident = format!("\"{}\"", table_name);
+
+        let opts = QueryOpts {
+            explain: true,
+            timing: false,
+            max_rows: 3,
+            output: None,
+            format: OutputFormat::Csv,
+        };
+
+        let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
+        let res = engine.execute(&sql, &opts).await?;
+
+        assert_eq!(res.columns.len(), 7);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_timing_sets_elapsed() -> TestResult<()> {
+        use crate::engine::Engine;
+        let (tmp, _total) = build_table_with_rows(10).await?;
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let table_name = default_table_name(tmp.path());
+        let table_ident = format!("\"{}\"", table_name);
+
+        let opts = QueryOpts {
+            explain: false,
+            timing: true,
+            max_rows: 4,
+            output: None,
+            format: OutputFormat::Csv,
+        };
+
+        let sql = format!("SELECT * FROM {} ORDER BY ts", table_ident);
+        let res = engine.execute(&sql, &opts).await?;
+
+        assert!(res.elapsed.is_some());
+        Ok(())
+    }
+}
