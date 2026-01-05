@@ -122,7 +122,7 @@ impl OutputWriter {
 
 /// Pick a stable, user-friendly SQL table name from the table root path.
 /// Fallback is "t".
-fn default_table_name(table_root: &Path) -> String {
+pub fn default_table_name(table_root: &Path) -> String {
     table_root
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
