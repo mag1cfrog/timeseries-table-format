@@ -82,6 +82,11 @@ enum OutputSinkInner {
 }
 
 /// A streaming output sink for writing bytes to a storage backend.
+///
+/// This type abstracts over backend-specific sink implementations. Callers
+/// obtain a sink via `open_output_sink` and then stream bytes through the
+/// `writer()` handle. Finalization is explicit via `finish()` to allow
+/// backend-specific commit semantics (e.g., atomic rename or multipart upload).
 pub struct OutputSink {
     inner: OutputSinkInner,
 }
@@ -103,6 +108,10 @@ impl OutputSink {
 }
 
 /// Open a streaming output sink at `location` + `rel_path`.
+///
+/// The `location` identifies the backend root, while `rel_path` identifies
+/// the object/key within that backend. For local filesystems this performs a
+/// temp-file write and atomic rename on `finish()`.
 ///
 /// v0.1: only StorageLocation::Local is supported.
 pub async fn open_output_sink(
