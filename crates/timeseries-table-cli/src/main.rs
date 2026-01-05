@@ -232,7 +232,13 @@ async fn cmd_query_with_engine(
     sql: String,
     opts: QueryOpts,
 ) -> CliResult<()> {
-    let res = engine.execute(&sql, &opts).await?;
+    let session = engine.prepare_session().await?;
+    if let Some(name) = session.table_name() {
+        let quoted = query::quote_identifier(name);
+        eprintln!("Registered table as '{}' (quoted: {quoted})", name);
+    }
+
+    let res = session.run_query(&sql, &opts).await?;
     query::print_query_result(&res, &opts)?;
     Ok(())
 }
@@ -247,12 +253,6 @@ async fn cmd_query(args: QueryArgs) -> CliResult<()> {
     };
 
     let engine = make_engine(args.backend.into(), &args.table);
-
-    if let Some(name) = engine.table_name() {
-        let quoted = query::quote_identifier(name);
-        eprintln!("Registered table as '{}' (quoted: {quoted})", name);
-    }
-
     cmd_query_with_engine(engine.as_ref(), args.sql, opts).await
 }
 
