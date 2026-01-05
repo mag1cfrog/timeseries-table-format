@@ -26,12 +26,27 @@ use crate::{
     query::{OutputFormat, QueryOpts, QueryResult, default_table_name},
 };
 
+#[async_trait::async_trait]
+pub trait QuerySession: Send + Sync + 'static {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    async fn run_query(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error>;
+
+    #[allow(dead_code)]
+    fn table_name(&self) -> Option<&str> {
+        None
+    }
+}
+
 /// Minimal engine trait.
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
     async fn execute(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error>;
+
+    #[allow(dead_code)]
+    async fn prepare_session(&self) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error>;
 
     fn table_name(&self) -> Option<&str> {
         None
@@ -113,6 +128,12 @@ pub struct DataFusionEngine {
     table_name: String,
 }
 
+pub struct DataFusionSession {
+    ctx: SessionContext,
+    #[allow(dead_code)]
+    table_name: String,
+}
+
 impl DataFusionEngine {
     pub fn new(table_root: impl AsRef<Path>) -> Self {
         let table_root = table_root.as_ref().to_path_buf();
@@ -124,7 +145,7 @@ impl DataFusionEngine {
         }
     }
 
-    async fn prepare_session(&self) -> CliResult<SessionContext> {
+    async fn prepare_session_internal(&self) -> CliResult<DataFusionSession> {
         let location = TableLocation::parse(self.table_root.to_string_lossy().as_ref())
             .context(StorageSnafu)?;
 
@@ -143,20 +164,21 @@ impl DataFusionEngine {
         ctx.register_table(self.table_name.as_str(), Arc::new(provider))
             .context(DataFusionSnafu)?;
 
-        Ok(ctx)
+        Ok(DataFusionSession {
+            ctx,
+            table_name: self.table_name.clone(),
+        })
     }
 }
 
 #[async_trait::async_trait]
-impl Engine for DataFusionEngine {
+impl QuerySession for DataFusionSession {
     type Error = CliError;
 
-    async fn execute(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error> {
-        let ctx = self.prepare_session().await?;
-
+    async fn run_query(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error> {
         if opts.explain {
             let explain_sql = format!("EXPLAIN {sql}");
-            let df = ctx.sql(&explain_sql).await.context(DataFusionSnafu)?;
+            let df = self.ctx.sql(&explain_sql).await.context(DataFusionSnafu)?;
             let batches = df.collect().await.context(DataFusionSnafu)?;
             let rendered = pretty_format_batches(&batches).context(ArrowSnafu)?;
             println!("{rendered}");
@@ -164,7 +186,7 @@ impl Engine for DataFusionEngine {
 
         let start = Instant::now();
 
-        let df = ctx.sql(sql).await.context(DataFusionSnafu)?;
+        let df = self.ctx.sql(sql).await.context(DataFusionSnafu)?;
         let mut stream = df.execute_stream().await.context(DataFusionSnafu)?;
 
         let mut total_rows: u64 = 0;
@@ -234,6 +256,26 @@ impl Engine for DataFusionEngine {
             total_rows,
             elapsed,
         })
+    }
+
+    fn table_name(&self) -> Option<&str> {
+        Some(self.table_name.as_str())
+    }
+}
+
+#[async_trait::async_trait]
+impl Engine for DataFusionEngine {
+    type Error = CliError;
+
+    async fn execute(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error> {
+        let session = self.prepare_session_internal().await?;
+        session.run_query(sql, opts).await
+    }
+
+    async fn prepare_session(
+        &self,
+    ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
+        Ok(Box::new(self.prepare_session_internal().await?))
     }
 
     fn table_name(&self) -> Option<&str> {
