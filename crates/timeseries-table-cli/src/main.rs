@@ -21,7 +21,7 @@ use crate::{
         AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
         OpenTableSnafu, StorageSnafu,
     },
-    query::QueryOpts,
+    query::{QueryOpts, page_output, print_query_result, write_query_result},
     shell::cmd_shell,
 };
 
@@ -121,6 +121,10 @@ enum Command {
         #[arg(long, default_value_t = false)]
         timing: bool,
 
+        /// Page output through `less -S` (no truncation; horizontal scroll)
+        #[arg(long, default_value_t = false)]
+        pager: bool,
+
         #[arg(long, default_value_t = 10)]
         max_rows: usize,
 
@@ -161,6 +165,7 @@ struct QueryArgs {
     sql: String,
     explain: bool,
     timing: bool,
+    pager: bool,
     max_rows: usize,
     output: Option<PathBuf>,
     format: OutputFormatArg,
@@ -265,6 +270,7 @@ async fn cmd_query_with_engine(
     engine: &dyn engine::Engine<Error = CliError>,
     sql: String,
     opts: QueryOpts,
+    pager: bool,
 ) -> CliResult<()> {
     let session = engine.prepare_session().await?;
     if let Some(name) = session.table_name() {
@@ -273,7 +279,14 @@ async fn cmd_query_with_engine(
     }
 
     let res = session.run_query(&sql, &opts).await?;
-    query::print_query_result(&res, &opts)?;
+    if pager {
+        let mut buf = Vec::new();
+        write_query_result(&res, &opts, &mut buf)?;
+        let rendered = String::from_utf8_lossy(&buf);
+        page_output(&rendered)?;
+    } else {
+        print_query_result(&res, &opts)?;
+    }
     Ok(())
 }
 
@@ -287,7 +300,7 @@ async fn cmd_query(args: QueryArgs) -> CliResult<()> {
     };
 
     let engine = make_engine(args.backend.into(), &args.table);
-    cmd_query_with_engine(engine.as_ref(), args.sql, opts).await
+    cmd_query_with_engine(engine.as_ref(), args.sql, opts, args.pager).await
 }
 
 async fn run() -> CliResult<()> {
@@ -314,6 +327,7 @@ async fn run() -> CliResult<()> {
             sql,
             explain,
             timing,
+            pager,
             max_rows,
             output,
             format,
@@ -324,6 +338,7 @@ async fn run() -> CliResult<()> {
                 sql,
                 explain,
                 timing,
+                pager,
                 max_rows,
                 output,
                 format,
