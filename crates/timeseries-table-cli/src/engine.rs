@@ -322,9 +322,7 @@ mod tests {
     }
 
     fn lcg_next(seed: &mut u64) -> u64 {
-        *seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         *seed
     }
 
@@ -510,7 +508,6 @@ mod tests {
         assert_eq!(res.total_rows, total as u64);
         assert_eq!(res.preview_rows.len(), 12);
 
-        println!("Preview output:");
         print_query_result(&res, &opts)?;
 
         Ok(())
