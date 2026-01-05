@@ -10,7 +10,10 @@ use crate::{
     engine::{Engine, QuerySession},
     error::{CliError, CliResult, OpenTableSnafu, StorageSnafu},
     make_engine, open_table,
-    query::{OutputFormat, QueryOpts, default_table_name, print_query_result, quote_identifier},
+    query::{
+        OutputFormat, QueryOpts, default_table_name, page_output, print_query_result,
+        quote_identifier, write_query_result,
+    },
 };
 
 type BoxedEngine = Box<dyn Engine<Error = CliError>>;
@@ -41,6 +44,7 @@ struct ShellContext {
     table: timeseries_table_core::time_series_table::TimeSeriesTable,
     session: BoxedSession,
     timing: bool,
+    pager: bool,
 }
 
 fn print_help() {
@@ -51,6 +55,7 @@ fn print_help() {
   query [--max-rows N] [--format csv|jsonl] [--output PATH] [--timing] [--explain] [--] <sql>
   explain [--max-rows N] [--format csv|jsonl] [--output PATH] [--timing] [--] <sql>
   \timing           toggle per-command elapsed time
+  \pager            toggle pager output (less -S)
   help
   exit | quit
 notes:
@@ -87,6 +92,7 @@ async fn build_context(
             table,
             session,
             timing: false,
+            pager: false,
         },
         table_name,
     ))
@@ -297,6 +303,15 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         });
     }
 
+    if trimmed == r"\pager" || trimmed == r"\\pager" {
+        ctx.pager = !ctx.pager;
+        println!("pager: {}", if ctx.pager { "on" } else { "off" });
+        return Ok(CommandResult {
+            action: CommandAction::Continue,
+            query_result: None,
+        });
+    }
+
     if trimmed == "refresh" {
         let start = Instant::now();
         let changed = ctx.table.refresh().await.map_err(|e| CliError::OpenTable {
@@ -440,7 +455,15 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         let res = match ctx.session.run_query(sql.trim(), &opts).await {
             Ok(res) => {
-                let _ = print_query_result(&res, &opts);
+                if ctx.pager {
+                    let mut buf = Vec::new();
+                    if write_query_result(&res, &opts, &mut buf).is_ok() {
+                        let rendered = String::from_utf8_lossy(&buf);
+                        let _ = page_output(&rendered);
+                    }
+                } else {
+                    let _ = print_query_result(&res, &opts);
+                }
                 Some(res)
             }
             Err(e) => {
@@ -504,7 +527,15 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         let res = match ctx.session.run_query(&explain_sql, &opts).await {
             Ok(res) => {
-                let _ = print_query_result(&res, &opts);
+                if ctx.pager {
+                    let mut buf = Vec::new();
+                    if write_query_result(&res, &opts, &mut buf).is_ok() {
+                        let rendered = String::from_utf8_lossy(&buf);
+                        let _ = page_output(&rendered);
+                    }
+                } else {
+                    let _ = print_query_result(&res, &opts);
+                }
                 Some(res)
             }
             Err(e) => {
@@ -557,10 +588,11 @@ fn shell_blocking(
     println!("type 'help' for commands\n");
 
     loop {
-        let prompt = if ctx.timing {
-            format!("ts-table[{table_name}](timing)> ")
-        } else {
-            format!("ts-table[{table_name}]> ")
+        let prompt = match (ctx.timing, ctx.pager) {
+            (true, true) => format!("ts-table[{table_name}](timing,pager)> "),
+            (true, false) => format!("ts-table[{table_name}](timing)> "),
+            (false, true) => format!("ts-table[{table_name}](pager)> "),
+            (false, false) => format!("ts-table[{table_name}]> "),
         };
 
         let line = match rl.readline(&prompt) {
