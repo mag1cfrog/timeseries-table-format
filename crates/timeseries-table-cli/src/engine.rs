@@ -46,7 +46,9 @@ pub trait Engine: Send + Sync + 'static {
     async fn execute(&self, sql: &str, opts: &QueryOpts) -> Result<QueryResult, Self::Error>;
 
     #[allow(dead_code)]
-    async fn prepare_session(&self) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error>;
+    async fn prepare_session(
+        &self,
+    ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error>;
 
     fn table_name(&self) -> Option<&str> {
         None
