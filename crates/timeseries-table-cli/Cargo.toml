@@ -25,6 +25,7 @@ parquet = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+timeseries-table-core = { path = "../timeseries-table-core", features = ["test-counters"] }
 
 [lints]
 workspace = true
