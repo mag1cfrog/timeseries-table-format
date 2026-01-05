@@ -91,33 +91,6 @@ pub fn write_parquet_rows(path: &Path, rows: usize) -> TestResult {
     Ok(())
 }
 
-pub fn sanitize_identifier(raw: &str) -> String {
-    let mut out = String::new();
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-
-    if out.is_empty() {
-        return "t".to_string();
-    }
-
-    if out
-        .chars()
-        .next()
-        .map(|ch| !ch.is_ascii_alphabetic())
-        .unwrap_or(false)
-    {
-        out = format!("t_{out}");
-    }
-
-    out.make_ascii_lowercase();
-    out
-}
-
 pub fn table_root(tmp: &tempfile::TempDir, name: &str) -> PathBuf {
     tmp.path().join(name)
 }

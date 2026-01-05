@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 mod common;
 
-use common::{sanitize_identifier, table_root, write_parquet_rows};
+use common::{table_root, write_parquet_rows};
 
 fn cli() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("timeseries-table-cli"))
@@ -237,8 +237,8 @@ fn cli_query_with_sanitized_table_name() -> Result<(), Box<dyn std::error::Error
         .assert()
         .success();
 
-    let sanitized = sanitize_identifier(table_name);
-    let sql = format!("SELECT * FROM {} ORDER BY ts", sanitized);
+    let expected = "my_table_1";
+    let sql = format!("SELECT * FROM {} ORDER BY ts", expected);
 
     cli()
         .args([
@@ -250,8 +250,8 @@ fn cli_query_with_sanitized_table_name() -> Result<(), Box<dyn std::error::Error
         ])
         .assert()
         .success()
-        .stderr(contains(format!("Registered table as '{}'", sanitized)))
-        .stderr(contains(format!("quoted: \"{}\"", sanitized)))
+        .stderr(contains(format!("Registered table as '{}'", expected)))
+        .stderr(contains(format!("quoted: \"{}\"", expected)))
         .stdout(contains("total_rows: 4"));
 
     Ok(())
