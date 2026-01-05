@@ -344,6 +344,27 @@ pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> Stor
     }
 }
 
+/// Get the length (in bytes) of a file at `rel_path` within `location`.
+///
+/// v0.1: only StorageLocation::Local is supported.
+pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageResult<u64> {
+    match location {
+        StorageLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+            let path_str = abs.display().to_string();
+
+            let meta = fs::metadata(&abs).await;
+            match meta {
+                Ok(m) => Ok(m.len()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Err(BackendError::Local(e)).context(NotFoundSnafu { path: path_str })
+                }
+                Err(e) => Err(BackendError::Local(e)).context(OtherIoSnafu { path: path_str }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
