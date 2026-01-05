@@ -16,6 +16,7 @@ timeseries-table-core = { path = "../timeseries-table-core" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion" }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
+tabled = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
