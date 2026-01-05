@@ -46,11 +46,18 @@ use std::path::PathBuf;
 /// error information via `StorageError`.
 pub type StorageResult<T> = Result<T, StorageError>;
 
-/// This enum abstracts over different storage backends, currently supporting
-/// local filesystem paths with potential future support for object storage.
+/// Backend + root location for storage operations.
+///
+/// This type represents the *root* of a storage backend (e.g. a local directory
+/// or an object-store prefix). It is intentionally generic and does **not**
+/// encode table-specific semantics; use `TableLocation` when you need a table
+/// root and table-scoped helpers.
+///
+/// Many storage helpers take a `StorageLocation` plus a relative path/key,
+/// which keeps backend roots and object paths separate and explicit.
 #[derive(Clone, Debug)]
 pub enum StorageLocation {
-    /// A table stored on the local filesystem at the given path.
+    /// A local filesystem root at the given path.
     Local(PathBuf),
     // Future:
     // S3 { bucket: string, prefix: string },
