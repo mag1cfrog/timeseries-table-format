@@ -13,7 +13,7 @@ use std::cell::Cell;
 
 #[cfg(feature = "test-counters")]
 thread_local! {
-    static REBUILD_TABLE_STATE_COUNT: Cell<usize> = Cell::new(0);
+    static REBUILD_TABLE_STATE_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(feature = "test-counters")]
