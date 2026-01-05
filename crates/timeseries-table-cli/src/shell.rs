@@ -1,14 +1,24 @@
-use std::{io::Write, path::PathBuf, time::Instant};
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
-use timeseries_table_core::storage::TableLocation;
+use timeseries_table_core::{
+    storage::TableLocation,
+    time_series_table::TimeSeriesTable,
+    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+};
 use tokio::runtime::Handle;
 
 use crate::{
     BackendArg,
     engine::{Engine, QuerySession},
-    error::{CliError, CliResult, OpenTableSnafu, StorageSnafu},
+    error::{
+        CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu, OpenTableSnafu, StorageSnafu,
+    },
     make_engine, open_table,
     query::{
         OutputFormat, QueryOpts, default_table_name, page_output, preview_message,
@@ -74,6 +84,145 @@ fn clear_screen() {
     // ANSI clear screen + cursor home; best-effort.
     print!("\x1b[2J\x1b[H");
     let _ = std::io::stdout().flush();
+}
+
+fn table_log_exists(root: &Path) -> bool {
+    root.join("_timeseries_log").exists()
+}
+
+fn prompt_line(prompt: &str) -> CliResult<String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|e| CliError::PathInvariantNoSource {
+            message: format!("failed to flush stdout: {e}"),
+            path: None,
+        })?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| CliError::PathInvariantNoSource {
+            message: format!("failed to read input: {e}"),
+            path: None,
+        })?;
+    Ok(input.trim().to_string())
+}
+
+fn prompt_non_empty(prompt: &str) -> CliResult<String> {
+    loop {
+        let input = prompt_line(prompt)?;
+        if !input.trim().is_empty() {
+            return Ok(input);
+        }
+    }
+}
+
+fn prompt_optional(prompt: &str) -> CliResult<Option<String>> {
+    let input = prompt_line(prompt)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
+    spec.parse::<TimeBucket>().context(InvalidBucketSnafu {
+        spec: spec.to_string(),
+    })
+}
+
+async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
+    println!("table not found; creating new table...");
+    let time_column = prompt_non_empty("time column name: ")?;
+    let bucket = loop {
+        let spec = prompt_non_empty("time bucket (e.g. 1s, 1m, 1h, 1d): ")?;
+        match parse_time_bucket(&spec) {
+            Ok(b) => break b,
+            Err(e) => println!("{e}"),
+        }
+    };
+    let timezone = prompt_optional("timezone (optional, IANA TZ): ")?;
+    let entities = prompt_optional("entity columns (comma-separated, optional): ")?
+        .map(|s| {
+            s.split(',')
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let index = TimeIndexSpec {
+        timestamp_column: time_column,
+        bucket,
+        timezone,
+        entity_columns: entities,
+    };
+    let meta = TableMeta::new_time_series(index);
+    let location =
+        TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
+    TimeSeriesTable::create(location, meta)
+        .await
+        .context(CreateTableSnafu {
+            table: table_root.display().to_string(),
+        })?;
+
+    println!("created table at {}", table_root.display());
+    Ok(())
+}
+
+async fn append_first_segment(
+    table_root: &Path,
+    location: &TableLocation,
+    table: &mut TimeSeriesTable,
+) -> CliResult<()> {
+    loop {
+        let parquet_path = prompt_non_empty("first segment parquet path: ")?;
+        let parquet_path = PathBuf::from(parquet_path);
+
+        if let Err(e) = table.refresh().await.context(OpenTableSnafu {
+            table: table_root.display().to_string(),
+        }) {
+            println!("{e}");
+            continue;
+        }
+
+        let rel = match location.ensure_parquet_under_root(&parquet_path).await {
+            Ok(r) => r,
+            Err(e) => {
+                println!("{}", CliError::Storage { source: e });
+                continue;
+            }
+        };
+
+        let rel_str = if cfg!(windows) {
+            rel.to_string_lossy().replace('\\', "/")
+        } else {
+            rel.to_string_lossy().to_string()
+        };
+
+        let ts_col = table.index_spec().timestamp_column.clone();
+        match table.append_parquet_segment(&rel_str, &ts_col).await {
+            Ok(s) => {
+                println!("appended: {rel_str}, size: {s}.");
+                break;
+            }
+            Err(e) => {
+                println!(
+                    "{}",
+                    CliError::AppendSegment {
+                        table: table_root.display().to_string(),
+                        source: Box::new(e),
+                    }
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn build_context(
@@ -720,10 +869,28 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
 fn shell_blocking(
     handle: Handle,
-    table_root: PathBuf,
+    table_root: Option<PathBuf>,
     history: Option<PathBuf>,
     backend: BackendArg,
 ) -> CliResult<()> {
+    let table_root = match table_root {
+        Some(path) => path,
+        None => PathBuf::from(prompt_non_empty("table root path: ")?),
+    };
+
+    if !table_log_exists(&table_root) {
+        handle.block_on(create_table_interactive(&table_root))?;
+    }
+
+    let location =
+        TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
+    let mut table = handle.block_on(open_table(location.clone(), table_root.as_path()))?;
+
+    if table.state().table_meta.logical_schema().is_none() {
+        println!("table has no schema yet; please append the first segment.");
+        handle.block_on(append_first_segment(&table_root, &location, &mut table))?;
+    }
+
     let (mut ctx, table_name) = handle.block_on(build_context(table_root, backend))?;
 
     let history_path = history.unwrap_or_else(|| ctx.table_root.join(".ts_table_history"));
@@ -798,7 +965,7 @@ fn shell_blocking(
 
 /// Run an interactive shell in a blocking thread (rustyline is blocking).
 pub async fn cmd_shell(
-    table_root: PathBuf,
+    table_root: Option<PathBuf>,
     history: Option<PathBuf>,
     backend: BackendArg,
 ) -> CliResult<()> {
@@ -1145,6 +1312,56 @@ mod tests {
         assert!(matches!(res.action, CommandAction::Continue));
 
         Ok(())
+    }
+
+    #[test]
+    fn alias_validation_rejects_invalid_names() {
+        assert!(is_valid_alias("t"));
+        assert!(is_valid_alias("_t2"));
+        assert!(!is_valid_alias(""));
+        assert!(!is_valid_alias("2bad"));
+        assert!(!is_valid_alias("bad-name"));
+        assert!(!is_valid_alias("bad name"));
+        assert!(!is_valid_alias("bad;drop"));
+    }
+
+    #[test]
+    fn alias_rewrite_replaces_identifiers_only() {
+        let sql = "select * from t where note = 't' and tt = 1";
+        let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
+        assert_eq!(
+            rewritten,
+            "select * from nyc_hvfhv where note = 't' and tt = 1"
+        );
+    }
+
+    #[test]
+    fn alias_rewrite_handles_quoted_identifiers() {
+        let sql = "select * from \"t\" join \"other\" on \"t\".id = other.id";
+        let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
+        assert_eq!(
+            rewritten,
+            "select * from \"nyc_hvfhv\" join \"other\" on \"nyc_hvfhv\".id = other.id"
+        );
+    }
+
+    #[test]
+    fn table_log_exists_detects_log_dir() -> TestResult {
+        let tmp = TempDir::new()?;
+        assert!(!table_log_exists(tmp.path()));
+        std::fs::create_dir_all(tmp.path().join("_timeseries_log"))?;
+        assert!(table_log_exists(tmp.path()));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_time_bucket_accepts_and_rejects() {
+        assert!(parse_time_bucket("1s").is_ok());
+        assert!(parse_time_bucket("1m").is_ok());
+        assert!(parse_time_bucket("1h").is_ok());
+        assert!(parse_time_bucket("1d").is_ok());
+        assert!(parse_time_bucket("1x").is_err());
+        assert!(parse_time_bucket("bogus").is_err());
     }
 
     #[test]
