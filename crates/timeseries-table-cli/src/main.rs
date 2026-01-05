@@ -145,7 +145,7 @@ enum Command {
     /// Interactive shell (keeps a live table handle; supports refresh/append/query)
     Shell {
         #[arg(long)]
-        table: PathBuf,
+        table: Option<PathBuf>,
 
         /// Optional history file path
         #[arg(long)]
