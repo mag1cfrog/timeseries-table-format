@@ -72,4 +72,10 @@ pub enum CliError {
 
     #[snafu(display("Arrow error: {source}"))]
     Arrow { source: ArrowError },
+
+    #[snafu(display(
+        "CSV output does not support nested field '{field}' with type {data_type}. \
+         Use --format jsonl instead."
+    ))]
+    CsvUnsupportedType { field: String, data_type: String },
 }
