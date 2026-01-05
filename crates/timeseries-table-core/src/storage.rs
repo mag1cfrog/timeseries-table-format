@@ -33,6 +33,9 @@ pub use operations::*;
 mod table_location;
 pub use table_location::*;
 
+mod output;
+pub use output::*;
+
 use snafu::IntoError;
 use std::path::PathBuf;
 

@@ -1,0 +1,120 @@
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
+
+use snafu::ResultExt;
+use tokio::fs;
+
+use crate::storage::{
+    BackendError, OtherIoSnafu, StorageLocation, StorageResult, TempFileGuard, create_parent_dir,
+    join_local,
+};
+
+/// Local filesystem sink that writes to a temp file and renames on finish.
+struct LocalSink {
+    tmp_path: PathBuf,
+    final_path: PathBuf,
+    writer: io::BufWriter<std::fs::File>,
+    guard: TempFileGuard,
+}
+
+impl LocalSink {
+    async fn open(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
+        let final_path = join_local(location, rel_path);
+        create_parent_dir(&final_path).await?;
+
+        let tmp_path = final_path.with_extension("tmp");
+
+        // Use std::fs::File because Arrow writers require std::io::Write.
+        let file = std::fs::File::create(&tmp_path)
+            .map_err(BackendError::Local)
+            .context(OtherIoSnafu {
+                path: tmp_path.display().to_string(),
+            })?;
+
+        let writer = io::BufWriter::new(file);
+        let guard = TempFileGuard::new(tmp_path.clone());
+
+        Ok(Self {
+            tmp_path,
+            final_path,
+            writer,
+            guard,
+        })
+    }
+
+    fn writer(&mut self) -> &mut dyn Write {
+        &mut self.writer
+    }
+
+    async fn finish(&mut self) -> StorageResult<()> {
+        self.writer
+            .flush()
+            .map_err(BackendError::Local)
+            .context(OtherIoSnafu {
+                path: self.tmp_path.display().to_string(),
+            })?;
+
+        self.writer
+            .get_ref()
+            .sync_all()
+            .map_err(BackendError::Local)
+            .context(OtherIoSnafu {
+                path: self.tmp_path.display().to_string(),
+            })?;
+
+        fs::rename(&self.tmp_path, &self.final_path)
+            .await
+            .map_err(BackendError::Local)
+            .context(OtherIoSnafu {
+                path: self.final_path.display().to_string(),
+            })?;
+
+        self.guard.disarm();
+        Ok(())
+    }
+}
+
+enum OutputSinkInner {
+    Local(LocalSink),
+    // S3(S3Sink),
+}
+
+/// A streaming output sink for writing bytes to a storage backend.
+pub struct OutputSink {
+    inner: OutputSinkInner,
+}
+
+impl OutputSink {
+    /// Return a mutable Write handle for streaming bytes.
+    pub fn writer(&mut self) -> &mut dyn Write {
+        match &mut self.inner {
+            OutputSinkInner::Local(s) => s.writer(),
+        }
+    }
+
+    /// Flush, fsync, and commit to final location.
+    pub async fn finish(self) -> StorageResult<()> {
+        match self.inner {
+            OutputSinkInner::Local(mut s) => s.finish().await,
+        }
+    }
+}
+
+/// Open a streaming output sink at `location` + `rel_path`.
+///
+/// v0.1: only StorageLocation::Local is supported.
+pub async fn open_output_sink(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<OutputSink> {
+    match location {
+        StorageLocation::Local(_) => {
+            let sink = LocalSink::open(location, rel_path).await?;
+            Ok(OutputSink {
+                inner: OutputSinkInner::Local(sink),
+            })
+        }
+    }
+}

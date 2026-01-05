@@ -14,19 +14,19 @@ use crate::storage::{
 
 /// Guard that removes a temporary file on drop unless disarmed.
 /// Used to ensure cleanup on error paths during atomic writes.
-struct TempFileGuard {
+pub(super) struct TempFileGuard {
     path: PathBuf,
     armed: bool,
 }
 
 impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
+    pub(super) fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
 
     /// Disarm the guard so the file is NOT removed on drop.
     /// Call this after a successful rename.
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -43,13 +43,13 @@ impl Drop for TempFileGuard {
 /// Join a table location with a relative path into an absolute local path.
 ///
 /// v0.1: only Local is supported.
-fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
+pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
     match location {
         StorageLocation::Local(root) => root.join(rel),
     }
 }
 
-async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
+pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)
             .await
