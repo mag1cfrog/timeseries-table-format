@@ -11,8 +11,8 @@ use crate::{
     error::{CliError, CliResult, OpenTableSnafu, StorageSnafu},
     make_engine, open_table,
     query::{
-        OutputFormat, QueryOpts, default_table_name, page_output, print_query_result,
-        quote_identifier, write_query_result,
+        OutputFormat, QueryOpts, default_table_name, page_output, preview_message, render_preview,
+        print_query_result, quote_identifier, write_query_summary,
     },
 };
 
@@ -471,11 +471,13 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         let res = match ctx.session.run_query(sql.trim(), &opts).await {
             Ok(res) => {
                 if ctx.pager {
-                    let mut buf = Vec::new();
-                    if write_query_result(&res, &opts, &mut buf).is_ok() {
-                        let rendered = String::from_utf8_lossy(&buf);
+                    if let Some(rendered) = render_preview(&res, &opts) {
                         let _ = page_output(&rendered);
                     }
+                    if let Some(message) = preview_message(&res, &opts) {
+                        println!("{message}");
+                    }
+                    let _ = write_query_summary(&res, &opts, &mut std::io::stdout());
                 } else {
                     let _ = print_query_result(&res, &opts);
                 }
@@ -543,11 +545,13 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         let res = match ctx.session.run_query(&explain_sql, &opts).await {
             Ok(res) => {
                 if ctx.pager {
-                    let mut buf = Vec::new();
-                    if write_query_result(&res, &opts, &mut buf).is_ok() {
-                        let rendered = String::from_utf8_lossy(&buf);
+                    if let Some(rendered) = render_preview(&res, &opts) {
                         let _ = page_output(&rendered);
                     }
+                    if let Some(message) = preview_message(&res, &opts) {
+                        println!("{message}");
+                    }
+                    let _ = write_query_summary(&res, &opts, &mut std::io::stdout());
                 } else {
                     let _ = print_query_result(&res, &opts);
                 }

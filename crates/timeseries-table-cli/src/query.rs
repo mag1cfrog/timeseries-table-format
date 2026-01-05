@@ -108,6 +108,54 @@ pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> 
     write_query_result(res, opts, &mut stdout)
 }
 
+pub fn render_preview(res: &QueryResult, opts: &QueryOpts) -> Option<String> {
+    if !res.preview_rows.is_empty() {
+        return Some(render_table(&res.columns, &res.preview_rows));
+    }
+
+    if opts.max_rows == 0 && !res.columns.is_empty() {
+        return Some(render_table(&res.columns, &[]));
+    }
+
+    None
+}
+
+pub fn preview_message(res: &QueryResult, opts: &QueryOpts) -> Option<String> {
+    if opts.max_rows == 0 && res.total_rows > 0 {
+        return Some("(preview suppressed; use --max-rows > 0)".to_string());
+    }
+
+    if res.total_rows == 0 {
+        return Some("(no rows)".to_string());
+    }
+
+    None
+}
+
+pub fn write_query_summary<W: Write>(
+    res: &QueryResult,
+    opts: &QueryOpts,
+    out: &mut W,
+) -> CliResult<()> {
+    let mut write_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to write output: {e}"),
+        path: None,
+    };
+
+    writeln!(out, "total_rows: {}", res.total_rows).map_err(&mut write_err)?;
+
+    if let Some(d) = res.elapsed {
+        writeln!(out, "elapsed_ms: {}", d.as_millis()).map_err(&mut write_err)?;
+    }
+
+    if let Some(path) = &opts.output {
+        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format)
+            .map_err(&mut write_err)?;
+    }
+
+    Ok(())
+}
+
 pub fn write_query_result<W: Write>(
     res: &QueryResult,
     opts: &QueryOpts,
@@ -118,31 +166,15 @@ pub fn write_query_result<W: Write>(
         path: None,
     };
 
-    if !res.preview_rows.is_empty() {
-        let rendered = render_table(&res.columns, &res.preview_rows);
+    if let Some(rendered) = render_preview(res, opts) {
         writeln!(out, "{rendered}").map_err(&mut write_err)?;
-    } else if opts.max_rows == 0 && !res.columns.is_empty() {
-        let rendered = render_table(&res.columns, &[]);
-        writeln!(out, "{rendered}").map_err(&mut write_err)?;
-        if res.total_rows > 0 {
-            writeln!(out, "(preview suppressed; use --max-rows > 0)").map_err(&mut write_err)?;
-        }
-    } else if opts.max_rows == 0 && res.total_rows > 0 {
-        writeln!(out, "(preview suppressed; use --max-rows > 0)").map_err(&mut write_err)?;
-    } else {
-        writeln!(out, "(no rows)").map_err(&mut write_err)?;
     }
 
-    writeln!(out, "total_rows: {}", res.total_rows).map_err(&mut write_err)?;
-
-    if let Some(d) = res.elapsed {
-        writeln!(out, "elapsed_ms: {}", d.as_millis()).map_err(&mut write_err)?;
+    if let Some(message) = preview_message(res, opts) {
+        writeln!(out, "{message}").map_err(&mut write_err)?;
     }
 
-    if let Some(path) = &opts.output {
-        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format).map_err(&mut write_err)?;
-    }
-
+    write_query_summary(res, opts, out)?;
     Ok(())
 }
 

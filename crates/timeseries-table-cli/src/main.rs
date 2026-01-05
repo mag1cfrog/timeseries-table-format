@@ -21,7 +21,10 @@ use crate::{
         AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
         OpenTableSnafu, StorageSnafu,
     },
-    query::{QueryOpts, page_output, print_query_result, write_query_result},
+    query::{
+        QueryOpts, page_output, preview_message, print_query_result, render_preview,
+        write_query_summary,
+    },
     shell::cmd_shell,
 };
 
@@ -280,10 +283,13 @@ async fn cmd_query_with_engine(
 
     let res = session.run_query(&sql, &opts).await?;
     if pager {
-        let mut buf = Vec::new();
-        write_query_result(&res, &opts, &mut buf)?;
-        let rendered = String::from_utf8_lossy(&buf);
-        page_output(&rendered)?;
+        if let Some(rendered) = render_preview(&res, &opts) {
+            page_output(&rendered)?;
+        }
+        if let Some(message) = preview_message(&res, &opts) {
+            println!("{message}");
+        }
+        write_query_summary(&res, &opts, &mut std::io::stdout())?;
     } else {
         print_query_result(&res, &opts)?;
     }
