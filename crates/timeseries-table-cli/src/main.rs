@@ -3,6 +3,7 @@
 mod engine;
 mod error;
 mod query;
+mod shell;
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,7 @@ use crate::{
         OpenTableSnafu, StorageSnafu,
     },
     query::QueryOpts,
+    shell::cmd_shell,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -124,6 +126,20 @@ enum Command {
         format: OutputFormatArg,
 
         /// Query backend (default: datafusion)
+        #[arg(long, value_enum, default_value_t = BackendArg::DataFusion)]
+        backend: BackendArg,
+    },
+
+    /// Interactive shell (keeps a live table handle; supports refresh/append/query)
+    Shell {
+        #[arg(long)]
+        table: PathBuf,
+
+        /// Optional history file path
+        #[arg(long)]
+        history: Option<PathBuf>,
+
+        /// Backend (default: datafusion)
         #[arg(long, value_enum, default_value_t = BackendArg::DataFusion)]
         backend: BackendArg,
     },
@@ -296,6 +312,12 @@ async fn run() -> CliResult<()> {
             })
             .await
         }
+
+        Command::Shell {
+            table,
+            history,
+            backend,
+        } => cmd_shell(table, history, backend).await,
     }
 }
 
