@@ -339,7 +339,7 @@ mod tests {
         let mut venue_builder = StringBuilder::new();
         let mut payload_builder = BinaryBuilder::new();
 
-        let mut seed = 0xBAD5_EEDu64;
+        let mut seed = 0xBAD_5EED_u64;
         let base_ts = 1_700_000_000_000i64;
         for i in 0..rows {
             let rnd = lcg_next(&mut seed);
@@ -462,8 +462,8 @@ mod tests {
 
         let csv_contents = std::fs::read_to_string(&csv_path)?;
         let csv_lines: Vec<&str> = csv_contents.lines().collect();
-        assert!(csv_lines.first().is_some());
-        assert!(csv_lines.len() >= total + 1);
+        assert!(!csv_lines.is_empty());
+        assert!(csv_lines.len() > total);
 
         let jsonl_path = tmp.path().join("out.jsonl");
         let opts_jsonl = QueryOpts {
