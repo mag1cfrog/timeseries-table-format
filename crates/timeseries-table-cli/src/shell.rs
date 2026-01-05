@@ -691,4 +691,50 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_timing_toggle_sets_query_elapsed() -> TestResult<()> {
+        let tmp = build_table_with_rows(3).await?;
+        let (mut ctx, table_name) =
+            build_context(tmp.path().to_path_buf(), BackendArg::DataFusion).await?;
+
+        process_command(&mut ctx, r"\timing").await?;
+        let res = process_command(&mut ctx, &query_sql(&table_name))
+            .await?
+            .query_result
+            .expect("query result");
+
+        assert!(res.elapsed.is_some());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_exit_and_quit_break() -> TestResult<()> {
+        let tmp = build_table_with_rows(1).await?;
+        let (mut ctx, _table_name) =
+            build_context(tmp.path().to_path_buf(), BackendArg::DataFusion).await?;
+
+        let res = process_command(&mut ctx, "exit").await?;
+        assert!(matches!(res.action, CommandAction::Break));
+
+        let res = process_command(&mut ctx, "quit").await?;
+        assert!(matches!(res.action, CommandAction::Break));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_help_and_unknown_continue() -> TestResult<()> {
+        let tmp = build_table_with_rows(1).await?;
+        let (mut ctx, _table_name) =
+            build_context(tmp.path().to_path_buf(), BackendArg::DataFusion).await?;
+
+        let res = process_command(&mut ctx, "help").await?;
+        assert!(matches!(res.action, CommandAction::Continue));
+
+        let res = process_command(&mut ctx, "not-a-command").await?;
+        assert!(matches!(res.action, CommandAction::Continue));
+
+        Ok(())
+    }
 }
