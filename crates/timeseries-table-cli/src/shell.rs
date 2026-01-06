@@ -150,7 +150,7 @@ fn render_status_line(ctx: &ShellContext, width: usize, color: bool) -> String {
     let left = format!("{accent}+-{reset} {bold}{display_name}{reset}{dim}{flag_text}{reset}");
 
     let right = ctx.last_status.as_ref().map(|status| {
-        let time_str = status.timestamp.format("%H:%M:%S").to_string();
+        let time_str = status.timestamp.format("%I:%M:%S %p").to_string();
         let mut parts = Vec::new();
         parts.push(status.label.clone());
         if let Some(elapsed) = status.elapsed {
@@ -923,6 +923,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         };
 
         // Refresh before queries so results track new commits.
+        let refresh_start = Instant::now();
         match ctx.table.refresh().await {
             Ok(changed) => {
                 if changed {
@@ -943,6 +944,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                 });
             }
         }
+        let refresh_elapsed = refresh_start.elapsed();
 
         let sql = if let Some(alias) = ctx.alias.as_deref() {
             rewrite_sql_alias(sql.trim(), alias, &ctx.table_name)
@@ -952,7 +954,8 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         let run_start = Instant::now();
         let run_result = ctx.session.run_query(sql.trim(), &opts).await;
-        set_status(ctx, "query", Some(query_elapsed(&run_result, run_start)));
+        let total_elapsed = refresh_elapsed + query_elapsed(&run_result, run_start);
+        set_status(ctx, "query+refresh", Some(total_elapsed));
 
         let res = match run_result {
             Ok(res) => {
@@ -1002,6 +1005,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         };
 
         // Refresh before queries so results track new commits.
+        let refresh_start = Instant::now();
         match ctx.table.refresh().await {
             Ok(changed) => {
                 if changed {
@@ -1022,6 +1026,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                 });
             }
         }
+        let refresh_elapsed = refresh_start.elapsed();
 
         // plan-only: just run an EXPLAIN statement through the same session
         let sql = if let Some(alias) = ctx.alias.as_deref() {
@@ -1035,7 +1040,8 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         let run_start = Instant::now();
         let run_result = ctx.session.run_query(&explain_sql, &opts).await;
-        set_status(ctx, "explain", Some(query_elapsed(&run_result, run_start)));
+        let total_elapsed = refresh_elapsed + query_elapsed(&run_result, run_start);
+        set_status(ctx, "explain+refresh", Some(total_elapsed));
 
         let res = match run_result {
             Ok(res) => {
