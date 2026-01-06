@@ -323,6 +323,44 @@ fn rewrite_sql_alias(sql: &str, alias: &str, actual: &str) -> String {
             continue;
         }
 
+        if ch == '-' && matches!(chars.peek().copied(), Some('-')) {
+            // Line comment: copy through end of line.
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            } else {
+                continue;
+            }
+
+            for n in chars.by_ref() {
+                out.push(n);
+                if n == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if ch == '/' && matches!(chars.peek().copied(), Some('*')) {
+            // Block comment: copy through closing */
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            } else {
+                continue;
+            }
+            while let Some(n) = chars.next() {
+                out.push(n);
+                if n == '*' && matches!(chars.peek().copied(), Some('/')) {
+                    if let Some(close) = chars.next() {
+                        out.push(close);
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
         if ch.is_ascii_alphanumeric() || ch == '_' {
             let mut ident = String::new();
             ident.push(ch);
@@ -1369,6 +1407,36 @@ mod tests {
         assert_eq!(
             rewritten,
             "select * from \"nyc_hvfhv\" join \"other\" on \"nyc_hvfhv\".id = other.id"
+        );
+    }
+
+    #[test]
+    fn alias_rewrite_skips_line_comments() {
+        let sql = "select * from t -- alias t\nwhere t.id = 1";
+        let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
+        assert_eq!(
+            rewritten,
+            "select * from nyc_hvfhv -- alias t\nwhere nyc_hvfhv.id = 1"
+        );
+    }
+
+    #[test]
+    fn alias_rewrite_skips_block_comments() {
+        let sql = "select * from t /* alias t */ where t.id = 1";
+        let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
+        assert_eq!(
+            rewritten,
+            "select * from nyc_hvfhv /* alias t */ where nyc_hvfhv.id = 1"
+        );
+    }
+
+    #[test]
+    fn alias_rewrite_handles_comment_markers_in_strings() {
+        let sql = "select '-- not comment' as note, '/* nope */' as note2 from t";
+        let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
+        assert_eq!(
+            rewritten,
+            "select '-- not comment' as note, '/* nope */' as note2 from nyc_hvfhv"
         );
     }
 
