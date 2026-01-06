@@ -198,6 +198,16 @@ fn set_status(ctx: &mut ShellContext, label: &str, elapsed: Option<Duration>) {
     });
 }
 
+fn query_elapsed(
+    run_result: &Result<crate::query::QueryResult, CliError>,
+    run_start: Instant,
+) -> Duration {
+    match run_result {
+        Ok(res) => res.elapsed.unwrap_or_else(|| run_start.elapsed()),
+        Err(_) => run_start.elapsed(),
+    }
+}
+
 fn table_log_exists(root: &Path) -> bool {
     root.join("_timeseries_log").exists()
 }
@@ -892,7 +902,6 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
     }
 
     if let Some(rest) = trimmed.strip_prefix("query") {
-        let start = Instant::now();
         if !rest.is_empty() && !rest.starts_with(' ') {
             println!("unknown command. type 'help'.");
             return Ok(CommandResult {
@@ -941,7 +950,11 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             sql.trim().to_string()
         };
 
-        let res = match ctx.session.run_query(sql.trim(), &opts).await {
+        let run_start = Instant::now();
+        let run_result = ctx.session.run_query(sql.trim(), &opts).await;
+        set_status(ctx, "query", Some(query_elapsed(&run_result, run_start)));
+
+        let res = match run_result {
             Ok(res) => {
                 if ctx.pager {
                     if let Some(rendered) = render_preview(&res, &opts) {
@@ -961,8 +974,6 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                 None
             }
         };
-
-        set_status(ctx, "query", Some(start.elapsed()));
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: res,
@@ -970,7 +981,6 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
     }
 
     if let Some(rest) = trimmed.strip_prefix("explain") {
-        let start = Instant::now();
         if !rest.is_empty() && !rest.starts_with(' ') {
             println!("unknown command. type 'help'.");
             return Ok(CommandResult {
@@ -1023,7 +1033,11 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         let explain_sql = format!("EXPLAIN {}", sql.trim());
         opts.explain = false; // because we are explicitly running EXPLAIN
 
-        let res = match ctx.session.run_query(&explain_sql, &opts).await {
+        let run_start = Instant::now();
+        let run_result = ctx.session.run_query(&explain_sql, &opts).await;
+        set_status(ctx, "explain", Some(query_elapsed(&run_result, run_start)));
+
+        let res = match run_result {
             Ok(res) => {
                 if ctx.pager {
                     if let Some(rendered) = render_preview(&res, &opts) {
@@ -1043,8 +1057,6 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                 None
             }
         };
-
-        set_status(ctx, "explain", Some(start.elapsed()));
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: res,
@@ -1708,6 +1720,31 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50s");
     }
 
+    #[test]
+    fn query_elapsed_prefers_result_elapsed() {
+        let result = Ok(crate::query::QueryResult {
+            columns: vec![],
+            preview_rows: vec![],
+            total_rows: 0,
+            elapsed: Some(Duration::from_millis(7)),
+        });
+        let elapsed = query_elapsed(&result, Instant::now());
+        assert_eq!(elapsed, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn query_elapsed_uses_run_start_when_missing() {
+        let result = Ok(crate::query::QueryResult {
+            columns: vec![],
+            preview_rows: vec![],
+            total_rows: 0,
+            elapsed: None,
+        });
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let elapsed = query_elapsed(&result, start);
+        assert!(elapsed >= Duration::from_millis(5));
+    }
     #[test]
     fn shell_query_preserves_unicode_tokens() -> TestResult<()> {
         let (sql, opts) =
