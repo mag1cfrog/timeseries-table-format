@@ -189,7 +189,8 @@ fn page_output_with_pager(text: &str, pager: &str, args: &[&str]) -> CliResult<(
 
     let mut child = match Command::new(pager).args(args).stdin(Stdio::piped()).spawn() {
         Ok(child) => child,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("warning: failed to launch pager '{pager}': {e}");
             let mut stdout = std::io::stdout();
             stdout.write_all(text.as_bytes()).map_err(io_err)?;
             return Ok(());
