@@ -349,64 +349,91 @@ fn rewrite_sql_alias(sql: &str, alias: &str, actual: &str) -> String {
 }
 
 fn lex_with_spans(input: &str) -> Result<Vec<TokenSpan>, String> {
-    let bytes = input.as_bytes();
     let mut i = 0;
     let mut tokens = Vec::new();
+    let len = input.len();
 
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
+    while i < len {
+        while i < len {
+            let ch = match input[i..].chars().next() {
+                Some(ch) => ch,
+                None => break,
+            };
+            if ch.is_ascii_whitespace() {
+                i += ch.len_utf8();
+            } else {
+                break;
+            }
         }
-        if i >= bytes.len() {
+        if i >= len {
             break;
         }
 
         let start = i;
         let mut value = String::new();
-        let quote = if bytes[i] == b'"' || bytes[i] == b'\'' {
-            let q = bytes[i];
-            i += 1;
-            Some(q)
-        } else {
-            None
-        };
+        let mut quote = None;
+        if let Some(ch) = input[i..].chars().next()
+            && (ch == '"' || ch == '\'')
+        {
+            quote = Some(ch);
+            i += ch.len_utf8();
+        }
 
         if let Some(q) = quote {
-            while i < bytes.len() {
-                let b = bytes[i];
-                if b == q {
-                    i += 1;
+            let mut closed = false;
+            while i < len {
+                let ch = match input[i..].chars().next() {
+                    Some(ch) => ch,
+                    None => break,
+                };
+                if ch == q {
+                    i += ch.len_utf8();
+                    closed = true;
                     break;
                 }
-                if b == b'\\' {
-                    i += 1;
-                    if i >= bytes.len() {
+                if ch == '\\' {
+                    i += ch.len_utf8();
+                    if i >= len {
                         return Err("unterminated escape in quoted token".to_string());
                     }
-                    value.push(bytes[i] as char);
-                    i += 1;
+                    let esc = input[i..]
+                        .chars()
+                        .next()
+                        .ok_or_else(|| "unterminated escape in quoted token".to_string())?;
+                    value.push(esc);
+                    i += esc.len_utf8();
                     continue;
                 }
-                value.push(b as char);
-                i += 1;
+                value.push(ch);
+                i += ch.len_utf8();
             }
-            if i <= bytes.len() && bytes.get(i.wrapping_sub(1)) != Some(&q) {
+            if !closed {
                 return Err("unterminated quoted token".to_string());
             }
         } else {
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                let b = bytes[i];
-                if b == b'\\' {
-                    i += 1;
-                    if i >= bytes.len() {
+            while i < len {
+                let ch = match input[i..].chars().next() {
+                    Some(ch) => ch,
+                    None => break,
+                };
+                if ch.is_ascii_whitespace() {
+                    break;
+                }
+                if ch == '\\' {
+                    i += ch.len_utf8();
+                    if i >= len {
                         return Err("unterminated escape in token".to_string());
                     }
-                    value.push(bytes[i] as char);
-                    i += 1;
+                    let esc = input[i..]
+                        .chars()
+                        .next()
+                        .ok_or_else(|| "unterminated escape in token".to_string())?;
+                    value.push(esc);
+                    i += esc.len_utf8();
                     continue;
                 }
-                value.push(b as char);
-                i += 1;
+                value.push(ch);
+                i += ch.len_utf8();
             }
         }
 
@@ -1407,6 +1434,28 @@ mod tests {
     fn shell_explain_rejects_explain_flag() -> TestResult<()> {
         let err = parse_sql_command("--explain SELECT 1", 1000, false, false).unwrap_err();
         assert!(err.contains("unknown flag"));
+        Ok(())
+    }
+
+    #[test]
+    fn shell_query_preserves_unicode_tokens() -> TestResult<()> {
+        let (sql, opts) =
+            parse_sql_command("--output café.jsonl SELECT café FROM t", 10, false, true)?;
+        assert_eq!(opts.output, Some(PathBuf::from("café.jsonl")));
+        assert_eq!(sql, "SELECT café FROM t");
+        Ok(())
+    }
+
+    #[test]
+    fn shell_query_preserves_unicode_in_quoted_tokens() -> TestResult<()> {
+        let (sql, opts) = parse_sql_command(
+            "--output \"mañana-Δ.jsonl\" SELECT 'naïve' AS note FROM \"tést\"",
+            10,
+            false,
+            true,
+        )?;
+        assert_eq!(opts.output, Some(PathBuf::from("mañana-Δ.jsonl")));
+        assert_eq!(sql, "SELECT 'naïve' AS note FROM \"tést\"");
         Ok(())
     }
 }
