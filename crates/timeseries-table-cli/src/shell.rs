@@ -924,12 +924,14 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         // Refresh before queries so results track new commits.
         let refresh_start = Instant::now();
-        match ctx.table.refresh().await {
+        let refreshed = match ctx.table.refresh().await {
             Ok(changed) => {
                 if changed {
                     ctx.session = ctx.engine.prepare_session_from_table(&ctx.table).await?;
                 }
+                changed
             }
+
             Err(e) => {
                 println!(
                     "{}",
@@ -943,7 +945,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                     query_result: None,
                 });
             }
-        }
+        };
         let refresh_elapsed = refresh_start.elapsed();
 
         let sql = if let Some(alias) = ctx.alias.as_deref() {
@@ -954,8 +956,13 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         let run_start = Instant::now();
         let run_result = ctx.session.run_query(sql.trim(), &opts).await;
-        let total_elapsed = refresh_elapsed + query_elapsed(&run_result, run_start);
-        set_status(ctx, "query+refresh", Some(total_elapsed));
+        let query_elapsed = query_elapsed(&run_result, run_start);
+        let (label, elapsed) = if refreshed {
+            ("query+refresh", query_elapsed + refresh_elapsed)
+        } else {
+            ("query", query_elapsed)
+        };
+        set_status(ctx, label, Some(elapsed));
 
         let res = match run_result {
             Ok(res) => {
@@ -1006,11 +1013,12 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         // Refresh before queries so results track new commits.
         let refresh_start = Instant::now();
-        match ctx.table.refresh().await {
+        let refreshed = match ctx.table.refresh().await {
             Ok(changed) => {
                 if changed {
                     ctx.session = ctx.engine.prepare_session_from_table(&ctx.table).await?;
                 }
+                changed
             }
             Err(e) => {
                 println!(
@@ -1025,7 +1033,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                     query_result: None,
                 });
             }
-        }
+        };
         let refresh_elapsed = refresh_start.elapsed();
 
         // plan-only: just run an EXPLAIN statement through the same session
@@ -1040,8 +1048,13 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
 
         let run_start = Instant::now();
         let run_result = ctx.session.run_query(&explain_sql, &opts).await;
-        let total_elapsed = refresh_elapsed + query_elapsed(&run_result, run_start);
-        set_status(ctx, "explain+refresh", Some(total_elapsed));
+        let query_elapsed = query_elapsed(&run_result, run_start);
+        let (label, elapsed) = if refreshed {
+            ("explain+refresh", query_elapsed + refresh_elapsed)
+        } else {
+            ("explain", query_elapsed)
+        };
+        set_status(ctx, label, Some(elapsed));
 
         let res = match run_result {
             Ok(res) => {
