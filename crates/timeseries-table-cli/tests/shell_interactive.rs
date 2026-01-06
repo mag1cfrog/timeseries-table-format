@@ -26,6 +26,7 @@ async fn run_shell_with_input(args: &[&str], input: &str) -> TestResult<std::pro
     let mut child = cmd.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(input.as_bytes()).await?;
+        drop(stdin);
     }
 
     let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
