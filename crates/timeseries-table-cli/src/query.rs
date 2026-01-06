@@ -177,7 +177,7 @@ pub fn write_query_result<W: Write>(
     Ok(())
 }
 
-pub fn page_output(text: &str) -> CliResult<()> {
+fn page_output_with_pager(text: &str, pager: &str, args: &[&str]) -> CliResult<()> {
     let spawn_err = |e: std::io::Error| CliError::PathInvariantNoSource {
         message: format!("failed to spawn pager: {e}"),
         path: None,
@@ -187,7 +187,7 @@ pub fn page_output(text: &str) -> CliResult<()> {
         path: None,
     };
 
-    let mut child = match Command::new("less").arg("-S").stdin(Stdio::piped()).spawn() {
+    let mut child = match Command::new(pager).args(args).stdin(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(_) => {
             let mut stdout = std::io::stdout();
@@ -196,18 +196,24 @@ pub fn page_output(text: &str) -> CliResult<()> {
         }
     };
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes()).map_err(io_err)?;
+        drop(stdin);
     }
 
     child.wait().map_err(spawn_err)?;
     Ok(())
 }
 
+pub fn page_output(text: &str) -> CliResult<()> {
+    page_output_with_pager(text, "less", &["-S"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{default_table_name, render_table};
     use std::path::Path;
+    use std::time::Duration;
 
     #[test]
     fn render_table_aligns_columns() {
@@ -247,5 +253,24 @@ mod tests {
 
         let name = default_table_name(Path::new(""));
         assert_eq!(name, "t");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn page_output_closes_stdin_to_pager() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = super::page_output_with_pager("hello\n", "cat", &[]);
+            let _ = tx.send(result);
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("pager failed: {e}"),
+            Err(_) => panic!("pager did not exit after stdin closed"),
+        }
     }
 }

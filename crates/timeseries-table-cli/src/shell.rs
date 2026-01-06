@@ -1451,10 +1451,7 @@ mod tests {
     fn alias_rewrite_handles_escaped_single_quotes() {
         let sql = "select 'it''s fine' as note from t";
         let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
-        assert_eq!(
-            rewritten,
-            "select 'it''s fine' as note from nyc_hvfhv"
-        );
+        assert_eq!(rewritten, "select 'it''s fine' as note from nyc_hvfhv");
     }
 
     #[test]
