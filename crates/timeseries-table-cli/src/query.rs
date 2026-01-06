@@ -137,19 +137,19 @@ pub fn write_query_summary<W: Write>(
     opts: &QueryOpts,
     out: &mut W,
 ) -> CliResult<()> {
-    let mut write_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+    let write_err = |e: std::io::Error| CliError::PathInvariantNoSource {
         message: format!("failed to write output: {e}"),
         path: None,
     };
 
-    writeln!(out, "total_rows: {}", res.total_rows).map_err(&mut write_err)?;
+    writeln!(out, "total_rows: {}", res.total_rows).map_err(&write_err)?;
 
     if let Some(d) = res.elapsed {
-        writeln!(out, "elapsed_ms: {}", d.as_millis()).map_err(&mut write_err)?;
+        writeln!(out, "elapsed_ms: {}", d.as_millis()).map_err(&write_err)?;
     }
 
     if let Some(path) = &opts.output {
-        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format).map_err(&mut write_err)?;
+        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format).map_err(&write_err)?;
     }
 
     Ok(())
