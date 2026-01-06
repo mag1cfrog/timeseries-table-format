@@ -1,11 +1,13 @@
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
+use chrono::Local;
 use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
+use terminal_size::terminal_size;
 use timeseries_table_core::{
     storage::TableLocation,
     time_series_table::TimeSeriesTable,
@@ -57,6 +59,13 @@ struct ShellContext {
     pager: bool,
     table_name: String,
     alias: Option<String>,
+    last_status: Option<StatusInfo>,
+}
+
+struct StatusInfo {
+    label: String,
+    elapsed: Option<Duration>,
+    timestamp: chrono::DateTime<chrono::Local>,
 }
 
 fn print_help() {
@@ -84,6 +93,109 @@ fn clear_screen() {
     // ANSI clear screen + cursor home; best-effort.
     print!("\x1b[2J\x1b[H");
     let _ = std::io::stdout().flush();
+}
+
+fn use_color() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::env::var("TERM").ok().as_deref() != Some("dumb")
+}
+
+fn strip_ansi_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        len += 1;
+    }
+    len
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    if elapsed.as_millis() < 1000 {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{:.2}s", elapsed.as_secs_f64())
+    }
+}
+
+fn render_status_line(ctx: &ShellContext, width: usize, color: bool) -> String {
+    let display_name = ctx.alias.as_deref().unwrap_or(&ctx.table_name);
+
+    let mut flags = Vec::new();
+    if ctx.timing {
+        flags.push("timing");
+    }
+    if ctx.pager {
+        flags.push("pager");
+    }
+    let flag_text = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", flags.join(","))
+    };
+
+    let (accent, dim, bold, reset) = if color {
+        ("\x1b[38;5;45m", "\x1b[2m", "\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "", "", "")
+    };
+
+    let left = format!("{accent}+-{reset} {bold}{display_name}{reset}{dim}{flag_text}{reset}");
+
+    let right = ctx.last_status.as_ref().map(|status| {
+        let time_str = status.timestamp.format("%H:%M:%S").to_string();
+        let mut parts = Vec::new();
+        parts.push(status.label.clone());
+        if let Some(elapsed) = status.elapsed {
+            parts.push(format_elapsed(elapsed));
+        }
+        parts.push(time_str);
+        let payload = parts.join(" | ");
+        format!("{dim}[{payload}]{reset}")
+    });
+
+    let mut line = left;
+    if let Some(right) = right {
+        let left_len = strip_ansi_len(&line);
+        let right_len = strip_ansi_len(&right);
+        if width > left_len + right_len + 1 {
+            line.push_str(&" ".repeat(width - left_len - right_len));
+            line.push_str(&right);
+        } else {
+            line.push(' ');
+            line.push_str(&right);
+        }
+    }
+
+    line
+}
+
+fn format_status_line(ctx: &ShellContext) -> Option<String> {
+    let (width, _) = terminal_size().map(|(w, h)| (w.0 as usize, h.0 as usize))?;
+    Some(render_status_line(ctx, width, use_color()))
+}
+
+fn format_prompt() -> String {
+    if use_color() {
+        "\x1b[38;5;39m>>\x1b[0m ".to_string()
+    } else {
+        ">> ".to_string()
+    }
+}
+
+fn set_status(ctx: &mut ShellContext, label: &str, elapsed: Option<Duration>) {
+    ctx.last_status = Some(StatusInfo {
+        label: label.to_string(),
+        elapsed,
+        timestamp: Local::now(),
+    });
 }
 
 fn table_log_exists(root: &Path) -> bool {
@@ -256,6 +368,7 @@ async fn build_context(
             pager: false,
             table_name: table_name.clone(),
             alias: None,
+            last_status: None,
         },
         table_name,
     ))
@@ -705,6 +818,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             Err(e) => println!("{e}"),
         }
 
+        set_status(ctx, "refresh", Some(start.elapsed()));
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: None,
@@ -770,6 +884,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             }
         }
 
+        set_status(ctx, "append", Some(start.elapsed()));
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: None,
@@ -777,6 +892,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
     }
 
     if let Some(rest) = trimmed.strip_prefix("query") {
+        let start = Instant::now();
         if !rest.is_empty() && !rest.starts_with(' ') {
             println!("unknown command. type 'help'.");
             return Ok(CommandResult {
@@ -846,6 +962,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             }
         };
 
+        set_status(ctx, "query", Some(start.elapsed()));
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: res,
@@ -853,6 +970,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
     }
 
     if let Some(rest) = trimmed.strip_prefix("explain") {
+        let start = Instant::now();
         if !rest.is_empty() && !rest.starts_with(' ') {
             println!("unknown command. type 'help'.");
             return Ok(CommandResult {
@@ -926,6 +1044,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             }
         };
 
+        set_status(ctx, "explain", Some(start.elapsed()));
         return Ok(CommandResult {
             action: CommandAction::Continue,
             query_result: res,
@@ -988,13 +1107,10 @@ fn shell_blocking(
     println!("type 'help' for commands\n");
 
     loop {
-        let display_name = ctx.alias.as_deref().unwrap_or(&ctx.table_name);
-        let prompt = match (ctx.timing, ctx.pager) {
-            (true, true) => format!("ts-table[{display_name}](timing,pager)> "),
-            (true, false) => format!("ts-table[{display_name}](timing)> "),
-            (false, true) => format!("ts-table[{display_name}](pager)> "),
-            (false, false) => format!("ts-table[{display_name}]> "),
-        };
+        if let Some(line) = format_status_line(&ctx) {
+            println!("{line}");
+        }
+        let prompt = format_prompt();
 
         let line = match rl.readline(&prompt) {
             Ok(l) => l,
@@ -1060,6 +1176,7 @@ pub async fn cmd_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snafu::ResultExt;
     use tempfile::TempDir;
     use timeseries_table_core::{
         storage::TableLocation,
@@ -1075,6 +1192,26 @@ mod tests {
     }
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn make_status_ctx() -> TestResult<(ShellContext, TempDir)> {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().to_path_buf();
+        let location =
+            TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
+        let meta = make_table_meta()?;
+
+        let rt = tokio::runtime::Runtime::new()?;
+        let (ctx, _) = rt.block_on(async {
+            TimeSeriesTable::create(location.clone(), meta)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            build_context(table_root.clone(), BackendArg::DataFusion)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        })?;
+
+        Ok((ctx, tmp))
+    }
 
     fn make_table_meta() -> TestResult<TableMeta> {
         let index = TimeIndexSpec {
@@ -1517,6 +1654,58 @@ mod tests {
         let err = parse_sql_command("--explain SELECT 1", 1000, false, false).unwrap_err();
         assert!(err.contains("unknown flag"));
         Ok(())
+    }
+
+    #[test]
+    fn status_line_right_aligns_when_space_allows() -> TestResult {
+        let (mut ctx, _tmp) = make_status_ctx()?;
+        ctx.alias = Some("alias".to_string());
+        ctx.timing = true;
+        ctx.pager = true;
+        ctx.last_status = Some(StatusInfo {
+            label: "query".to_string(),
+            elapsed: Some(Duration::from_millis(12)),
+            timestamp: Local::now(),
+        });
+
+        let line = render_status_line(&ctx, 80, false);
+        assert!(line.contains("alias"));
+        assert!(line.contains("[timing,pager]"));
+        assert!(line.contains("[query | 12ms"));
+        assert!(line.len() <= 80);
+        assert!(line.ends_with(']'));
+        Ok(())
+    }
+
+    #[test]
+    fn status_line_omits_right_block_without_status() -> TestResult {
+        let (mut ctx, _tmp) = make_status_ctx()?;
+        ctx.alias = Some("alias".to_string());
+
+        let line = render_status_line(&ctx, 40, false);
+        assert!(line.contains("alias"));
+        assert!(!line.contains('['));
+        Ok(())
+    }
+
+    #[test]
+    fn status_line_no_color_has_no_ansi() -> TestResult {
+        let (mut ctx, _tmp) = make_status_ctx()?;
+        ctx.last_status = Some(StatusInfo {
+            label: "refresh".to_string(),
+            elapsed: Some(Duration::from_millis(5)),
+            timestamp: Local::now(),
+        });
+
+        let line = render_status_line(&ctx, 60, false);
+        assert!(!line.contains('\u{1b}'));
+        Ok(())
+    }
+
+    #[test]
+    fn format_elapsed_formats_ms_and_seconds() {
+        assert_eq!(format_elapsed(Duration::from_millis(950)), "950ms");
+        assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50s");
     }
 
     #[test]
