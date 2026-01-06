@@ -285,16 +285,23 @@ fn rewrite_sql_alias(sql: &str, alias: &str, actual: &str) -> String {
     let mut in_single = false;
 
     while let Some(ch) = chars.next() {
-        if in_single {
+        if ch == '\'' {
             out.push(ch);
-            if ch == '\'' {
-                in_single = false;
+            if in_single {
+                if matches!(chars.peek().copied(), Some('\'')) {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                } else {
+                    in_single = false;
+                }
+            } else {
+                in_single = true;
             }
             continue;
         }
 
-        if ch == '\'' {
-            in_single = true;
+        if in_single {
             out.push(ch);
             continue;
         }
@@ -1437,6 +1444,16 @@ mod tests {
         assert_eq!(
             rewritten,
             "select '-- not comment' as note, '/* nope */' as note2 from nyc_hvfhv"
+        );
+    }
+
+    #[test]
+    fn alias_rewrite_handles_escaped_single_quotes() {
+        let sql = "select 'it''s fine' as note from t";
+        let rewritten = rewrite_sql_alias(sql, "t", "nyc_hvfhv");
+        assert_eq!(
+            rewritten,
+            "select 'it''s fine' as note from nyc_hvfhv"
         );
     }
 
