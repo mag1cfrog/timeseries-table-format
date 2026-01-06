@@ -14,6 +14,10 @@ use parquet::arrow::ArrowWriter;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 pub fn write_parquet_rows(path: &Path, rows: usize) -> TestResult {
+    write_parquet_rows_with_base(path, rows, 1_700_000_000_000i64)
+}
+
+pub fn write_parquet_rows_with_base(path: &Path, rows: usize, base_ts: i64) -> TestResult {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -27,7 +31,6 @@ pub fn write_parquet_rows(path: &Path, rows: usize) -> TestResult {
     let mut payload_builder = BinaryBuilder::new();
 
     let mut seed = 0xBAD_5EED_u64;
-    let base_ts = 1_700_000_000_000i64;
     for i in 0..rows {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let rnd = seed;
