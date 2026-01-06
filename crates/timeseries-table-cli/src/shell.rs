@@ -1125,7 +1125,10 @@ fn shell_blocking(
 
     // history best-effort
     if let Err(e) = rl.load_history(&history_path) {
-        eprintln!("warning: failed to load history from {}: {e}", history_path.display());
+        eprintln!(
+            "warning: failed to load history from {}: {e}",
+            history_path.display()
+        );
     }
 
     println!("ts-table shell");
@@ -1176,7 +1179,10 @@ fn shell_blocking(
     }
 
     if let Err(e) = rl.save_history(&history_path) {
-        eprintln!("warning: failed to save history to {}: {e}", history_path.display());
+        eprintln!(
+            "warning: failed to save history to {}: {e}",
+            history_path.display()
+        );
     }
 
     Ok(())
@@ -1310,7 +1316,6 @@ mod tests {
 
         Ok(tmp)
     }
-
 
     fn query_sql(table_name: &str) -> String {
         format!(
