@@ -1,3 +1,5 @@
+//! Benchmark coverage bitmap computation across different parquet scan strategies.
+
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -6,6 +8,10 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
+use parquet::basic::{LogicalType, TimeUnit as ParquetTimeUnit, Type as PhysicalType};
+use parquet::column::reader::ColumnReader;
+use parquet::data_type::Int64Type;
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use rayon::prelude::*;
 
 use arrow::datatypes::{DataType, TimeUnit};
@@ -24,6 +30,7 @@ use timeseries_table_core::transaction_log::TimeBucket;
 enum Engine {
     Baseline,
     RgParallel,
+    ParquetDirect,
     All,
 }
 
@@ -32,6 +39,7 @@ impl Engine {
         match value {
             "baseline" => Ok(Self::Baseline),
             "rg-parallel" => Ok(Self::RgParallel),
+            "parquet-direct" => Ok(Self::ParquetDirect),
             "all" => Ok(Self::All),
             other => Err(format!("unknown engine '{other}'")),
         }
@@ -41,6 +49,7 @@ impl Engine {
         match self {
             Self::Baseline => "baseline",
             Self::RgParallel => "rg-parallel",
+            Self::ParquetDirect => "parquet-direct",
             Self::All => "all",
         }
     }
@@ -64,7 +73,7 @@ fn usage() -> String {
         "options:",
         "  --time-column <name>    (default: ts)",
         "  --bucket <spec>         (must be 1s; default: 1s)",
-        "  --engine <name>         (baseline | rg-parallel | all) (default: all)",
+        "  --engine <name>         (baseline | rg-parallel | parquet-direct | all) (default: all)",
         "  --iters <n>             (default: 5)",
         "  --warmup <n>            (default: 1)",
         "  --csv <path>            (optional CSV output)",
@@ -164,6 +173,14 @@ fn secs_from_raw(unit: TimeUnit, raw: i64) -> i64 {
         TimeUnit::Millisecond => raw.div_euclid(1_000),
         TimeUnit::Microsecond => raw.div_euclid(1_000_000),
         TimeUnit::Nanosecond => raw.div_euclid(1_000_000_000),
+    }
+}
+
+fn secs_from_parquet_unit(unit: ParquetTimeUnit, raw: i64) -> i64 {
+    match unit {
+        ParquetTimeUnit::MILLIS => raw.div_euclid(1_000),
+        ParquetTimeUnit::MICROS => raw.div_euclid(1_000_000),
+        ParquetTimeUnit::NANOS => raw.div_euclid(1_000_000_000),
     }
 }
 
@@ -354,6 +371,142 @@ fn compute_rg_parallel_coverage(
     ))
 }
 
+fn find_parquet_column_index(
+    schema: &parquet::schema::types::SchemaDescriptor,
+    time_column: &str,
+) -> Result<usize, String> {
+    schema
+        .columns()
+        .iter()
+        .enumerate()
+        .find_map(|(idx, col)| {
+            col.path()
+                .parts()
+                .last()
+                .map(|part| part == time_column)
+                .unwrap_or(false)
+                .then_some(idx)
+        })
+        .ok_or_else(|| format!("missing time column '{time_column}'"))
+}
+
+fn read_int64_column_into_bitmap(
+    reader: &mut parquet::column::reader::ColumnReaderImpl<Int64Type>,
+    max_def_level: i16,
+    unit: ParquetTimeUnit,
+    bucket: &TimeBucket,
+    bitmap: &mut RoaringBitmap,
+) -> Result<(), String> {
+    const BATCH_SIZE: usize = 8192;
+    let mut values = vec![0i64; BATCH_SIZE];
+    let mut def_levels_storage = if max_def_level > 0 {
+        Some(vec![0i16; BATCH_SIZE])
+    } else {
+        None
+    };
+
+    loop {
+        let (records_read, values_read, levels_read) = reader
+            .read_records(
+                BATCH_SIZE,
+                def_levels_storage.as_mut().map(|v| v.as_mut()),
+                None,
+                &mut values,
+            )
+            .map_err(|e| format!("parquet read error: {e}"))?;
+
+        if records_read == 0 {
+            break;
+        }
+
+        if max_def_level == 0 {
+            for &raw in &values[..values_read] {
+                let secs = secs_from_parquet_unit(unit, raw);
+                let bucket_id = bucket_id_from_epoch_secs(bucket, secs);
+                insert_bucket(bitmap, bucket_id)?;
+            }
+        } else {
+            let def_levels = def_levels_storage
+                .as_ref()
+                .ok_or_else(|| "missing definition levels buffer".to_string())?;
+            let mut value_idx = 0usize;
+            for &level in &def_levels[..levels_read] {
+                if level == max_def_level {
+                    let raw = values[value_idx];
+                    value_idx += 1;
+                    let secs = secs_from_parquet_unit(unit, raw);
+                    let bucket_id = bucket_id_from_epoch_secs(bucket, secs);
+                    insert_bucket(bitmap, bucket_id)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn compute_parquet_direct_coverage(
+    bytes: &Bytes,
+    time_column: &str,
+    bucket: &TimeBucket,
+) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
+    let reader = SerializedFileReader::new(bytes.clone())?;
+    let schema = reader.metadata().file_metadata().schema_descr();
+    let time_idx = find_parquet_column_index(schema, time_column)?;
+    let col_descr = schema.column(time_idx);
+
+    if col_descr.max_rep_level() > 0 {
+        return Err("nested time column is not supported".into());
+    }
+
+    let physical = col_descr.physical_type();
+    if physical != PhysicalType::INT64 {
+        return Err(format!(
+            "unsupported parquet physical type for {time_column}: {physical:?}"
+        )
+        .into());
+    }
+
+    let unit = match col_descr.logical_type_ref() {
+        Some(LogicalType::Timestamp { unit, .. }) => *unit,
+        other => {
+            return Err(format!(
+                "unsupported parquet logical type for {time_column}: {other:?}"
+            )
+            .into())
+        }
+    };
+
+    let mut bitmap = RoaringBitmap::new();
+    let max_def_level = col_descr.max_def_level();
+
+    for rg_idx in 0..reader.num_row_groups() {
+        let row_group = reader.get_row_group(rg_idx)?;
+        let col_reader = row_group.get_column_reader(time_idx)?;
+        match col_reader {
+            ColumnReader::Int64ColumnReader(mut typed_reader) => {
+                read_int64_column_into_bitmap(
+                    &mut typed_reader,
+                    max_def_level,
+                    unit,
+                    bucket,
+                    &mut bitmap,
+                )?;
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported parquet column reader for {time_column}"
+                )
+                .into());
+            }
+        }
+    }
+
+    Ok(timeseries_table_core::coverage::Coverage::from_bitmap(
+        bitmap,
+    ))
+}
+
 fn run_rg_parallel(
     bytes: &Bytes,
     _file: &str,
@@ -409,6 +562,26 @@ fn run_rg_parallel(
     Ok(durations)
 }
 
+fn run_parquet_direct(
+    bytes: &Bytes,
+    time_column: &str,
+    bucket: &TimeBucket,
+    warmup: usize,
+    iters: usize,
+) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
+    for _ in 0..warmup {
+        let _cov = compute_parquet_direct_coverage(bytes, time_column, bucket)?;
+    }
+
+    let mut durations = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let start = Instant::now();
+        let _cov = compute_parquet_direct_coverage(bytes, time_column, bucket)?;
+        durations.push(start.elapsed());
+    }
+    Ok(durations)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match parse_args() {
         Ok(args) => args,
@@ -427,19 +600,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engines = match args.engine {
         Engine::Baseline => vec![Engine::Baseline],
         Engine::RgParallel => vec![Engine::RgParallel],
-        Engine::All => vec![Engine::Baseline, Engine::RgParallel],
+        Engine::ParquetDirect => vec![Engine::ParquetDirect],
+        Engine::All => vec![Engine::Baseline, Engine::RgParallel, Engine::ParquetDirect],
     };
 
-    if engines.contains(&Engine::Baseline) && engines.contains(&Engine::RgParallel) {
+    if engines.contains(&Engine::Baseline) {
         let baseline_cov = compute_baseline_coverage(
             &bytes,
             &args.file,
             &args.time_column,
             &args.bucket,
         )?;
-        let rg_cov = compute_rg_parallel_coverage(&bytes, &args.time_column, &args.bucket)?;
-        if baseline_cov.present() != rg_cov.present() {
-            return Err("rg-parallel coverage mismatch vs baseline".into());
+        if engines.contains(&Engine::RgParallel) {
+            let rg_cov = compute_rg_parallel_coverage(&bytes, &args.time_column, &args.bucket)?;
+            if baseline_cov.present() != rg_cov.present() {
+                return Err("rg-parallel coverage mismatch vs baseline".into());
+            }
+        }
+        if engines.contains(&Engine::ParquetDirect) {
+            let direct_cov =
+                compute_parquet_direct_coverage(&bytes, &args.time_column, &args.bucket)?;
+            if baseline_cov.present() != direct_cov.present() {
+                return Err("parquet-direct coverage mismatch vs baseline".into());
+            }
         }
     }
 
@@ -456,6 +639,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Engine::RgParallel => run_rg_parallel(
                 &bytes,
                 &args.file,
+                &args.time_column,
+                &args.bucket,
+                args.warmup,
+                args.iters,
+            )?,
+            Engine::ParquetDirect => run_parquet_direct(
+                &bytes,
                 &args.time_column,
                 &args.bucket,
                 args.warmup,
