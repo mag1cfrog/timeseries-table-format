@@ -7,7 +7,7 @@ CSV=${3:-rg-parallel-threads.csv}
 
 RG_CHUNK=${4:-1}
 BATCH_SIZE=${5:-default}
-MAX_THREADS=${6:-16}
+MAX_THREADS=${6:-32}
 
 for t in $(seq 1 "$MAX_THREADS"); do
   if [[ "$BATCH_SIZE" == "default" ]]; then
@@ -17,7 +17,7 @@ for t in $(seq 1 "$MAX_THREADS"); do
       --engine rg-parallel \
       --threads "$t" \
       --rg-chunk "$RG_CHUNK" \
-      --iters 5 \
+      --iters 20 \
       --csv "$CSV"
   else
     cargo run -p timeseries-table-core --bin coverage_bench -- \
@@ -27,7 +27,7 @@ for t in $(seq 1 "$MAX_THREADS"); do
       --threads "$t" \
       --rg-chunk "$RG_CHUNK" \
       --batch-size "$BATCH_SIZE" \
-      --iters 5 \
+      --iters 20 \
       --csv "$CSV"
   fi
  done
