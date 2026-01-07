@@ -725,7 +725,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         if let Some(csv_path) = &args.csv {
-            let header = "engine,file,rows,bucket_spec,iter,elapsed_ms,throughput_rows_per_sec";
+            let header = "engine,file,rows,time_column,bucket_spec,batch_size,rg_chunk,threads,iter,elapsed_ms,throughput_rows_per_sec";
             for (idx, duration) in durations.iter().enumerate() {
                 let elapsed_ms = duration.as_secs_f64() * 1000.0;
                 let throughput = if duration.as_secs_f64() > 0.0 {
@@ -734,12 +734,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0.0
                 };
                 let bucket = bucket_spec_string(&args.bucket);
+                let batch_size = args
+                    .batch_size
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "default".to_string());
+                let rg_chunk = args.rg_chunk.to_string();
+                let threads = args
+                    .threads
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "default".to_string());
                 let row = format!(
-                    "{label},{file},{rows},{bucket},{iter},{elapsed_ms:.3},{throughput:.0}",
+                    "{label},{file},{rows},{time_column},{bucket},{batch_size},{rg_chunk},{threads},{iter},{elapsed_ms:.3},{throughput:.0}",
                     label = label,
                     file = args.file,
                     rows = rows,
+                    time_column = args.time_column,
                     bucket = bucket,
+                    batch_size = batch_size,
+                    rg_chunk = rg_chunk,
+                    threads = threads,
                     iter = idx + 1,
                     elapsed_ms = elapsed_ms,
                     throughput = throughput
