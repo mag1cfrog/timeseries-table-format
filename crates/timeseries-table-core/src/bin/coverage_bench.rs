@@ -23,7 +23,6 @@ use arrow_array::{
 use roaring::RoaringBitmap;
 
 use timeseries_table_core::helpers::time_bucket::bucket_id_from_epoch_secs;
-use timeseries_table_core::helpers::segment_coverage::compute_segment_coverage_from_parquet_bytes;
 use timeseries_table_core::transaction_log::TimeBucket;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +62,9 @@ struct Args {
     engine: Engine,
     iters: usize,
     warmup: usize,
+    batch_size: Option<usize>,
+    rg_chunk: usize,
+    threads: Option<usize>,
     csv: Option<String>,
 }
 
@@ -76,6 +78,9 @@ fn usage() -> String {
         "  --engine <name>         (baseline | rg-parallel | parquet-direct | all) (default: all)",
         "  --iters <n>             (default: 5)",
         "  --warmup <n>            (default: 1)",
+        "  --batch-size <n>        (optional; Arrow/parquet-direct batch size)",
+        "  --rg-chunk <n>          (row groups per parallel task; default: 1)",
+        "  --threads <n>           (rg-parallel only; overrides rayon thread count)",
         "  --csv <path>            (optional CSV output)",
     ]
     .join("\n")
@@ -88,6 +93,9 @@ fn parse_args() -> Result<Args, String> {
     let mut engine = Engine::All;
     let mut iters = 5usize;
     let mut warmup = 1usize;
+    let mut batch_size = None;
+    let mut rg_chunk = 1usize;
+    let mut threads = None;
     let mut csv = None;
 
     let mut args = std::env::args().skip(1);
@@ -119,6 +127,35 @@ fn parse_args() -> Result<Args, String> {
                     .parse::<usize>()
                     .map_err(|_| "invalid --warmup value")?;
             }
+            "--batch-size" => {
+                let value = args.next().ok_or("missing value for --batch-size")?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| "invalid --batch-size value")?;
+                if parsed == 0 {
+                    return Err("batch size must be > 0".to_string());
+                }
+                batch_size = Some(parsed);
+            }
+            "--rg-chunk" => {
+                let value = args.next().ok_or("missing value for --rg-chunk")?;
+                rg_chunk = value
+                    .parse::<usize>()
+                    .map_err(|_| "invalid --rg-chunk value")?;
+                if rg_chunk == 0 {
+                    return Err("rg-chunk must be > 0".to_string());
+                }
+            }
+            "--threads" => {
+                let value = args.next().ok_or("missing value for --threads")?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| "invalid --threads value")?;
+                if parsed == 0 {
+                    return Err("threads must be > 0".to_string());
+                }
+                threads = Some(parsed);
+            }
             "--csv" => {
                 csv = Some(args.next().ok_or("missing value for --csv")?);
             }
@@ -144,6 +181,9 @@ fn parse_args() -> Result<Args, String> {
         engine,
         iters,
         warmup,
+        batch_size,
+        rg_chunk,
+        threads,
         csv,
     })
 }
@@ -231,15 +271,12 @@ fn compute_bitmap_from_reader(
 
     macro_rules! process_timestamp_array {
         ($array_type: ty, $col: expr, $unit: expr) => {{
-            let arr = $col
-                .as_any()
-                .downcast_ref::<$array_type>()
-                .ok_or_else(|| {
-                    format!(
-                        "unsupported arrow type for column {time_column}: {}",
-                        $col.data_type()
-                    )
-                })?;
+            let arr = $col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
+                format!(
+                    "unsupported arrow type for column {time_column}: {}",
+                    $col.data_type()
+                )
+            })?;
 
             if arr.null_count() == 0 {
                 add_buckets_from_values(&mut bitmap, bucket_spec, $unit, arr.values())
@@ -280,64 +317,66 @@ fn compute_bitmap_from_reader(
 fn median_ms(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
     }
 }
 
+fn compute_arrow_coverage(
+    bytes: &Bytes,
+    time_column: &str,
+    bucket: &TimeBucket,
+    batch_size: Option<usize>,
+) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())?;
+    builder
+        .schema()
+        .index_of(time_column)
+        .map_err(|_| format!("missing time column '{time_column}'"))?;
+    let mask = ProjectionMask::columns(builder.parquet_schema(), [time_column]);
+    let builder = builder.with_projection(mask);
+    let builder = if let Some(size) = batch_size {
+        builder.with_batch_size(size)
+    } else {
+        builder
+    };
+    let reader = builder.build()?;
+    let bitmap = compute_bitmap_from_reader(reader, time_column, bucket)?;
+    Ok(timeseries_table_core::coverage::Coverage::from_bitmap(
+        bitmap,
+    ))
+}
+
 fn run_baseline(
     bytes: &Bytes,
-    file: &str,
     time_column: &str,
     bucket: &TimeBucket,
     warmup: usize,
     iters: usize,
+    batch_size: Option<usize>,
 ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
-    let rel_path = Path::new(file);
     for _ in 0..warmup {
-        let _cov = compute_segment_coverage_from_parquet_bytes(
-            rel_path,
-            time_column,
-            bucket,
-            bytes.clone(),
-        )?;
+        let _cov = compute_arrow_coverage(bytes, time_column, bucket, batch_size)?;
     }
 
     let mut durations = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        let _cov = compute_segment_coverage_from_parquet_bytes(
-            rel_path,
-            time_column,
-            bucket,
-            bytes.clone(),
-        )?;
+        let _cov = compute_arrow_coverage(bytes, time_column, bucket, batch_size)?;
         durations.push(start.elapsed());
     }
     Ok(durations)
-}
-
-fn compute_baseline_coverage(
-    bytes: &Bytes,
-    file: &str,
-    time_column: &str,
-    bucket: &TimeBucket,
-) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
-    let rel_path = Path::new(file);
-    Ok(compute_segment_coverage_from_parquet_bytes(
-        rel_path,
-        time_column,
-        bucket,
-        bytes.clone(),
-    )?)
 }
 
 fn compute_rg_parallel_coverage(
     bytes: &Bytes,
     time_column: &str,
     bucket: &TimeBucket,
+    batch_size: Option<usize>,
+    rg_chunk: usize,
+    threads: Option<usize>,
 ) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
     let metadata = ArrowReaderMetadata::load(bytes, ArrowReaderOptions::default())?;
     let schema = metadata.schema();
@@ -345,21 +384,44 @@ fn compute_rg_parallel_coverage(
         .index_of(time_column)
         .map_err(|_| format!("missing time column '{time_column}'"))?;
     let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
-    let row_groups = 0..metadata.metadata().num_row_groups();
-
-    let bitmaps: Result<Vec<RoaringBitmap>, String> = row_groups
-        .into_par_iter()
-        .map(|rg| {
-            let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
-                bytes.clone(),
-                metadata.clone(),
-            )
-            .with_projection(mask.clone())
-            .with_row_groups(vec![rg]);
-            let reader = builder.build().map_err(|e| format!("parquet read error: {e}"))?;
-            compute_bitmap_from_reader(reader, time_column, bucket)
-        })
+    let row_groups: Vec<usize> = (0..metadata.metadata().num_row_groups()).collect();
+    let chunks: Vec<Vec<usize>> = row_groups
+        .chunks(rg_chunk)
+        .map(|chunk| chunk.to_vec())
         .collect();
+
+    let execute = || -> Result<Vec<RoaringBitmap>, String> {
+        chunks
+            .par_iter()
+            .map(|chunk| {
+                let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                    bytes.clone(),
+                    metadata.clone(),
+                )
+                .with_projection(mask.clone())
+                .with_row_groups(chunk.clone());
+                let builder = if let Some(size) = batch_size {
+                    builder.with_batch_size(size)
+                } else {
+                    builder
+                };
+                let reader = builder
+                    .build()
+                    .map_err(|e| format!("parquet read error: {e}"))?;
+                compute_bitmap_from_reader(reader, time_column, bucket)
+            })
+            .collect()
+    };
+
+    let bitmaps = if let Some(count) = threads {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .build()
+            .map_err(|e| format!("failed to build rayon thread pool: {e}"))?;
+        pool.install(execute)
+    } else {
+        execute()
+    };
 
     let mut merged = RoaringBitmap::new();
     for bm in bitmaps? {
@@ -396,23 +458,23 @@ fn read_int64_column_into_bitmap(
     unit: ParquetTimeUnit,
     bucket: &TimeBucket,
     bitmap: &mut RoaringBitmap,
+    batch_size: usize,
 ) -> Result<(), String> {
-    const BATCH_SIZE: usize = 8192;
-    let mut values = vec![0i64; BATCH_SIZE];
-    let mut def_levels_storage = if max_def_level > 0 {
-        Some(vec![0i16; BATCH_SIZE])
+    let mut values: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut def_levels_storage: Option<Vec<i16>> = if max_def_level > 0 {
+        Some(Vec::with_capacity(batch_size))
     } else {
         None
     };
 
     loop {
+        values.clear();
+        if let Some(def_levels) = def_levels_storage.as_mut() {
+            def_levels.clear();
+        }
+
         let (records_read, values_read, levels_read) = reader
-            .read_records(
-                BATCH_SIZE,
-                def_levels_storage.as_mut().map(|v| v.as_mut()),
-                None,
-                &mut values,
-            )
+            .read_records(batch_size, def_levels_storage.as_mut(), None, &mut values)
             .map_err(|e| format!("parquet read error: {e}"))?;
 
         if records_read == 0 {
@@ -445,10 +507,11 @@ fn read_int64_column_into_bitmap(
     Ok(())
 }
 
-fn compute_parquet_direct_coverage(
+fn compute_parquet_direct_coverage_with_batch(
     bytes: &Bytes,
     time_column: &str,
     bucket: &TimeBucket,
+    batch_size: Option<usize>,
 ) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
     let reader = SerializedFileReader::new(bytes.clone())?;
     let schema = reader.metadata().file_metadata().schema_descr();
@@ -461,24 +524,23 @@ fn compute_parquet_direct_coverage(
 
     let physical = col_descr.physical_type();
     if physical != PhysicalType::INT64 {
-        return Err(format!(
-            "unsupported parquet physical type for {time_column}: {physical:?}"
-        )
-        .into());
+        return Err(
+            format!("unsupported parquet physical type for {time_column}: {physical:?}").into(),
+        );
     }
 
     let unit = match col_descr.logical_type_ref() {
         Some(LogicalType::Timestamp { unit, .. }) => *unit,
         other => {
-            return Err(format!(
-                "unsupported parquet logical type for {time_column}: {other:?}"
-            )
-            .into())
+            return Err(
+                format!("unsupported parquet logical type for {time_column}: {other:?}").into(),
+            );
         }
     };
 
     let mut bitmap = RoaringBitmap::new();
     let max_def_level = col_descr.max_def_level();
+    let batch_size = batch_size.unwrap_or(8192);
 
     for rg_idx in 0..reader.num_row_groups() {
         let row_group = reader.get_row_group(rg_idx)?;
@@ -491,13 +553,11 @@ fn compute_parquet_direct_coverage(
                     unit,
                     bucket,
                     &mut bitmap,
+                    batch_size,
                 )?;
             }
             _ => {
-                return Err(format!(
-                    "unsupported parquet column reader for {time_column}"
-                )
-                .into());
+                return Err(format!("unsupported parquet column reader for {time_column}").into());
             }
         }
     }
@@ -509,52 +569,27 @@ fn compute_parquet_direct_coverage(
 
 fn run_rg_parallel(
     bytes: &Bytes,
-    _file: &str,
-    time_column: &str,
-    bucket: &TimeBucket,
-    warmup: usize,
-    iters: usize,
+    args: &Args,
 ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
-    let metadata = ArrowReaderMetadata::load(bytes, ArrowReaderOptions::default())?;
-    let schema = metadata.schema();
-    schema
-        .index_of(time_column)
-        .map_err(|_| format!("missing time column '{time_column}'"))?;
-    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
-    let row_groups = 0..metadata.metadata().num_row_groups();
-
     let run_once = || -> Result<(), Box<dyn std::error::Error>> {
-        let bitmaps: Result<Vec<RoaringBitmap>, String> = row_groups
-            .clone()
-            .into_par_iter()
-            .map(|rg| {
-                let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
-                    bytes.clone(),
-                    metadata.clone(),
-                )
-                .with_projection(mask.clone())
-                .with_row_groups(vec![rg]);
-                let reader = builder.build().map_err(|e| format!("parquet read error: {e}"))?;
-                compute_bitmap_from_reader(reader, time_column, bucket)
-            })
-            .collect();
-
-        let mut merged = RoaringBitmap::new();
-        for bm in bitmaps? {
-            merged |= bm;
-        }
-
-        // Use the result so the compiler doesn't optimize out the loop.
-        let _cov = timeseries_table_core::coverage::Coverage::from_bitmap(merged);
+        let cov = compute_rg_parallel_coverage(
+            bytes,
+            &args.time_column,
+            &args.bucket,
+            args.batch_size,
+            args.rg_chunk,
+            args.threads,
+        )?;
+        let _ = cov.present();
         Ok(())
     };
 
-    for _ in 0..warmup {
-        let _ = run_once()?;
+    for _ in 0..args.warmup {
+        run_once()?;
     }
 
-    let mut durations = Vec::with_capacity(iters);
-    for _ in 0..iters {
+    let mut durations = Vec::with_capacity(args.iters);
+    for _ in 0..args.iters {
         let start = Instant::now();
         run_once()?;
         durations.push(start.elapsed());
@@ -568,15 +603,18 @@ fn run_parquet_direct(
     bucket: &TimeBucket,
     warmup: usize,
     iters: usize,
+    batch_size: Option<usize>,
 ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
     for _ in 0..warmup {
-        let _cov = compute_parquet_direct_coverage(bytes, time_column, bucket)?;
+        let _cov =
+            compute_parquet_direct_coverage_with_batch(bytes, time_column, bucket, batch_size)?;
     }
 
     let mut durations = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        let _cov = compute_parquet_direct_coverage(bytes, time_column, bucket)?;
+        let _cov =
+            compute_parquet_direct_coverage_with_batch(bytes, time_column, bucket, batch_size)?;
         durations.push(start.elapsed());
     }
     Ok(durations)
@@ -605,23 +643,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if engines.contains(&Engine::Baseline) {
-        let baseline_cov = compute_baseline_coverage(
-            &bytes,
-            &args.file,
-            &args.time_column,
-            &args.bucket,
-        )?;
+        let baseline_cov =
+            compute_arrow_coverage(&bytes, &args.time_column, &args.bucket, args.batch_size)?;
         if engines.contains(&Engine::RgParallel) {
-            let rg_cov = compute_rg_parallel_coverage(&bytes, &args.time_column, &args.bucket)?;
+            let rg_cov = compute_rg_parallel_coverage(
+                &bytes,
+                &args.time_column,
+                &args.bucket,
+                args.batch_size,
+                args.rg_chunk,
+                args.threads,
+            )?;
             if baseline_cov.present() != rg_cov.present() {
                 return Err("rg-parallel coverage mismatch vs baseline".into());
             }
         }
         if engines.contains(&Engine::ParquetDirect) {
-            let direct_cov =
-                compute_parquet_direct_coverage(&bytes, &args.time_column, &args.bucket)?;
+            let direct_cov = compute_parquet_direct_coverage_with_batch(
+                &bytes,
+                &args.time_column,
+                &args.bucket,
+                args.batch_size,
+            )?;
             if baseline_cov.present() != direct_cov.present() {
-                return Err("parquet-direct coverage mismatch vs baseline".into());
+                let diff = baseline_cov.present() ^ direct_cov.present();
+                let example = diff.iter().next();
+                return Err(format!(
+                    "parquet-direct coverage mismatch vs baseline (baseline_len={}, direct_len={}, diff_len={}, example={example:?})",
+                    baseline_cov.present().len(),
+                    direct_cov.present().len(),
+                    diff.len(),
+                )
+                .into());
             }
         }
     }
@@ -630,34 +683,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let durations = match engine {
             Engine::Baseline => run_baseline(
                 &bytes,
-                &args.file,
                 &args.time_column,
                 &args.bucket,
                 args.warmup,
                 args.iters,
+                args.batch_size,
             )?,
-            Engine::RgParallel => run_rg_parallel(
-                &bytes,
-                &args.file,
-                &args.time_column,
-                &args.bucket,
-                args.warmup,
-                args.iters,
-            )?,
+            Engine::RgParallel => run_rg_parallel(&bytes, &args)?,
             Engine::ParquetDirect => run_parquet_direct(
                 &bytes,
                 &args.time_column,
                 &args.bucket,
                 args.warmup,
                 args.iters,
+                args.batch_size,
             )?,
             Engine::All => unreachable!(),
         };
 
-        let mut ms_values: Vec<f64> = durations
-            .iter()
-            .map(|d| d.as_secs_f64() * 1000.0)
-            .collect();
+        let mut ms_values: Vec<f64> = durations.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
         let avg_ms = ms_values.iter().sum::<f64>() / ms_values.len() as f64;
         let med_ms = median_ms(&mut ms_values);
 
