@@ -189,7 +189,7 @@ fn resolve_rg_settings(num_row_groups: usize) -> (usize, usize) {
     let rg_chunk = if threads_used == 0 {
         1
     } else {
-        (num_row_groups + threads_used - 1) / threads_used
+        num_row_groups.div_ceil(threads_used)
     };
     (threads_used.max(1), rg_chunk.max(1))
 }
@@ -310,8 +310,8 @@ pub fn compute_segment_coverage_from_parquet_bytes(
     let row_groups = metadata.metadata().num_row_groups();
 
     if row_groups <= 1 {
-        let builder =
-            ParquetRecordBatchReaderBuilder::new_with_metadata(data, metadata).with_projection(mask);
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(data, metadata)
+            .with_projection(mask);
         let reader = builder
             .build()
             .map_err(|source| SegmentCoverageError::ParquetRead {
@@ -349,13 +349,14 @@ pub fn compute_segment_coverage_from_parquet_bytes(
                 )
                 .with_projection(mask.clone())
                 .with_row_groups(chunk.clone());
-                let reader = builder
-                    .build()
-                    .map_err(|source| SegmentCoverageError::ParquetRead {
-                        path: path_str.clone(),
-                        source,
-                        backtrace: Backtrace::capture(),
-                    })?;
+                let reader =
+                    builder
+                        .build()
+                        .map_err(|source| SegmentCoverageError::ParquetRead {
+                            path: path_str.clone(),
+                            source,
+                            backtrace: Backtrace::capture(),
+                        })?;
                 compute_bitmap_from_reader(reader, &path_str, time_column, bucket_spec)
             })
             .collect()
