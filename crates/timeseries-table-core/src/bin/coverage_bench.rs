@@ -427,7 +427,7 @@ fn resolve_rg_settings(
         if threads_used == 0 {
             rg_chunk.max(1)
         } else {
-            let chunk = (num_row_groups + threads_used - 1) / threads_used;
+            let chunk = num_row_groups.div_ceil(threads_used);
             chunk.max(1)
         }
     } else {
