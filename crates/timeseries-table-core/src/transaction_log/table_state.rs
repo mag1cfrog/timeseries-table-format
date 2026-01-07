@@ -8,6 +8,24 @@
 //! version.
 use std::collections::HashMap;
 
+#[cfg(feature = "test-counters")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(feature = "test-counters")]
+static REBUILD_TABLE_STATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "test-counters")]
+/// Return the number of rebuilds invoked in this process (test-only).
+pub fn rebuild_table_state_count() -> usize {
+    REBUILD_TABLE_STATE_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "test-counters")]
+/// Reset the rebuild counter to zero (test-only).
+pub fn reset_rebuild_table_state_count() {
+    REBUILD_TABLE_STATE_COUNT.store(0, Ordering::Relaxed);
+}
+
 use crate::{helpers::segment_order::cmp_segment_meta_by_time, transaction_log::*};
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
@@ -60,6 +78,9 @@ impl TransactionLogStore {
     /// - The first commit must include at least one UpdateTableMeta action
     ///   to bootstrap TableMeta; the last UpdateTableMeta wins.
     pub async fn rebuild_table_state(&self) -> Result<TableState, CommitError> {
+        #[cfg(feature = "test-counters")]
+        REBUILD_TABLE_STATE_COUNT.fetch_add(1, Ordering::Relaxed);
+
         let current_version = self.load_current_version().await?;
 
         if current_version == 0 {

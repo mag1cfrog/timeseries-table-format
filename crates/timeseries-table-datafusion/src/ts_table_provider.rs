@@ -108,13 +108,14 @@ impl TsTableProvider {
             .map_err(df_external)?;
 
         let object_store_url = ObjectStoreUrl::parse("file://").map_err(df_external)?; // baseline: local FS
+        let state = table.state().clone();
 
         Ok(Self {
             table,
             schema,
             cache: RwLock::new(Cache {
-                version: None,
-                state: None,
+                version: Some(state.version),
+                state: Some(state),
             }),
             object_store_url,
         })

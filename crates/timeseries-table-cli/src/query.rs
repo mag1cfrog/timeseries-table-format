@@ -1,14 +1,16 @@
 use std::{
+    io::Write,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     time::Duration,
 };
 
 use tabled::{
     builder::Builder,
-    settings::{Style, object::Rows, style::LineText},
+    settings::{Style, object::Rows, style::LineText, width::MinWidth},
 };
 
-use crate::error::CliResult;
+use crate::error::{CliError, CliResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -81,6 +83,10 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
         return String::new();
     }
 
+    const PREVIEW_LABEL: &str = "Preview output";
+    const PREVIEW_OFFSET: usize = 6;
+    let min_width = PREVIEW_OFFSET + PREVIEW_LABEL.len() + 4;
+
     let mut builder = Builder::default();
     builder.push_record(columns);
     for row in rows {
@@ -88,44 +94,127 @@ fn render_table(columns: &[String], rows: &[Vec<String>]) -> String {
     }
 
     let mut table = builder.build();
+
     table.with(Style::rounded());
-    table.with(LineText::new("Preview output", Rows::first()).offset(6));
+    table.with(MinWidth::new(min_width));
+    table.with(LineText::new(PREVIEW_LABEL, Rows::first()).offset(PREVIEW_OFFSET));
+    // LineText re-estimates dimensions, so re-apply MinWidth afterwards.
+    table.with(MinWidth::new(min_width));
     table.to_string()
 }
 
 pub fn print_query_result(res: &QueryResult, opts: &QueryOpts) -> CliResult<()> {
+    let mut stdout = std::io::stdout();
+    write_query_result(res, opts, &mut stdout)
+}
+
+pub fn render_preview(res: &QueryResult, opts: &QueryOpts) -> Option<String> {
     if !res.preview_rows.is_empty() {
-        let rendered = render_table(&res.columns, &res.preview_rows);
-        println!("{rendered}");
-    } else if opts.max_rows == 0 && !res.columns.is_empty() {
-        let rendered = render_table(&res.columns, &[]);
-        println!("{rendered}");
-        if res.total_rows > 0 {
-            println!("(preview suppressed; use --max-rows > 0)");
-        }
-    } else if opts.max_rows == 0 && res.total_rows > 0 {
-        println!("(preview suppressed; use --max-rows > 0)");
-    } else {
-        println!("(no rows)");
+        return Some(render_table(&res.columns, &res.preview_rows));
     }
 
-    println!("total_rows: {}", res.total_rows);
+    if opts.max_rows == 0 && !res.columns.is_empty() {
+        return Some(render_table(&res.columns, &[]));
+    }
+
+    None
+}
+
+pub fn preview_message(res: &QueryResult, opts: &QueryOpts) -> Option<String> {
+    if opts.max_rows == 0 && res.total_rows > 0 {
+        return Some("(preview suppressed; use --max-rows > 0)".to_string());
+    }
+
+    if res.total_rows == 0 {
+        return Some("(no rows)".to_string());
+    }
+
+    None
+}
+
+pub fn write_query_summary<W: Write>(
+    res: &QueryResult,
+    opts: &QueryOpts,
+    out: &mut W,
+) -> CliResult<()> {
+    let write_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to write output: {e}"),
+        path: None,
+    };
+
+    writeln!(out, "total_rows: {}", res.total_rows).map_err(&write_err)?;
 
     if let Some(d) = res.elapsed {
-        println!("elapsed_ms: {}", d.as_millis());
+        writeln!(out, "elapsed_ms: {}", d.as_millis()).map_err(&write_err)?;
     }
 
     if let Some(path) = &opts.output {
-        println!("wrote: {} ({:?})", path.display(), opts.format);
+        writeln!(out, "wrote: {} ({:?})", path.display(), opts.format).map_err(&write_err)?;
     }
 
     Ok(())
+}
+
+pub fn write_query_result<W: Write>(
+    res: &QueryResult,
+    opts: &QueryOpts,
+    out: &mut W,
+) -> CliResult<()> {
+    let mut write_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to write output: {e}"),
+        path: None,
+    };
+
+    if let Some(rendered) = render_preview(res, opts) {
+        writeln!(out, "{rendered}").map_err(&mut write_err)?;
+    }
+
+    if let Some(message) = preview_message(res, opts) {
+        writeln!(out, "{message}").map_err(&mut write_err)?;
+    }
+
+    write_query_summary(res, opts, out)?;
+    Ok(())
+}
+
+fn page_output_with_pager(text: &str, pager: &str, args: &[&str]) -> CliResult<()> {
+    let spawn_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to spawn pager: {e}"),
+        path: None,
+    };
+    let io_err = |e: std::io::Error| CliError::PathInvariantNoSource {
+        message: format!("failed to write pager output: {e}"),
+        path: None,
+    };
+
+    let mut child = match Command::new(pager).args(args).stdin(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("warning: failed to launch pager '{pager}': {e}");
+            let mut stdout = std::io::stdout();
+            stdout.write_all(text.as_bytes()).map_err(io_err)?;
+            return Ok(());
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes()).map_err(io_err)?;
+        drop(stdin);
+    }
+
+    child.wait().map_err(spawn_err)?;
+    Ok(())
+}
+
+pub fn page_output(text: &str) -> CliResult<()> {
+    page_output_with_pager(text, "less", &["-S"])
 }
 
 #[cfg(test)]
 mod tests {
     use super::{default_table_name, render_table};
     use std::path::Path;
+    use std::time::Duration;
 
     #[test]
     fn render_table_aligns_columns() {
@@ -144,6 +233,15 @@ mod tests {
     }
 
     #[test]
+    fn render_table_includes_preview_label_for_narrow_tables() {
+        let columns = vec!["x".to_string()];
+        let rows = vec![vec!["1".to_string()]];
+
+        let rendered = render_table(&columns, &rows);
+        assert!(rendered.contains("Preview output"));
+    }
+
+    #[test]
     fn default_table_name_sanitizes() {
         let name = default_table_name(Path::new("/tmp/my-table 1"));
         assert_eq!(name, "my_table_1");
@@ -156,5 +254,24 @@ mod tests {
 
         let name = default_table_name(Path::new(""));
         assert_eq!(name, "t");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn page_output_closes_stdin_to_pager() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = super::page_output_with_pager("hello\n", "cat", &[]);
+            let _ = tx.send(result);
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("pager failed: {e}"),
+            Err(_) => panic!("pager did not exit after stdin closed"),
+        }
     }
 }

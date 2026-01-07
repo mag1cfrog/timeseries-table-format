@@ -10,13 +10,16 @@ arrow-json = { workspace = true }
 clap = { version = "4.5.54", features = ["derive"] }
 datafusion = { workspace = true }
 snafu = { workspace = true }
-tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
 timeseries-table-core = { path = "../timeseries-table-core" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion" }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
+rustyline = { version = "17.0.2", features = ["with-file-history"] }
+terminal_size = "0.3.0"
+chrono = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
@@ -24,6 +27,7 @@ parquet = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+timeseries-table-core = { path = "../timeseries-table-core", features = ["test-counters"] }
 
 [lints]
 workspace = true

@@ -52,6 +52,15 @@ pub trait Engine: Send + Sync + 'static {
     async fn prepare_session(
         &self,
     ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error>;
+
+    /// Prepare a session using an existing table snapshot, avoiding log replay.
+    async fn prepare_session_from_table(
+        &self,
+        table: &TimeSeriesTable,
+    ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
+        let _ = table;
+        self.prepare_session().await
+    }
 }
 
 struct SinkWriter {
@@ -195,6 +204,31 @@ impl DataFusionEngine {
             table_name: self.table_name.clone(),
         })
     }
+
+    async fn prepare_session_from_table_internal(
+        &self,
+        table: &TimeSeriesTable,
+    ) -> CliResult<DataFusionSession> {
+        let state = table.state().clone();
+        let location = table.location().clone();
+        let table = TimeSeriesTable::from_state(location, state).context(OpenTableSnafu {
+            table: self.table_root.display().to_string(),
+        })?;
+
+        let table = Arc::new(table);
+        let provider = TsTableProvider::try_new(table).context(DataFusionSnafu)?;
+
+        let cfg = SessionConfig::new();
+        let ctx = SessionContext::new_with_config(cfg);
+
+        ctx.register_table(self.table_name.as_str(), Arc::new(provider))
+            .context(DataFusionSnafu)?;
+
+        Ok(DataFusionSession {
+            ctx,
+            table_name: self.table_name.clone(),
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -302,6 +336,15 @@ impl Engine for DataFusionEngine {
         &self,
     ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
         Ok(Box::new(self.prepare_session_internal().await?))
+    }
+
+    async fn prepare_session_from_table(
+        &self,
+        table: &TimeSeriesTable,
+    ) -> Result<Box<dyn QuerySession<Error = Self::Error>>, Self::Error> {
+        Ok(Box::new(
+            self.prepare_session_from_table_internal(table).await?,
+        ))
     }
 }
 
@@ -555,6 +598,43 @@ mod tests {
         let session = engine.prepare_session().await?;
         assert_eq!(session.table_name(), Some(table_name.as_str()));
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_session_rebuilds_table_state() -> TestResult<()> {
+        use crate::engine::Engine;
+        use timeseries_table_core::transaction_log::table_state::{
+            rebuild_table_state_count, reset_rebuild_table_state_count,
+        };
+
+        let (tmp, _total) = build_table_with_rows(2).await?;
+        reset_rebuild_table_state_count();
+
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let _session = engine.prepare_session().await?;
+
+        assert_eq!(rebuild_table_state_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_session_from_table_avoids_rebuild() -> TestResult<()> {
+        use crate::engine::Engine;
+        use timeseries_table_core::transaction_log::table_state::{
+            rebuild_table_state_count, reset_rebuild_table_state_count,
+        };
+
+        let (tmp, _total) = build_table_with_rows(2).await?;
+        let location = TableLocation::local(tmp.path());
+        let table = TimeSeriesTable::open(location).await?;
+
+        reset_rebuild_table_state_count();
+
+        let engine = super::DataFusionEngine::new(tmp.path());
+        let _session = engine.prepare_session_from_table(&table).await?;
+
+        assert_eq!(rebuild_table_state_count(), 0);
         Ok(())
     }
 
