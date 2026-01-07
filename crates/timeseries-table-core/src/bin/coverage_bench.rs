@@ -54,6 +54,21 @@ impl Engine {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadSetting {
+    Auto,
+    Fixed(usize),
+}
+
+impl ThreadSetting {
+    fn as_label(self) -> String {
+        match self {
+            Self::Auto => "auto".to_string(),
+            Self::Fixed(v) => v.to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Args {
     file: String,
@@ -64,7 +79,8 @@ struct Args {
     warmup: usize,
     batch_size: Option<usize>,
     rg_chunk: usize,
-    threads: Option<usize>,
+    rg_chunk_auto: bool,
+    threads: ThreadSetting,
     print_metadata: bool,
     csv: Option<String>,
 }
@@ -81,7 +97,7 @@ fn usage() -> String {
         "  --warmup <n>            (default: 1)",
         "  --batch-size <n>        (optional; Arrow/parquet-direct batch size)",
         "  --rg-chunk <n>          (row groups per parallel task; default: 1)",
-        "  --threads <n>           (rg-parallel only; overrides rayon thread count)",
+        "  --threads <n|auto>      (rg-parallel only; default: auto)",
         "  --print-metadata        (print parquet row group metadata and exit)",
         "  --csv <path>            (optional CSV output)",
     ]
@@ -97,7 +113,8 @@ fn parse_args() -> Result<Args, String> {
     let mut warmup = 1usize;
     let mut batch_size = None;
     let mut rg_chunk = 1usize;
-    let mut threads = None;
+    let mut rg_chunk_auto = true;
+    let mut threads = ThreadSetting::Auto;
     let mut print_metadata = false;
     let mut csv = None;
 
@@ -148,16 +165,21 @@ fn parse_args() -> Result<Args, String> {
                 if rg_chunk == 0 {
                     return Err("rg-chunk must be > 0".to_string());
                 }
+                rg_chunk_auto = false;
             }
             "--threads" => {
                 let value = args.next().ok_or("missing value for --threads")?;
-                let parsed = value
-                    .parse::<usize>()
-                    .map_err(|_| "invalid --threads value")?;
-                if parsed == 0 {
-                    return Err("threads must be > 0".to_string());
+                if value == "auto" {
+                    threads = ThreadSetting::Auto;
+                } else {
+                    let parsed = value
+                        .parse::<usize>()
+                        .map_err(|_| "invalid --threads value")?;
+                    if parsed == 0 {
+                        return Err("threads must be > 0".to_string());
+                    }
+                    threads = ThreadSetting::Fixed(parsed);
                 }
-                threads = Some(parsed);
             }
             "--print-metadata" => {
                 print_metadata = true;
@@ -189,6 +211,7 @@ fn parse_args() -> Result<Args, String> {
         warmup,
         batch_size,
         rg_chunk,
+        rg_chunk_auto,
         threads,
         print_metadata,
         csv,
@@ -377,13 +400,50 @@ fn run_baseline(
     Ok(durations)
 }
 
+fn resolve_rg_settings(
+    num_row_groups: usize,
+    rg_chunk: usize,
+    rg_chunk_auto: bool,
+    threads: ThreadSetting,
+) -> (usize, usize) {
+    let logical_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let max_threads = logical_threads.saturating_mul(2).max(1);
+    let threads_used = match threads {
+        ThreadSetting::Auto => {
+            if num_row_groups == 0 {
+                logical_threads.max(1)
+            } else if num_row_groups <= max_threads {
+                num_row_groups
+            } else {
+                logical_threads.max(1)
+            }
+        }
+        ThreadSetting::Fixed(v) => v,
+    };
+
+    let rg_chunk_used = if rg_chunk_auto {
+        if threads_used == 0 {
+            rg_chunk.max(1)
+        } else {
+            let chunk = (num_row_groups + threads_used - 1) / threads_used;
+            chunk.max(1)
+        }
+    } else {
+        rg_chunk
+    };
+
+    (threads_used.max(1), rg_chunk_used)
+}
+
 fn compute_rg_parallel_coverage(
     bytes: &Bytes,
     time_column: &str,
     bucket: &TimeBucket,
     batch_size: Option<usize>,
-    rg_chunk: usize,
-    threads: Option<usize>,
+    rg_chunk_used: usize,
+    threads_used: usize,
 ) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
     let metadata = ArrowReaderMetadata::load(bytes, ArrowReaderOptions::default())?;
     let schema = metadata.schema();
@@ -393,7 +453,7 @@ fn compute_rg_parallel_coverage(
     let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
     let row_groups: Vec<usize> = (0..metadata.metadata().num_row_groups()).collect();
     let chunks: Vec<Vec<usize>> = row_groups
-        .chunks(rg_chunk)
+        .chunks(rg_chunk_used)
         .map(|chunk| chunk.to_vec())
         .collect();
 
@@ -420,15 +480,11 @@ fn compute_rg_parallel_coverage(
             .collect()
     };
 
-    let bitmaps = if let Some(count) = threads {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(count)
-            .build()
-            .map_err(|e| format!("failed to build rayon thread pool: {e}"))?;
-        pool.install(execute)
-    } else {
-        execute()
-    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads_used.max(1))
+        .build()
+        .map_err(|e| format!("failed to build rayon thread pool: {e}"))?;
+    let bitmaps = pool.install(execute);
 
     let mut merged = RoaringBitmap::new();
     for bm in bitmaps? {
@@ -578,14 +634,22 @@ fn run_rg_parallel(
     bytes: &Bytes,
     args: &Args,
 ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
+    let metadata = ArrowReaderMetadata::load(bytes, ArrowReaderOptions::default())?;
+    let num_row_groups = metadata.metadata().num_row_groups();
+    let (threads_used, rg_chunk_used) = resolve_rg_settings(
+        num_row_groups,
+        args.rg_chunk,
+        args.rg_chunk_auto,
+        args.threads,
+    );
     let run_once = || -> Result<(), Box<dyn std::error::Error>> {
         let cov = compute_rg_parallel_coverage(
             bytes,
             &args.time_column,
             &args.bucket,
             args.batch_size,
-            args.rg_chunk,
-            args.threads,
+            rg_chunk_used,
+            threads_used,
         )?;
         let _ = cov.present();
         Ok(())
@@ -666,13 +730,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let baseline_cov =
             compute_arrow_coverage(&bytes, &args.time_column, &args.bucket, args.batch_size)?;
         if engines.contains(&Engine::RgParallel) {
+            let (threads_used, rg_chunk_used) = resolve_rg_settings(
+                metadata.metadata().num_row_groups(),
+                args.rg_chunk,
+                args.rg_chunk_auto,
+                args.threads,
+            );
             let rg_cov = compute_rg_parallel_coverage(
                 &bytes,
                 &args.time_column,
                 &args.bucket,
                 args.batch_size,
-                args.rg_chunk,
-                args.threads,
+                rg_chunk_used,
+                threads_used,
             )?;
             if baseline_cov.present() != rg_cov.present() {
                 return Err("rg-parallel coverage mismatch vs baseline".into());
@@ -758,11 +828,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .batch_size
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "default".to_string());
-                let rg_chunk = args.rg_chunk.to_string();
-                let threads = args
-                    .threads
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "default".to_string());
+                let (rg_chunk, threads) = if *label == "rg-parallel" {
+                    let (threads_used, rg_chunk_used) = resolve_rg_settings(
+                        metadata.metadata().num_row_groups(),
+                        args.rg_chunk,
+                        args.rg_chunk_auto,
+                        args.threads,
+                    );
+                    (rg_chunk_used.to_string(), threads_used.to_string())
+                } else {
+                    (args.rg_chunk.to_string(), args.threads.as_label())
+                };
                 let row = format!(
                     "{label},{file},{rows},{time_column},{bucket},{batch_size},{rg_chunk},{threads},{iter},{elapsed_ms:.3},{throughput:.0}",
                     label = label,
