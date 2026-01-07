@@ -65,6 +65,7 @@ struct Args {
     batch_size: Option<usize>,
     rg_chunk: usize,
     threads: Option<usize>,
+    print_metadata: bool,
     csv: Option<String>,
 }
 
@@ -81,6 +82,7 @@ fn usage() -> String {
         "  --batch-size <n>        (optional; Arrow/parquet-direct batch size)",
         "  --rg-chunk <n>          (row groups per parallel task; default: 1)",
         "  --threads <n>           (rg-parallel only; overrides rayon thread count)",
+        "  --print-metadata        (print parquet row group metadata and exit)",
         "  --csv <path>            (optional CSV output)",
     ]
     .join("\n")
@@ -96,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
     let mut batch_size = None;
     let mut rg_chunk = 1usize;
     let mut threads = None;
+    let mut print_metadata = false;
     let mut csv = None;
 
     let mut args = std::env::args().skip(1);
@@ -156,6 +159,9 @@ fn parse_args() -> Result<Args, String> {
                 }
                 threads = Some(parsed);
             }
+            "--print-metadata" => {
+                print_metadata = true;
+            }
             "--csv" => {
                 csv = Some(args.next().ok_or("missing value for --csv")?);
             }
@@ -184,6 +190,7 @@ fn parse_args() -> Result<Args, String> {
         batch_size,
         rg_chunk,
         threads,
+        print_metadata,
         csv,
     })
 }
@@ -632,6 +639,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = Bytes::from(fs::read(&args.file)?);
     let metadata = ArrowReaderMetadata::load(&bytes, ArrowReaderOptions::default())?;
     let rows = metadata.metadata().file_metadata().num_rows();
+    if args.print_metadata {
+        println!("file: {}", args.file);
+        println!("num_row_groups: {}", metadata.metadata().num_row_groups());
+        for (idx, rg) in metadata.metadata().row_groups().iter().enumerate() {
+            println!(
+                "row_group {}: num_rows={}, total_byte_size={}",
+                idx,
+                rg.num_rows(),
+                rg.total_byte_size()
+            );
+        }
+        return Ok(());
+    }
 
     let mut results = Vec::new();
 
