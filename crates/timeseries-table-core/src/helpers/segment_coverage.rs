@@ -23,9 +23,13 @@ use arrow_array::{
 };
 use bytes::Bytes;
 use parquet::{
-    arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder},
+    arrow::{
+        ProjectionMask,
+        arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder},
+    },
     errors::ParquetError,
 };
+use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use snafu::{Backtrace, Snafu};
 
@@ -170,6 +174,95 @@ fn add_buckets_from_values(
     Ok(())
 }
 
+fn resolve_rg_settings(num_row_groups: usize) -> (usize, usize) {
+    let logical_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let max_threads = logical_threads.saturating_mul(2).max(1);
+    let threads_used = if num_row_groups == 0 {
+        logical_threads.max(1)
+    } else if num_row_groups <= max_threads {
+        num_row_groups
+    } else {
+        logical_threads.max(1)
+    };
+    let rg_chunk = if num_row_groups == 0 {
+        1
+    } else {
+        num_row_groups.div_ceil(threads_used)
+    };
+    (threads_used, rg_chunk)
+}
+
+fn compute_bitmap_from_reader(
+    reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, ArrowError>>,
+    path_str: &str,
+    time_column: &str,
+    bucket_spec: &TimeBucket,
+) -> Result<RoaringBitmap, SegmentCoverageError> {
+    let mut bitmap = RoaringBitmap::new();
+
+    macro_rules! process_timestamp_array {
+        ($array_type: ty, $col: expr, $unit: expr) => {{
+            let arr = $col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
+                SegmentCoverageError::TimeColumn {
+                    path: path_str.to_string(),
+                    source: TimeColumnError::UnsupportedArrowType {
+                        column: time_column.to_string(),
+                        datatype: $col.data_type().to_string(),
+                    },
+                }
+            })?;
+
+            if arr.null_count() == 0 {
+                add_buckets_from_values(&mut bitmap, path_str, bucket_spec, $unit, arr.values())
+            } else {
+                add_buckets_from_iter(&mut bitmap, path_str, bucket_spec, $unit, arr.iter())
+            }
+        }};
+    }
+
+    for batch_res in reader {
+        let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
+            path: path_str.to_string(),
+            source,
+            backtrace: Backtrace::capture(),
+        })?;
+
+        let col = batch.column(0);
+
+        match col.data_type() {
+            DataType::Timestamp(unit, _) => match unit {
+                TimeUnit::Second => process_timestamp_array!(TimestampSecondArray, col, *unit)?,
+
+                TimeUnit::Millisecond => {
+                    process_timestamp_array!(TimestampMillisecondArray, col, *unit)?
+                }
+
+                TimeUnit::Microsecond => {
+                    process_timestamp_array!(TimestampMicrosecondArray, col, *unit)?
+                }
+
+                TimeUnit::Nanosecond => {
+                    process_timestamp_array!(TimestampNanosecondArray, col, *unit)?
+                }
+            },
+
+            other => {
+                return Err(SegmentCoverageError::TimeColumn {
+                    path: path_str.to_string(),
+                    source: TimeColumnError::UnsupportedArrowType {
+                        column: time_column.to_string(),
+                        datatype: other.to_string(),
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(bitmap)
+}
+
 /// Compute segment coverage from in-memory Parquet bytes.
 ///
 /// This mirrors `compute_segment_coverage` but operates on a provided `Bytes`
@@ -193,102 +286,88 @@ pub fn compute_segment_coverage_from_parquet_bytes(
 ) -> Result<Coverage, SegmentCoverageError> {
     let path_str = rel_path.display().to_string();
 
-    // Build parquet -> arrow batch reader from the provided bytes.
-    let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(|source| {
-        SegmentCoverageError::ParquetRead {
-            path: path_str.clone(),
-            source,
-            backtrace: Backtrace::capture(),
-        }
-    })?;
-
-    // Find the time column index, and project only that one for efficiency.
-    let schema = builder.schema();
-    // Validate the column exists in the Arrow schema (good error message)
-    let _arrow_idx =
-        schema
-            .index_of(time_column)
-            .map_err(|_| SegmentCoverageError::TimeColumn {
+    let metadata =
+        ArrowReaderMetadata::load(&data, ArrowReaderOptions::default()).map_err(|source| {
+            SegmentCoverageError::ParquetRead {
                 path: path_str.clone(),
-                source: TimeColumnError::Missing {
-                    column: time_column.to_string(),
-                },
-            })?;
-
-    let mask = ProjectionMask::columns(builder.parquet_schema(), [time_column]);
-    let builder = builder.with_projection(mask);
-
-    let reader = builder
-        .build()
-        .map_err(|source| SegmentCoverageError::ParquetRead {
-            path: path_str.clone(),
-            source,
-            backtrace: Backtrace::capture(),
-        })?;
-
-    // Compute coverage: accumulate bucket IDs into a bitmap.
-    let mut bitmap = RoaringBitmap::new();
-
-    macro_rules! process_timestamp_array {
-        ($array_type: ty, $col: expr, $unit: expr) => {{
-            let arr = $col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
-                SegmentCoverageError::TimeColumn {
-                    path: path_str.clone(),
-                    source: TimeColumnError::UnsupportedArrowType {
-                        column: time_column.to_string(),
-                        datatype: $col.data_type().to_string(),
-                    },
-                }
-            })?;
-
-            if arr.null_count() == 0 {
-                add_buckets_from_values(&mut bitmap, &path_str, bucket_spec, $unit, arr.values())
-            } else {
-                add_buckets_from_iter(&mut bitmap, &path_str, bucket_spec, $unit, arr.iter())
+                source,
+                backtrace: Backtrace::capture(),
             }
-        }};
-    }
-
-    for batch_res in reader {
-        let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
-            path: path_str.clone(),
-            source,
-            backtrace: Backtrace::capture(),
         })?;
 
-        // After projection, the timestamp column is at 0;
-        let col = batch.column(0);
-
-        match col.data_type() {
-            DataType::Timestamp(unit, _) => match unit {
-                TimeUnit::Second => process_timestamp_array!(TimestampSecondArray, col, *unit)?,
-
-                TimeUnit::Millisecond => {
-                    process_timestamp_array!(TimestampMillisecondArray, col, *unit)?
-                }
-
-                TimeUnit::Microsecond => {
-                    process_timestamp_array!(TimestampMicrosecondArray, col, *unit)?
-                }
-
-                TimeUnit::Nanosecond => {
-                    process_timestamp_array!(TimestampNanosecondArray, col, *unit)?
-                }
+    // Validate the column exists in the Arrow schema (good error message)
+    metadata
+        .schema()
+        .index_of(time_column)
+        .map_err(|_| SegmentCoverageError::TimeColumn {
+            path: path_str.clone(),
+            source: TimeColumnError::Missing {
+                column: time_column.to_string(),
             },
+        })?;
 
-            other => {
-                return Err(SegmentCoverageError::TimeColumn {
-                    path: path_str.clone(),
-                    source: TimeColumnError::UnsupportedArrowType {
-                        column: time_column.to_string(),
-                        datatype: other.to_string(),
-                    },
-                });
-            }
-        }
+    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
+    let row_groups = metadata.metadata().num_row_groups();
+
+    if row_groups <= 1 {
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(data, metadata)
+            .with_projection(mask);
+        let reader = builder
+            .build()
+            .map_err(|source| SegmentCoverageError::ParquetRead {
+                path: path_str.clone(),
+                source,
+                backtrace: Backtrace::capture(),
+            })?;
+        let bitmap = compute_bitmap_from_reader(reader, &path_str, time_column, bucket_spec)?;
+        return Ok(Coverage::from_bitmap(bitmap));
     }
 
-    Ok(Coverage::from_bitmap(bitmap))
+    let (threads_used, rg_chunk) = resolve_rg_settings(row_groups);
+    let rg_indices: Vec<usize> = (0..row_groups).collect();
+    let chunks: Vec<Vec<usize>> = rg_indices
+        .chunks(rg_chunk)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads_used)
+        .build()
+        .map_err(|e| SegmentCoverageError::ParquetRead {
+            path: path_str.clone(),
+            source: ParquetError::General(format!("failed to build rayon thread pool: {e}")),
+            backtrace: Backtrace::capture(),
+        })?;
+
+    let bitmaps: Result<Vec<RoaringBitmap>, SegmentCoverageError> = pool.install(|| {
+        chunks
+            .par_iter()
+            .map(|chunk| {
+                let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                    data.clone(),
+                    metadata.clone(),
+                )
+                .with_projection(mask.clone())
+                .with_row_groups(chunk.clone());
+                let reader =
+                    builder
+                        .build()
+                        .map_err(|source| SegmentCoverageError::ParquetRead {
+                            path: path_str.clone(),
+                            source,
+                            backtrace: Backtrace::capture(),
+                        })?;
+                compute_bitmap_from_reader(reader, &path_str, time_column, bucket_spec)
+            })
+            .collect()
+    });
+
+    let mut merged = RoaringBitmap::new();
+    for bm in bitmaps? {
+        merged |= bm;
+    }
+
+    Ok(Coverage::from_bitmap(merged))
 }
 
 /// Computes segment-level time-series coverage by reading a Parquet segment file
