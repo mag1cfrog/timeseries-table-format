@@ -186,12 +186,12 @@ fn resolve_rg_settings(num_row_groups: usize) -> (usize, usize) {
     } else {
         logical_threads.max(1)
     };
-    let rg_chunk = if threads_used == 0 {
+    let rg_chunk = if num_row_groups == 0 {
         1
     } else {
         num_row_groups.div_ceil(threads_used)
     };
-    (threads_used.max(1), rg_chunk.max(1))
+    (threads_used, rg_chunk)
 }
 
 fn compute_bitmap_from_reader(
