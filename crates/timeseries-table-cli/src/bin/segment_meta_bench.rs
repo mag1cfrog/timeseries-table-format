@@ -512,7 +512,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut results = Vec::new();
-    let mut reference: Option<(i64, i64)> = None;
 
     results.push(run_bench(
         "row_iter_baseline",
@@ -524,10 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || scan_row_iter(&bytes, time_idx),
     )?);
 
-    {
-        let (min_v, max_v, _) = scan_row_iter(&bytes, time_idx)?;
-        reference = Some((min_v, max_v));
-    }
+    let (ref_min, ref_max, _) = scan_row_iter(&bytes, time_idx)?;
 
     results.push(run_bench(
         "direct_column_reader",
@@ -559,29 +555,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || scan_direct_column_rg_parallel(&bytes, time_idx, args.threads),
     )?);
 
-    if let Some((ref_min, ref_max)) = reference {
-        let strategies = [
-            (
-                "direct_column_reader",
-                scan_direct_column(&bytes, time_idx)?,
-            ),
-            (
-                "row_group_parallel_arrow",
-                scan_arrow_rg_parallel(&bytes, &args.time_column, args.threads)?,
-            ),
-            (
-                "row_group_parallel_direct",
-                scan_direct_column_rg_parallel(&bytes, time_idx, args.threads)?,
-            ),
-        ];
+    let strategies = [
+        (
+            "direct_column_reader",
+            scan_direct_column(&bytes, time_idx)?,
+        ),
+        (
+            "row_group_parallel_arrow",
+            scan_arrow_rg_parallel(&bytes, &args.time_column, args.threads)?,
+        ),
+        (
+            "row_group_parallel_direct",
+            scan_direct_column_rg_parallel(&bytes, time_idx, args.threads)?,
+        ),
+    ];
 
-        for (name, (min_v, max_v, _)) in strategies {
-            if min_v != ref_min || max_v != ref_max {
-                return Err(format!(
-                    "correctness check failed for {name}: expected min/max {ref_min}/{ref_max}, got {min_v}/{max_v}"
-                )
-                .into());
-            }
+    for (name, (min_v, max_v, _)) in strategies {
+        if min_v != ref_min || max_v != ref_max {
+            return Err(format!(
+                "correctness check failed for {name}: expected min/max {ref_min}/{ref_max}, got {min_v}/{max_v}"
+            )
+            .into());
         }
     }
 
