@@ -89,17 +89,6 @@ fn min_max_from_stats(
     }
 }
 
-#[allow(dead_code)]
-fn min_max_from_scan(
-    path: &str,
-    column: &str,
-    time_idx: usize,
-    reader: &SerializedFileReader<Bytes>,
-) -> Result<(i64, i64), SegmentMetaError> {
-    let (min, max, _) = min_max_from_scan_with_count(path, column, time_idx, reader)?;
-    Ok((min, max))
-}
-
 fn min_max_from_scan_with_count(
     path: &str,
     column: &str,

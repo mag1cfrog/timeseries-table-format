@@ -5,10 +5,14 @@ edition = "2024"
 
 [dependencies]
 arrow = { workspace = true, features = ["prettyprint"] }
+arrow-array = { workspace = true }
 arrow-csv = { workspace = true }
 arrow-json = { workspace = true }
+bytes = "1.11.0"
 clap = { version = "4.5.54", features = ["derive"] }
 datafusion = { workspace = true }
+parquet = { workspace = true }
+rayon = "1.11.0"
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
