@@ -19,5 +19,8 @@
 mod segment_meta;
 pub use segment_meta::*;
 
+mod rg_parallel;
+pub use rg_parallel::*;
+
 mod schema;
 pub use schema::*;

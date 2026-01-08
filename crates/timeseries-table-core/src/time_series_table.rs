@@ -22,6 +22,8 @@
 //! - commit `AddSegment` with `coverage_path` plus `UpdateTableCoverage` atomically,
 //! - fail fast if the table state is missing coverage pointers or has segments without `coverage_path`.
 pub mod append;
+/// Append profiling report types used by CLI benchmarks.
+pub mod append_report;
 pub mod coverage_queries;
 pub mod coverage_state;
 pub mod error;

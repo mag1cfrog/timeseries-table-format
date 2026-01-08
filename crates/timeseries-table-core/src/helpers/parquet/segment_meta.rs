@@ -2,9 +2,14 @@ use std::path::Path;
 
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
+use parquet::arrow::{
+    ProjectionMask,
+    arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder},
+};
 use parquet::basic::{LogicalType, TimeUnit, Type as PhysicalType};
 
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use rayon::prelude::*;
 
 use snafu::Backtrace;
 
@@ -89,66 +94,190 @@ fn min_max_from_stats(
     }
 }
 
-fn min_max_from_scan(
-    path: &str,
-    column: &str,
-    time_idx: usize,
-    reader: &SerializedFileReader<Bytes>,
-) -> Result<(i64, i64), SegmentMetaError> {
-    use parquet::record::Field;
+use crate::helpers::parquet::resolve_rg_settings;
 
-    let iter = reader
-        .get_row_iter(None)
-        .map_err(|source| SegmentMetaError::ParquetRead {
-            path: path.to_string(),
-            source,
-            backtrace: Backtrace::capture(),
-        })?;
+fn scan_arrow_batches_min_max(
+    path: &str,
+    time_column: &str,
+    reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
+) -> Result<(i64, i64, u64), SegmentMetaError> {
+    use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
+    use arrow_array::{
+        Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
 
     let mut min_val: Option<i64> = None;
     let mut max_val: Option<i64> = None;
+    let mut scanned_rows: u64 = 0;
 
-    for row_res in iter {
-        let row = row_res.map_err(|source| SegmentMetaError::ParquetRead {
+    macro_rules! scan_arr {
+        ($arr:ty, $col:expr) => {{
+            let arr = $col.as_any().downcast_ref::<$arr>().ok_or_else(|| {
+                SegmentMetaError::TimeColumn {
+                    path: path.to_string(),
+                    source: TimeColumnError::UnsupportedArrowType {
+                        column: time_column.to_string(),
+                        datatype: $col.data_type().to_string(),
+                    },
+                }
+            })?;
+
+            if arr.null_count() == 0 {
+                for &v in arr.values() {
+                    min_val = Some(match min_val {
+                        Some(prev) => prev.min(v),
+                        None => v,
+                    });
+                    max_val = Some(match max_val {
+                        Some(prev) => prev.max(v),
+                        None => v,
+                    });
+                    scanned_rows = scanned_rows.saturating_add(1);
+                }
+            } else {
+                for v in arr.iter().flatten() {
+                    min_val = Some(match min_val {
+                        Some(prev) => prev.min(v),
+                        None => v,
+                    });
+                    max_val = Some(match max_val {
+                        Some(prev) => prev.max(v),
+                        None => v,
+                    });
+                    scanned_rows = scanned_rows.saturating_add(1);
+                }
+            }
+        }};
+    }
+
+    for batch_res in reader {
+        let batch = batch_res.map_err(|source| SegmentMetaError::ArrowRead {
             path: path.to_string(),
             source,
             backtrace: Backtrace::capture(),
         })?;
 
-        // Get raw field and extract i64 value from any timestamp type
-        let field = row.get_column_iter().nth(time_idx).map(|(_, f)| f);
-        let v = match field {
-            Some(Field::Long(val)) => *val,
-            Some(Field::TimestampMillis(val)) => *val,
-            Some(Field::TimestampMicros(val)) => *val,
-            _ => {
-                return Err(SegmentMetaError::ParquetRead {
+        let col = batch.column(0);
+        match col.data_type() {
+            DataType::Timestamp(unit, _) => match unit {
+                ArrowTimeUnit::Second => scan_arr!(TimestampSecondArray, col),
+                ArrowTimeUnit::Millisecond => scan_arr!(TimestampMillisecondArray, col),
+                ArrowTimeUnit::Microsecond => scan_arr!(TimestampMicrosecondArray, col),
+                ArrowTimeUnit::Nanosecond => scan_arr!(TimestampNanosecondArray, col),
+            },
+            other => {
+                return Err(SegmentMetaError::TimeColumn {
                     path: path.to_string(),
-                    source: parquet::errors::ParquetError::General(format!(
-                        "Cannot read timestamp from field at index {time_idx}"
-                    )),
-                    backtrace: Backtrace::capture(),
+                    source: TimeColumnError::UnsupportedArrowType {
+                        column: time_column.to_string(),
+                        datatype: other.to_string(),
+                    },
                 });
             }
-        };
-
-        min_val = Some(match min_val {
-            Some(prev) => prev.min(v),
-            None => v,
-        });
-        max_val = Some(match max_val {
-            Some(prev) => prev.max(v),
-            None => v,
-        });
+        }
     }
 
     match (min_val, max_val) {
-        (Some(lo), Some(hi)) => Ok((lo, hi)),
+        (Some(lo), Some(hi)) => Ok((lo, hi, scanned_rows)),
         _ => Err(SegmentMetaError::ParquetStatsMissing {
             path: path.to_string(),
-            column: column.to_string(),
+            column: time_column.to_string(),
         }),
     }
+}
+
+fn min_max_from_arrow_rg_parallel_with_count(
+    path: &str,
+    time_column: &str,
+    data: Bytes,
+) -> Result<(i64, i64, u64), SegmentMetaError> {
+    let metadata =
+        ArrowReaderMetadata::load(&data, ArrowReaderOptions::default()).map_err(|source| {
+            SegmentMetaError::ParquetRead {
+                path: path.to_string(),
+                source,
+                backtrace: Backtrace::capture(),
+            }
+        })?;
+
+    metadata
+        .schema()
+        .index_of(time_column)
+        .map_err(|_| SegmentMetaError::TimeColumn {
+            path: path.to_string(),
+            source: TimeColumnError::Missing {
+                column: time_column.to_string(),
+            },
+        })?;
+
+    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
+    let row_groups = metadata.metadata().num_row_groups();
+
+    if row_groups <= 1 {
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(data, metadata)
+            .with_projection(mask);
+        let reader = builder
+            .build()
+            .map_err(|source| SegmentMetaError::ParquetRead {
+                path: path.to_string(),
+                source,
+                backtrace: Backtrace::capture(),
+            })?;
+        return scan_arrow_batches_min_max(path, time_column, reader);
+    }
+
+    let (threads_used, rg_chunk) = resolve_rg_settings(row_groups);
+    let rg_indices: Vec<usize> = (0..row_groups).collect();
+    let chunks: Vec<Vec<usize>> = rg_indices
+        .chunks(rg_chunk)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads_used)
+        .build()
+        .map_err(|e| SegmentMetaError::ParquetRead {
+            path: path.to_string(),
+            source: parquet::errors::ParquetError::General(format!(
+                "failed to build rayon thread pool: {e}"
+            )),
+            backtrace: Backtrace::capture(),
+        })?;
+
+    let results: Result<Vec<(i64, i64, u64)>, SegmentMetaError> = pool.install(|| {
+        chunks
+            .par_iter()
+            .map(|chunk| {
+                let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                    data.clone(),
+                    metadata.clone(),
+                )
+                .with_projection(mask.clone())
+                .with_row_groups(chunk.clone());
+                let reader = builder
+                    .build()
+                    .map_err(|source| SegmentMetaError::ParquetRead {
+                        path: path.to_string(),
+                        source,
+                        backtrace: Backtrace::capture(),
+                    })?;
+                scan_arrow_batches_min_max(path, time_column, reader)
+            })
+            .collect()
+    });
+
+    let results = results?;
+    let mut min_val = i64::MAX;
+    let mut max_val = i64::MIN;
+    let mut scanned_rows: u64 = 0;
+    for (lo, hi, rows) in results {
+        min_val = min_val.min(lo);
+        max_val = max_val.max(hi);
+        scanned_rows = scanned_rows.saturating_add(rows);
+    }
+
+    Ok((min_val, max_val, scanned_rows))
 }
 
 /// Internal enum to capture which Parquet timestamp unit we selected.
@@ -206,6 +335,19 @@ fn ts_from_i64(unit: TimestampUnit, value: i64) -> Result<DateTime<Utc>, Segment
         })
 }
 
+/// Profiling details collected while building `SegmentMeta`.
+#[derive(Debug, Clone)]
+pub struct SegmentMetaReport {
+    /// Number of row groups reported by Parquet metadata.
+    pub row_groups: usize,
+    /// Total row count from file metadata.
+    pub row_count: u64,
+    /// True if min/max were derived from Parquet statistics.
+    pub used_stats: bool,
+    /// Number of rows scanned during fallback (0 if stats were used).
+    pub scanned_rows: u64,
+}
+
 /// Build a `SegmentMeta` from in-memory Parquet bytes.
 ///
 /// This mirrors `segment_meta_from_parquet_location` but operates on a provided
@@ -229,6 +371,18 @@ pub fn segment_meta_from_parquet_bytes(
     time_column: &str,
     data: Bytes,
 ) -> SegmentResult<SegmentMeta> {
+    let (meta, _) =
+        segment_meta_from_parquet_bytes_with_report(rel_path, segment_id, time_column, data)?;
+    Ok(meta)
+}
+
+/// Build a `SegmentMeta` from in-memory Parquet bytes and return profiling data.
+pub fn segment_meta_from_parquet_bytes_with_report(
+    rel_path: &Path,
+    segment_id: SegmentId,
+    time_column: &str,
+    data: Bytes,
+) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
     let path_str = rel_path.display().to_string();
 
     if data.len() < 8 {
@@ -238,16 +392,18 @@ pub fn segment_meta_from_parquet_bytes(
     let file_size = data.len() as u64;
 
     // Parquet reader works on any Read + Seek.
-    let reader =
-        SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
+    let reader = SerializedFileReader::new(data.clone()).map_err(|source| {
+        SegmentMetaError::ParquetRead {
             path: path_str.clone(),
             source,
             backtrace: Backtrace::capture(),
-        })?;
+        }
+    })?;
 
     let meta = reader.metadata();
     let file_meta = meta.file_metadata();
     let row_count = file_meta.num_rows() as u64;
+    let row_groups = meta.num_row_groups();
 
     // Locate the time column in the schema descriptor.
     let schema = file_meta.schema_descr();
@@ -280,11 +436,13 @@ pub fn segment_meta_from_parquet_bytes(
     // Try fast path: min/max from row-group stats.
     let stats_min_max = min_max_from_stats(&path_str, time_column, time_idx, &reader)?;
 
-    let (ts_min_raw, ts_max_raw) = match stats_min_max {
-        Some(pair) => pair,
+    let (ts_min_raw, ts_max_raw, used_stats, scanned_rows) = match stats_min_max {
+        Some(pair) => (pair.0, pair.1, true, 0),
         None => {
-            // Fallback: row scan if stats are missing/incomplete.
-            min_max_from_scan(&path_str, time_column, time_idx, &reader)?
+            // Fallback: row-group parallel Arrow decode for the timestamp column.
+            let (min, max, scanned_rows) =
+                min_max_from_arrow_rg_parallel_with_count(&path_str, time_column, data.clone())?;
+            (min, max, false, scanned_rows)
         }
     };
 
@@ -293,7 +451,7 @@ pub fn segment_meta_from_parquet_bytes(
     let ts_max = ts_from_i64(unit, ts_max_raw)?;
 
     // Build SegmentMeta: caller supplies segment_id; we fill in the ts_* and row_count.
-    Ok(SegmentMeta {
+    let meta_out = SegmentMeta {
         segment_id,
         path: rel_path.to_string_lossy().into_owned(),
         format: FileFormat::Parquet,
@@ -302,7 +460,16 @@ pub fn segment_meta_from_parquet_bytes(
         row_count,
         file_size: Some(file_size),
         coverage_path: None,
-    })
+    };
+
+    let report = SegmentMetaReport {
+        row_groups,
+        row_count,
+        used_stats,
+        scanned_rows,
+    };
+
+    Ok((meta_out, report))
 }
 
 /// Read a Parquet file at `rel_path` from `location` and produce a SegmentMeta

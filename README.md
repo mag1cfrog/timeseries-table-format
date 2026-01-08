@@ -5,7 +5,7 @@
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
 <p align="center">
-  <img src="docs/ferris-timeseries-3.png" alt="Ferris with timeseries-table-format" width="1920" />
+  <img src="docs/assets/ferris-timeseries-3.png" alt="Ferris with timeseries-table-format" width="1920" />
 </p>
 
 Time-series data deserves something better than “just more Parquet files.”
@@ -39,7 +39,7 @@ While experimenting with backtests and custom indicators (moving averages, volat
 ## High-level architecture
 
 <p align="center">
-  <img src="docs/high-level-architecture-2.png" alt="high level architecture" width="1920" />
+  <img src="docs/assets/high-level-architecture-2.png" alt="high level architecture" width="1920" />
 </p>
 
 At a high level, a time-series table in this project looks like:
