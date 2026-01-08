@@ -82,6 +82,49 @@ Early **MVP** work in progress:
 - [x] Log-based metadata layer with version-guard OCC  
 - [x] Time-series table abstraction + basic range scans  
 - [x] Coverage snapshots, overlap-safe append checks, and basic gap/coverage metrics  
+- [x] CLI for table management and SQL queries
 - [ ] Small end-to-end example (synthetic time-series data)
 
 APIs and on-disk layouts may change until v0.1 is tagged.
+
+---
+
+## Getting started
+
+### CLI
+
+The easiest way to try out this project is with the CLI—no Rust code required:
+
+```bash
+# Install from GitHub
+cargo install --git https://github.com/mag1cfrog/timeseries-table-format timeseries-table-cli
+
+# Create a table, append data, and query
+timeseries-table-cli create --table ./my_table --time-column ts --bucket 1h
+timeseries-table-cli append --table ./my_table --parquet ./data.parquet
+timeseries-table-cli query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
+```
+
+See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full command reference.
+
+### Rust API
+
+For programmatic access, use the core crate directly:
+
+```toml
+[dependencies]
+timeseries-table-core = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+```
+
+See [timeseries-table-core](crates/timeseries-table-core/README.md) for API docs.
+
+### DataFusion integration
+
+Run SQL queries with time-based segment pruning:
+
+```toml
+[dependencies]
+timeseries-table-datafusion = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+```
+
+See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) for details.
