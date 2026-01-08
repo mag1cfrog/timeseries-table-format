@@ -36,8 +36,8 @@ use snafu::{Backtrace, Snafu};
 use crate::{
     common::time_column::TimeColumnError,
     coverage::Coverage,
-    helpers::time_bucket::bucket_id_from_epoch_secs,
     helpers::parquet::resolve_rg_settings,
+    helpers::time_bucket::bucket_id_from_epoch_secs,
     storage::{self, StorageError, TableLocation},
     transaction_log::TimeBucket,
 };
@@ -174,7 +174,6 @@ fn add_buckets_from_values(
     }
     Ok(())
 }
-
 
 fn compute_bitmap_from_reader(
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, ArrowError>>,
