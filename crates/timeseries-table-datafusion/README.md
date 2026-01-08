@@ -1,13 +1,90 @@
 # timeseries-table-datafusion
 
 This crate lets you query a `timeseries-table-core` table using DataFusion SQL.
-It focuses on time-series workloads and includes **compile-time pruning**:
-when a query has a time predicate, we try to determine which data segments
-cannot possibly match, and skip them before execution.
+It focuses on time-series workloads and includes **segment-level pruning**:
+when a query has a time predicate, we determine which data segments cannot
+possibly match (based on each segment's `ts_min`/`ts_max`), and skip them
+before execution.
 
 The goal is simple: keep SQL queries fast without changing your data.
 
-## What works well today
+## Getting Started
+
+### Installation
+
+```toml
+[dependencies]
+timeseries-table-datafusion = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+datafusion = "46"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+```
+
+### Rust API Example
+
+```rust
+use datafusion::prelude::*;
+use timeseries_table_core::TimeSeriesTable;
+use timeseries_table_datafusion::TsTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Open an existing table
+    let table = TimeSeriesTable::open("./my_table")?;
+
+    // 2. Create a TsTableProvider (implements DataFusion's TableProvider)
+    let provider = TsTableProvider::try_new(Arc::new(table)).await?;
+
+    // 3. Register it in a DataFusion SessionContext
+    let ctx = SessionContext::new();
+    ctx.register_table("my_table", Arc::new(provider))?;
+
+    // 4. Run a query with time filters + projection
+    //    Time filters enable segment pruning automatically
+    let df = ctx.sql("
+        SELECT ts, symbol, close
+        FROM my_table
+        WHERE ts >= '2024-01-01T00:00:00Z'
+          AND ts <  '2024-02-01T00:00:00Z'
+        ORDER BY ts
+        LIMIT 100
+    ").await?;
+
+    // 5. Collect and print results
+    let batches = df.collect().await?;
+    for batch in &batches {
+        println!("{:?}", batch);
+    }
+
+    // Or use show() for a formatted table
+    // df.show().await?;
+
+    Ok(())
+}
+```
+
+### How Pruning Works
+
+When you include time predicates in your query (e.g., `WHERE ts >= '...' AND ts < '...'`),
+the `TsTableProvider` extracts those filters and compares them against each segment's
+metadata (`ts_min`, `ts_max`). Segments that fall entirely outside the query range
+are skipped—no I/O is performed for them.
+
+This happens automatically; you don't need to do anything special.
+
+### Current Limitations
+
+- **Read-only**: This integration is for querying only. Use `timeseries-table-core` or the CLI for writes.
+- **Best-effort filter extraction**: Complex predicates may not be fully recognized (see below). Unrecognized predicates fall back to scanning all segments—correctness is preserved.
+- **No custom execution plan**: We use DataFusion's default `ParquetExec` after pruning. Future versions may add custom operators.
+
+---
+
+## Pruning Reference
+
+Below is a detailed reference of which SQL predicates enable segment pruning.
+
+### What works well today
 
 ### Basic time comparisons
 We recognize direct comparisons between the timestamp column and a literal:
@@ -122,20 +199,9 @@ These are intentionally treated as “unknown” to avoid incorrect pruning:
 
 Queries still run correctly; they just won’t be pruned.
 
-## Notes for contributors
+---
 
-- The pruning logic is in `src/ts_table_provider/`.
-- Unit tests for predicate logic live in `src/ts_table_provider/tests.rs`.
-- Integration tests (SQL-level) live in `tests/ts_table_provider_tests.rs`.
-- Test helpers for integration tests are in `src/test_utils.rs`.
+## Related
 
-## Quick example
-
-```sql
-SELECT *
-FROM t
-WHERE ts >= '2024-01-01T00:00:00Z'
-  AND ts <  '2024-01-02T00:00:00Z'
-```
-
-This should prune any segment that is fully outside the range.
+- [timeseries-table-cli](../timeseries-table-cli/README.md) — Command-line tool for managing and querying tables (no Rust code required)
+- [timeseries-table-core](../timeseries-table-core/README.md) — Core library for table creation, appends, and coverage tracking
