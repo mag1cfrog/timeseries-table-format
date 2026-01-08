@@ -9,6 +9,7 @@
 //!   Keep new append-time invariants here so the flow remains centralized.
 
 use std::path::Path;
+use std::time::Instant;
 
 use bytes::Bytes;
 
@@ -18,7 +19,7 @@ use crate::{
     coverage::serde::coverage_to_bytes,
     helpers::{
         coverage_sidecar::{CoverageError, write_coverage_sidecar_new_bytes},
-        parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes},
+        parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes_with_report},
         schema::ensure_schema_exact_match,
         segment_coverage::compute_segment_coverage_from_parquet_bytes,
         segment_entity_identity::segment_entity_identity_from_parquet_bytes,
@@ -29,6 +30,7 @@ use crate::{
     storage::{self, StorageError},
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
+        append_report::{AppendReport, AppendReportBuilder},
         error::{
             CoverageOverlapSnafu, EntityMismatchSnafu, ExistingSegmentMissingCoverageSnafu,
             MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
@@ -65,12 +67,31 @@ impl TimeSeriesTable {
     ///
     /// Callers must ensure `data` corresponds to `relative_path`; the function
     /// does not re-read from storage.
+    #[allow(dead_code)]
     async fn append_parquet_segment_with_id_and_bytes(
         &mut self,
         segment_id: SegmentId,
         relative_path: &str,
         time_column: &str,
         data: Bytes,
+    ) -> Result<u64, TableError> {
+        self.append_parquet_segment_with_id_and_bytes_inner(
+            segment_id,
+            relative_path,
+            time_column,
+            data,
+            None,
+        )
+        .await
+    }
+
+    async fn append_parquet_segment_with_id_and_bytes_inner(
+        &mut self,
+        segment_id: SegmentId,
+        relative_path: &str,
+        time_column: &str,
+        data: Bytes,
+        mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -80,12 +101,33 @@ impl TimeSeriesTable {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         // 1) Segment meta + schema.
-        let mut segment_meta =
-            segment_meta_from_parquet_bytes(rel_path, segment_id, time_column, data.clone())
-                .context(SegmentMetaSnafu)?;
+        let step_start = Instant::now();
+        let (mut segment_meta, meta_report) = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            segment_id,
+            time_column,
+            data.clone(),
+        )
+        .context(SegmentMetaSnafu)?;
+        if let Some(r) = report.as_mut() {
+            let fields = vec![
+                ("row_groups".to_string(), meta_report.row_groups.to_string()),
+                ("row_count".to_string(), meta_report.row_count.to_string()),
+                ("used_stats".to_string(), meta_report.used_stats.to_string()),
+                (
+                    "scanned_rows".to_string(),
+                    meta_report.scanned_rows.to_string(),
+                ),
+            ];
+            r.push_step("segment_meta", step_start.elapsed(), fields);
+        }
 
+        let step_start = Instant::now();
         let segment_schema =
             logical_schema_from_parquet_bytes(rel_path, data.clone()).context(SegmentMetaSnafu)?;
+        if let Some(r) = report.as_mut() {
+            r.push_step("logical_schema", step_start.elapsed(), Vec::new());
+        }
 
         // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
@@ -118,12 +160,16 @@ impl TimeSeriesTable {
 
         // 2.5) Entity identity enforcement / pinning (v0.1 single-entity-per-table)
         if !self.index.entity_columns.is_empty() {
+            let step_start = Instant::now();
             let seg_ident = segment_entity_identity_from_parquet_bytes(
                 data.clone(),
                 rel_path,
                 &self.index.entity_columns,
             )
             .context(SegmentEntityIdentitySnafu)?;
+            if let Some(r) = report.as_mut() {
+                r.push_step("entity_identity", step_start.elapsed(), Vec::new());
+            }
 
             match &self.state.table_meta.entity_identity {
                 Some(expected) => {
@@ -146,9 +192,14 @@ impl TimeSeriesTable {
         }
 
         // 3) Load current table snapshot coverage (or empty if first append).
+        let step_start = Instant::now();
         let table_cov = self.load_table_snapshot_coverage_with_heal().await?;
+        if let Some(r) = report.as_mut() {
+            r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
+        }
 
         // 4) Compute segment coverage.
+        let step_start = Instant::now();
         let segment_cov = compute_segment_coverage_from_parquet_bytes(
             rel_path,
             time_column,
@@ -156,8 +207,12 @@ impl TimeSeriesTable {
             data.clone(),
         )
         .context(SegmentCoverageSnafu)?;
+        if let Some(r) = report.as_mut() {
+            r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
+        }
 
         // 5) Overlap detection.
+        let step_start = Instant::now();
         let overlap = segment_cov.intersect(&table_cov);
         let overlap_count = overlap.cardinality();
         if overlap_count > 0 {
@@ -168,6 +223,9 @@ impl TimeSeriesTable {
                 example_bucket,
             }
             .fail();
+        }
+        if let Some(r) = report.as_mut() {
+            r.push_step("overlap_check", step_start.elapsed(), Vec::new());
         }
         let seg_cov_bytes =
             coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
@@ -180,6 +238,7 @@ impl TimeSeriesTable {
             segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
                 source: CoverageError::Layout { source },
             })?;
+        let step_start = Instant::now();
         match write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes).await
         {
             Ok(()) => {}
@@ -189,6 +248,9 @@ impl TimeSeriesTable {
                 // ok: same id implies same intended content
             }
             Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+        }
+        if let Some(r) = report.as_mut() {
+            r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
         }
 
         let new_version_guess = expected_version + 1;
@@ -207,6 +269,7 @@ impl TimeSeriesTable {
             }
         })?;
 
+        let step_start = Instant::now();
         match write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
             .await
         {
@@ -217,6 +280,9 @@ impl TimeSeriesTable {
                 // ok: same id implies same intended content
             }
             Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+        }
+        if let Some(r) = report.as_mut() {
+            r.push_step("write_snapshot_sidecar", step_start.elapsed(), Vec::new());
         }
 
         // 7) Build actions and commit.
@@ -233,11 +299,15 @@ impl TimeSeriesTable {
             coverage_path: snapshot_path.to_string_lossy().to_string(),
         });
 
+        let step_start = Instant::now();
         let new_version = self
             .log
             .commit_with_expected_version(expected_version, actions)
             .await
             .context(TransactionLogSnafu)?;
+        if let Some(r) = report.as_mut() {
+            r.push_step("commit_log", step_start.elapsed(), Vec::new());
+        }
 
         // OCC invariant: a successful commit_with_expected_version must return
         // the same "next" version we predicted when constructing `snapshot_path`.
@@ -251,6 +321,7 @@ impl TimeSeriesTable {
         );
 
         // 8) Update in-memory state.
+        let step_start = Instant::now();
         self.state.version = new_version;
 
         if let Some(updated_meta) = maybe_updated_meta {
@@ -267,6 +338,9 @@ impl TimeSeriesTable {
             coverage_path: snapshot_path.to_string_lossy().to_string(),
             version: new_version,
         });
+        if let Some(r) = report.as_mut() {
+            r.push_step("state_update", step_start.elapsed(), Vec::new());
+        }
 
         Ok(new_version)
     }
@@ -301,11 +375,12 @@ impl TimeSeriesTable {
             .await
             .context(StorageSnafu)?;
 
-        self.append_parquet_segment_with_id_and_bytes(
+        self.append_parquet_segment_with_id_and_bytes_inner(
             segment_id,
             relative_path,
             time_column,
             Bytes::from(bytes),
+            None,
         )
         .await
     }
@@ -329,8 +404,50 @@ impl TimeSeriesTable {
         let data = Bytes::from(bytes);
 
         let segment_id = segment_id_v1(relative_path, &data);
-        self.append_parquet_segment_with_id_and_bytes(segment_id, relative_path, time_column, data)
+        self.append_parquet_segment_with_id_and_bytes_inner(
+            segment_id,
+            relative_path,
+            time_column,
+            data,
+            None,
+        )
+        .await
+    }
+
+    /// Append a Parquet segment and return a profiling report.
+    pub async fn append_parquet_segment_with_report(
+        &mut self,
+        relative_path: &str,
+        time_column: &str,
+    ) -> Result<(u64, AppendReport), TableError> {
+        let mut report = AppendReportBuilder::new();
+        report.set_context("relative_path", relative_path);
+        report.set_context("time_column", time_column);
+
+        let rel_path = Path::new(relative_path);
+        let read_start = Instant::now();
+        let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
             .await
+            .context(StorageSnafu)?;
+        report.push_step("read_parquet_bytes", read_start.elapsed(), Vec::new());
+
+        report.set_context("bytes_len", bytes.len().to_string());
+        let data = Bytes::from(bytes);
+
+        let segment_id = segment_id_v1(relative_path, &data);
+        report.set_context("segment_id", segment_id.0.clone());
+
+        let version = self
+            .append_parquet_segment_with_id_and_bytes_inner(
+                segment_id,
+                relative_path,
+                time_column,
+                data,
+                Some(&mut report),
+            )
+            .await?;
+
+        Ok((version, report.finish()))
     }
 }
 

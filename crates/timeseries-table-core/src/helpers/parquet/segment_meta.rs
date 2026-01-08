@@ -89,12 +89,23 @@ fn min_max_from_stats(
     }
 }
 
+#[allow(dead_code)]
 fn min_max_from_scan(
     path: &str,
     column: &str,
     time_idx: usize,
     reader: &SerializedFileReader<Bytes>,
 ) -> Result<(i64, i64), SegmentMetaError> {
+    let (min, max, _) = min_max_from_scan_with_count(path, column, time_idx, reader)?;
+    Ok((min, max))
+}
+
+fn min_max_from_scan_with_count(
+    path: &str,
+    column: &str,
+    time_idx: usize,
+    reader: &SerializedFileReader<Bytes>,
+) -> Result<(i64, i64, u64), SegmentMetaError> {
     use parquet::record::Field;
 
     let iter = reader
@@ -107,6 +118,7 @@ fn min_max_from_scan(
 
     let mut min_val: Option<i64> = None;
     let mut max_val: Option<i64> = None;
+    let mut scanned_rows: u64 = 0;
 
     for row_res in iter {
         let row = row_res.map_err(|source| SegmentMetaError::ParquetRead {
@@ -140,10 +152,11 @@ fn min_max_from_scan(
             Some(prev) => prev.max(v),
             None => v,
         });
+        scanned_rows = scanned_rows.saturating_add(1);
     }
 
     match (min_val, max_val) {
-        (Some(lo), Some(hi)) => Ok((lo, hi)),
+        (Some(lo), Some(hi)) => Ok((lo, hi, scanned_rows)),
         _ => Err(SegmentMetaError::ParquetStatsMissing {
             path: path.to_string(),
             column: column.to_string(),
@@ -206,6 +219,19 @@ fn ts_from_i64(unit: TimestampUnit, value: i64) -> Result<DateTime<Utc>, Segment
         })
 }
 
+/// Profiling details collected while building `SegmentMeta`.
+#[derive(Debug, Clone)]
+pub struct SegmentMetaReport {
+    /// Number of row groups reported by Parquet metadata.
+    pub row_groups: usize,
+    /// Total row count from file metadata.
+    pub row_count: u64,
+    /// True if min/max were derived from Parquet statistics.
+    pub used_stats: bool,
+    /// Number of rows scanned during fallback (0 if stats were used).
+    pub scanned_rows: u64,
+}
+
 /// Build a `SegmentMeta` from in-memory Parquet bytes.
 ///
 /// This mirrors `segment_meta_from_parquet_location` but operates on a provided
@@ -229,6 +255,18 @@ pub fn segment_meta_from_parquet_bytes(
     time_column: &str,
     data: Bytes,
 ) -> SegmentResult<SegmentMeta> {
+    let (meta, _) =
+        segment_meta_from_parquet_bytes_with_report(rel_path, segment_id, time_column, data)?;
+    Ok(meta)
+}
+
+/// Build a `SegmentMeta` from in-memory Parquet bytes and return profiling data.
+pub fn segment_meta_from_parquet_bytes_with_report(
+    rel_path: &Path,
+    segment_id: SegmentId,
+    time_column: &str,
+    data: Bytes,
+) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
     let path_str = rel_path.display().to_string();
 
     if data.len() < 8 {
@@ -248,6 +286,7 @@ pub fn segment_meta_from_parquet_bytes(
     let meta = reader.metadata();
     let file_meta = meta.file_metadata();
     let row_count = file_meta.num_rows() as u64;
+    let row_groups = meta.num_row_groups();
 
     // Locate the time column in the schema descriptor.
     let schema = file_meta.schema_descr();
@@ -280,11 +319,13 @@ pub fn segment_meta_from_parquet_bytes(
     // Try fast path: min/max from row-group stats.
     let stats_min_max = min_max_from_stats(&path_str, time_column, time_idx, &reader)?;
 
-    let (ts_min_raw, ts_max_raw) = match stats_min_max {
-        Some(pair) => pair,
+    let (ts_min_raw, ts_max_raw, used_stats, scanned_rows) = match stats_min_max {
+        Some(pair) => (pair.0, pair.1, true, 0),
         None => {
             // Fallback: row scan if stats are missing/incomplete.
-            min_max_from_scan(&path_str, time_column, time_idx, &reader)?
+            let (min, max, scanned_rows) =
+                min_max_from_scan_with_count(&path_str, time_column, time_idx, &reader)?;
+            (min, max, false, scanned_rows)
         }
     };
 
@@ -293,7 +334,7 @@ pub fn segment_meta_from_parquet_bytes(
     let ts_max = ts_from_i64(unit, ts_max_raw)?;
 
     // Build SegmentMeta: caller supplies segment_id; we fill in the ts_* and row_count.
-    Ok(SegmentMeta {
+    let meta_out = SegmentMeta {
         segment_id,
         path: rel_path.to_string_lossy().into_owned(),
         format: FileFormat::Parquet,
@@ -302,7 +343,16 @@ pub fn segment_meta_from_parquet_bytes(
         row_count,
         file_size: Some(file_size),
         coverage_path: None,
-    })
+    };
+
+    let report = SegmentMetaReport {
+        row_groups,
+        row_count,
+        used_stats,
+        scanned_rows,
+    };
+
+    Ok((meta_out, report))
 }
 
 /// Read a Parquet file at `rel_path` from `location` and produce a SegmentMeta
