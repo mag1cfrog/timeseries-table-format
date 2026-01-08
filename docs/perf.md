@@ -37,3 +37,24 @@ cargo run -p timeseries-table-cli --bin segment_meta_bench -- \
 Notes:
 - `--threads 0` means “auto” for parallel strategies.
 - Benchmarks validate correctness by comparing min/max across strategies.
+
+## Coverage bitmap benchmark (core crate)
+The core crate includes `coverage_bench`, which compares coverage computation
+strategies for Parquet time columns.
+
+Example:
+```
+cargo run -p timeseries-table-core --bin coverage_bench -- \
+  --file ./data/fhvhv_2024-04.parquet \
+  --time-column pickup_datetime \
+  --bucket 1s \
+  --engine all \
+  --iters 5 --warmup 1 \
+  --csv ./coverage_bench.csv
+```
+
+Key options:
+- `--engine` = `baseline` | `rg-parallel` | `parquet-direct` | `all`
+- `--threads` for RG-parallel
+- `--batch-size` for Arrow/parquet-direct readers
+- `--print-metadata` to inspect row groups
