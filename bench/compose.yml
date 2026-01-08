@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - ./work/postgres:/var/lib/postgresql/data
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  timescaledb:
+    image: ${TIMESCALE_IMAGE}
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - ./work/timescaledb:/var/lib/postgresql/data
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  influxdb3:
+    image: ${INFLUX_IMAGE}
+    environment:
+      INFLUXDB3_HTTP_BIND: ":8086"
+      INFLUXDB3_START_WITHOUT_AUTH: "true"
+    volumes:
+      - ./work/influxdb3:/var/lib/influxdb3
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  spark:
+    image: ${SPARK_IMAGE}
+    environment:
+      - SPARK_MODE=master
+    volumes:
+      - ./work/spark:/opt/spark/work
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  timeseries_table:
+    build:
+      context: ..
+      dockerfile: bench/systems/timeseries_table/Dockerfile
+    volumes:
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
