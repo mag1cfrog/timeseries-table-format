@@ -30,4 +30,4 @@ for t in $(seq 1 "$MAX_THREADS"); do
       --iters 20 \
       --csv "$CSV"
   fi
- done
+done

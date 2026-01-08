@@ -20,7 +20,7 @@ Arguments:
 3) output csv (default: `rg-parallel-threads.csv`)
 4) rg_chunk (default: `1`)
 5) batch size (`default` to omit `--batch-size`)
-6) max threads to test (default: `16`)
+6) max threads to test (default: `32`)
 
 ## Grid sweep (threads x rg_chunk x batch)
 

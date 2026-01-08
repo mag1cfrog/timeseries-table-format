@@ -23,4 +23,4 @@ for t in "${THREADS_LIST[@]}"; do
         --csv "$CSV"
     done
   done
- done
+done
