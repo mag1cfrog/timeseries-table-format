@@ -384,7 +384,6 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     data: Bytes,
 ) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
     let path_str = rel_path.display().to_string();
-    let data = data.clone();
 
     if data.len() < 8 {
         return Err(SegmentMetaError::TooShort { path: path_str });
@@ -396,7 +395,6 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     let reader = SerializedFileReader::new(data.clone()).map_err(|source| {
         SegmentMetaError::ParquetRead {
             path: path_str.clone(),
-
             source,
             backtrace: Backtrace::capture(),
         }
