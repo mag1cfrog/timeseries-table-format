@@ -107,7 +107,7 @@ See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) 
 ## 🏗️ Architecture
 
 <p align="center">
-  <img src="docs/assets/high-level-architecture-2.png" alt="high level architecture" width="1920" />
+  <img src="docs/assets/high-level-architecture-3.png" alt="high level architecture" width="1920" />
 </p>
 
 <details>
