@@ -9,6 +9,7 @@ use parquet::arrow::{
 use parquet::basic::{LogicalType, TimeUnit, Type as PhysicalType};
 
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use rayon::prelude::*;
 
 use snafu::Backtrace;
 
@@ -234,11 +235,13 @@ fn min_max_from_arrow_rg_parallel_with_count(
     if row_groups <= 1 {
         let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(data, metadata)
             .with_projection(mask);
-        let reader = builder.build().map_err(|source| SegmentMetaError::ParquetRead {
-            path: path.to_string(),
-            source,
-            backtrace: Backtrace::capture(),
-        })?;
+        let reader = builder
+            .build()
+            .map_err(|source| SegmentMetaError::ParquetRead {
+                path: path.to_string(),
+                source,
+                backtrace: Backtrace::capture(),
+            })?;
         return scan_arrow_batches_min_max(path, time_column, reader);
     }
 
@@ -270,11 +273,13 @@ fn min_max_from_arrow_rg_parallel_with_count(
                 )
                 .with_projection(mask.clone())
                 .with_row_groups(chunk.clone());
-                let reader = builder.build().map_err(|source| SegmentMetaError::ParquetRead {
-                    path: path.to_string(),
-                    source,
-                    backtrace: Backtrace::capture(),
-                })?;
+                let reader = builder
+                    .build()
+                    .map_err(|source| SegmentMetaError::ParquetRead {
+                        path: path.to_string(),
+                        source,
+                        backtrace: Backtrace::capture(),
+                    })?;
                 scan_arrow_batches_min_max(path, time_column, reader)
             })
             .collect()
@@ -397,6 +402,7 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     data: Bytes,
 ) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
     let path_str = rel_path.display().to_string();
+    let data = data.clone();
 
     if data.len() < 8 {
         return Err(SegmentMetaError::TooShort { path: path_str });
@@ -405,12 +411,14 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     let file_size = data.len() as u64;
 
     // Parquet reader works on any Read + Seek.
-    let reader =
-        SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
+    let reader = SerializedFileReader::new(data.clone()).map_err(|source| {
+        SegmentMetaError::ParquetRead {
             path: path_str.clone(),
+
             source,
             backtrace: Backtrace::capture(),
-        })?;
+        }
+    })?;
 
     let meta = reader.metadata();
     let file_meta = meta.file_metadata();
