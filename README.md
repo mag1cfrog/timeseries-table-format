@@ -5,7 +5,7 @@
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
 <p align="center">
-  <img src="docs/assets/ferris-timeseries-3.png" alt="Ferris with timeseries-table-format" width="1920" />
+  <img src="docs/assets/ferris-timeseries.png" alt="Ferris with timeseries-table-format" width="1920" />
 </p>
 
 <h3 align="center">
@@ -107,7 +107,7 @@ See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) 
 ## 🏗️ Architecture
 
 <p align="center">
-  <img src="docs/assets/high-level-architecture-3.png" alt="high level architecture" width="1920" />
+  <img src="docs/assets/high-level-architecture.png" alt="high level architecture" width="1920" />
 </p>
 
 <details>
