@@ -26,9 +26,10 @@ jobs:
         with:
           filters: |
             code:
-              - 'crates/**'
               - '**/*.rs'
-              - 'Cargo.toml'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - '**/build.rs'
   
   rust-quality-gate:
     runs-on: ubuntu-latest
