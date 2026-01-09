@@ -74,23 +74,26 @@ def main():
         .getOrCreate()
     )
 
-    table_path = os.environ["DELTA_TABLE_PATH"]
+    table_path_bulk = os.environ["DELTA_TABLE_PATH_BULK"]
+    table_path_daily = os.environ["DELTA_TABLE_PATH_DAILY"]
     bulk_path = dataset_dir / bulk_rel
 
     start = now_ms()
-    spark.read.parquet(str(bulk_path)).write.format("delta").mode("overwrite").save(table_path)
+    spark.read.parquet(str(bulk_path)).write.format("delta").mode("overwrite").save(table_path_bulk)
     elapsed = now_ms() - start
     emit("bulk_ingest", bulk_rel, elapsed)
+
+    spark.read.parquet(str(bulk_path)).limit(0).write.format("delta").mode("overwrite").save(table_path_daily)
 
     daily_files = sorted(daily_dir.glob("fhvhv_*.parquet"))
     for file_path in daily_files:
         rel = f"daily/{file_path.name}"
         start = now_ms()
-        spark.read.parquet(str(file_path)).write.format("delta").mode("append").save(table_path)
+        spark.read.parquet(str(file_path)).write.format("delta").mode("append").save(table_path_daily)
         elapsed = now_ms() - start
         emit("daily_append", rel, elapsed)
 
-    spark.read.format("delta").load(table_path).createOrReplaceTempView("trips")
+    spark.read.format("delta").load(table_path_daily).createOrReplaceTempView("trips")
 
     for q in [
         "q1_time_range",
@@ -98,7 +101,6 @@ def main():
         "q3_filter_agg",
         "q4_groupby",
         "q5_date_trunc",
-        "q6_date_bin",
     ]:
         sql = render_sql(queries_dir / f"{q}.sql", query_start, query_end, min_miles)
         start = now_ms()

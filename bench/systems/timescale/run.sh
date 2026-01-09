@@ -30,6 +30,8 @@ ${COMPOSE} exec -T timescaledb psql -U bench -d bench -c "\\copy trips FROM '${b
 elapsed=$(( $(now_ms) - start ))
 emit_row "$CSV_OUT" "timescale" "bulk_ingest" "$bulk_rel" "$bulk_rows" "$bulk_bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
 
+${COMPOSE} exec -T timescaledb psql -U bench -d bench -f /workspace/bench/systems/timescale/schema.sql
+
 mapfile -t daily_files < <(ls -1 "${ROOT_DIR}/${DATASET_DIR}/csv/daily"/fhvhv_*.csv | sort)
 for file in "${daily_files[@]}"; do
   rel="csv/daily/$(basename "$file")"
@@ -41,14 +43,13 @@ for file in "${daily_files[@]}"; do
   emit_row "$CSV_OUT" "timescale" "daily_append" "$rel" "$rows" "$bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
 done
 
-for q in q1_time_range q2_agg q3_filter_agg q4_groupby q5_date_trunc q6_date_bin; do
+for q in q1_time_range q2_agg q3_filter_agg q4_groupby q5_date_trunc; do
   sql=$(sed -e "s/{START}/${QUERY_START}/g" \
             -e "s/{END}/${QUERY_END}/g" \
             -e "s/{MIN_MILES}/${MIN_MILES}/g" \
             "${ROOT_DIR}/bench/queries/${q}.sql")
-  sql_compact=$(echo "$sql" | tr '\n' ' ')
   start=$(now_ms)
-  ${COMPOSE} exec -T timescaledb psql -U bench -d bench -c "$sql_compact" >/dev/null
+  printf '%s\n' "$sql" | ${COMPOSE} exec -T timescaledb psql -U bench -d bench >/dev/null
   elapsed=$(( $(now_ms) - start ))
   emit_row "$CSV_OUT" "timescale" "${q}" "" "" "" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
 done

@@ -23,7 +23,7 @@ read -r bulk_rows bulk_bytes < <(manifest_lookup "${ROOT_DIR}/${DATASET_DIR}" "i
 
 start=$(now_ms)
 ${COMPOSE} exec -T influxdb3 influxdb3 write \
-  --database "${INFLUX_DATABASE}" \
+  --database "${INFLUX_DATABASE}_bulk" \
   --file "${bulk_path}"
 elapsed=$(( $(now_ms) - start ))
 emit_row "$CSV_OUT" "influxdb3" "bulk_ingest" "influx/${bulk_rel}" "$bulk_rows" "$bulk_bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
@@ -35,13 +35,13 @@ for file in "${daily_files[@]}"; do
   read -r rows bytes < <(manifest_lookup "${ROOT_DIR}/${DATASET_DIR}" "influx/${rel}")
   start=$(now_ms)
   ${COMPOSE} exec -T influxdb3 influxdb3 write \
-    --database "${INFLUX_DATABASE}" \
+    --database "${INFLUX_DATABASE}_daily" \
     --file "${path}"
   elapsed=$(( $(now_ms) - start ))
   emit_row "$CSV_OUT" "influxdb3" "daily_append" "influx/${rel}" "$rows" "$bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
 done
 
 # Queries for InfluxDB 3 are intentionally left as a follow-up once the SQL/Flight API is configured.
-for q in q1_time_range q2_agg q3_filter_agg q4_groupby q5_date_trunc q6_date_bin; do
+for q in q1_time_range q2_agg q3_filter_agg q4_groupby q5_date_trunc; do
   emit_row "$CSV_OUT" "influxdb3" "${q}" "" "" "" "" "$CPU_LIMIT" "$MEM_LIMIT" "not_implemented"
 done

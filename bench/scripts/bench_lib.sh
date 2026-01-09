@@ -22,7 +22,7 @@ ensure_csv_header() {
 manifest_lookup() {
   local dataset_dir="$1"
   local rel_path="$2"
-  python - <<PY
+  python3 - <<PY
 import csv
 import os
 path = os.path.join("$dataset_dir", "manifest.csv")
