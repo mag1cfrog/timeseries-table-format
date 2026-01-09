@@ -16,7 +16,7 @@ mod test_common {
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 async fn run_shell_with_input(args: &[&str], input: &str) -> TestResult<std::process::Output> {
-    let bin = assert_cmd::cargo::cargo_bin!("timeseries-table-cli");
+    let bin = assert_cmd::cargo::cargo_bin!("tstable");
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .stdin(Stdio::piped())
