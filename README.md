@@ -187,6 +187,15 @@ A time-series table consists of:
 
 ---
 
+## 📚 Further Reading
+
+- [Benchmark methodology & results](docs/benchmarks/README.md)
+- [CLI reference](crates/timeseries-table-cli/README.md)
+- [Core library API](crates/timeseries-table-core/README.md)
+- [DataFusion integration](crates/timeseries-table-datafusion/README.md)
+
+---
+
 ## 🤝 Contributing
 
 Contributions welcome! This project is also a learning exercise in building table formats from scratch—if you're curious about the internals, the code is heavily commented.
