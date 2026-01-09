@@ -30,4 +30,5 @@ CREATE TABLE bench.trips
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(pickup_datetime)
-ORDER BY (pickup_datetime);
+ORDER BY (pickup_datetime)
+SETTINGS allow_nullable_key = 1;

@@ -48,7 +48,6 @@ run_system() {
 run_system "timeseries_table" "timeseries_table" "${ROOT_DIR}/bench/systems/timeseries_table/run.sh"
 run_system "postgres" "postgres" "${ROOT_DIR}/bench/systems/postgres/run.sh"
 run_system "timescale" "timescaledb" "${ROOT_DIR}/bench/systems/timescale/run.sh"
-run_system "questdb" "questdb" "${ROOT_DIR}/bench/systems/questdb/run.sh"
 run_system "clickhouse" "clickhouse" "${ROOT_DIR}/bench/systems/clickhouse/run.sh"
 run_system "influxdb3" "influxdb3" "${ROOT_DIR}/bench/systems/influxdb3/run.sh"
 run_system "delta_spark" "spark" "${ROOT_DIR}/bench/systems/delta_spark/run.sh"

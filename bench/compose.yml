@@ -49,22 +49,6 @@ services:
     mem_limit: ${MEM_LIMIT}
     cpus: ${CPU_LIMIT}
 
-  questdb:
-    image: ${QUESTDB_IMAGE}
-    environment:
-      QDB_PG_USER: bench
-      QDB_PG_PASSWORD: bench
-    ports:
-      - "9000:9000"
-      - "8812:8812"
-      - "9009:9009"
-    volumes:
-      - ./work/questdb:/var/lib/questdb
-      - ..:/workspace:rw
-    working_dir: /workspace
-    mem_limit: ${MEM_LIMIT}
-    cpus: ${CPU_LIMIT}
-
   clickhouse:
     image: ${CLICKHOUSE_IMAGE}
     volumes:

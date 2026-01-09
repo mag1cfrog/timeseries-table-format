@@ -19,7 +19,7 @@ for _ in {1..30}; do
   sleep 1
 done
 
-${COMPOSE} exec -T clickhouse clickhouse-client --multiquery < /workspace/bench/systems/clickhouse/schema.sql
+${COMPOSE} exec -T clickhouse clickhouse-client --multiquery < "${ROOT_DIR}/bench/systems/clickhouse/schema.sql"
 
 bulk_rel="csv/raw/${TLC_FILE_PREFIX}${START_MONTH}.csv"
 bulk_path="/workspace/${DATASET_DIR}/${bulk_rel}"
@@ -35,12 +35,11 @@ ${COMPOSE} exec -T clickhouse clickhouse-client \
   --query "INSERT INTO trips FORMAT CSVWithNames" \
   --date_time_input_format best_effort \
   --input_format_null_as_default 1 \
-  --input_format_csv_skip_empty_lines 1 \
   < "${ROOT_DIR}/${DATASET_DIR}/${bulk_rel}"
 elapsed=$(( $(now_ms) - start ))
 emit_row "$CSV_OUT" "clickhouse" "bulk_ingest" "$bulk_rel" "$bulk_rows" "$bulk_bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
 
-${COMPOSE} exec -T clickhouse clickhouse-client --multiquery < /workspace/bench/systems/clickhouse/schema.sql
+${COMPOSE} exec -T clickhouse clickhouse-client --multiquery < "${ROOT_DIR}/bench/systems/clickhouse/schema.sql"
 
 mapfile -t daily_files < <(ls -1 "${ROOT_DIR}/${DATASET_DIR}/csv/daily"/fhvhv_*.csv | sort)
 for file in "${daily_files[@]}"; do
@@ -53,7 +52,6 @@ for file in "${daily_files[@]}"; do
     --query "INSERT INTO trips FORMAT CSVWithNames" \
     --date_time_input_format best_effort \
     --input_format_null_as_default 1 \
-    --input_format_csv_skip_empty_lines 1 \
     < "${ROOT_DIR}/${DATASET_DIR}/${rel}"
   elapsed=$(( $(now_ms) - start ))
   emit_row "$CSV_OUT" "clickhouse" "daily_append" "$rel" "$rows" "$bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
