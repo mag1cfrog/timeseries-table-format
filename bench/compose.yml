@@ -28,8 +28,8 @@ services:
   influxdb3:
     image: ${INFLUX_IMAGE}
     environment:
-      INFLUXDB3_HTTP_BIND: ":8086"
       INFLUXDB3_START_WITHOUT_AUTH: "true"
+    command: ["influxdb3", "serve", "--http-bind", "0.0.0.0:8181"]
     volumes:
       - ./work/influxdb3:/var/lib/influxdb3
       - ..:/workspace:rw

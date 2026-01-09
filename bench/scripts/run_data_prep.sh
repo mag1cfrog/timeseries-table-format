@@ -12,6 +12,11 @@ IMAGE_NAME="timeseries-table-data-prep:local"
 
 mkdir -p "${DATASET_PATH}"
 
+if [[ -s "${DATASET_PATH}/manifest.csv" ]]; then
+  echo "Data prep already complete: ${DATASET_PATH}/manifest.csv"
+  exit 0
+fi
+
 # Build a small helper image once to avoid reinstalling deps every run.
 if ! docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1; then
   docker build -f "${ROOT_DIR}/bench/scripts/data_prep.Dockerfile" -t "${IMAGE_NAME}" "${ROOT_DIR}"
