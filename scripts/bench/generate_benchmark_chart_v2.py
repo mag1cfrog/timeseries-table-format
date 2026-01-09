@@ -216,7 +216,7 @@ def create_modern_chart(dark_mode=True):
         # Position each "card"
         card_left = CARD_LEFT_START + idx * CARD_SPACING
         
-        ax = fig.add_axes([card_left, CARD_BOTTOM, CARD_WIDTH, CARD_HEIGHT])
+        ax = fig.add_axes((card_left, CARD_BOTTOM, CARD_WIDTH, CARD_HEIGHT))
         ax.set_facecolor(card_bg)
         
         # Remove spines
