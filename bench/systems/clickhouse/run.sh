@@ -12,6 +12,13 @@ COMPOSE="docker compose -f ${ROOT_DIR}/bench/compose.yml --project-directory ${R
 CSV_OUT="${RESULTS_RUN_DIR}/clickhouse.csv"
 ensure_csv_header "$CSV_OUT"
 
+# Normalize ISO 8601 timestamps ("2024-05-01T00:00:00Z") to a ClickHouse-friendly
+# format ("2024-05-01 00:00:00") using the server's timezone (expected UTC).
+CH_START=${QUERY_START/T/ }
+CH_START=${CH_START/Z/}
+CH_END=${QUERY_END/T/ }
+CH_END=${CH_END/Z/}
+
 for _ in {1..30}; do
   if ${COMPOSE} exec -T clickhouse clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
     break
@@ -58,8 +65,8 @@ for file in "${daily_files[@]}"; do
 done
 
 for q in q1_time_range q2_agg q3_filter_agg q4_groupby q5_date_trunc; do
-  sql=$(sed -e "s/{START}/${QUERY_START}/g" \
-            -e "s/{END}/${QUERY_END}/g" \
+  sql=$(sed -e "s/{START}/${CH_START}/g" \
+            -e "s/{END}/${CH_END}/g" \
             -e "s/{MIN_MILES}/${MIN_MILES}/g" \
             "${ROOT_DIR}/bench/queries/${q}.sql")
   if [[ "${q}" == "q5_date_trunc" ]]; then
