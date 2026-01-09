@@ -70,7 +70,7 @@ OP_TITLE_FONTSIZE = 13
 OP_TITLE_Y = 0.02                 # Y position at bottom of card
 
 # --- Footer Settings ---
-FOOTER_TEXT = "See docs/benchmarks/ for full methodology and reproduction steps"
+FOOTER_TEXT = "See docs/benchmarks/README.md for full methodology and reproduction steps"
 FOOTER_FONTSIZE = 9
 FOOTER_Y = 0.03
 

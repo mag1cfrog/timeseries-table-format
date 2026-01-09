@@ -86,7 +86,7 @@ Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appen
 </td></tr>
 </table>
 
-<sub>Aggregation queries (GROUP BY, filtering) are competitive with ClickHouse. See [full benchmark details](docs/benchmarks/).</sub>
+<sub>Aggregation queries (GROUP BY, filtering) are competitive with ClickHouse. See [full benchmark methodology and results](docs/benchmarks/README.md).</sub>
 
 ---
 
