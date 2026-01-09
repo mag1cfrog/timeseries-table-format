@@ -7,7 +7,6 @@
 //! ## Features
 //!
 //! - `datafusion` (default): Enables DataFusion integration for SQL queries
-//! - `cli`: Includes the CLI tool
 //!
 //! ## Example
 //!

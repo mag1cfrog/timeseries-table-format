@@ -17,7 +17,6 @@ cargo add timeseries-table-format
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `datafusion` | ✓ | DataFusion TableProvider for SQL queries |
-| `cli` | | Include CLI tool |
 
 ## Usage
 

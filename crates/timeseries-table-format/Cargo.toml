@@ -11,12 +11,10 @@ categories = ["database", "data-structures"]
 [features]
 default = ["datafusion"]
 datafusion = ["dep:timeseries-table-datafusion"]
-cli = ["dep:timeseries-table-cli"]
 
 [dependencies]
 timeseries-table-core = { path = "../timeseries-table-core" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion", optional = true }
-timeseries-table-cli = { path = "../timeseries-table-cli", optional = true }
 
 [lints]
 workspace = true
