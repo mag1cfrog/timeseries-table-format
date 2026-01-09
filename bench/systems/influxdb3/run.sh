@@ -13,6 +13,38 @@ COMPOSE="docker compose -f ${ROOT_DIR}/bench/compose.yml --project-directory ${R
 CSV_OUT="${RESULTS_RUN_DIR}/influxdb3.csv"
 ensure_csv_header "$CSV_OUT"
 
+ensure_influx_running() {
+  local cid
+  cid="$(${COMPOSE} ps -q influxdb3 2>/dev/null || true)"
+  if [[ -z "${cid}" ]]; then
+    ${COMPOSE} up -d influxdb3
+    sleep 3
+    cid="$(${COMPOSE} ps -q influxdb3 2>/dev/null || true)"
+  fi
+  if [[ -n "${cid}" ]]; then
+    local status
+    status="$(docker inspect -f '{{.State.Status}}' "${cid}" 2>/dev/null || true)"
+    if [[ "${status}" != "running" ]]; then
+      ${COMPOSE} up -d influxdb3
+      sleep 3
+    fi
+    local oom
+    oom="$(docker inspect -f '{{.State.OOMKilled}}' "${cid}" 2>/dev/null || true)"
+    if [[ "${oom}" == "true" ]]; then
+      echo "influxdb3: container OOMKilled; restart and reduce load before retrying" >&2
+      exit 1
+    fi
+  fi
+}
+
+ensure_influx_running
+
+startup_wait="${INFLUX_STARTUP_WAIT_SEC:-5}"
+if [[ "${startup_wait}" != "0" && "${startup_wait}" != "0.0" ]]; then
+  echo "influxdb3: waiting ${startup_wait}s for server startup"
+  sleep "${startup_wait}"
+fi
+
 if [[ ! -d "${ROOT_DIR}/${INFLUX_LINE_PROTOCOL_DIR}" ]]; then
   emit_row "$CSV_OUT" "influxdb3" "skipped" "" "" "" "" "$CPU_LIMIT" "$MEM_LIMIT" "missing_line_protocol"
   exit 0
@@ -53,7 +85,7 @@ for file in "${daily_files[@]}"; do
   echo "influxdb3: influx/${rel} recorded"
 done
 
-# Queries for InfluxDB 3 are intentionally left as a follow-up once the SQL/Flight API is configured.
+# InfluxDB 3 Core enforces a file-scan limit that blocks wide-range queries on large ingest.
 for q in q1_time_range q2_agg q3_filter_agg q4_groupby q5_date_trunc; do
-  emit_row "$CSV_OUT" "influxdb3" "${q}" "" "" "" "" "$CPU_LIMIT" "$MEM_LIMIT" "not_implemented"
+  emit_row "$CSV_OUT" "influxdb3" "${q}" "" "" "" "" "$CPU_LIMIT" "$MEM_LIMIT" "not_supported_core_file_limit"
 done

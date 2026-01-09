@@ -30,6 +30,9 @@ services:
     environment:
       INFLUX_NODE_ID: "local"
       INFLUXDB3_MAX_HTTP_REQUEST_SIZE: "${INFLUXDB3_MAX_HTTP_REQUEST_SIZE}"
+      INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD: "${INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD}"
+      INFLUXDB3_WAL_FLUSH_INTERVAL: "${INFLUXDB3_WAL_FLUSH_INTERVAL}"
+      INFLUXDB3_WAL_MAX_WRITE_BUFFER_SIZE: "${INFLUXDB3_WAL_MAX_WRITE_BUFFER_SIZE}"
     user: "0:0"
     command:
       - "influxdb3"
@@ -41,6 +44,31 @@ services:
       - "--without-auth"
     volumes:
       - ./work/influxdb3:/var/lib/influxdb3
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  questdb:
+    image: ${QUESTDB_IMAGE}
+    environment:
+      QDB_PG_USER: bench
+      QDB_PG_PASSWORD: bench
+    ports:
+      - "9000:9000"
+      - "8812:8812"
+      - "9009:9009"
+    volumes:
+      - ./work/questdb:/var/lib/questdb
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE}
+    volumes:
+      - ./work/clickhouse:/var/lib/clickhouse
       - ..:/workspace:rw
     working_dir: /workspace
     mem_limit: ${MEM_LIMIT}
