@@ -141,6 +141,40 @@ See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) 
 
 ---
 
+## 🥾 Quickstart Example (NVDA 1h + MA5)
+
+Fastest way to see the format end-to-end (no external services needed):
+
+1) Ingest sample data (creates `examples/nvda_table/`):
+
+```bash
+cargo run -p timeseries-table-core --example ingest_nvda
+```
+
+2) Query with DataFusion + moving average window:
+
+```bash
+cargo run -p timeseries-table-datafusion --example query_nvda_ma
+```
+
+Example output:
+
+```
++---------------------+--------+--------------------+
+| ts                  | close  | ma_5               |
++---------------------+--------+--------------------+
+| 2024-06-01T00:00:00 | 115.22 | 115.22             |
+| 2024-06-01T01:00:00 | 115.55 | 115.38499999999999 |
+| 2024-06-01T02:00:00 | 115.51 | 115.42666666666666 |
+| 2024-06-01T03:00:00 | 114.99 | 115.3175           |
+| 2024-06-01T04:00:00 | 114.7  | 115.194            |
++---------------------+--------+--------------------+
+```
+
+Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
+
+---
+
 ## 🏗️ Architecture
 
 <p align="center">
@@ -181,7 +215,7 @@ A time-series table consists of:
 - [x] Coverage snapshots + overlap-safe appends  
 - [x] CLI for table management and SQL queries
 - [x] DataFusion `TableProvider` integration
-- [ ] End-to-end example with synthetic data
+- [x] End-to-end example with synthetic data
 - [ ] Compaction / segment merging
 - [ ] Time-travel queries
 

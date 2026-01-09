@@ -28,6 +28,7 @@ default = []
 test-counters = []
 
 [dev-dependencies]
+arrow-csv = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
 
