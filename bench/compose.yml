@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - ./work/postgres:/var/lib/postgresql/data
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  timescaledb:
+    image: ${TIMESCALE_IMAGE}
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - ./work/timescaledb:/var/lib/postgresql/data
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  influxdb3:
+    image: ${INFLUX_IMAGE}
+    environment:
+      INFLUX_NODE_ID: "local"
+      INFLUXDB3_MAX_HTTP_REQUEST_SIZE: "${INFLUXDB3_MAX_HTTP_REQUEST_SIZE}"
+      INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD: "${INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD}"
+      INFLUXDB3_WAL_FLUSH_INTERVAL: "${INFLUXDB3_WAL_FLUSH_INTERVAL}"
+      INFLUXDB3_WAL_MAX_WRITE_BUFFER_SIZE: "${INFLUXDB3_WAL_MAX_WRITE_BUFFER_SIZE}"
+    user: "0:0"
+    command:
+      - "influxdb3"
+      - "serve"
+      - "--http-bind"
+      - "0.0.0.0:8181"
+      - "--node-id-from-env"
+      - "INFLUX_NODE_ID"
+      - "--without-auth"
+    volumes:
+      - ./work/influxdb3:/var/lib/influxdb3
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE}
+    volumes:
+      - ./work/clickhouse:/var/lib/clickhouse
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  spark:
+    image: ${SPARK_IMAGE}
+    environment:
+      - SPARK_MODE=master
+    command: ["/bin/bash", "-lc", "/opt/spark/sbin/start-master.sh && tail -f /dev/null"]
+    user: "0:0"
+    volumes:
+      - ./work/spark:/opt/spark/work
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+
+  timeseries_table:
+    build:
+      context: ..
+      dockerfile: bench/systems/timeseries_table/Dockerfile
+    volumes:
+      - ..:/workspace:rw
+    working_dir: /workspace
+    mem_limit: ${MEM_LIMIT}
+    cpus: ${CPU_LIMIT}
+    command: ["bash", "-lc", "tail -f /dev/null"]

@@ -28,7 +28,8 @@
 | 🗺️ **Coverage Tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
 | 🚀 **Overlap-Safe Appends** | Automatic detection prevents accidental duplicate data ingestion |
 | 🔍 **DataFusion Integration** | SQL queries with time-based segment pruning out of the box |
-| 📦 **Zero External Dependencies** | Pure Rust, no JVM, no Python runtime—just cargo install and go |
+| 📦 **Zero External Dependencies** | Pure Rust, no JVM, no Python runtime—just `cargo install` and go |
+| ⚡ **Blazing Fast Ingest** | [7–27× faster](#-performance) than ClickHouse/PostgreSQL on bulk loads and daily appends |
 
 ---
 
@@ -50,6 +51,42 @@ But if you're working with **time-series specifically**, you might have noticed:
 - 📊 Sensor/IoT data pipelines with strict coverage requirements  
 - 💹 Financial data stores where overlap = disaster
 - 🧪 Learning how modern table formats work (well-documented internals!)
+
+---
+
+## ⚡ Performance
+
+Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appends):
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-chart.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-chart-light.png">
+    <img alt="Benchmark comparison chart" src="docs/assets/benchmark-chart.png" width="900">
+  </picture>
+</p>
+
+<table>
+<tr><td>
+
+| vs ClickHouse | Speedup |
+|---------------|---------|
+| Bulk ingest | **7.7×** |
+| Daily append | **3.3×** |
+| Time-range scan | **2.5×** |
+
+</td><td>
+
+| vs PostgreSQL | Speedup |
+|---------------|---------|
+| Bulk ingest | **27×** |
+| Daily append | **5.5×** |
+| Time-range scan | **80×** |
+
+</td></tr>
+</table>
+
+<sub>Aggregation queries (GROUP BY, filtering) are competitive with ClickHouse. See [full benchmark methodology and results](docs/benchmarks/README.md).</sub>
 
 ---
 
@@ -147,6 +184,15 @@ A time-series table consists of:
 - [ ] End-to-end example with synthetic data
 - [ ] Compaction / segment merging
 - [ ] Time-travel queries
+
+---
+
+## 📚 Further Reading
+
+- [Benchmark methodology & results](docs/benchmarks/README.md)
+- [CLI reference](crates/timeseries-table-cli/README.md)
+- [Core library API](crates/timeseries-table-core/README.md)
+- [DataFusion integration](crates/timeseries-table-datafusion/README.md)
 
 ---
 
