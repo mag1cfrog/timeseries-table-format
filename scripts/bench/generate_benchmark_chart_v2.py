@@ -2,13 +2,6 @@
 """
 Generate a modern, eye-catching benchmark comparison chart for README.
 
-Features:
-- Gradient bars with glow effects
-- Modern color palette
-- Clean typography
-- Speedup callouts
-- Card-style layout
-
 Usage:
     python scripts/bench/generate_benchmark_chart_v2.py
 
@@ -18,29 +11,104 @@ Output:
 """
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch
-import numpy as np
 from pathlib import Path
 
-# Use a clean sans-serif font
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
+# =============================================================================
+# CONFIGURATION - Adjust these values to customize the chart
+# =============================================================================
 
-# Benchmark data (from actual results)
-SYSTEMS = ["timeseries-table", "ClickHouse", "Delta+Spark", "PostgreSQL", "TimescaleDB"]
-DISPLAY_NAMES = ["timeseries-table", "ClickHouse", "Delta + Spark", "PostgreSQL", "TimescaleDB"]
+# --- Figure Settings ---
+FIG_WIDTH = 14                    # Total figure width in inches
+FIG_HEIGHT = 7                    # Total figure height in inches
+FIG_DPI = 150                     # Output resolution
 
-# Modern gradient-friendly colors - softer, more muted palette
-COLORS_DARK = {
+# --- Title Settings ---
+TITLE_TEXT = "⚡ Benchmark Results"
+TITLE_FONTSIZE = 24
+TITLE_Y = 0.94                    # Vertical position (0-1)
+
+SUBTITLE_TEXT = "73M rows • NYC Taxi Dataset • Lower is better"
+SUBTITLE_FONTSIZE = 12
+SUBTITLE_Y = 0.89
+
+# --- Card (Panel) Settings ---
+CARD_LEFT_START = 0.05            # Left margin for first card
+CARD_SPACING = 0.31               # Horizontal spacing between cards
+CARD_WIDTH = 0.28                 # Width of each card
+CARD_BOTTOM = 0.12                # Bottom margin
+CARD_HEIGHT = 0.68                # Height of each card
+CARD_ROUNDING = 0.05              # Corner rounding for cards
+CARD_BORDER_WIDTH = 1             # Border line width
+
+# --- Bar Settings ---
+BAR_HEIGHT = 0.06                 # Height of each bar (in axes coords)
+BAR_SPACING = 0.16                # Vertical spacing between bars
+BAR_START_Y = 0.78                # Y position of first bar
+BAR_LEFT_MARGIN = 0.02            # Left margin for bars
+BAR_MAX_WIDTH = 0.60              # Maximum bar width (for longest bar)
+BAR_ROUNDING_FACTOR = 3           # Bar corner rounding (height / this value)
+BAR_HERO_ALPHA = 1.0              # Opacity for hero (winner) bar
+BAR_OTHER_ALPHA = 0.75            # Opacity for other bars
+
+# --- Label Settings ---
+LABEL_FONTSIZE = 9                # Font size for system names
+LABEL_OFFSET_Y = 0.01            # Vertical offset above bar
+TIME_FONTSIZE = 10                # Font size for time values
+TIME_INSIDE_THRESHOLD = 0.25      # Bar width threshold for inside/outside label
+TIME_INSIDE_OFFSET = 0.02         # Offset from bar end (inside)
+TIME_OUTSIDE_OFFSET = 0.02        # Offset from bar end (outside)
+
+# --- Speedup Badge Settings ---
+BADGE_FONTSIZE = 9
+BADGE_X = 0.98                    # X position (right side of card)
+BADGE_PADDING = 0.3               # Padding inside badge
+BADGE_ALPHA = 0.15                # Badge background opacity
+
+# --- Operation Title Settings ---
+OP_TITLE_FONTSIZE = 13
+OP_TITLE_Y = 0.02                 # Y position at bottom of card
+
+# --- Footer Settings ---
+FOOTER_TEXT = "See docs/benchmarks/ for full methodology and reproduction steps"
+FOOTER_FONTSIZE = 9
+FOOTER_Y = 0.03
+
+# --- Glow Effect Settings ---
+GLOW_ENABLED = True               # Enable/disable glow on hero bar
+GLOW_LAYERS = 3                   # Number of glow layers
+GLOW_ALPHA_MULTIPLIER = 0.15      # Alpha per layer
+
+# --- Colors (Dark Mode) ---
+DARK_BG_COLOR = "#0D1117"         # Main background
+DARK_CARD_BG = "#161B22"          # Card background
+DARK_TEXT_COLOR = "#E6EDF3"       # Primary text
+DARK_TEXT_SECONDARY = "#8B949E"   # Secondary text (subtitle, footer)
+DARK_GRID_COLOR = "#30363D"       # Card border color
+
+# --- Colors (Light Mode) ---
+LIGHT_BG_COLOR = "#FFFFFF"
+LIGHT_CARD_BG = "#F6F8FA"
+LIGHT_TEXT_COLOR = "#1F2328"
+LIGHT_TEXT_SECONDARY = "#656D76"
+LIGHT_GRID_COLOR = "#D0D7DE"
+
+# --- Bar Colors (primary, secondary for each system) ---
+# Softer, more muted palette
+BAR_COLORS = {
     "timeseries-table": ("#E07A5F", "#E8998D"),  # Terracotta (warm but muted)
-    "ClickHouse": ("#F2CC8F", "#F5DDB5"),        # Warm sand
-    "Delta+Spark": ("#81B29A", "#A3C4B1"),       # Sage green  
-    "PostgreSQL": ("#5B8FB9", "#89B4D4"),        # Soft blue
-    "TimescaleDB": ("#9A8C98", "#B5AAB8"),       # Muted purple/mauve
+    "ClickHouse":       ("#F2CC8F", "#F5DDB5"),  # Warm sand
+    "Delta+Spark":      ("#81B29A", "#A3C4B1"),  # Sage green  
+    "PostgreSQL":       ("#5B8FB9", "#89B4D4"),  # Soft blue
+    "TimescaleDB":      ("#9A8C98", "#B5AAB8"),  # Muted purple/mauve
 }
 
-# Data in milliseconds
+# --- System Data ---
+SYSTEMS = ["timeseries-table", "ClickHouse", "Delta+Spark", "PostgreSQL", "TimescaleDB"]
+DISPLAY_NAMES = ["timeseries-table", "ClickHouse", "Delta + Spark", "PostgreSQL", "TimescaleDB"]
+HERO_SYSTEM = "timeseries-table"  # Which system to highlight
+
+# --- Benchmark Data (in milliseconds) ---
 DATA = {
     "Bulk Ingest": {
         "timeseries-table": 1697,
@@ -65,6 +133,14 @@ DATA = {
     },
 }
 
+# =============================================================================
+# END CONFIGURATION
+# =============================================================================
+
+# Font setup
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
+
 
 def format_time(ms: float) -> str:
     """Format milliseconds to human readable string."""
@@ -78,15 +154,17 @@ def draw_rounded_bar(ax, x, y, width, height, color, alpha=1.0, glow=False):
     if width <= 0:
         return
     
+    rounding = height / BAR_ROUNDING_FACTOR
+    
     # Glow effect for hero bar
-    if glow:
-        for i in range(3, 0, -1):
+    if glow and GLOW_ENABLED:
+        for i in range(GLOW_LAYERS, 0, -1):
             glow_bar = FancyBboxPatch(
                 (x, y - height/2), width, height,
-                boxstyle=f"round,pad=0,rounding_size={height/3}",
+                boxstyle=f"round,pad=0,rounding_size={rounding}",
                 facecolor=color,
                 edgecolor='none',
-                alpha=0.15 * (4-i),
+                alpha=GLOW_ALPHA_MULTIPLIER * (GLOW_LAYERS + 1 - i),
                 transform=ax.transData,
                 zorder=1
             )
@@ -95,7 +173,7 @@ def draw_rounded_bar(ax, x, y, width, height, color, alpha=1.0, glow=False):
     # Main bar
     bar = FancyBboxPatch(
         (x, y - height/2), width, height,
-        boxstyle=f"round,pad=0,rounding_size={height/3}",
+        boxstyle=f"round,pad=0,rounding_size={rounding}",
         facecolor=color,
         edgecolor='none',
         alpha=alpha,
@@ -111,50 +189,47 @@ def create_modern_chart(dark_mode=True):
     
     # Colors based on mode
     if dark_mode:
-        bg_color = "#0D1117"
-        card_bg = "#161B22"
-        text_color = "#E6EDF3"
-        text_secondary = "#8B949E"
-        grid_color = "#30363D"
+        bg_color = DARK_BG_COLOR
+        card_bg = DARK_CARD_BG
+        text_color = DARK_TEXT_COLOR
+        text_secondary = DARK_TEXT_SECONDARY
+        grid_color = DARK_GRID_COLOR
     else:
-        bg_color = "#FFFFFF"
-        card_bg = "#F6F8FA"
-        text_color = "#1F2328"
-        text_secondary = "#656D76"
-        grid_color = "#D0D7DE"
+        bg_color = LIGHT_BG_COLOR
+        card_bg = LIGHT_CARD_BG
+        text_color = LIGHT_TEXT_COLOR
+        text_secondary = LIGHT_TEXT_SECONDARY
+        grid_color = LIGHT_GRID_COLOR
     
-    fig = plt.figure(figsize=(14, 7), facecolor=bg_color)
+    fig = plt.figure(figsize=(FIG_WIDTH, FIG_HEIGHT), facecolor=bg_color)
     
     # Title area
-    fig.text(0.5, 0.94, "⚡ Benchmark Results", fontsize=24, fontweight='bold',
+    fig.text(0.5, TITLE_Y, TITLE_TEXT, fontsize=TITLE_FONTSIZE, fontweight='bold',
              color=text_color, ha='center', va='top')
-    fig.text(0.5, 0.89, "73M rows • NYC Taxi Dataset • Lower is better",
-             fontsize=12, color=text_secondary, ha='center', va='top')
+    fig.text(0.5, SUBTITLE_Y, SUBTITLE_TEXT,
+             fontsize=SUBTITLE_FONTSIZE, color=text_secondary, ha='center', va='top')
     
     operations = list(DATA.keys())
     
     # Create 3 card-style subplots
     for idx, op in enumerate(operations):
         # Position each "card"
-        card_left = 0.05 + idx * 0.31
-        card_width = 0.28
-        card_bottom = 0.12
-        card_height = 0.68
+        card_left = CARD_LEFT_START + idx * CARD_SPACING
         
-        ax = fig.add_axes([card_left, card_bottom, card_width, card_height])
+        ax = fig.add_axes([card_left, CARD_BOTTOM, CARD_WIDTH, CARD_HEIGHT])
         ax.set_facecolor(card_bg)
         
-        # Add rounded card border
+        # Remove spines
         for spine in ax.spines.values():
             spine.set_visible(False)
         
         # Card background with subtle border
         card_rect = FancyBboxPatch(
             (0, 0), 1, 1,
-            boxstyle="round,pad=0.02,rounding_size=0.05",
+            boxstyle=f"round,pad=0.02,rounding_size={CARD_ROUNDING}",
             facecolor=card_bg,
             edgecolor=grid_color,
-            linewidth=1,
+            linewidth=CARD_BORDER_WIDTH,
             transform=ax.transAxes,
             zorder=0
         )
@@ -163,56 +238,70 @@ def create_modern_chart(dark_mode=True):
         values = [DATA[op][sys] for sys in SYSTEMS]
         max_val = max(values)
         
-        # Bar settings
-        bar_height = 0.10
-        bar_spacing = 0.16
-        start_y = 0.78
-        
         # Draw bars
         for i, (sys, val, name) in enumerate(zip(SYSTEMS, values, DISPLAY_NAMES)):
-            y = start_y - i * bar_spacing
-            bar_width = (val / max_val) * 0.60
+            y = BAR_START_Y - i * BAR_SPACING
+            bar_width = (val / max_val) * BAR_MAX_WIDTH
             
-            color = COLORS_DARK[sys][0]
-            is_hero = (sys == "timeseries-table")
+            color = BAR_COLORS[sys][0]
+            is_hero = (sys == HERO_SYSTEM)
             
-            draw_rounded_bar(ax, 0.02, y, bar_width, bar_height, color, 
-                           alpha=1.0 if is_hero else 0.75,
-                           glow=is_hero)
+            draw_rounded_bar(
+                ax, BAR_LEFT_MARGIN, y, bar_width, BAR_HEIGHT, color,
+                alpha=BAR_HERO_ALPHA if is_hero else BAR_OTHER_ALPHA,
+                glow=is_hero
+            )
             
-            # System name (left aligned, more space above bar)
-            ax.text(0.02, y + bar_height/2 + 0.055, name, fontsize=9,
-                   color=text_color, ha='left', va='bottom',
-                   fontweight='bold' if is_hero else 'normal',
-                   transform=ax.transAxes)
+            # System name (left aligned, above bar)
+            ax.text(
+                BAR_LEFT_MARGIN, y + BAR_HEIGHT/2 + LABEL_OFFSET_Y, name,
+                fontsize=LABEL_FONTSIZE,
+                color=text_color, ha='left', va='bottom',
+                fontweight='bold' if is_hero else 'normal',
+                transform=ax.transAxes
+            )
             
             # Time value (at end of bar or outside)
             time_str = format_time(val)
-            if bar_width > 0.25:
-                ax.text(0.02 + bar_width - 0.02, y, time_str, fontsize=10,
-                       color='white', ha='right', va='center',
-                       fontweight='bold', transform=ax.transAxes)
+            if bar_width > TIME_INSIDE_THRESHOLD:
+                ax.text(
+                    BAR_LEFT_MARGIN + bar_width - TIME_INSIDE_OFFSET, y, time_str,
+                    fontsize=TIME_FONTSIZE,
+                    color='white', ha='right', va='center',
+                    fontweight='bold', transform=ax.transAxes
+                )
             else:
-                ax.text(0.02 + bar_width + 0.02, y, time_str, fontsize=10,
-                       color=text_color, ha='left', va='center',
-                       fontweight='bold', transform=ax.transAxes)
+                ax.text(
+                    BAR_LEFT_MARGIN + bar_width + TIME_OUTSIDE_OFFSET, y, time_str,
+                    fontsize=TIME_FONTSIZE,
+                    color=text_color, ha='left', va='center',
+                    fontweight='bold', transform=ax.transAxes
+                )
             
             # Speedup badge for hero
             if is_hero and i == 0:
                 speedup = values[1] / val  # vs second place
                 badge_text = f"{speedup:.0f}× faster"
-                ax.text(0.98, y, badge_text, fontsize=9,
-                       color=COLORS_DARK["timeseries-table"][0], 
-                       ha='right', va='center',
-                       fontweight='bold', transform=ax.transAxes,
-                       bbox=dict(boxstyle='round,pad=0.3', 
-                                facecolor=COLORS_DARK["timeseries-table"][0],
-                                alpha=0.15, edgecolor='none'))
+                ax.text(
+                    BADGE_X, y, badge_text,
+                    fontsize=BADGE_FONTSIZE,
+                    color=BAR_COLORS[HERO_SYSTEM][0], 
+                    ha='right', va='center',
+                    fontweight='bold', transform=ax.transAxes,
+                    bbox=dict(
+                        boxstyle=f'round,pad={BADGE_PADDING}', 
+                        facecolor=BAR_COLORS[HERO_SYSTEM][0],
+                        alpha=BADGE_ALPHA, edgecolor='none'
+                    )
+                )
         
         # Operation title at bottom
-        ax.text(0.5, 0.02, op, fontsize=13, fontweight='bold',
-               color=text_color, ha='center', va='bottom',
-               transform=ax.transAxes)
+        ax.text(
+            0.5, OP_TITLE_Y, op,
+            fontsize=OP_TITLE_FONTSIZE, fontweight='bold',
+            color=text_color, ha='center', va='bottom',
+            transform=ax.transAxes
+        )
         
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
@@ -220,8 +309,10 @@ def create_modern_chart(dark_mode=True):
         ax.set_yticks([])
     
     # Footer
-    fig.text(0.5, 0.03, "See docs/benchmarks/ for full methodology and reproduction steps",
-             fontsize=9, color=text_secondary, ha='center', style='italic')
+    fig.text(
+        0.5, FOOTER_Y, FOOTER_TEXT,
+        fontsize=FOOTER_FONTSIZE, color=text_secondary, ha='center', style='italic'
+    )
     
     return fig
 
@@ -233,16 +324,20 @@ def main():
     # Dark mode version
     fig_dark = create_modern_chart(dark_mode=True)
     output_dark = output_dir / "benchmark-chart.png"
-    fig_dark.savefig(output_dark, dpi=150, bbox_inches='tight',
-                     facecolor='#0D1117', edgecolor='none', pad_inches=0.2)
+    fig_dark.savefig(
+        output_dark, dpi=FIG_DPI, bbox_inches='tight',
+        facecolor=DARK_BG_COLOR, edgecolor='none', pad_inches=0.2
+    )
     plt.close(fig_dark)
     print(f"✓ Saved dark mode: {output_dark}")
     
     # Light mode version
     fig_light = create_modern_chart(dark_mode=False)
     output_light = output_dir / "benchmark-chart-light.png"
-    fig_light.savefig(output_light, dpi=150, bbox_inches='tight',
-                      facecolor='white', edgecolor='none', pad_inches=0.2)
+    fig_light.savefig(
+        output_light, dpi=FIG_DPI, bbox_inches='tight',
+        facecolor='white', edgecolor='none', pad_inches=0.2
+    )
     plt.close(fig_light)
     print(f"✓ Saved light mode: {output_light}")
 
