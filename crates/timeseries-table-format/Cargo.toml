@@ -1,0 +1,22 @@
+[package]
+name = "timeseries-table-format"
+version = "0.1.0"
+edition = "2024"
+description = "Append-only time-series table format with gap/overlap tracking"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mag1cfrog/timeseries-table-format"
+keywords = ["time-series", "parquet", "datafusion", "analytics"]
+categories = ["database", "data-structures"]
+
+[features]
+default = ["datafusion"]
+datafusion = ["dep:timeseries-table-datafusion"]
+cli = ["dep:timeseries-table-cli"]
+
+[dependencies]
+timeseries-table-core = { path = "../timeseries-table-core" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", optional = true }
+timeseries-table-cli = { path = "../timeseries-table-cli", optional = true }
+
+[lints]
+workspace = true
