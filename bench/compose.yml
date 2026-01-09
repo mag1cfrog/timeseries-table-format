@@ -49,6 +49,7 @@ services:
     environment:
       - SPARK_MODE=master
     command: ["/bin/bash", "-lc", "/opt/spark/sbin/start-master.sh && tail -f /dev/null"]
+    user: "0:0"
     volumes:
       - ./work/spark:/opt/spark/work
       - ..:/workspace:rw

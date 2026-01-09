@@ -25,4 +25,4 @@ ${COMPOSE} exec -T \
   -e MEM_LIMIT="${MEM_LIMIT}" \
   -e DELTA_TABLE_PATH_BULK="/workspace/${WORK_DIR}/delta_spark/trips_bulk" \
   -e DELTA_TABLE_PATH_DAILY="/workspace/${WORK_DIR}/delta_spark/trips_daily" \
-  spark bash -lc "mkdir -p /tmp/.ivy2 && /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 --driver-memory 8g --executor-memory 8g --conf spark.sql.shuffle.partitions=8 --packages io.delta:delta-spark_2.12:3.1.0 /workspace/bench/systems/delta_spark/run.py"
+  spark bash -lc "mkdir -p /tmp/.ivy2 /workspace/${RESULTS_DIR}/$(basename "${RESULTS_RUN_DIR}") && chmod -R a+rwX /workspace/${RESULTS_DIR}/$(basename "${RESULTS_RUN_DIR}") /workspace/${WORK_DIR}/delta_spark || true; /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 --driver-memory 4g --executor-memory 4g --conf spark.driver.maxResultSize=512m --conf spark.sql.shuffle.partitions=8 --packages io.delta:delta-spark_2.12:3.1.0 /workspace/bench/systems/delta_spark/run.py"

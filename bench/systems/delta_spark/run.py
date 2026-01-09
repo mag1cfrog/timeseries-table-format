@@ -8,7 +8,8 @@ from pyspark.sql import SparkSession
 
 
 def now_ms():
-    return int(time.time() * 1000)
+    # Monotonic clock avoids negative durations if wall time shifts.
+    return int(time.monotonic() * 1000)
 
 
 def load_manifest(path):
@@ -78,12 +79,16 @@ def main():
     table_path_daily = os.environ["DELTA_TABLE_PATH_DAILY"]
     bulk_path = dataset_dir / bulk_rel
 
+    print("delta_spark: bulk ingest start", flush=True)
     start = now_ms()
     spark.read.parquet(str(bulk_path)).write.format("delta").mode("overwrite").save(table_path_bulk)
     elapsed = now_ms() - start
     emit("bulk_ingest", bulk_rel, elapsed)
+    print(f"delta_spark: bulk ingest done ({elapsed} ms)", flush=True)
 
+    print("delta_spark: daily table init", flush=True)
     spark.read.parquet(str(bulk_path)).limit(0).write.format("delta").mode("overwrite").save(table_path_daily)
+    print("delta_spark: daily appends start", flush=True)
 
     daily_files = sorted(daily_dir.glob("fhvhv_*.parquet"))
     for file_path in daily_files:
@@ -93,6 +98,7 @@ def main():
         elapsed = now_ms() - start
         emit("daily_append", rel, elapsed)
 
+    print("delta_spark: register temp view", flush=True)
     spark.read.format("delta").load(table_path_daily).createOrReplaceTempView("trips")
 
     for q in [
@@ -102,12 +108,14 @@ def main():
         "q4_groupby",
         "q5_date_trunc",
     ]:
+        print(f"delta_spark: query {q}", flush=True)
         sql = render_sql(queries_dir / f"{q}.sql", query_start, query_end, min_miles)
         start = now_ms()
         spark.sql(sql).collect()
         elapsed = now_ms() - start
         emit(q, "", elapsed)
 
+    print("delta_spark: done", flush=True)
     spark.stop()
 
 
