@@ -23,6 +23,7 @@ bulk_path="/workspace/${INFLUX_LINE_PROTOCOL_DIR}/${bulk_rel}"
 read -r bulk_rows bulk_bytes < <(manifest_lookup "${ROOT_DIR}/${DATASET_DIR}" "influx/${bulk_rel}")
 
 chunk_bytes="${INFLUX_WRITE_CHUNK_BYTES:-8000000}"
+sleep_sec="${INFLUX_WRITE_SLEEP_SEC:-0}"
 chunk_dir="/workspace/${WORK_DIR}/influxdb3_chunks"
 
 split_and_write() {
@@ -32,9 +33,9 @@ split_and_write() {
   local file_label="$4"
 
   start=$(now_ms)
-  ${COMPOSE} exec -T influxdb3 bash -lc "set -euo pipefail; mkdir -p '${chunk_dir}' && rm -f '${chunk_dir}'/part_*; split -C ${chunk_bytes} -d -a 4 '${lp_path}' '${chunk_dir}/part_'; max_bytes=\$(stat -c%s ${chunk_dir}/part_* | sort -n | tail -1); total=\$(ls -1 ${chunk_dir}/part_* | wc -l); echo \"influxdb3: ${file_label} chunks=\${total} max_bytes=\${max_bytes}\"; for part in ${chunk_dir}/part_*; do if [[ \"${INFLUXDB3_NO_SYNC:-}\" == \"1\" ]]; then influxdb3 write --no-sync --database '${db_name}' --file \"\${part}\" >/dev/null; else influxdb3 write --database '${db_name}' --file \"\${part}\" >/dev/null; fi; done; echo \"influxdb3: ${file_label} write complete\""
+  ${COMPOSE} exec -T influxdb3 bash -lc "set -euo pipefail; mkdir -p '${chunk_dir}' && rm -f '${chunk_dir}'/part_*; split -C ${chunk_bytes} -d -a 4 '${lp_path}' '${chunk_dir}/part_'; max_bytes=\$(stat -c%s ${chunk_dir}/part_* | sort -n | tail -1); total=\$(ls -1 ${chunk_dir}/part_* | wc -l); echo \"influxdb3: ${file_label} chunks=\${total} max_bytes=\${max_bytes}\"; for part in ${chunk_dir}/part_*; do if [[ \"${INFLUXDB3_NO_SYNC:-}\" == \"1\" ]]; then influxdb3 write --no-sync --database '${db_name}' --file \"\${part}\" >/dev/null || { echo \"influxdb3: write failed for \${part}\"; influxdb3 write --no-sync --database '${db_name}' --file \"\${part}\"; exit 1; }; else influxdb3 write --database '${db_name}' --file \"\${part}\" >/dev/null || { echo \"influxdb3: write failed for \${part}\"; influxdb3 write --database '${db_name}' --file \"\${part}\"; exit 1; }; fi; if [[ \"${sleep_sec}\" != \"0\" && \"${sleep_sec}\" != \"0.0\" ]]; then sleep ${sleep_sec}; fi; done; echo \"influxdb3: ${file_label} write complete\""
   elapsed=$(( $(now_ms) - start ))
-  emit_row "$CSV_OUT" "influxdb3" "${test_name}" "${file_label}" "$bulk_rows" "$bulk_bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" "chunk_bytes=${chunk_bytes}"
+  emit_row "$CSV_OUT" "influxdb3" "${test_name}" "${file_label}" "$bulk_rows" "$bulk_bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" "chunk_bytes=${chunk_bytes} sleep=${sleep_sec} no_sync=${INFLUXDB3_NO_SYNC:-0}"
   echo "influxdb3: ${file_label} recorded"
 }
 
@@ -46,9 +47,9 @@ for file in "${daily_files[@]}"; do
   path="/workspace/${INFLUX_LINE_PROTOCOL_DIR}/${rel}"
   read -r rows bytes < <(manifest_lookup "${ROOT_DIR}/${DATASET_DIR}" "influx/${rel}")
   start=$(now_ms)
-  ${COMPOSE} exec -T influxdb3 bash -lc "set -euo pipefail; mkdir -p '${chunk_dir}' && rm -f '${chunk_dir}'/part_*; split -C ${chunk_bytes} -d -a 4 '${path}' '${chunk_dir}/part_'; max_bytes=\$(stat -c%s ${chunk_dir}/part_* | sort -n | tail -1); total=\$(ls -1 ${chunk_dir}/part_* | wc -l); echo \"influxdb3: influx/${rel} chunks=\${total} max_bytes=\${max_bytes}\"; for part in ${chunk_dir}/part_*; do if [[ \"${INFLUXDB3_NO_SYNC:-}\" == \"1\" ]]; then influxdb3 write --no-sync --database '${INFLUX_DATABASE}_daily' --file \"\${part}\" >/dev/null; else influxdb3 write --database '${INFLUX_DATABASE}_daily' --file \"\${part}\" >/dev/null; fi; done; echo \"influxdb3: influx/${rel} write complete\""
+  ${COMPOSE} exec -T influxdb3 bash -lc "set -euo pipefail; mkdir -p '${chunk_dir}' && rm -f '${chunk_dir}'/part_*; split -C ${chunk_bytes} -d -a 4 '${path}' '${chunk_dir}/part_'; max_bytes=\$(stat -c%s ${chunk_dir}/part_* | sort -n | tail -1); total=\$(ls -1 ${chunk_dir}/part_* | wc -l); echo \"influxdb3: influx/${rel} chunks=\${total} max_bytes=\${max_bytes}\"; for part in ${chunk_dir}/part_*; do if [[ \"${INFLUXDB3_NO_SYNC:-}\" == \"1\" ]]; then influxdb3 write --no-sync --database '${INFLUX_DATABASE}_daily' --file \"\${part}\" >/dev/null || { echo \"influxdb3: write failed for \${part}\"; influxdb3 write --no-sync --database '${INFLUX_DATABASE}_daily' --file \"\${part}\"; exit 1; }; else influxdb3 write --database '${INFLUX_DATABASE}_daily' --file \"\${part}\" >/dev/null || { echo \"influxdb3: write failed for \${part}\"; influxdb3 write --database '${INFLUX_DATABASE}_daily' --file \"\${part}\"; exit 1; }; fi; if [[ \"${sleep_sec}\" != \"0\" && \"${sleep_sec}\" != \"0.0\" ]]; then sleep ${sleep_sec}; fi; done; echo \"influxdb3: influx/${rel} write complete\""
   elapsed=$(( $(now_ms) - start ))
-  emit_row "$CSV_OUT" "influxdb3" "daily_append" "influx/${rel}" "$rows" "$bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" "chunk_bytes=${chunk_bytes}"
+  emit_row "$CSV_OUT" "influxdb3" "daily_append" "influx/${rel}" "$rows" "$bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" "chunk_bytes=${chunk_bytes} sleep=${sleep_sec} no_sync=${INFLUXDB3_NO_SYNC:-0}"
   echo "influxdb3: influx/${rel} recorded"
 done
 
