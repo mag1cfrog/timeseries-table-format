@@ -96,16 +96,16 @@ Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appen
 
 ```bash
 # Install
-cargo install --git https://github.com/mag1cfrog/timeseries-table-format timeseries-table-cli
+cargo install --git https://github.com/mag1cfrog/timeseries-table-format --bin tstable
 
 # Create a table with 1-hour buckets
-timeseries-table-cli create --table ./my_table --time-column ts --bucket 1h
+tstable create --table ./my_table --time-column ts --bucket 1h
 
 # Append data (overlap-safe!)
-timeseries-table-cli append --table ./my_table --parquet ./data.parquet
+tstable append --table ./my_table --parquet ./data.parquet
 
 # Query with SQL
-timeseries-table-cli query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
+tstable query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
 ```
 
 See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full command reference.
@@ -114,11 +114,11 @@ See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full 
 
 ```toml
 [dependencies]
-timeseries-table-core = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+timeseries-table-format = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
 ```
 
 ```rust
-use timeseries_table_core::TimeSeriesTable;
+use timeseries_table_format::TimeSeriesTable;
 
 // Open and query coverage
 let table = TimeSeriesTable::open("./my_table")?;
@@ -128,13 +128,14 @@ println!("Coverage ratio: {:.1}%", coverage.ratio() * 100.0);
 println!("Gaps: {:?}", coverage.gaps());
 ```
 
+
 See [timeseries-table-core](crates/timeseries-table-core/README.md) for full API docs.
 
 ### DataFusion Integration
 
 ```toml
 [dependencies]
-timeseries-table-datafusion = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+timeseries-table-format = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
 ```
 
 See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) for SQL query examples.
@@ -215,7 +216,7 @@ A time-series table consists of:
 - [x] Coverage snapshots + overlap-safe appends  
 - [x] CLI for table management and SQL queries
 - [x] DataFusion `TableProvider` integration
-- [x] End-to-end example with synthetic data
+- [x] End-to-end example with sample data
 - [ ] Compaction / segment merging
 - [ ] Time-travel queries
 
