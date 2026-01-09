@@ -29,6 +29,8 @@ services:
     image: ${INFLUX_IMAGE}
     environment:
       INFLUX_NODE_ID: "local"
+      INFLUXDB3_MAX_HTTP_REQUEST_SIZE: "${INFLUXDB3_MAX_HTTP_REQUEST_SIZE}"
+    user: "0:0"
     command:
       - "influxdb3"
       - "serve"

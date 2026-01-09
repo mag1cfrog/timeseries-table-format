@@ -2,13 +2,20 @@
 set -euo pipefail
 
 now_ms() {
-  if command -v date >/dev/null 2>&1; then
-    date +%s%3N
-  else
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import time
+print(int(time.monotonic() * 1000))
+PY
+  elif command -v python >/dev/null 2>&1; then
     python - <<'PY'
 import time
-print(int(time.time() * 1000))
+print(int(time.monotonic() * 1000))
 PY
+  elif command -v date >/dev/null 2>&1; then
+    date +%s%3N
+  else
+    printf '%s\n' 0
   fi
 }
 
