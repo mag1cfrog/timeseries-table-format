@@ -97,11 +97,11 @@ The table below shows the **mean** append time across all 90 days:
 
 | System | Mean | Min | Max | Std Dev |
 |--------|------|-----|-----|---------|
-| timeseries-table | 335ms | 284ms | 485ms | 41ms |
-| ClickHouse | 1,114ms | 918ms | 1,344ms | 91ms |
-| Delta + Spark | 1,454ms | 1,296ms | 2,237ms | 194ms |
-| PostgreSQL | 1,829ms | 1,434ms | 2,524ms | 219ms |
-| TimescaleDB | 3,197ms | 2,651ms | 4,265ms | 339ms |
+| timeseries-table | 335ms | 309ms | 365ms | 12ms |
+| ClickHouse | 1,114ms | 918ms | 1,344ms | 89ms |
+| Delta + Spark | 1,454ms | 1,212ms | 2,237ms | 190ms |
+| PostgreSQL | 1,829ms | 1,468ms | 2,362ms | 197ms |
+| TimescaleDB | 3,197ms | 2,651ms | 4,265ms | 336ms |
 
 No system showed performance regression over the 90-day append sequence.
 
