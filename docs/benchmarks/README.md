@@ -101,7 +101,7 @@ The table below shows the **mean** append time across all 90 days:
 | ClickHouse | 1,114ms | 918ms | 1,344ms | 89ms |
 | Delta + Spark | 1,454ms | 1,212ms | 2,237ms | 190ms |
 | PostgreSQL | 1,829ms | 1,468ms | 2,362ms | 197ms |
-| TimescaleDB | 3,197ms | 2,651ms | 4,265ms | 336ms |
+| TimescaleDB | 3,197ms | 2,544ms | 3,913ms | 336ms |
 
 No system showed performance regression over the 90-day append sequence.
 
