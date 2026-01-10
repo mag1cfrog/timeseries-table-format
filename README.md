@@ -96,16 +96,16 @@ Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appen
 
 ```bash
 # Install
-cargo install --git https://github.com/mag1cfrog/timeseries-table-format timeseries-table-cli
+cargo install --git https://github.com/mag1cfrog/timeseries-table-format --bin tstable
 
 # Create a table with 1-hour buckets
-timeseries-table-cli create --table ./my_table --time-column ts --bucket 1h
+tstable create --table ./my_table --time-column ts --bucket 1h
 
 # Append data (overlap-safe!)
-timeseries-table-cli append --table ./my_table --parquet ./data.parquet
+tstable append --table ./my_table --parquet ./data.parquet
 
 # Query with SQL
-timeseries-table-cli query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
+tstable query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
 ```
 
 See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full command reference.
@@ -114,11 +114,11 @@ See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full 
 
 ```toml
 [dependencies]
-timeseries-table-core = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+timeseries-table-format = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
 ```
 
 ```rust
-use timeseries_table_core::TimeSeriesTable;
+use timeseries_table_format::TimeSeriesTable;
 
 // Open and query coverage
 let table = TimeSeriesTable::open("./my_table")?;
@@ -128,16 +128,51 @@ println!("Coverage ratio: {:.1}%", coverage.ratio() * 100.0);
 println!("Gaps: {:?}", coverage.gaps());
 ```
 
+
 See [timeseries-table-core](crates/timeseries-table-core/README.md) for full API docs.
 
 ### DataFusion Integration
 
 ```toml
 [dependencies]
-timeseries-table-datafusion = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+timeseries-table-format = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
 ```
 
 See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) for SQL query examples.
+
+---
+
+## 🥾 Quickstart Example (NVDA 1h + MA5)
+
+Fastest way to see the format end-to-end (no external services needed):
+
+1) Ingest sample data (creates `examples/nvda_table/`):
+
+```bash
+cargo run -p timeseries-table-core --example ingest_nvda
+```
+
+2) Query with DataFusion + moving average window:
+
+```bash
+cargo run -p timeseries-table-datafusion --example query_nvda_ma
+```
+
+Example output:
+
+```
++---------------------+--------+--------------------+
+| ts                  | close  | ma_5               |
++---------------------+--------+--------------------+
+| 2024-06-01T00:00:00 | 115.22 | 115.22             |
+| 2024-06-01T01:00:00 | 115.55 | 115.38499999999999 |
+| 2024-06-01T02:00:00 | 115.51 | 115.42666666666666 |
+| 2024-06-01T03:00:00 | 114.99 | 115.3175           |
+| 2024-06-01T04:00:00 | 114.7  | 115.194            |
++---------------------+--------+--------------------+
+```
+
+Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
 
 ---
 
@@ -181,7 +216,7 @@ A time-series table consists of:
 - [x] Coverage snapshots + overlap-safe appends  
 - [x] CLI for table management and SQL queries
 - [x] DataFusion `TableProvider` integration
-- [ ] End-to-end example with synthetic data
+- [x] End-to-end example with sample data
 - [ ] Compaction / segment merging
 - [ ] Time-travel queries
 

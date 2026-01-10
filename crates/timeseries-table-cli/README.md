@@ -1,4 +1,4 @@
-# timeseries-table-cli
+# tstable
 
 A command-line tool for creating, managing, and querying time-series tables—without writing any Rust code.
 
@@ -17,7 +17,7 @@ Instead of manually managing scattered Parquet files, you get:
 ### From GitHub
 
 ```bash
-cargo install --git https://github.com/mag1cfrog/timeseries-table-format timeseries-table-cli
+cargo install --git https://github.com/mag1cfrog/timeseries-table-format --bin tstable
 ```
 
 ### From a local clone
@@ -31,26 +31,26 @@ cargo install --path crates/timeseries-table-cli
 ### Verify installation
 
 ```bash
-timeseries-table-cli --help
+tstable --help
 ```
 
 ## Quick start
 
 ```bash
 # 1. Create a table for hourly stock bars
-timeseries-table-cli create \
+tstable create \
   --table ./my_stocks \
   --time-column timestamp \
   --bucket 1h \
   --entity symbol
 
 # 2. Add some data (any Parquet file with a timestamp column)
-timeseries-table-cli append \
+tstable append \
   --table ./my_stocks \
   --parquet ./data/aapl_bars.parquet
 
 # 3. Query with SQL
-timeseries-table-cli query \
+tstable query \
   --table ./my_stocks \
   --sql "SELECT symbol, COUNT(*) FROM my_stocks GROUP BY symbol"
 ```
@@ -64,7 +64,7 @@ timeseries-table-cli query \
 Creates an empty time-series table. The schema is automatically inferred when you append the first data segment.
 
 ```bash
-timeseries-table-cli create \
+tstable create \
   --table ./data/my_table \
   --time-column timestamp \
   --bucket 1h \
@@ -92,7 +92,7 @@ If your data has multiple "things" (like stock symbols or sensor IDs), specify t
 Appends a Parquet file as a new segment. The file must have the timestamp column defined when you created the table.
 
 ```bash
-timeseries-table-cli append \
+tstable append \
   --table ./data/my_table \
   --parquet ./incoming/new_data.parquet
 ```
@@ -116,7 +116,7 @@ timeseries-table-cli append \
 Execute SQL queries against your table using DataFusion.
 
 ```bash
-timeseries-table-cli query \
+tstable query \
   --table ./data/my_table \
   --sql "SELECT * FROM my_table WHERE timestamp > '2024-01-01' LIMIT 10"
 ```
@@ -139,20 +139,20 @@ The table is registered under its directory name. For `./data/my_table`, use `my
 
 ```bash
 # Show all data (no row limit)
-timeseries-table-cli query \
+tstable query \
   --table ./stocks \
   --sql "SELECT * FROM stocks" \
   --max-rows 0
 
 # Export to JSON Lines
-timeseries-table-cli query \
+tstable query \
   --table ./stocks \
   --sql "SELECT symbol, close FROM stocks WHERE symbol = 'AAPL'" \
   --format jsonl \
   --output aapl.jsonl
 
 # See the query plan
-timeseries-table-cli query \
+tstable query \
   --table ./stocks \
   --sql "SELECT * FROM stocks WHERE timestamp > '2024-06-01'" \
   --explain
@@ -165,7 +165,7 @@ timeseries-table-cli query \
 Opens an interactive shell that keeps the table loaded in memory. Great for exploratory analysis.
 
 ```bash
-timeseries-table-cli shell --table ./data/my_table
+tstable shell --table ./data/my_table
 ```
 
 If you omit `--table`, the shell will prompt you for a path (and can create a new table interactively).
@@ -207,7 +207,7 @@ Here's a complete workflow for managing daily stock bars:
 
 ```bash
 # Create a table for daily bars, partitioned by symbol
-timeseries-table-cli create \
+tstable create \
   --table ./market_data/daily_bars \
   --time-column date \
   --bucket 1d \
@@ -215,16 +215,16 @@ timeseries-table-cli create \
   --timezone America/New_York
 
 # Append historical data
-timeseries-table-cli append \
+tstable append \
   --table ./market_data/daily_bars \
   --parquet ./downloads/spy_2023.parquet
 
-timeseries-table-cli append \
+tstable append \
   --table ./market_data/daily_bars \
   --parquet ./downloads/spy_2024.parquet
 
 # Query: Find the highest closing prices
-timeseries-table-cli query \
+tstable query \
   --table ./market_data/daily_bars \
   --sql "
     SELECT symbol, date, close
@@ -233,7 +233,7 @@ timeseries-table-cli query \
   "
 
 # Interactive exploration
-timeseries-table-cli shell --table ./market_data/daily_bars
+tstable shell --table ./market_data/daily_bars
 ```
 
 ---

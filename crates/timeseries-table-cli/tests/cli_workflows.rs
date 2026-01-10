@@ -15,7 +15,7 @@ use timeseries_table_core::{
 };
 
 fn cli_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_timeseries-table-cli")
+    env!("CARGO_BIN_EXE_tstable")
 }
 
 fn run_cli(args: &[&str]) -> io::Result<Output> {

@@ -9,7 +9,7 @@ mod common;
 use common::{table_root, write_parquet_rows};
 
 fn cli() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("timeseries-table-cli"))
+    Command::new(assert_cmd::cargo::cargo_bin!("tstable"))
 }
 
 #[test]
