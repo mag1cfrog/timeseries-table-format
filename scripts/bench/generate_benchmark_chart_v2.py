@@ -127,7 +127,7 @@ DATA = {
     "Time-Range Query": {
         "timeseries-table": 545,
         "ClickHouse": 1371,
-        "Delta+Spark": 49722,
+        "Delta+Spark": 964,
         "PostgreSQL": 43556,
         "TimescaleDB": 43923,
     },
