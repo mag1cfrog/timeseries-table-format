@@ -12,6 +12,11 @@ def now_ms():
     return int(time.monotonic() * 1000)
 
 
+def consume_partition(rows):
+    for _ in rows:
+        pass
+
+
 def load_manifest(path):
     data = {}
     with open(path, newline="") as f:
@@ -111,7 +116,7 @@ def main():
         print(f"delta_spark: query {q}", flush=True)
         sql = render_sql(queries_dir / f"{q}.sql", query_start, query_end, min_miles)
         start = now_ms()
-        spark.sql(sql).collect()
+        spark.sql(sql).foreachPartition(consume_partition)
         elapsed = now_ms() - start
         emit(q, "", elapsed)
 
