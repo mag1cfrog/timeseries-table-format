@@ -8,7 +8,7 @@ This document details the benchmark methodology, results, and reproduction steps
 |--------|-------------|--------------------|--------------------|-------------------|
 | **timeseries-table** | **1.7s** | **335ms** | **545ms** | **321ms** |
 | ClickHouse | 13.1s | 1.1s | 1.4s | 311ms |
-| Delta + Spark | 24.2s | 1.5s | 49.7s | 507ms |
+| Delta + Spark | 24.2s | 1.5s | 964ms | 507ms |
 | PostgreSQL | 45.5s | 1.8s | 43.6s | 2.4s |
 | TimescaleDB | 86.6s | 3.2s | 43.9s | 519ms |
 
@@ -75,7 +75,7 @@ Load the first month of data (~20M rows) into an empty table.
 |--------|--------|
 | timeseries-table | `timeseries-table-cli append --parquet` |
 | ClickHouse | `INSERT INTO ... FORMAT CSVWithNames` |
-| Delta + Spark | `df.write.format("delta").save()` |
+| Delta + Spark | `df.write.format("delta").partitionBy("pickup_date").save()` |
 | PostgreSQL | `\copy ... FROM ... WITH (FORMAT csv)` |
 | TimescaleDB | `\copy ... FROM ... WITH (FORMAT csv)` |
 
@@ -147,7 +147,7 @@ ORDER BY hour;
 
 | Query | timeseries-table | ClickHouse | Delta+Spark | PostgreSQL | TimescaleDB |
 |-------|------------------|------------|-------------|------------|-------------|
-| Q1 (time-range) | **545** | 1,371 | 49,722 | 43,556 | 43,923 |
+| Q1 (time-range) | **545** | 1,371 | 964 | 43,556 | 43,923 |
 | Q2 (aggregation) | **317** | 319 | 552 | 3,565 | 529 |
 | Q3 (filter+agg) | **353** | 312 | 391 | 2,035 | 475 |
 | Q4 (group by) | **323** | 305 | 507 | 1,929 | 518 |
@@ -164,7 +164,7 @@ Results in 80× faster performance vs PostgreSQL and 2.5× vs ClickHouse.
 
 **Aggregation Queries (Q2–Q5)**: Performance is competitive with ClickHouse (within ±15%). Both systems benefit from columnar storage. PostgreSQL's row-oriented storage shows in the 6–10× slower results.
 
-**Delta + Spark**: The JVM startup overhead and Spark's execution model add latency, especially visible in Q1 where the full result set must be materialized.
+**Delta + Spark**: With partitioned Delta tables and a JVM-only scan for Q1, time-range performance is closer to ClickHouse but still trails `timeseries-table`.
 
 ---
 
@@ -280,7 +280,7 @@ clickhouse,q4_groupby,305
 clickhouse,q5_date_trunc,308
 delta_spark,bulk_ingest,24196
 delta_spark,daily_append (mean),1454
-delta_spark,q1_time_range,49722
+delta_spark,q1_time_range,964
 delta_spark,q2_agg,552
 delta_spark,q3_filter_agg,391
 delta_spark,q4_groupby,507
