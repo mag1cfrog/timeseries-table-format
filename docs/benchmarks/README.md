@@ -63,16 +63,6 @@ All systems run in Docker containers with identical resource constraints via `cp
 | **PostgreSQL** | 16 | `postgres:16` |
 | **TimescaleDB** | latest | `timescale/timescaledb:latest-pg16` |
 
-### Excluded: InfluxDB 3 Core
-
-InfluxDB 3 Core was initially included but excluded from final results due to:
-
-1. **File scan limit**: The free Core version enforces a file scan limit that prevents running analytical queries (Q1–Q5) on datasets of this size
-2. **Ingest performance**: Bulk ingest was ~250s (vs 1.7s for timeseries-table), making it non-competitive for this workload
-3. **Protocol mismatch**: Requires line protocol format, adding conversion overhead
-
-InfluxDB 3 is optimized for high-frequency metrics ingestion, not analytical batch workloads.
-
 ---
 
 ## Benchmark Operations
@@ -227,7 +217,6 @@ bench/results/20260109_135101/
 ├── postgres.csv
 ├── timescale.csv
 ├── timeseries_table.csv
-├── influxdb3.csv
 └── combined.csv
 ```
 

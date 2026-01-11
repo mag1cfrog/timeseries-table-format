@@ -16,25 +16,6 @@ import pyarrow.parquet as pq
 import pyarrow.csv as pacsv
 
 
-def _escape_lp_key(val: str) -> str:
-    return val.replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
-
-
-def _escape_lp_string(val: str) -> str:
-    return val.replace("\\", "\\\\").replace("\"", "\\\"")
-
-
-def _to_ns(ts_val) -> int:
-    if isinstance(ts_val, dt.datetime):
-        return int(ts_val.timestamp() * 1_000_000_000)
-    if isinstance(ts_val, dt.date):
-        return int(dt.datetime(ts_val.year, ts_val.month, ts_val.day).timestamp() * 1_000_000_000)
-    try:
-        return int(ts_val)
-    except Exception:
-        return 0
-
-
 def month_range(start_ym: str, count: int):
     year, month = start_ym.split("-")
     year = int(year)
@@ -135,43 +116,6 @@ def write_csv_from_parquet(parquet_path: pathlib.Path, csv_path: pathlib.Path):
     pacsv.write_csv(table, csv_path)
 
 
-def write_line_protocol(parquet_path: pathlib.Path, lp_path: pathlib.Path, time_col: str, measurement: str):
-    dataset = ds.dataset(parquet_path)
-    scanner = dataset.scanner(batch_size=16 * 1024)
-    lp_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(lp_path, "w", encoding="utf-8") as f:
-        for batch in scanner.to_batches():
-            rows = batch.to_pylist()
-            for row in rows:
-                ts_val = row.get(time_col)
-                if ts_val is None:
-                    continue
-                ts_ns = _to_ns(ts_val)
-                if ts_ns == 0:
-                    continue
-                fields = []
-                for key, val in row.items():
-                    if key == time_col or val is None:
-                        continue
-                    field_key = _escape_lp_key(str(key))
-                    if isinstance(val, bool):
-                        fields.append(f"{field_key}={'true' if val else 'false'}")
-                    elif isinstance(val, int):
-                        fields.append(f"{field_key}={val}i")
-                    elif isinstance(val, float):
-                        if val != val:
-                            continue
-                        fields.append(f"{field_key}={val}")
-                    else:
-                        sval = _escape_lp_string(str(val))
-                        fields.append(f"{field_key}=\"{sval}\"")
-                if not fields:
-                    continue
-                measurement_key = _escape_lp_key(measurement)
-                f.write(f"{measurement_key} {','.join(fields)} {ts_ns}\n")
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -179,18 +123,15 @@ def main():
     parser.add_argument("--start-month", required=True)
     parser.add_argument("--months", type=int, required=True)
     parser.add_argument("--time-column", required=True)
-    parser.add_argument("--influx-measurement", default="trips")
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--local-raw-dir", default="")
     parser.add_argument("--generate-csv", action="store_true")
-    parser.add_argument("--generate-influx-lp", action="store_true")
     args = parser.parse_args()
 
     dataset_dir = pathlib.Path(args.dataset_dir)
     raw_dir = dataset_dir / "raw"
     daily_dir = dataset_dir / "daily"
     csv_dir = dataset_dir / "csv"
-    influx_dir = dataset_dir / "influx"
     manifest_path = dataset_dir / "manifest.csv"
 
     raw_files = []
@@ -225,16 +166,6 @@ def main():
             date_part = daily.stem.replace("fhvhv_", "")
             csv_path = csv_dir / "daily" / f"fhvhv_{date_part}.csv"
             write_csv_from_parquet(daily, csv_path)
-
-    if args.generate_influx_lp:
-        print("Generating Influx line protocol files...")
-        for raw in raw_files:
-            lp_path = influx_dir / "raw" / (raw.stem + ".lp")
-            write_line_protocol(raw, lp_path, args.time_column, args.influx_measurement)
-        for daily in sorted(daily_dir.glob("fhvhv_*.parquet")):
-            date_part = daily.stem.replace("fhvhv_", "")
-            lp_path = influx_dir / "daily" / f"fhvhv_{date_part}.lp"
-            write_line_protocol(daily, lp_path, args.time_column, args.influx_measurement)
 
     print("Writing manifest...")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,27 +208,6 @@ def main():
                     daily.stat().st_size,
                     "daily",
                     "csv",
-                ])
-        if args.generate_influx_lp:
-            for raw in raw_files:
-                lp_path = influx_dir / "raw" / (raw.stem + ".lp")
-                writer.writerow([
-                    str(lp_path.relative_to(dataset_dir)),
-                    parquet_rows(raw),
-                    lp_path.stat().st_size,
-                    "raw",
-                    "lp",
-                ])
-            for daily in sorted((influx_dir / "daily").glob("fhvhv_*.lp")):
-                date_part = daily.stem.replace("fhvhv_", "")
-                parquet_path = daily_dir / f"fhvhv_{date_part}.parquet"
-                rows = parquet_rows(parquet_path) if parquet_path.exists() else ""
-                writer.writerow([
-                    str(daily.relative_to(dataset_dir)),
-                    rows,
-                    daily.stat().st_size,
-                    "daily",
-                    "lp",
                 ])
 
     print("Done.")

@@ -34,7 +34,5 @@ docker run --rm \
     --months '${MONTHS}' \
     --time-column '${TIME_COLUMN}' \
     --local-raw-dir '/workspace/${LOCAL_RAW_DIR}' \
-    --influx-measurement '${INFLUX_MEASUREMENT}' \
     --dataset-dir '/workspace/${DATASET_DIR}' \
-    $(if [[ "${GENERATE_CSV}" == "1" ]]; then echo --generate-csv; fi) \
-    $(if [[ "${GENERATE_INFLUX_LP}" == "1" ]]; then echo --generate-influx-lp; fi)"
+    $(if [[ "${GENERATE_CSV}" == "1" ]]; then echo --generate-csv; fi)"
