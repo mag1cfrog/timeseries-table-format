@@ -25,30 +25,6 @@ services:
     mem_limit: ${MEM_LIMIT}
     cpus: ${CPU_LIMIT}
 
-  influxdb3:
-    image: ${INFLUX_IMAGE}
-    environment:
-      INFLUX_NODE_ID: "local"
-      INFLUXDB3_MAX_HTTP_REQUEST_SIZE: "${INFLUXDB3_MAX_HTTP_REQUEST_SIZE}"
-      INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD: "${INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD}"
-      INFLUXDB3_WAL_FLUSH_INTERVAL: "${INFLUXDB3_WAL_FLUSH_INTERVAL}"
-      INFLUXDB3_WAL_MAX_WRITE_BUFFER_SIZE: "${INFLUXDB3_WAL_MAX_WRITE_BUFFER_SIZE}"
-    user: "0:0"
-    command:
-      - "influxdb3"
-      - "serve"
-      - "--http-bind"
-      - "0.0.0.0:8181"
-      - "--node-id-from-env"
-      - "INFLUX_NODE_ID"
-      - "--without-auth"
-    volumes:
-      - ./work/influxdb3:/var/lib/influxdb3
-      - ..:/workspace:rw
-    working_dir: /workspace
-    mem_limit: ${MEM_LIMIT}
-    cpus: ${CPU_LIMIT}
-
   clickhouse:
     image: ${CLICKHOUSE_IMAGE}
     volumes:

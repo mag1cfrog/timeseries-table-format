@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import csv
 import os
+import re
 import time
 from pathlib import Path
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
 
 def now_ms():
@@ -21,13 +23,57 @@ def load_manifest(path):
     return data
 
 
-def render_sql(path, start, end, min_miles):
+def iso_date(iso_ts: str) -> str:
+    return iso_ts.split("T", 1)[0]
+
+
+def inject_partition_predicate(sql: str, start_date: str, end_date: str, partition_col: str) -> str:
+    base = sql.strip().rstrip(";")
+    predicate = f"{partition_col} >= '{start_date}' AND {partition_col} < '{end_date}'"
+    lower = base.lower()
+    where_match = re.search(r"\bwhere\b", lower)
+    clause_match = re.search(r"\b(group\s+by|order\s+by|limit)\b", lower)
+    if where_match is None:
+        if clause_match is None:
+            return f"{base} WHERE {predicate}"
+        cut = clause_match.start()
+        return f"{base[:cut]} WHERE {predicate} {base[cut:]}"
+    start = where_match.end()
+    if clause_match is None or clause_match.start() < start:
+        return f"{base} AND {predicate}"
+    cut = clause_match.start()
+    return f"{base[:cut]} AND {predicate} {base[cut:]}"
+
+
+def select_list(cols):
+    return ", ".join(f"`{c}`" for c in cols)
+
+
+def rewrite_select_star(sql: str, select_cols) -> str:
+    needle = "select *"
+    lower = sql.lower()
+    idx = lower.find(needle)
+    if idx == -1:
+        return sql
+    return sql[:idx] + f"SELECT {select_list(select_cols)}" + sql[idx + len(needle):]
+
+
+def render_sql(path, start, end, min_miles, partition_col, select_cols):
     with open(path, "r", encoding="utf-8") as f:
         sql = f.read()
     sql = sql.replace("{START}", start)
     sql = sql.replace("{END}", end)
     sql = sql.replace("{MIN_MILES}", str(min_miles))
-    return sql
+    sql = rewrite_select_star(sql, select_cols)
+    return inject_partition_predicate(sql, iso_date(start), iso_date(end), partition_col)
+
+
+def execute_query(df, full_scan: bool):
+    if full_scan:
+        cols = ",".join(f"`{c}`" for c in df.columns)
+        df.selectExpr(f"sum(hash({cols})) as _h").collect()
+    else:
+        df.collect()
 
 
 def main():
@@ -42,6 +88,8 @@ def main():
     min_miles = os.environ["MIN_MILES"]
     cpu_limit = os.environ.get("CPU_LIMIT", "")
     mem_limit = os.environ.get("MEM_LIMIT", "")
+    time_column = os.environ.get("TIME_COLUMN", "pickup_datetime")
+    partition_col = "pickup_date"
 
     manifest = load_manifest(manifest_csv)
 
@@ -79,27 +127,36 @@ def main():
     table_path_daily = os.environ["DELTA_TABLE_PATH_DAILY"]
     bulk_path = dataset_dir / bulk_rel
 
+    def with_partition(df):
+        return df.withColumn(partition_col, F.to_date(F.col(time_column)))
+
     print("delta_spark: bulk ingest start", flush=True)
     start = now_ms()
-    spark.read.parquet(str(bulk_path)).write.format("delta").mode("overwrite").save(table_path_bulk)
+    bulk_df = with_partition(spark.read.parquet(str(bulk_path)))
+    bulk_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy(partition_col).save(table_path_bulk)
     elapsed = now_ms() - start
     emit("bulk_ingest", bulk_rel, elapsed)
     print(f"delta_spark: bulk ingest done ({elapsed} ms)", flush=True)
 
     print("delta_spark: daily table init", flush=True)
-    spark.read.parquet(str(bulk_path)).limit(0).write.format("delta").mode("overwrite").save(table_path_daily)
+    bulk_df.limit(0).write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy(partition_col).save(table_path_daily)
     print("delta_spark: daily appends start", flush=True)
 
     daily_files = sorted(daily_dir.glob("fhvhv_*.parquet"))
     for file_path in daily_files:
         rel = f"daily/{file_path.name}"
         start = now_ms()
-        spark.read.parquet(str(file_path)).write.format("delta").mode("append").save(table_path_daily)
+        with_partition(spark.read.parquet(str(file_path))).write.format("delta").mode("append").partitionBy(partition_col).save(table_path_daily)
         elapsed = now_ms() - start
         emit("daily_append", rel, elapsed)
 
     print("delta_spark: register temp view", flush=True)
-    spark.read.format("delta").load(table_path_daily).createOrReplaceTempView("trips")
+    base_df = spark.read.format("delta").load(table_path_daily)
+    data_cols = [c for c in base_df.columns if c != partition_col]
+    base_df.createOrReplaceTempView("trips")
+
+    print("delta_spark: warmup", flush=True)
+    spark.sql("SELECT * FROM trips LIMIT 1").collect()
 
     for q in [
         "q1_time_range",
@@ -109,9 +166,10 @@ def main():
         "q5_date_trunc",
     ]:
         print(f"delta_spark: query {q}", flush=True)
-        sql = render_sql(queries_dir / f"{q}.sql", query_start, query_end, min_miles)
+        sql = render_sql(queries_dir / f"{q}.sql", query_start, query_end, min_miles, partition_col, data_cols)
         start = now_ms()
-        spark.sql(sql).collect()
+        df = spark.sql(sql)
+        execute_query(df, q == "q1_time_range")
         elapsed = now_ms() - start
         emit(q, "", elapsed)
 
