@@ -52,6 +52,8 @@ But if you're working with **time-series specifically**, you might have noticed:
 - 💹 Financial data stores where overlap = disaster
 - 🧪 Learning how modern table formats work (well-documented internals!)
 
+> **💡 How buckets work:** A bucket (1s, 1m, 1h, etc.) defines the *logical time slot* for coverage tracking—not the sample rate. Choose a bucket that matches your data's natural resolution: hourly bars → `1h`, minute candles → `1m`. Multiple records in the same slot are treated as overlap (v0.1 rejects duplicates; merge policies planned for v0.2).
+
 ---
 
 ## ⚡ Performance
