@@ -1,0 +1,28 @@
+[changelog]
+header = """
+# Changelog
+All notable changes to {{ package }} will be documented in this file.
+"""
+body = """
+{% if version %}## {{ version }}{% if date %} ({{ date }}){% endif %}{% else %}## [Latest]{% endif %}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/mag1cfrog/timeseries-table-format/commit/{{ commit.id }}))
+{% endfor %}
+{% endfor %}
+"""
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^refactor", group = "Code Refactoring" },
+  { message = "^test", group = "Testing" },
+  { message = "^chore\\(release\\):", skip = true },
+  { message = "^chore", group = "Maintenance" }
+]
