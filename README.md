@@ -29,7 +29,7 @@
 | **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
 | **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
 | **Pure Rust** | Pure Rust, no JVM, no Python runtime—just `cargo install` and go |
-| **Fast ingest** | [7–27× faster](#-performance) than ClickHouse/PostgreSQL on bulk loads and daily appends |
+| **Fast ingest** | [7–27× faster](#performance-) than ClickHouse/PostgreSQL on bulk loads and daily appends |
 
 ---
 
