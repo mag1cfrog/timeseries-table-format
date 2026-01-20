@@ -144,7 +144,7 @@ See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) 
 
 ---
 
-## Quickstart Example (NVDA 1h + MA5) 🥾
+### Example walkthrough: NVDA 1h + MA5 🥾
 
 Fastest way to see the format end-to-end (no external services needed):
 
