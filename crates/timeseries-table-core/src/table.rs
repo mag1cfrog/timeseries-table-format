@@ -4,4 +4,3 @@
 //! a thin re-export over the existing `time_series_table` module.
 
 pub use crate::time_series_table::*;
-

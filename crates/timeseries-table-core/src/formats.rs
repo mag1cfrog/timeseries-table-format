@@ -4,4 +4,3 @@
 //! particular on-disk segment format (Parquet, CSV, ...).
 
 pub mod parquet;
-

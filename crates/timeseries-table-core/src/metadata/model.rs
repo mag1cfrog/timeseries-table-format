@@ -7,4 +7,3 @@ pub use crate::transaction_log::{
     Commit, FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TableMetaDelta,
     TableState, TimeBucket, TimeIndexSpec,
 };
-
