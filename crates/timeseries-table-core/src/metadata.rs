@@ -1,10 +1,15 @@
 //! Metadata layer.
 //!
-//! This module groups the durable metadata model and the append-only metadata
-//! log APIs (optimistic concurrency control, table state materialization, ...).
+//! This module groups **pure** metadata data types and validation logic.
 //!
-//! For now these are thin re-exports over existing modules to allow an
-//! incremental refactor.
+//! It must not depend on storage backends or perform IO. IO-heavy modules (log
+//! replay, storage access, Parquet scanning, etc.) should live in higher layers
+//! such as `transaction_log`, `storage`, and `time_series_table`.
 
-pub mod log;
+pub mod logical_schema;
+pub mod segments;
+pub mod table_metadata;
+pub mod time_column;
+
+/// Convenience re-exports for the metadata "model" surface.
 pub mod model;
