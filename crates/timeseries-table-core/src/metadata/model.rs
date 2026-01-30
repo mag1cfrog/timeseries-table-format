@@ -1,9 +1,16 @@
 //! Metadata model types.
 //!
-//! Thin re-export shim over metadata types currently defined under
-//! `transaction_log`.
+//! Convenience re-exports over [`crate::metadata`] submodules.
 
-pub use crate::transaction_log::{
-    Commit, FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TableMetaDelta,
-    TableState, TimeBucket, TimeIndexSpec,
+pub use crate::metadata::{
+    logical_schema::{
+        LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
+        SchemaConvertError,
+    },
+    segments::{FileFormat, SegmentId, SegmentMeta, SegmentMetaError},
+    table_metadata::{
+        ParseTimeBucketError, TABLE_FORMAT_VERSION, TableKind, TableMeta, TableMetaDelta,
+        TimeBucket, TimeIndexSpec,
+    },
+    time_column::TimeColumnError,
 };

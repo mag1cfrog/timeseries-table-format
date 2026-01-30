@@ -11,7 +11,9 @@ use crate::storage::{TableLocation, read_all_bytes};
 use crate::transaction_log::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
-use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
+use crate::transaction_log::segments::{
+    SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
+};
 
 fn map_parquet_col_to_logical_type(
     column: &str,
@@ -407,10 +409,10 @@ pub fn logical_schema_from_parquet_bytes(
 
     // Map Parquet physical/logical types into our LogicalSchema representation.
     logical_schema_from_parquet(file_meta).map_err(|source| {
-        SegmentMetaError::LogicalSchemaInvalid {
+        SegmentError::from(SegmentMetaError::LogicalSchemaInvalid {
             path: path_str,
             source,
-        }
+        })
     })
 }
 
@@ -725,7 +727,9 @@ mod tests {
 
         let bytes = std::fs::read(&abs)?;
         match logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes)) {
-            Err(SegmentMetaError::LogicalSchemaInvalid { source, .. }) => {
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::LogicalSchemaInvalid { source, .. },
+            }) => {
                 assert_eq!(source, expected);
                 Ok(())
             }

@@ -20,7 +20,7 @@ use crate::{
         segment_entity_identity::SegmentEntityIdentityError,
     },
     storage::StorageError,
-    transaction_log::{CommitError, SegmentId, TableKind, TimeBucket, segments::SegmentMetaError},
+    transaction_log::{CommitError, SegmentId, TableKind, TimeBucket, segments::SegmentError},
 };
 
 /// Errors from high-level time-series table operations.
@@ -63,7 +63,7 @@ pub enum TableError {
     SegmentMeta {
         /// Underlying segment metadata error.
         #[snafu(source, backtrace)]
-        source: SegmentMetaError,
+        source: SegmentError,
     },
 
     /// Schema compatibility error when appending a segment with incompatible schema (no evolution allowed in v0.1).

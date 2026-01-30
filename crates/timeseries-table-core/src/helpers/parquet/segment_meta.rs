@@ -386,7 +386,7 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     let path_str = rel_path.display().to_string();
 
     if data.len() < 8 {
-        return Err(SegmentMetaError::TooShort { path: path_str });
+        return Err(SegmentMetaError::TooShort { path: path_str }.into());
     }
 
     let file_size = data.len() as u64;
@@ -492,6 +492,7 @@ pub async fn segment_meta_from_parquet_location(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transaction_log::segments::{SegmentError, SegmentIoError};
     use parquet::basic::{LogicalType, Repetition, TimeUnit};
     use parquet::column::writer::ColumnWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -695,7 +696,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentMetaError::ParquetStatsMissing { .. })
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::ParquetStatsMissing { .. }
+            })
         ));
         Ok(())
     }
@@ -783,9 +786,11 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentMetaError::TimeColumn {
-                source: TimeColumnError::Missing { .. },
-                ..
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::TimeColumn {
+                    source: TimeColumnError::Missing { .. },
+                    ..
+                }
             })
         ));
         Ok(())
@@ -810,9 +815,11 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentMetaError::TimeColumn {
-                source: TimeColumnError::UnsupportedParquetType { .. },
-                ..
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::TimeColumn {
+                    source: TimeColumnError::UnsupportedParquetType { .. },
+                    ..
+                }
             })
         ));
         Ok(())
@@ -836,7 +843,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SegmentMetaError::ParquetRead { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::ParquetRead { .. }
+            })
+        ));
         Ok(())
     }
 
@@ -853,7 +865,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SegmentMetaError::MissingFile { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::Io {
+                source: SegmentIoError::MissingFile { .. }
+            })
+        ));
         Ok(())
     }
 
@@ -873,7 +890,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SegmentMetaError::TooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::TooShort { .. }
+            })
+        ));
         Ok(())
     }
 }

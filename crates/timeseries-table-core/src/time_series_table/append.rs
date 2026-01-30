@@ -460,7 +460,7 @@ mod tests {
     use crate::helpers::coverage_sidecar::read_coverage_sidecar;
     use crate::storage::{StorageLocation, TableLocation};
     use crate::transaction_log::logical_schema::{LogicalDataType, LogicalTimestampUnit};
-    use crate::transaction_log::segments::SegmentMetaError;
+    use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
         Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
     };
@@ -487,10 +487,12 @@ mod tests {
             TableError::SegmentMeta { source } => {
                 assert!(matches!(
                     source,
-                    SegmentMetaError::TimeColumn {
-                        source: TimeColumnError::Missing { .. },
-                        ..
-                    }
+                    SegmentError::Meta {
+                        source: SegmentMetaError::TimeColumn {
+                            source: TimeColumnError::Missing { .. },
+                            ..
+                        }
+                    },
                 ));
             }
             other => panic!("unexpected error: {other:?}"),
