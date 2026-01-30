@@ -7,7 +7,7 @@
 //!
 //! Responsibilities (high level):
 //! - A Delta-inspired, append-only metadata log with version-guard optimistic
-//!   concurrency control ([`metadata::log`] / [`transaction_log`]).
+//!   concurrency control ([`transaction_log`]).
 //! - Strongly-typed table metadata that distinguishes time-series tables (with a
 //!   [`TimeIndexSpec`]) from generic tables ([`metadata::model`] /
 //!   [`transaction_log::table_metadata`]).
@@ -19,14 +19,14 @@
 //!   pointer, segment paths, etc.) ([`storage`] and [`layout`]).
 //!
 //! Main layers (new paths):
-//! - [`metadata`]: metadata model + append-only log (OCC) APIs.
+//! - [`metadata`]: metadata model + schema/segment validation (no IO).
 //! - [`table`]: the [`table::TimeSeriesTable`] user-facing abstraction.
 //! - [`storage`]: storage backend + table-root IO utilities.
 //! - [`coverage`]: bitmap-based coverage math and utilities.
 //! - [`formats`]: format-specific helpers (currently Parquet).
 //!
 //! Compatibility shims:
-//! - [`transaction_log`] mirrors [`metadata::log`]
+//! - [`transaction_log`] implements the append-only metadata log (OCC).
 //! - [`time_series_table`] mirrors [`table`]
 //! - [`log`] and [`fs`] exist as thin re-exports for older docs/paths.
 //!
@@ -49,7 +49,7 @@ pub use transaction_log::table_metadata::ParseTimeBucketError;
 
 /// Compatibility shim for older `timeseries_table_core::log::*` paths.
 pub mod log {
-    pub use crate::metadata::log::*;
+    pub use crate::transaction_log::*;
 }
 
 /// Compatibility shim for older `timeseries_table_core::fs::*` paths.

@@ -8,7 +8,8 @@ This crate does **not** implement a query engine. It exposes metadata and scan
 streams that other layers (DataFusion, Polars, custom code) can consume.
 
 ## Layers (module layout)
-- `metadata`: durable metadata model + append-only log APIs (OCC, table state).
+- `metadata`: pure metadata model + validation (logical schema, table metadata, segment types). No IO.
+- `transaction_log`: append-only metadata log APIs (OCC) + table state materialization.
 - `table`: user-facing `TimeSeriesTable` API (create/open/append/scan).
 - `storage`: local backend + table-root IO helpers.
 - `coverage`: coverage math and gap analysis.

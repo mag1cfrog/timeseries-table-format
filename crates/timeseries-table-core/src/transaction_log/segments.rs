@@ -1,248 +1,88 @@
-//! Segment identifiers, formats, and per-file metadata recorded in the log.
+//! Segment IO helpers.
 //!
-//! These types describe each physical data slice a commit can add or remove:
-//! [`SegmentId`] is a strong string newtype, [`SegmentMeta`] captures relative
-//! paths, timestamp bounds, and row counts, and [`FileFormat`] tracks the
-//! on-disk encoding. They are used by `LogAction::AddSegment` and related
-//! reader logic to rebuild the live segment map.
+//! The canonical segment metadata model lives in [`crate::metadata::segments`]
+//! and contains **no storage IO**.
+//!
+//! This module is the IO boundary: it re-exports the pure types and provides
+//! constructors/validators that touch storage (for example, verifying Parquet
+//! magic bytes via a storage backend).
 
-use std::fmt;
-
-use arrow::error::ArrowError;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use parquet::errors::ParquetError;
-use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
-use crate::{
-    common::time_column::TimeColumnError,
-    storage::{self, StorageError, TableLocation},
-    transaction_log::logical_schema::LogicalSchemaError,
+use crate::storage::{self, StorageError, TableLocation};
+
+// Re-export pure types for compatibility (`transaction_log::segments::*`).
+pub use crate::metadata::segments::{
+    FileFormat, SegmentId, SegmentMeta, SegmentMetaError, SegmentMetaResult, segment_id_v1,
 };
 
-/// Identifier for a physical segment (e.g. a Parquet file or group).
-///
-/// This is a logical ID used by the metadata; the actual file path is stored
-/// separately in [`SegmentMeta`]. Using a newtype makes it harder to mix
-/// up segment IDs with other stringly-typed fields.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(transparent)]
-pub struct SegmentId(pub String);
-
-impl fmt::Display for SegmentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// Supported on-disk file formats for segments.
-///
-/// In v0.1, only `Parquet` will be implemented, but the enum keeps the
-/// metadata model open to other formats in future versions.
-///
-/// JSON layout example:
-/// `"format": "parquet"`
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum FileFormat {
-    /// Apache Parquet columnar format.
-    #[default]
-    Parquet,
-    // Future:
-    // Orc,
-    // Avro,
-    // Csv,
-}
-
-/// Metadata about a single physical segment.
-///
-/// In v0.1, a "segment" corresponds to a single data file on disk.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SegmentMeta {
-    /// Logical identifier for this segment.
-    pub segment_id: SegmentId,
-
-    /// File path relative to the table root (for example, `"data/nvda_1h_0001.parquet"`).
-    pub path: String,
-
-    /// File format for this segment.
-    pub format: FileFormat,
-
-    /// Minimum timestamp contained in this segment (inclusive), in RFC3339 UTC.
-    pub ts_min: DateTime<Utc>,
-
-    /// Maximum timestamp contained in this segment (inclusive), in RFC3339 UTC.
-    pub ts_max: DateTime<Utc>,
-
-    /// Number of rows in this segment.
-    pub row_count: u64,
-
-    /// Optional file size in bytes at the time metadata was captured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<u64>,
-
-    /// Coverage sidecar pointer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coverage_path: Option<String>,
-}
-
-/// Errors that can occur while validating or handling segment metadata.
+/// IO-layer errors when constructing/validating segments.
 #[derive(Debug, Snafu)]
-pub enum SegmentMetaError {
-    /// File format is not supported for v0.1.
-    #[snafu(display("Unsupported file format: {format:?}"))]
-    UnsupportedFormat {
-        /// The offending file format.
-        format: FileFormat,
-    },
-
+pub enum SegmentIoError {
     /// The file is missing or not a regular file.
     #[snafu(display("Segment file missing or not a regular file: {path}"))]
     MissingFile {
         /// The path to the missing or invalid file.
         path: String,
-    },
-
-    /// The file is too short to be a valid Parquet file.
-    #[snafu(display("Segment file too short to be valid Parquet: {path}"))]
-    TooShort {
-        /// The path to the file that was too short.
-        path: String,
-    },
-
-    /// Magic bytes at the start / end of file don't match the Parquet spec.
-    #[snafu(display("Invalid Parquet magic bytes in segment file: {path}"))]
-    InvalidMagic {
-        /// The path to the file with invalid magic bytes.
-        path: String,
+        /// Backtrace for debugging.
+        backtrace: Backtrace,
     },
 
     /// Generic I/O error while validating the segment.
     #[snafu(display("I/O error while validating segment at {path}: {source}"))]
-    Io {
+    Storage {
         /// The path to the file that caused the I/O error.
         path: String,
         /// Underlying storage error that caused this I/O failure.
         #[snafu(source, backtrace)]
         source: StorageError,
     },
+}
 
-    /// Parquet reader / metadata failure.
-    #[snafu(display("Error reading Parquet metadata for segment at {path}: {source}"))]
-    ParquetRead {
-        /// The path to the file that caused the Parquet read failure.
-        path: String,
-        /// Underlying parquet error that caused this failure.
-        source: ParquetError,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
+/// Segment error at the IO boundary: either a storage failure or a pure metadata failure.
+#[derive(Debug, Snafu)]
+pub enum SegmentError {
+    /// Storage / backend error while accessing a segment.
+    #[snafu(transparent)]
+    Io {
+        /// The underlying IO-layer error.
+        source: SegmentIoError,
     },
 
-    /// Arrow decode failure while reading Parquet data.
-    #[snafu(display("Arrow read error for segment at {path}: {source}"))]
-    ArrowRead {
-        /// The path to the file that caused the Arrow read failure.
-        path: String,
-        /// Underlying Arrow error that caused this failure.
-        source: ArrowError,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
-    },
-
-    /// Time column validation or metadata error.
-    ///
-    /// This may occur when the timestamp column is missing, has an unsupported type,
-    /// or fails validation during coverage computation.
-    #[snafu(display("Time column error in segment at {path}: {source}"))]
-    TimeColumn {
-        /// The path to the segment file with a time column error.
-        path: String,
-        /// The underlying time column error.
-        source: TimeColumnError,
-    },
-
-    /// Statistics exist but are not well-shaped (wrong length / unexpected type).
-    #[snafu(display(
-        "Parquet statistics shape invalid for {column} in segment at {path}: {detail}"
-    ))]
-    ParquetStatsShape {
-        /// The path to the file with malformed Parquet statistics.
-        path: String,
-        /// The column whose statistics are malformed.
-        column: String,
-        /// Details about how the statistics are malformed.
-        detail: String,
-    },
-
-    /// No usable statistics for the time column; v0.1 may fall back to a scan.
-    #[snafu(display("Parquet statistics missing for {column} in segment at {path}"))]
-    ParquetStatsMissing {
-        /// The path to the file missing statistics for the column.
-        path: String,
-        /// The column missing statistics.
-        column: String,
-    },
-
-    /// Failed to derive a valid LogicalSchema from the Parquet file.
-    #[snafu(display("Invalid logical schema derived from Parquet at {path}: {source}"))]
-    LogicalSchemaInvalid {
-        /// The path to the file without a valid LogicalSchema
-        path: String,
-        #[snafu(source)]
-        /// Underlying logical schema error that triggered this failure.
-        source: LogicalSchemaError,
+    /// Pure metadata/decoding/validation error.
+    #[snafu(transparent)]
+    Meta {
+        /// The underlying pure metadata error.
+        source: SegmentMetaError,
     },
 }
 
-impl SegmentMetaError {
-    /// Construct a `SegmentMetaError::Io` from a lower-level `StorageError` and
-    /// the associated path so the storage error can be preserved as the source.
-    pub fn from_storage(err: StorageError, path: String) -> Self {
-        SegmentMetaError::Io { path, source: err }
-    }
-}
-
-/// Derive a deterministic segment id for an append entry.
-///
-/// This is content-addressable: it hashes both the relative path and the bytes so
-/// retries with the same input stay stable while same bytes at different paths
-/// diverge. The returned id uses the `seg-` prefix followed by 32 hex chars of
-/// the BLAKE3 digest, keeping ids bounded and safe for idempotent appends.
-pub fn segment_id_v1(relative_path: &str, data: &Bytes) -> SegmentId {
-    let mut h = blake3::Hasher::new();
-    h.update(b"segment-id-v1");
-    h.update(b"\0");
-    h.update(relative_path.as_bytes());
-    h.update(b"\0");
-    h.update(data.as_ref());
-    let hex = h.finalize().to_hex();
-    SegmentId(format!("seg-{}", &hex[..32]))
-}
-
-/// Convenience alias for results returned by segment metadata operations.
+/// Convenience alias for results returned by IO-layer segment operations.
 #[allow(clippy::result_large_err)]
-pub type SegmentResult<T> = Result<T, SegmentMetaError>;
+pub type SegmentResult<T> = Result<T, SegmentError>;
 
-/// Convert a lower-level `StorageError` into the corresponding `SegmentMetaError`.
+/// Convert a lower-level `StorageError` into the corresponding `SegmentError`.
 ///
-/// - `StorageError::NotFound` is mapped to `SegmentMetaError::MissingFile` with a fresh
-///   backtrace.
-/// - All other storage errors are wrapped in `SegmentMetaError::Io`, preserving the original
-///   `StorageError` as the source for diagnostics.
-pub fn map_storage_error(err: StorageError) -> SegmentMetaError {
-    match &err {
-        StorageError::NotFound { path, .. } => SegmentMetaError::MissingFile { path: path.clone() },
-
-        // For everything else, preserve the full StorageError as the source.
+/// - `StorageError::NotFound` is mapped to `SegmentIoError::MissingFile`.
+/// - All other storage errors are wrapped in `SegmentIoError::Storage`,
+///   preserving the original `StorageError` as the source for diagnostics.
+pub fn map_storage_error(err: StorageError) -> SegmentError {
+    let (is_missing, path) = match &err {
+        StorageError::NotFound { path, .. } => (true, path.clone()),
         StorageError::AlreadyExists { path, .. }
         | StorageError::OtherIo { path, .. }
-        | StorageError::AlreadyExistsNoSource { path, .. } => {
-            SegmentMetaError::Io {
-                path: path.clone(),
-                source: err, // move the full StorageError in
-            }
+        | StorageError::AlreadyExistsNoSource { path, .. } => (false, path.clone()),
+    };
+
+    if is_missing {
+        SegmentIoError::MissingFile {
+            path,
+            backtrace: Backtrace::capture(),
         }
+        .into()
+    } else {
+        SegmentIoError::Storage { path, source: err }.into()
     }
 }
 
@@ -269,19 +109,19 @@ impl SegmentMeta {
             .map_err(map_storage_error)?;
 
         if probe.len < 8 {
-            return TooShortSnafu {
+            return Err(SegmentMetaError::TooShort {
                 path: path.to_string(),
             }
-            .fail();
+            .into());
         }
 
         const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
 
         if &probe.head != PARQUET_MAGIC || &probe.tail != PARQUET_MAGIC {
-            return InvalidMagicSnafu {
+            return Err(SegmentMetaError::InvalidMagic {
                 path: path.to_string(),
             }
-            .fail();
+            .into());
         }
 
         Ok(SegmentMeta {
@@ -294,12 +134,6 @@ impl SegmentMeta {
             file_size: Some(probe.len),
             coverage_path: None,
         })
-    }
-
-    /// Set the coverage sidecar path for this segment metadata.
-    pub fn with_coverage_path(mut self, path: impl Into<String>) -> Self {
-        self.coverage_path = Some(path.into());
-        self
     }
 
     /// Format-dispatching constructor that can grow in future versions.
@@ -386,7 +220,7 @@ mod tests {
         tokio::fs::write(path, bytes).await
     }
 
-    fn into_boxed(err: SegmentMetaError) -> Box<dyn std::error::Error> {
+    fn into_boxed(err: SegmentError) -> Box<dyn std::error::Error> {
         Box::new(err)
     }
 
@@ -438,7 +272,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SegmentMetaError::MissingFile { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::Io {
+                source: SegmentIoError::MissingFile { .. }
+            })
+        ));
         Ok(())
     }
 
@@ -460,7 +299,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SegmentMetaError::TooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::TooShort { .. }
+            })
+        ));
         Ok(())
     }
 
@@ -482,7 +326,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SegmentMetaError::InvalidMagic { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::InvalidMagic { .. }
+            })
+        ));
         Ok(())
     }
 
