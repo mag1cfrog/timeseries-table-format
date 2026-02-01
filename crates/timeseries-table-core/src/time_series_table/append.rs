@@ -17,15 +17,18 @@ use snafu::prelude::*;
 
 use crate::{
     coverage::serde::coverage_to_bytes,
+    coverage::{
+        io::{CoverageError, write_coverage_sidecar_new_bytes},
+        layout::{
+            segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1,
+            table_snapshot_path,
+        },
+    },
+    formats::parquet::coverage::compute_segment_coverage_from_parquet_bytes,
     helpers::{
-        coverage_sidecar::{CoverageError, write_coverage_sidecar_new_bytes},
         parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes_with_report},
         schema::ensure_schema_exact_match,
-        segment_coverage::compute_segment_coverage_from_parquet_bytes,
         segment_entity_identity::segment_entity_identity_from_parquet_bytes,
-    },
-    storage::layout::{
-        segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
     },
     storage::{self, StorageError},
     time_series_table::{
@@ -457,7 +460,7 @@ mod tests {
     use super::*;
     use crate::common::time_column::TimeColumnError;
     use crate::coverage::Coverage;
-    use crate::helpers::coverage_sidecar::read_coverage_sidecar;
+    use crate::coverage::io::read_coverage_sidecar;
     use crate::storage::layout;
     use crate::storage::{StorageLocation, TableLocation};
     use crate::transaction_log::logical_schema::{LogicalDataType, LogicalTimestampUnit};
