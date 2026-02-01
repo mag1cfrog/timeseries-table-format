@@ -16,11 +16,8 @@
 //!
 //! Errors are reported with detailed context (file path, column name, specific
 //! mismatch details) to aid debugging of Parquet schema mismatches or corruption.
-mod segment_meta;
-pub use segment_meta::*;
+//
+// NOTE: This is a compatibility shim. The canonical implementation lives under
+// `crate::formats::parquet`.
 
-mod rg_parallel;
-pub use rg_parallel::*;
-
-mod schema;
-pub use schema::*;
+pub use crate::formats::parquet::*;
