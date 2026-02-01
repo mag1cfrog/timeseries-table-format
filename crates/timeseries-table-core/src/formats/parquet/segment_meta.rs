@@ -1,3 +1,8 @@
+//! Parquet segment metadata derivation.
+//!
+//! This module extracts per-segment metadata (ts_min/ts_max/row_count, etc.)
+//! from Parquet bytes or a storage location.
+
 use std::path::Path;
 
 use bytes::Bytes;
@@ -94,7 +99,7 @@ fn min_max_from_stats(
     }
 }
 
-use crate::helpers::parquet::resolve_rg_settings;
+use super::resolve_rg_settings;
 
 fn scan_arrow_batches_min_max(
     path: &str,
