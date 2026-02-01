@@ -32,8 +32,6 @@ pub mod layout;
 mod io;
 pub use io::*;
 
-pub mod operations;
-
 mod table_location;
 pub use table_location::*;
 
