@@ -1,3 +1,8 @@
+//! Parquet -> LogicalSchema extraction helpers.
+//!
+//! This module reads Parquet schema metadata (footer) and maps it into the
+//! crate's format-agnostic [`LogicalSchema`] representation.
+
 use std::path::Path;
 
 use bytes::Bytes;
