@@ -36,11 +36,12 @@ use snafu::{Backtrace, Snafu};
 use crate::{
     coverage::Coverage,
     coverage::bucket::bucket_id_from_epoch_secs,
-    helpers::parquet::resolve_rg_settings,
     metadata::table_metadata::TimeBucket,
     metadata::time_column::TimeColumnError,
     storage::{self, StorageError, TableLocation},
 };
+
+use super::resolve_rg_settings;
 
 /// Errors that can occur when reading or computing segment coverage.
 ///

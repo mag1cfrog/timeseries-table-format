@@ -14,11 +14,8 @@ use parquet::errors::ParquetError;
 use snafu::prelude::*;
 
 use crate::{
-    helpers::{
-        coverage_sidecar::CoverageError, schema::SchemaCompatibilityError,
-        segment_coverage::SegmentCoverageError,
-        segment_entity_identity::SegmentEntityIdentityError,
-    },
+    formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
+    helpers::{coverage_sidecar::CoverageError, schema::SchemaCompatibilityError},
     storage::StorageError,
     transaction_log::{CommitError, SegmentId, TableKind, TimeBucket, segments::SegmentError},
 };
