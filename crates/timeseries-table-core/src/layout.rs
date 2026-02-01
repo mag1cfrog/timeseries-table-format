@@ -1,12 +1,6 @@
-//! Directory and file layout conventions for table storage.
+//! Compatibility shims for older layout modules.
 //!
-//! This module defines the standardized structure of the table's directory tree,
-//! including where segments, metadata, logs, and coverage data are stored.
-//! It provides constants for well-known directory names and file extensions,
-//! as well as errors that can occur during layout operations.
-//!
-//! # Submodules
-//!
-//! - [`coverage`]: Layout and errors for coverage data storage.
+//! The canonical on-disk layout helpers live in [`crate::storage::layout`].
+//! This module only keeps older module paths compiling during refactors.
 
 pub mod coverage;
