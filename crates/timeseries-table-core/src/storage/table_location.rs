@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
+use crate::storage::layout;
 use crate::storage::{
     AlreadyExistsNoSourceSnafu, BackendError, NotFoundSnafu, OtherIoSnafu, StorageLocation,
     StorageResult,
@@ -80,7 +81,7 @@ impl TableLocation {
                     })?
                     .to_owned();
 
-                let data_dir = root.join("data");
+                let data_dir = root.join(layout::DATA_DIR_NAME);
                 fs::create_dir_all(&data_dir)
                     .await
                     .map_err(BackendError::Local)
