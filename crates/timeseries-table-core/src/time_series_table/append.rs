@@ -24,7 +24,7 @@ use crate::{
         segment_coverage::compute_segment_coverage_from_parquet_bytes,
         segment_entity_identity::segment_entity_identity_from_parquet_bytes,
     },
-    layout::coverage::{
+    storage::layout::{
         segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1, table_snapshot_path,
     },
     storage::{self, StorageError},
@@ -458,11 +458,12 @@ mod tests {
     use crate::common::time_column::TimeColumnError;
     use crate::coverage::Coverage;
     use crate::helpers::coverage_sidecar::read_coverage_sidecar;
+    use crate::storage::layout;
     use crate::storage::{StorageLocation, TableLocation};
     use crate::transaction_log::logical_schema::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
-        Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
+        Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
     };
     use std::collections::BTreeMap;
     use tempfile::TempDir;
@@ -538,11 +539,10 @@ mod tests {
         assert_eq!(seg.ts_min.timestamp_millis(), 1_000);
         assert_eq!(seg.ts_max.timestamp_millis(), 1_000);
 
-        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
-        let commit_path = log_dir.join("0000000002.json");
+        let commit_path = tmp.path().join(layout::commit_rel_path(2));
         assert!(commit_path.is_file());
         let current =
-            tokio::fs::read_to_string(log_dir.join(TransactionLogStore::CURRENT_FILE_NAME)).await?;
+            tokio::fs::read_to_string(tmp.path().join(layout::current_rel_path())).await?;
         assert_eq!(current.trim(), "2");
 
         let reopened = TimeSeriesTable::open(location).await?;
@@ -586,10 +586,7 @@ mod tests {
             Some(expected_identity.clone())
         );
 
-        let commit_path = tmp
-            .path()
-            .join(TransactionLogStore::LOG_DIR_NAME)
-            .join("0000000002.json");
+        let commit_path = tmp.path().join(layout::commit_rel_path(2));
         let contents = tokio::fs::read_to_string(&commit_path).await?;
         let commit: Commit = serde_json::from_str(&contents)?;
 
@@ -665,10 +662,7 @@ mod tests {
             Some(expected_identity.clone())
         );
 
-        let commit_path = tmp
-            .path()
-            .join(TransactionLogStore::LOG_DIR_NAME)
-            .join("0000000003.json");
+        let commit_path = tmp.path().join(layout::commit_rel_path(3));
         let contents = tokio::fs::read_to_string(&commit_path).await?;
         let commit: Commit = serde_json::from_str(&contents)?;
         assert_eq!(commit.actions.len(), 2);
@@ -735,10 +729,7 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
-        let commit_path = tmp
-            .path()
-            .join(TransactionLogStore::LOG_DIR_NAME)
-            .join("0000000003.json");
+        let commit_path = tmp.path().join(layout::commit_rel_path(3));
         assert!(!commit_path.exists());
 
         Ok(())
@@ -909,8 +900,7 @@ mod tests {
         assert_eq!(seg.ts_min.timestamp_millis(), 120_000);
         assert_eq!(seg.ts_max.timestamp_millis(), 121_000);
 
-        let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
-        assert!(log_dir.join("0000000003.json").is_file());
+        assert!(tmp.path().join(layout::commit_rel_path(3)).is_file());
         Ok(())
     }
 

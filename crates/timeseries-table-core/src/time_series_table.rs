@@ -263,6 +263,7 @@ mod tests {
     use super::*;
     use crate::storage::StorageLocation;
     use crate::storage::TableLocation;
+    use crate::storage::layout;
     use crate::time_series_table::test_util::*;
     use crate::transaction_log::TimeBucket;
     use crate::transaction_log::TransactionLogStore;
@@ -286,10 +287,10 @@ mod tests {
             StorageLocation::Local(p) => p.clone(),
         };
 
-        let log_dir = root.join(TransactionLogStore::LOG_DIR_NAME);
+        let log_dir = root.join(layout::log_rel_dir());
         assert!(log_dir.is_dir());
 
-        let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
+        let current_path = root.join(layout::current_rel_path());
         let current_contents = tokio::fs::read_to_string(&current_path).await?;
         assert_eq!(current_contents.trim(), "1");
 
