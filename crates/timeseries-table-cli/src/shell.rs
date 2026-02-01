@@ -9,9 +9,9 @@ use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
 use terminal_size::terminal_size;
 use timeseries_table_core::{
+    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
-    time_series_table::TimeSeriesTable,
-    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+    table::TimeSeriesTable,
 };
 use tokio::runtime::Handle;
 
@@ -53,7 +53,7 @@ struct ShellContext {
     table_root: PathBuf,
     location: TableLocation,
     engine: BoxedEngine,
-    table: timeseries_table_core::time_series_table::TimeSeriesTable,
+    table: timeseries_table_core::table::TimeSeriesTable,
     session: BoxedSession,
     timing: bool,
     pager: bool,
@@ -1216,12 +1216,12 @@ mod tests {
     use snafu::ResultExt;
     use tempfile::TempDir;
     use timeseries_table_core::{
-        storage::TableLocation,
-        time_series_table::TimeSeriesTable,
-        transaction_log::{
-            TableMeta, TimeBucket, TimeIndexSpec,
-            logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+        metadata::logical_schema::{
+            LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
+        metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+        storage::TableLocation,
+        table::TimeSeriesTable,
     };
 
     mod test_common {

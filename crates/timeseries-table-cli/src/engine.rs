@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use snafu::ResultExt;
 use timeseries_table_core::{
     storage::{OutputLocation, OutputSink, TableLocation, open_output_sink},
-    time_series_table::TimeSeriesTable,
+    table::TimeSeriesTable,
 };
 use timeseries_table_datafusion::TsTableProvider;
 
@@ -355,12 +355,12 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use tempfile::TempDir;
     use timeseries_table_core::{
-        storage::TableLocation,
-        time_series_table::TimeSeriesTable,
-        transaction_log::{
-            TableMeta, TimeBucket, TimeIndexSpec,
-            logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+        metadata::logical_schema::{
+            LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
+        metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+        storage::TableLocation,
+        table::TimeSeriesTable,
     };
 
     use crate::query::{OutputFormat, QueryOpts, default_table_name, print_query_result};

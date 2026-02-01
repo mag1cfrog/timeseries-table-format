@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_core::{
-    storage::TableLocation, time_series_table::TimeSeriesTable, transaction_log::TimeBucket,
+    metadata::table_metadata::TimeBucket, storage::TableLocation, table::TimeSeriesTable,
 };
 
 fn cli_bin() -> &'static str {

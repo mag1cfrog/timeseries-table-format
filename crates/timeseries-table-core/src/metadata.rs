@@ -7,6 +7,7 @@
 //! such as `transaction_log`, `storage`, and `time_series_table`.
 
 pub mod logical_schema;
+pub mod schema_compat;
 pub mod segments;
 pub mod table_metadata;
 pub mod time_column;

@@ -11,9 +11,9 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
 use timeseries_table_core::{
+    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
-    time_series_table::TimeSeriesTable,
-    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+    table::TimeSeriesTable,
 };
 
 use crate::{

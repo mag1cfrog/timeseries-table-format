@@ -8,15 +8,15 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
+use timeseries_table_core::metadata::logical_schema::{
+    LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
+};
+use timeseries_table_core::metadata::segments::{FileFormat, SegmentId, SegmentMeta};
+use timeseries_table_core::metadata::table_metadata::{
+    TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+};
 use timeseries_table_core::storage::{StorageError, TableLocation, layout};
-use timeseries_table_core::transaction_log::{
-    CommitError, FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
-    TimeIndexSpec, TransactionLogStore,
-};
-use timeseries_table_core::transaction_log::{
-    logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
-    table_metadata::TABLE_FORMAT_VERSION,
-};
+use timeseries_table_core::transaction_log::{CommitError, LogAction, TransactionLogStore};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

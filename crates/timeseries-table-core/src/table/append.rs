@@ -28,7 +28,7 @@ use crate::{
         coverage::compute_segment_coverage_from_parquet_bytes, logical_schema_from_parquet_bytes,
         segment_entity_identity_from_parquet_bytes, segment_meta_from_parquet_bytes_with_report,
     },
-    helpers::schema::ensure_schema_exact_match,
+    metadata::schema_compat::ensure_schema_exact_match,
     storage::{self, StorageError},
     transaction_log::{
         LogAction, SegmentId, TableState, segments::segment_id_v1,
@@ -459,12 +459,12 @@ impl TimeSeriesTable {
 mod tests {
     use super::super::test_util::*;
     use super::*;
-    use crate::common::time_column::TimeColumnError;
     use crate::coverage::Coverage;
     use crate::coverage::io::read_coverage_sidecar;
+    use crate::metadata::logical_schema::{LogicalDataType, LogicalTimestampUnit};
+    use crate::metadata::time_column::TimeColumnError;
     use crate::storage::layout;
     use crate::storage::{StorageLocation, TableLocation};
-    use crate::transaction_log::logical_schema::{LogicalDataType, LogicalTimestampUnit};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
         Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
@@ -826,7 +826,7 @@ mod tests {
             TableError::SchemaCompatibility { source } => {
                 assert!(matches!(
                     source,
-                    crate::helpers::schema::SchemaCompatibilityError::MissingColumn { .. }
+                    crate::metadata::schema_compat::SchemaCompatibilityError::MissingColumn { .. }
                 ));
             }
             other => panic!("unexpected error: {other:?}"),

@@ -22,11 +22,11 @@ use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
-use timeseries_table_core::storage::TableLocation;
-use timeseries_table_core::time_series_table::TimeSeriesTable;
-use timeseries_table_core::transaction_log::logical_schema::{
+use timeseries_table_core::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
+use timeseries_table_core::storage::TableLocation;
+use timeseries_table_core::table::TimeSeriesTable;
 use timeseries_table_core::transaction_log::{
     FileFormat, LogAction, SegmentId, SegmentMeta, TableMeta, TimeBucket, TimeIndexSpec,
     TransactionLogStore,

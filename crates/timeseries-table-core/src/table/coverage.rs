@@ -194,7 +194,7 @@ use snafu::ensure;
 use crate::{
     coverage::Bucket,
     coverage::bucket::{bucket_id, bucket_range},
-    time_series_table::error::{BucketDomainOverflowSnafu, InvalidRangeSnafu},
+    table::error::{BucketDomainOverflowSnafu, InvalidRangeSnafu},
 };
 
 impl TimeSeriesTable {
@@ -267,8 +267,8 @@ impl TimeSeriesTable {
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_core::{time_series_table::TimeSeriesTable, storage::TableLocation};
-    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::time_series_table::error::TableError> {
+    /// # use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::table::TableError> {
     /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
     /// let end = Utc.timestamp_opt(120, 0).single().unwrap();
     /// let ratio = table.coverage_ratio_for_range(start, end).await?;
@@ -295,8 +295,8 @@ impl TimeSeriesTable {
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_core::{time_series_table::TimeSeriesTable, storage::TableLocation};
-    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::time_series_table::error::TableError> {
+    /// # use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::table::TableError> {
     /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
     /// let end = Utc.timestamp_opt(180, 0).single().unwrap();
     /// let gap = table.max_gap_len_for_range(start, end).await?;
@@ -327,8 +327,8 @@ impl TimeSeriesTable {
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_core::{time_series_table::TimeSeriesTable, storage::TableLocation};
-    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::time_series_table::error::TableError> {
+    /// # use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::table::TableError> {
     /// let ts_end = Utc.timestamp_opt(360, 0).single().unwrap(); // end of bucket 5
     /// let window = table.last_fully_covered_window(ts_end, 2).await?;
     /// # let _ = window;
@@ -364,11 +364,11 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::{
+        metadata::table_metadata::TimeBucket,
         storage::TableLocation,
-        time_series_table::test_util::{
+        table::test_util::{
             TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
         },
-        transaction_log::TimeBucket,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;

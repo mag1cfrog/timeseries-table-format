@@ -22,8 +22,8 @@ use arrow_array::{
 
 use roaring::RoaringBitmap;
 
-use timeseries_table_core::helpers::time_bucket::bucket_id_from_epoch_secs;
-use timeseries_table_core::transaction_log::TimeBucket;
+use timeseries_table_core::coverage::bucket::bucket_id_from_epoch_secs;
+use timeseries_table_core::metadata::table_metadata::TimeBucket;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {

@@ -1,8 +1,8 @@
 use super::*;
-use crate::transaction_log::logical_schema::{
+use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use crate::transaction_log::{TableKind, TableMeta, TimeBucket, TimeIndexSpec};
+use crate::metadata::table_metadata::{TableKind, TableMeta, TimeBucket, TimeIndexSpec};
 use arrow::array::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
     TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,

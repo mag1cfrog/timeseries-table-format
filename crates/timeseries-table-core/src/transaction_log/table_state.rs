@@ -26,7 +26,7 @@ pub fn reset_rebuild_table_state_count() {
     REBUILD_TABLE_STATE_COUNT.store(0, Ordering::Relaxed);
 }
 
-use crate::{helpers::segment_order::cmp_segment_meta_by_time, transaction_log::*};
+use crate::{metadata::segments::cmp_segment_meta_by_time, transaction_log::*};
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]

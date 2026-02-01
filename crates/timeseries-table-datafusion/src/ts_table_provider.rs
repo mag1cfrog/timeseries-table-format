@@ -38,7 +38,7 @@ use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
-use timeseries_table_core::time_series_table::TimeSeriesTable;
+use timeseries_table_core::table::TimeSeriesTable;
 use timeseries_table_core::transaction_log::SegmentMeta;
 use timeseries_table_core::transaction_log::TableState;
 use tokio::sync::RwLock;

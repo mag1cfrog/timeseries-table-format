@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use timeseries_table_core::{
+    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
-    time_series_table::{
+    table::{
         TimeSeriesTable,
         append_report::{AppendReport, AppendStep},
     },
-    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
 };
 
 #[derive(Debug, Parser)]

@@ -8,9 +8,9 @@ use arrow_csv::reader::Format;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use timeseries_table_core::{
+    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
-    time_series_table::TimeSeriesTable,
-    transaction_log::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    table::TimeSeriesTable,
 };
 
 #[tokio::main(flavor = "current_thread")]
