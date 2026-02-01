@@ -5,8 +5,9 @@
 //! - coverage sidecar directories (`_coverage/`)
 //! - conventional data directory (`data/`)
 //!
-//! The functions here return relative [`std::path::PathBuf`] values; callers
-//! combine them with a [`crate::storage::TableLocation`] / backend root.
+//! The functions here return relative [`std::path::PathBuf`] values. Callers are
+//! expected to join these with a table root (for example, a
+//! [`crate::storage::TableLocation`] / backend root) before doing IO.
 
 use std::path::PathBuf;
 
