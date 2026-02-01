@@ -24,12 +24,11 @@ use crate::{
             table_snapshot_path,
         },
     },
-    formats::parquet::coverage::compute_segment_coverage_from_parquet_bytes,
-    helpers::{
-        parquet::{logical_schema_from_parquet_bytes, segment_meta_from_parquet_bytes_with_report},
-        schema::ensure_schema_exact_match,
-        segment_entity_identity::segment_entity_identity_from_parquet_bytes,
+    formats::parquet::{
+        coverage::compute_segment_coverage_from_parquet_bytes, logical_schema_from_parquet_bytes,
+        segment_entity_identity_from_parquet_bytes, segment_meta_from_parquet_bytes_with_report,
     },
+    helpers::schema::ensure_schema_exact_match,
     storage::{self, StorageError},
     time_series_table::{
         SegmentMetaSnafu, TimeSeriesTable,
