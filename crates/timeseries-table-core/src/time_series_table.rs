@@ -94,6 +94,15 @@ impl TimeSeriesTable {
         &self.state
     }
 
+    /// Return a mutable reference to the current committed table state (crate-internal).
+    ///
+    /// This exists to support internal helpers (e.g. coverage recovery tests) without
+    /// exposing mutation to library callers.
+    #[allow(dead_code)]
+    pub(crate) fn state_mut(&mut self) -> &mut TableState {
+        &mut self.state
+    }
+
     /// Return the time index specification for this table.
     pub fn index_spec(&self) -> &TimeIndexSpec {
         &self.index
