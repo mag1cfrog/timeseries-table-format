@@ -16,9 +16,10 @@ use log::warn;
 use crate::{
     coverage::Coverage,
     coverage::io::{read_coverage_sidecar, write_coverage_sidecar_atomic},
-    time_series_table::{TimeSeriesTable, error::TableError},
     transaction_log::table_state::TableCoveragePointer,
 };
+
+use super::{TimeSeriesTable, error::TableError};
 
 impl TimeSeriesTable {
     /// Rebuild table coverage by reading each segment's coverage sidecar.
