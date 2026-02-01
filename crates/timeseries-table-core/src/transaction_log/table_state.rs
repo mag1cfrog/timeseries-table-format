@@ -154,6 +154,7 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
         FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
@@ -331,10 +332,7 @@ mod tests {
             .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
             .await?;
 
-        let commit_path = tmp
-            .path()
-            .join(TransactionLogStore::LOG_DIR_NAME)
-            .join("0000000001.json");
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
         tokio::fs::write(&commit_path, b"not-json").await?;
 
         let err = store
@@ -354,10 +352,7 @@ mod tests {
             .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
             .await?;
 
-        let commit_path = tmp
-            .path()
-            .join(TransactionLogStore::LOG_DIR_NAME)
-            .join("0000000001.json");
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
         tokio::fs::remove_file(&commit_path).await?;
 
         let err = store
