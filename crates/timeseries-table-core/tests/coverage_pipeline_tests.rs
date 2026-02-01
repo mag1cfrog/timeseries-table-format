@@ -11,13 +11,13 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_core::{
     coverage::Coverage,
-    helpers::coverage_sidecar::read_coverage_sidecar,
-    storage::TableLocation,
-    time_series_table::{TimeSeriesTable, error::TableError},
-    transaction_log::{
-        TableMeta, TimeBucket, TimeIndexSpec,
-        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+    coverage::io::read_coverage_sidecar,
+    metadata::logical_schema::{
+        LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     },
+    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    storage::TableLocation,
+    table::{TableError, TimeSeriesTable},
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -225,11 +225,10 @@ fn make_basic_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
             name: "ts".to_string(),
-            data_type:
-                timeseries_table_core::transaction_log::logical_schema::LogicalDataType::Timestamp {
-                    unit: LogicalTimestampUnit::Millis,
-                    timezone: None,
-                },
+            data_type: LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            },
             nullable: false,
         },
         LogicalField {

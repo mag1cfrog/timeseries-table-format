@@ -3,9 +3,9 @@
 use std::{process::Stdio, time::Duration};
 use tempfile::TempDir;
 use timeseries_table_core::{
+    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
-    time_series_table::TimeSeriesTable,
-    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+    table::TimeSeriesTable,
 };
 use tokio::io::AsyncWriteExt;
 

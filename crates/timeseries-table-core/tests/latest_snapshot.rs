@@ -3,12 +3,11 @@
 
 use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
+use timeseries_table_core::metadata::segments::{FileFormat, SegmentId, SegmentMeta};
+use timeseries_table_core::metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec};
 use timeseries_table_core::storage::TableLocation;
-use timeseries_table_core::time_series_table::TimeSeriesTable;
-use timeseries_table_core::transaction_log::{
-    FileFormat, LogAction, SegmentId, SegmentMeta, TableMeta, TimeBucket, TimeIndexSpec,
-    TransactionLogStore,
-};
+use timeseries_table_core::table::TimeSeriesTable;
+use timeseries_table_core::transaction_log::{LogAction, TransactionLogStore};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -87,7 +86,7 @@ async fn load_latest_state_no_change_returns_current_snapshot() -> TestResult {
     assert!(latest.segments.is_empty());
     assert!(latest.table_coverage.is_none());
     match latest.table_meta.kind() {
-        timeseries_table_core::transaction_log::TableKind::TimeSeries(_) => {}
+        timeseries_table_core::metadata::table_metadata::TableKind::TimeSeries(_) => {}
         other => panic!("expected time series table kind, got {other:?}"),
     }
 

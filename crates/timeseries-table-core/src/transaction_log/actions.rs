@@ -8,9 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::transaction_log::{
-    TimeBucket,
+    TableMetaDelta, TimeBucket,
     segments::{SegmentId, SegmentMeta},
-    table_metadata::TableMetaDelta,
 };
 /// An action recorded in a commit.
 ///

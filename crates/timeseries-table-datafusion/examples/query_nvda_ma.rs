@@ -3,7 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use datafusion::prelude::*;
-use timeseries_table_core::{storage::TableLocation, time_series_table::TimeSeriesTable};
+use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
 use timeseries_table_datafusion::TsTableProvider;
 
 #[tokio::main(flavor = "current_thread")]

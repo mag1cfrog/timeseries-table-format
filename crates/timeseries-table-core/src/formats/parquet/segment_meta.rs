@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 use snafu::Backtrace;
 
-use crate::common::time_column::TimeColumnError;
+use crate::metadata::time_column::TimeColumnError;
 use crate::storage::{self, TableLocation};
 
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};

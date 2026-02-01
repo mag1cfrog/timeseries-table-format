@@ -32,12 +32,13 @@ use futures::{StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use snafu::prelude::*;
 
-use crate::helpers::segment_order::cmp_segment_meta_by_time;
+use crate::metadata::segments::SegmentMeta;
 use crate::storage::{self, TableLocation};
-use crate::transaction_log::{SegmentMeta, TableState};
+use crate::transaction_log::TableState;
 
 use super::error::{InvalidRangeSnafu, StorageSnafu, TableError};
 use super::{TimeSeriesScan, TimeSeriesTable};
+use crate::metadata::segments::cmp_segment_meta_by_time;
 
 fn segments_for_range(
     state: &TableState,
@@ -357,10 +358,10 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::storage::TableLocation;
-    use crate::time_series_table::test_util::*;
+    use crate::table::test_util::*;
 
-    use crate::transaction_log::logical_schema::LogicalTimestampUnit;
-    use crate::transaction_log::segments::{FileFormat, SegmentId};
+    use crate::metadata::logical_schema::LogicalTimestampUnit;
+    use crate::metadata::segments::{FileFormat, SegmentId};
 
     use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 

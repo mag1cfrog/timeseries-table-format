@@ -119,11 +119,11 @@ fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
     })
 }
 
-fn make_table_meta() -> timeseries_table_core::transaction_log::TableMeta {
-    use timeseries_table_core::transaction_log::{
-        TimeBucket, TimeIndexSpec,
-        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+fn make_table_meta() -> timeseries_table_core::metadata::table_metadata::TableMeta {
+    use timeseries_table_core::metadata::logical_schema::{
+        LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
+    use timeseries_table_core::metadata::table_metadata::{TimeBucket, TimeIndexSpec};
 
     let index = TimeIndexSpec {
         timestamp_column: "ts".to_string(),
@@ -154,7 +154,7 @@ fn make_table_meta() -> timeseries_table_core::transaction_log::TableMeta {
     ])
     .expect("valid logical schema");
 
-    timeseries_table_core::transaction_log::TableMeta::new_time_series_with_schema(
+    timeseries_table_core::metadata::table_metadata::TableMeta::new_time_series_with_schema(
         index,
         logical_schema,
     )
@@ -164,7 +164,7 @@ fn make_table_meta() -> timeseries_table_core::transaction_log::TableMeta {
 async fn provider_cache_is_primed_from_snapshot() -> DFResult<()> {
     use timeseries_table_core::{
         storage::TableLocation,
-        time_series_table::TimeSeriesTable,
+        table::TimeSeriesTable,
         transaction_log::table_state::{
             rebuild_table_state_count, reset_rebuild_table_state_count,
         },

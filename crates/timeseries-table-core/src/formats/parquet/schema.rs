@@ -12,10 +12,10 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::schema::types::Type;
 use snafu::Backtrace;
 
-use crate::storage::{TableLocation, read_all_bytes};
-use crate::transaction_log::logical_schema::{
+use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
+use crate::storage::{TableLocation, read_all_bytes};
 use crate::transaction_log::segments::{
     SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
 };

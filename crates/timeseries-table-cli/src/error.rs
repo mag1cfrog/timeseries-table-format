@@ -1,6 +1,7 @@
 use arrow::error::ArrowError;
 use std::path::PathBuf;
-use timeseries_table_core::{ParseTimeBucketError, TableError};
+use timeseries_table_core::metadata::table_metadata::ParseTimeBucketError;
+use timeseries_table_core::table::TableError;
 
 use snafu::Snafu;
 
