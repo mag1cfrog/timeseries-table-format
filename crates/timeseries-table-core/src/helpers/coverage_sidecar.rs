@@ -29,7 +29,7 @@ use crate::{
         Coverage,
         serde::{CoverageSerdeError, coverage_from_bytes, coverage_to_bytes},
     },
-    layout::coverage::CoverageLayoutError,
+    storage::layout::CoverageLayoutError,
     storage::{self, StorageError, TableLocation},
 };
 

@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
-use timeseries_table_core::storage::{StorageError, TableLocation};
+use timeseries_table_core::storage::{StorageError, TableLocation, layout};
 use timeseries_table_core::transaction_log::{
     CommitError, FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
     TimeIndexSpec, TransactionLogStore,
@@ -129,10 +129,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     assert_eq!(v1, 1);
 
     // Verify commit file exists
-    let commit_1_path = tmp
-        .path()
-        .join(TransactionLogStore::LOG_DIR_NAME)
-        .join("0000000001.json");
+    let commit_1_path = tmp.path().join(layout::commit_rel_path(1));
     assert!(
         commit_1_path.exists(),
         "commit file for version 1 should exist"
@@ -145,10 +142,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     assert_eq!(v2, 2);
 
     // Verify commit file exists
-    let commit_2_path = tmp
-        .path()
-        .join(TransactionLogStore::LOG_DIR_NAME)
-        .join("0000000002.json");
+    let commit_2_path = tmp.path().join(layout::commit_rel_path(2));
     assert!(
         commit_2_path.exists(),
         "commit file for version 2 should exist"
@@ -349,9 +343,9 @@ async fn corrupt_current_file_returns_corrupt_state() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
     // Create corrupt CURRENT file
-    let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+    let log_dir = tmp.path().join(layout::log_rel_dir());
     tokio::fs::create_dir_all(&log_dir).await?;
-    let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
+    let current_path = tmp.path().join(layout::current_rel_path());
     tokio::fs::write(&current_path, "not-a-number").await?;
 
     let result = store.load_current_version().await;
@@ -368,9 +362,9 @@ async fn corrupt_current_file_returns_corrupt_state() -> TestResult {
 async fn empty_current_file_returns_corrupt_state() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
-    let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+    let log_dir = tmp.path().join(layout::log_rel_dir());
     tokio::fs::create_dir_all(&log_dir).await?;
-    let current_path = log_dir.join(TransactionLogStore::CURRENT_FILE_NAME);
+    let current_path = tmp.path().join(layout::current_rel_path());
     tokio::fs::write(&current_path, "").await?;
 
     let result = store.load_current_version().await;
@@ -395,10 +389,7 @@ async fn corrupt_commit_file_returns_corrupt_state() -> TestResult {
         .await?;
 
     // Corrupt the commit file
-    let commit_path = tmp
-        .path()
-        .join(TransactionLogStore::LOG_DIR_NAME)
-        .join("0000000001.json");
+    let commit_path = tmp.path().join(layout::commit_rel_path(1));
     tokio::fs::write(&commit_path, "{ invalid json }}}").await?;
 
     // load_commit should fail with CorruptState
@@ -431,10 +422,7 @@ async fn missing_commit_file_returns_storage_not_found() -> TestResult {
         .await?;
 
     // Delete the commit file
-    let commit_path = tmp
-        .path()
-        .join(TransactionLogStore::LOG_DIR_NAME)
-        .join("0000000001.json");
+    let commit_path = tmp.path().join(layout::commit_rel_path(1));
     tokio::fs::remove_file(&commit_path).await?;
 
     // load_commit should fail with Storage(NotFound)
@@ -469,7 +457,7 @@ async fn leftover_tmp_files_are_ignored() -> TestResult {
         .await?;
 
     // Create leftover .tmp files that might be from crashed writes
-    let log_dir = tmp.path().join(TransactionLogStore::LOG_DIR_NAME);
+    let log_dir = tmp.path().join(layout::log_rel_dir());
     tokio::fs::write(log_dir.join("0000000002.json.tmp"), b"garbage").await?;
     tokio::fs::write(log_dir.join(".tmp_random_file"), b"more garbage").await?;
     tokio::fs::write(log_dir.join("temp_commit.tmp"), b"even more garbage").await?;
@@ -502,10 +490,7 @@ async fn missing_intermediate_commit_fails_rebuild() -> TestResult {
         .await?;
 
     // Delete commit 1 (intermediate)
-    let commit_1_path = tmp
-        .path()
-        .join(TransactionLogStore::LOG_DIR_NAME)
-        .join("0000000001.json");
+    let commit_1_path = tmp.path().join(layout::commit_rel_path(1));
     tokio::fs::remove_file(&commit_1_path).await?;
 
     // rebuild_table_state should fail when trying to load commit 1
