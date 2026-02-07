@@ -1,6 +1,6 @@
-# I built a lakehouse table format from stratch, and here's how I did it
+# I built a lakehouse table format from scratch, and here's how I did it
 
-## How it get started
+## How it started
 
 A couple months ago I was learning Kafka on my own, and I had that “ohhh” moment: Kafka isn’t really a message queue the way people casually describe it — it’s an immutable, append-only log.
 
