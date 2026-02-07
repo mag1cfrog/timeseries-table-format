@@ -13,3 +13,4 @@ Then I started digging into how modern table formats like Delta Lake and Iceberg
 At that point I thought: if the core idea is “log + snapshots + a bit of concurrency control,” how hard would it be to build a small version myself — and tune it specifically for time-series data?
 
 That question turned into a learn-by-doing project…and eventually into the table format I’m writing about in this post.
+
