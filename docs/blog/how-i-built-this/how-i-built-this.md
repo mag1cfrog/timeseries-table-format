@@ -1,7 +1,7 @@
 # I built a lakehouse table format from scratch, and here's how I did it
 
 I built a Rust-based lakehouse table format inspired by Delta/Iceberg, and on append-heavy time-series workloads it blows the
-common systems out of the water in our benchmark (5x Postgres, 4x Delta + Spark, and 3x ClickHouse). Here's why -- and how it works -- dead simple in 10 minutes.
+common systems out of the water in our benchmark (5x Postgres, 4x Delta + Spark, and 3x ClickHouse). Here's why and how it works, dead simple in 10 minutes.
 
 ## How it started
 
