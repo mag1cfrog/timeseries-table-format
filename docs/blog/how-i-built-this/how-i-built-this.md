@@ -1,6 +1,6 @@
 # I built a lakehouse table format from scratch, and here's how I did it
 
-I tried to build a small Delta-style table format in Rust, tuned for time-series appends. It beats Postgres / Delta + Spark / ClickHouse on append throughput (5x/4x/3x in our benchmark). Here's why and how it works, in 10 minutes.
+I tried to build a small Delta-style table format in Rust, tuned for time-series appends. It's faster than Postgres / Delta + Spark / ClickHouse on append throughput (5x/4x/3x in our benchmark). Here's why and how it works, in 10 minutes.
 
 ## The moment it clicked
 
