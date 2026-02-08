@@ -5,11 +5,11 @@ common systems out of the water in our benchmark (5x Postgres, 4x Delta + Spark,
 
 ## The moment it clicked
 
-While I was learning Kafka (docs + blogs + youtube toturials), one theme kept coming up: the more useful way to think about Kafka isn't 'a message queue', it's 'an immutable append-only log'.
+While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log".
 
-Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era. When I dig deep into what's behind the modern lakehouse table formats like Delta Lake and Icebeg, I noticed the same pattern again: an append-only history of metadata taht describes table state over time.
+Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era. When I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time.
 
-At that point I thought: this mental model of an immutable, append-only log must be really powerful. And if the core idea is just “log + snapshots + a bit of concurrency control,” how hard would it be to build a small version myself — and tune it specifically for time-series data?
+At that point I thought: this mental model of an immutable, append-only log must be really powerful. If the core idea is just “log + snapshots + a bit of concurrency control,” how hard would it be to build a small version myself — and tune it specifically for time-series data?
 
 That question turned into a learn-by-doing project…and eventually into the table format I’m writing about in this post.
 
