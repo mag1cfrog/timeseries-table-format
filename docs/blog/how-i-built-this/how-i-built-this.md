@@ -13,3 +13,20 @@ At that point I thought: this mental model of an immutable, append-only log must
 
 That question turned into a learn-by-doing project…and eventually into the table format I’m writing about in this post.
 
+## Table formats in 5 minutes (Delta-style mental model)
+
+First, a quick clarification: Parquet is a file format. Delta Lake and Iceberg are table formats.
+A table format is basically a contract that answers:
+- Where is the data stored?
+- What files belong to the table right now?
+- How do writers safely add new data without corrupting readers?
+- How do readers get a consistent snapshot?
+
+The bottom line about table formats is: they work because they treat table state as append-only metadata history + a current snapshot/pointer + a commit protocol.
+
+### Delta vs Iceberg
+Delta and Iceberg both use the same core shape: data files + append-only metadata history + snapshots.
+
+They differ in the concrete implementation:
+- Delta relies on underlying storage/compute primitives to achieve atomic commits, while Iceberg relies on catalog.
+- Delta is like maintaining a series of changelogs with occasional checkpoints, while Iceberg is like maintaining a new snapshot for each commit.
