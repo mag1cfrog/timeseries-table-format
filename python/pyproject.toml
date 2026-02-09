@@ -15,3 +15,8 @@ build-backend = "maturin"
 [tool.maturin]
 manifest-path = "../crates/timeseries-table-python/Cargo.toml"
 bindings = "pyo3"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
