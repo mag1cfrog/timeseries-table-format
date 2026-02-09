@@ -61,7 +61,7 @@ Readers want a consistent view: "give me the table as of the latest committed ve
 
 Conceptually, a snapshot is just "the table state after applying commits up to version N:. Implementations differ in how they find N and how they materialize state efficiently, but hte idea is the same.
 
-> [!NOTE] 
+> NOTE:
 > Replay a long log can get slow, so systems like Delta often write checkpoints: a compact representation of the current state so readers don't reply from day 1.
 > You can think of checkpoints as "snapshots for performance", not a different source of truth.
 
