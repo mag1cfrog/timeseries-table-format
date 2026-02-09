@@ -27,6 +27,19 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Install Python (for PyO3)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Configure PyO3 env
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "${libdir}" ]]; then
+            echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
+          fi
       - name: Run release-plz (release)
         uses: release-plz/action@v0.5
         with:
@@ -59,6 +72,19 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Install Python (for PyO3)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Configure PyO3 env
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "${libdir}" ]]; then
+            echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
+          fi
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:
