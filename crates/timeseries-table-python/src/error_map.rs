@@ -8,6 +8,7 @@ use timeseries_table_core::{
     storage::StorageError as CoreStorageError, table::TableError, transaction_log::CommitError,
 };
 
+#[allow(dead_code)]
 pub(crate) fn datafusion_error_to_py(
     _py: Python<'_>,
     err: datafusion::error::DataFusionError,
