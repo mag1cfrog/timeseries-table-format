@@ -34,32 +34,32 @@ They differ in the concrete implementation:
 Here's what you need to know about lakehouse table formats before we move on. A lakehouse table format usually consists of these major components:
 
 ### 1. Immutable data files
-    In lakehouses, the data usually lives as immutable files (commonly parquet). Appending data means writing new files; you don't "UPDATE rows in place" like a classic OLTP database.
+In lakehouses, the data usually lives as immutable files (commonly parquet). Appending data means writing new files; you don't "UPDATE rows in place" like a classic OLTP database.
 
-    The fiel format matters for performance, but it's not the point here. The table format's real job is to manage which files are currently valid.
+The fiel format matters for performance, but it's not the point here. The table format's real job is to manage which files are currently valid.
 
 ### 2. A transaction log (append-only metadata)
-    A lakehouse table format like Delta's core idea is a transaction log: a sequence of commits where each commits syas "here's what changed".
+A lakehouse table format like Delta's core idea is a transaction log: a sequence of commits where each commits syas "here's what changed".
 
-    Typical actions are:
-    - add data files
-    - remove data files (tombstones)
-    - update table-level metadata (schema/config)
+Typical actions are:
+- add data files
+- remove data files (tombstones)
+- update table-level metadata (schema/config)
 
-    Because commits are append-only, you can always reconstruct the table state at version N by replaying commits.
+Because commits are append-only, you can always reconstruct the table state at version N by replaying commits.
 
 ### 3. Versioning + concurrency control (OCC)
-    To support concurrent writers, each commit is versioned. Writers:
-    1. read the latest version
-    2. prepare "version + 1"
-    3. commit only if the world hasn' changed underneath them
+To support concurrent writers, each commit is versioned. Writers:
+1. read the latest version
+2. prepare "version + 1"
+3. commit only if the world hasn' changed underneath them
 
-    If another writer wins first, you don't corrupt the table -- you just detect a conflict and retry based on the new latest state.
+If another writer wins first, you don't corrupt the table -- you just detect a conflict and retry based on the new latest state.
 
 ### 4. A current snapshot for readers (and checkpoints)
-    Readers want a consistent view: "give me the table as of the latest committed version".
+Readers want a consistent view: "give me the table as of the latest committed version".
 
-    Conceptually, a snapshot is just "the table state after applying commits up to version N:. Implementations differ in how they find N and how they materialize state efficiently, but hte idea is the same.
+Conceptually, a snapshot is just "the table state after applying commits up to version N:. Implementations differ in how they find N and how they materialize state efficiently, but hte idea is the same.
 
 > [!NOTE] 
 > Replay a long log can get slow, so systems like Delta often write checkpoints: a compact representation of the current state so readers don't reply from day 1.
