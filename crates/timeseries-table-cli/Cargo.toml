@@ -21,8 +21,8 @@ rayon = "1.11.0"
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
-timeseries-table-core = { path = "../timeseries-table-core" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion" }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.0" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.0" }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
@@ -36,7 +36,7 @@ parquet = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-timeseries-table-core = { path = "../timeseries-table-core", features = ["test-counters"] }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.0", features = ["test-counters"] }
 
 [lints]
 workspace = true
