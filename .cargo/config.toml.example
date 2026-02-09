@@ -1,0 +1,16 @@
+# Local developer config for PyO3 builds.
+#
+# Copy this file to `.cargo/config.toml` to make `cargo test` pick the repo's
+# Python virtualenv (used by `uv`) instead of whatever `python3` points to on
+# your system.
+#
+# Notes:
+# - This is intended for local development only; CI should keep setting
+#   `PYO3_PYTHON` explicitly.
+# - Run Cargo commands from the repo root so the relative path resolves.
+#
+#   cp .cargo/config.toml.example .cargo/config.toml
+
+[env]
+PYO3_PYTHON = { value = "python/.venv/bin/python", force = false }
+

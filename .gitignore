@@ -35,3 +35,6 @@ target/wheels/
 python/**/*.so
 python/**/*.pyd
 python/**/*.dylib
+
+# Local Cargo config (developer-specific)
+.cargo/config.toml
