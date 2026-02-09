@@ -5,22 +5,12 @@ mod tokio_runner;
 
 #[pyo3::pymodule]
 mod timeseries_table_format {
-    use std::path::Path;
 
-    use pyo3::{Bound, PyResult, Python, prelude::*, pyclass, pymethods, types::PyModule};
-    use timeseries_table_core::{
-        storage::TableLocation,
-        table::TableError,
-        transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
-    };
+    use pyo3::{Bound, PyResult, prelude::*, pyclass, pymethods, types::PyModule};
 
-    use crate::{
-        error_map,
-        exceptions::{
-            ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
-            StorageError, TimeseriesTableError,
-        },
-        tokio_runner,
+    use crate::exceptions::{
+        ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
+        TimeseriesTableError,
     };
 
     #[pyclass]
@@ -50,6 +40,8 @@ mod timeseries_table_format {
     /// append to fail with a coverage overlap.
     #[pyfunction]
     fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
+        use crate::{error_map, tokio_runner};
+
         let rt = tokio_runner::new_runtime()?;
 
         let table_root = table_root.to_string();
@@ -59,7 +51,14 @@ mod timeseries_table_format {
             py,
             &rt,
             async move {
+                use std::path::Path;
+
                 use timeseries_table_core::table::TimeSeriesTable;
+                use timeseries_table_core::{
+                    storage::TableLocation,
+                    table::TableError,
+                    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+                };
 
                 let index = TimeIndexSpec {
                     timestamp_column: "ts".to_string(),
@@ -119,8 +118,10 @@ mod timeseries_table_format {
         m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
         m.add("DataFusionError", py.get_type::<DataFusionError>())?;
 
-        // Test-only hook
-        m.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
+        // Internal test-only hook (kept under a clearly private namespace).
+        let testing = PyModule::new(py, "timeseries_table_format._testing")?;
+        testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
+        m.add_submodule(&testing)?;
         Ok(())
     }
 }
