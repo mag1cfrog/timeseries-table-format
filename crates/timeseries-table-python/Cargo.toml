@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
 
 [lints]
 workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+name = "timeseries_table_format"
