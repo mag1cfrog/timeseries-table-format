@@ -12,5 +12,6 @@
 #   cp .cargo/config.toml.example .cargo/config.toml
 
 [env]
-PYO3_PYTHON = { value = "python/.venv/bin/python", force = false }
-
+# `relative = true` makes Cargo resolve this path relative to the workspace root
+# (instead of the build script's working directory under `target/`).
+PYO3_PYTHON = { value = "python/.venv/bin/python", force = false, relative = true }
