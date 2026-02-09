@@ -20,7 +20,7 @@ chrono = "0.4.42"
 parquet = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
-timeseries-table-core = { path = "../timeseries-table-core", features = ["test-counters"] }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.0, features = ["test-counters"] }
 
 [lints]
 workspace = true
