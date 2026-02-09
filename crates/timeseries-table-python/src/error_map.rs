@@ -16,6 +16,7 @@ pub(crate) fn datafusion_error_to_py(
     DataFusionError::new_err(err.to_string())
 }
 
+#[allow(dead_code)]
 pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyErr {
     let msg = err.to_string();
 
@@ -38,6 +39,7 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyEr
     py_err
 }
 
+#[allow(dead_code)]
 fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
     match err {
         CommitError::Conflict {
@@ -62,6 +64,7 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn table_error_to_py(py: Python<'_>, err: TableError) -> PyErr {
     let msg = err.to_string();
 
