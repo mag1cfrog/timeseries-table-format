@@ -30,7 +30,7 @@ They differ in the concrete implementation:
 - Delta relies on underlying storage/compute primitives to achieve atomic commits, while Iceberg relies on a catalog.
 - Delta is like maintaining a series of changelogs with occasional checkpoints, while Iceberg is like maintaining a new snapshot for each commit.
 
-## Lakehouse table format 101
+## Lakehouse conceptual 101
 Here's what you need to know about lakehouse table formats before we move on. A lakehouse table format usually consists of these major components:
 
 ### 1. Immutable data files
@@ -39,7 +39,7 @@ In lakehouses, the data usually lives as immutable files (commonly parquet). App
 The file format matters for performance, but it's not the point here. The table format's real job is to manage which files are currently valid.
 
 ### 2. A transaction log (append-only metadata)
-A lakehouse table format like Delta's core idea is a transaction log: a sequence of commits where each commits says "here's what changed".
+A lakehouse table format like Delta's core idea is a transaction log: a sequence of commits where each commit says "here's what changed".
 
 Typical actions are:
 - add data files
@@ -59,7 +59,7 @@ If another writer wins first, you don't corrupt the table -- you just detect a c
 ### 4. A current snapshot for readers (and checkpoints)
 Readers want a consistent view: "give me the table as of the latest committed version".
 
-Conceptually, a snapshot is just "the table state after applying commits up to version N. Implementations differ in how they find N and how they materialize state efficiently, but the idea is the same.
+Conceptually, a snapshot is just "the table state after applying commits up to version N". Implementations differ in how they find N and how they materialize state efficiently, but the idea is the same.
 
 > NOTE:
 > Replaying a long log can get slow, so systems like Delta often write checkpoints: a compact representation of the current state so readers don't replay from day 1.
