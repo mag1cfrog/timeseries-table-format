@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
