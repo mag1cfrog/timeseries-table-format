@@ -13,8 +13,8 @@ default = ["datafusion"]
 datafusion = ["dep:timeseries-table-datafusion"]
 
 [dependencies]
-timeseries-table-core = { path = "../timeseries-table-core" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", optional = true }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.0" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.0", optional = true }
 
 [lints]
 workspace = true

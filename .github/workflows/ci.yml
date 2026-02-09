@@ -78,6 +78,19 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      - name: Configure Python for PyO3 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -V
+          python3 -c 'import sysconfig; print("LIBDIR=", sysconfig.get_config_var("LIBDIR")); print("LDLIBRARY=", sysconfig.get_config_var("LDLIBRARY")); print("Py_ENABLE_SHARED=", sysconfig.get_config_var("Py_ENABLE_SHARED"))'
+          PYTHON="$(command -v python3)"
+          echo "PYO3_PYTHON=$PYTHON" >> "$GITHUB_ENV"
+          LIBDIR="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "$LIBDIR" ]]; then
+            echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
       
       - name: test
         run: cargo nextest run --workspace --all-features --no-fail-fast

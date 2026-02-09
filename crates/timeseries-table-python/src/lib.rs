@@ -1,4 +1,5 @@
 //! Python bindings for timeseries-table-format (v0 skeleton).
+mod tokio_runner;
 
 #[pyo3::pymodule]
 mod timeseries_table_format {
