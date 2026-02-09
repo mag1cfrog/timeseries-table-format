@@ -15,3 +15,7 @@ workspace = true
 [lib]
 crate-type = ["cdylib"]
 name = "timeseries_table_format"
+
+[features]
+default = []
+test-utils = []
