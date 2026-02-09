@@ -1,0 +1,24 @@
+# Direnv helper for local PyO3 development.
+#
+# Copy to `.envrc` and run `direnv allow` (requires direnv installed).
+#
+# This makes `cargo test -p timeseries-table-python` and other Rust/PyO3
+# invocations use the repo's UV-managed virtualenv interpreter, and ensures the
+# dynamic linker can find libpython at runtime.
+#
+#   cp .envrc.example .envrc
+#   direnv allow
+
+if [[ -z "${PYO3_PYTHON:-}" ]]; then
+  export PYO3_PYTHON="$PWD/python/.venv/bin/python"
+fi
+
+if [[ -x "$PYO3_PYTHON" ]]; then
+  libdir="$("$PYO3_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+  if [[ -n "$libdir" ]]; then
+    export LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+else
+  echo "warning: PYO3_PYTHON is not executable: $PYO3_PYTHON" >&2
+fi
+

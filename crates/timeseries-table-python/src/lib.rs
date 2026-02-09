@@ -1,9 +1,27 @@
 //! Python bindings for timeseries-table-format (v0 skeleton).
+mod error_map;
+mod exceptions;
 mod tokio_runner;
 
 #[pyo3::pymodule]
 mod timeseries_table_format {
-    use pyo3::{Bound, PyResult, prelude::*, pyclass, pymethods, types::PyModule};
+    use std::path::Path;
+
+    use pyo3::{Bound, PyResult, Python, prelude::*, pyclass, pymethods, types::PyModule};
+    use timeseries_table_core::{
+        storage::TableLocation,
+        table::TableError,
+        transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+    };
+
+    use crate::{
+        error_map,
+        exceptions::{
+            ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
+            StorageError, TimeseriesTableError,
+        },
+        tokio_runner,
+    };
 
     #[pyclass]
     struct Session;
@@ -27,9 +45,82 @@ mod timeseries_table_format {
         }
     }
 
+    /// Test-only helper: creates a table at `table_root`, copies `parquet_path`
+    /// under the table root if needed, appends it twice, and expects the second
+    /// append to fail with a coverage overlap.
+    #[pyfunction]
+    fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
+        let rt = tokio_runner::new_runtime()?;
+
+        let table_root = table_root.to_string();
+        let parquet_path = parquet_path.to_string();
+
+        tokio_runner::run_blocking_map_err(
+            py,
+            &rt,
+            async move {
+                use timeseries_table_core::table::TimeSeriesTable;
+
+                let index = TimeIndexSpec {
+                    timestamp_column: "ts".to_string(),
+                    bucket: TimeBucket::Minutes(60),
+                    timezone: None,
+                    entity_columns: Vec::new(),
+                };
+
+                let meta = TableMeta::new_time_series(index);
+
+                let location = TableLocation::parse(&table_root)
+                    .map_err(|e| TableError::Storage { source: e })?;
+
+                let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+                let rel = location
+                    .ensure_parquet_under_root(Path::new(&parquet_path))
+                    .await
+                    .map_err(|e| TableError::Storage { source: e })?;
+
+                let rel_str = rel.to_string_lossy().to_string();
+                let rel_str = if cfg!(windows) {
+                    rel_str.replace('\\', "/")
+                } else {
+                    rel_str
+                };
+
+                let _v1 = table.append_parquet_segment(&rel_str, "ts").await?;
+
+                let _v2 = table.append_parquet_segment(&rel_str, "ts").await?;
+
+                Ok::<(), TableError>(())
+            },
+            error_map::table_error_to_py,
+        )?;
+
+        Ok(())
+    }
+
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
+        // Export exception types
+        let py = m.py();
+        m.add(
+            "TimeseriesTableError",
+            py.get_type::<TimeseriesTableError>(),
+        )?;
+
+        m.add("StorageError", py.get_type::<StorageError>())?;
+        m.add("ConflictError", py.get_type::<ConflictError>())?;
+        m.add(
+            "CoverageOverlapError",
+            py.get_type::<CoverageOverlapError>(),
+        )?;
+        m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
+        m.add("DataFusionError", py.get_type::<DataFusionError>())?;
+
+        // Test-only hook
+        m.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
         Ok(())
     }
 }
