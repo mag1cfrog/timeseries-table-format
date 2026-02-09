@@ -1,4 +1,4 @@
-//! doc placeholder
+//! Python exception types exposed by the `timeseries_table_format` module.
 
 use pyo3::{create_exception, exceptions::PyException};
 
