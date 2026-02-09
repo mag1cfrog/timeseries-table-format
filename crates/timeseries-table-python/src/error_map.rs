@@ -41,11 +41,13 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyEr
 
 #[allow(dead_code)]
 fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
+    let msg = err.to_string();
+
     match err {
         CommitError::Conflict {
             expected, found, ..
         } => {
-            let py_err = ConflictError::new_err(err.to_string());
+            let py_err = ConflictError::new_err(msg);
             let exc = py_err.value(py);
 
             if let Err(e) = exc.setattr("expected", expected) {
@@ -60,7 +62,7 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
 
         CommitError::Storage { source } => storage_error_to_py(py, source),
 
-        CommitError::CorruptState { .. } => TimeseriesTableError::new_err(err.to_string()),
+        CommitError::CorruptState { .. } => TimeseriesTableError::new_err(msg),
     }
 }
 
