@@ -1,4 +1,5 @@
 //! Python bindings for timeseries-table-format (v0 skeleton).
+mod error_map;
 mod exceptions;
 mod tokio_runner;
 
