@@ -1,0 +1,17 @@
+[project]
+name = "timeseries-table-format"
+version = "0.1.0"
+description = "Append-only time-series table format with gap/overlap tracking (Python bindings)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyarrow>=23.0.0",
+]
+
+[build-system]
+requires = ["maturin>=1.11.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "../crates/timeseries-table-python/Cargo.toml"
+bindings = "pyo3"
