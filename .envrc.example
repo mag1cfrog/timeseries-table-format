@@ -14,6 +14,14 @@ if [[ -z "${PYO3_PYTHON:-}" ]]; then
 fi
 
 if [[ -x "$PYO3_PYTHON" ]]; then
+  # Silence embedded-CPython warnings like:
+  # "Could not find platform dependent libraries <exec_prefix>"
+  # when running Rust unit tests (the process argv[0] is a Rust test binary).
+  base_prefix="$("$PYO3_PYTHON" -c 'import sys; print(sys.base_prefix)')"
+  if [[ -n "$base_prefix" ]]; then
+    export PYTHONHOME="$base_prefix"
+  fi
+
   libdir="$("$PYO3_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
   if [[ -n "$libdir" ]]; then
     export LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -21,4 +29,3 @@ if [[ -x "$PYO3_PYTHON" ]]; then
 else
   echo "warning: PYO3_PYTHON is not executable: $PYO3_PYTHON" >&2
 fi
-
