@@ -16,3 +16,22 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.venv/
+
+# Python packaging artifacts
+build/
+dist/
+**/*.egg-info/
+
+# maturin wheel output (note: `target/` is already ignored above)
+target/wheels/
+
+# Built Python extension modules (keep scoped to Python package dirs)
+python/**/*.so
+python/**/*.pyd
+python/**/*.dylib
