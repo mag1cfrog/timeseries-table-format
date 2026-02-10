@@ -153,6 +153,7 @@ mod timeseries_table_format {
     /// Test-only helper: creates a table at `table_root`, copies `parquet_path`
     /// under the table root if needed, appends it twice, and expects the second
     /// append to fail with a coverage overlap.
+    #[cfg(feature = "test-utils")]
     #[pyfunction]
     fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
         use crate::{error_map, tokio_runner};
@@ -237,10 +238,15 @@ mod timeseries_table_format {
         m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
         m.add("DataFusionError", py.get_type::<DataFusionError>())?;
 
-        // Internal test-only hook (kept under a clearly private namespace).
-        let testing = PyModule::new(py, "timeseries_table_format._testing")?;
-        testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
-        m.add_submodule(&testing)?;
+        #[cfg(feature = "test-utils")]
+        {
+            // Internal test-only hook (kept under a clearly private namespace).
+            let py = m.py();
+            let testing = PyModule::new(py, "timeseries_table_format._testing")?;
+            testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
+            m.add_submodule(&testing)?;
+        }
+
         Ok(())
     }
 }
