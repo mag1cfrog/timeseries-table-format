@@ -184,6 +184,10 @@ mod timeseries_table_format {
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
+        // Export classes
+        m.add_class::<Session>()?;
+        m.add_class::<TimeSeriesTable>()?;
+
         // Export exception types
         let py = m.py();
         m.add(
