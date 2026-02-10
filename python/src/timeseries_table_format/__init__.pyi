@@ -1,3 +1,5 @@
+from types import ModuleType
+
 __version__: str
 
 class TimeseriesTableError(Exception): ...
@@ -28,10 +30,17 @@ class TimeSeriesTable:
     ) -> TimeSeriesTable: ...
     @classmethod
     def open(cls, table_root: str) -> TimeSeriesTable: ...
-    @classmethod
     def append_parquet(
         self,
         parquet_path: str,
         time_column: str | None = None,
         copy_if_outside: bool = True,
     ) -> int: ...
+
+
+class _TestingModule(ModuleType):
+    def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
+    def _test_sleep_without_gil(self, millis: int) -> None: ...
+
+# Feature-gated: present only when built with `--features test-utils`.
+_testing: _TestingModule | None
