@@ -11,7 +11,7 @@ mod _dev {
         exceptions::PyValueError,
         prelude::*,
         pyclass, pymethods,
-        types::{PyModule, PyType},
+        types::{PyDict, PyModule, PyType},
     };
 
     use crate::exceptions::{
@@ -153,6 +153,35 @@ mod _dev {
                 inner,
                 table_root: table_root_for_err,
             })
+        }
+
+        fn root(&self) -> String {
+            self.table_root.clone()
+        }
+
+        fn version(&self) -> u64 {
+            self.inner.state().version
+        }
+
+        fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            use timeseries_table_core::transaction_log::TimeBucket;
+
+            let spec = self.inner.index_spec();
+
+            let bucket = match spec.bucket {
+                TimeBucket::Seconds(n) => format!("{n}s"),
+                TimeBucket::Minutes(n) => format!("{n}m"),
+                TimeBucket::Hours(n) => format!("{n}h"),
+                TimeBucket::Days(n) => format!("{n}d"),
+            };
+
+            let d = PyDict::new(py);
+            d.set_item("timestamp_column", spec.timestamp_column.clone())?;
+            d.set_item("entity_columns", spec.entity_columns.clone())?;
+            d.set_item("bucket", bucket)?;
+            d.set_item("timezone", spec.timezone.clone())?;
+
+            Ok(d)
         }
 
         #[pyo3(signature = (parquet_path, time_column=None, copy_if_outside=true))]
