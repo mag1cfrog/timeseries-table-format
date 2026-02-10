@@ -4,7 +4,7 @@ mod exceptions;
 mod tokio_runner;
 
 #[pyo3::pymodule]
-mod timeseries_table_format {
+mod _dev {
 
     use pyo3::{
         Bound, PyErr, PyResult,
@@ -242,7 +242,7 @@ mod timeseries_table_format {
         {
             // Internal test-only hook (kept under a clearly private namespace).
             let py = m.py();
-            let testing = PyModule::new(py, "timeseries_table_format._testing")?;
+            let testing = PyModule::new(py, "timeseries_table_format._dev._testing")?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
             m.add_submodule(&testing)?;
         }
