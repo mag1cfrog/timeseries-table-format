@@ -4,7 +4,10 @@ import pyarrow.parquet as pq
 
 import timeseries_table_format as ttf
 
-def _write_parquet(path: str, ts_us: list[int], symbol: list[str], close: list[float]) -> None:
+
+def _write_parquet(
+    path: str, ts_us: list[int], symbol: list[str], close: list[float]
+) -> None:
     tbl = pa.table(
         {
             "ts": pa.array(ts_us, type=pa.timestamp("us")),
@@ -13,6 +16,7 @@ def _write_parquet(path: str, ts_us: list[int], symbol: list[str], close: list[f
         }
     )
     pq.write_table(tbl, path)
+
 
 def _write_parquet_with_ts2(
     path: str, ts2_us: list[int], symbol: list[str], close: list[float]
@@ -25,6 +29,7 @@ def _write_parquet_with_ts2(
         }
     )
     pq.write_table(tbl, path)
+
 
 def test_append_parquet_outside_and_inside_root(tmp_path):
     root = tmp_path / "table"
@@ -64,6 +69,7 @@ def test_append_parquet_outside_and_inside_root(tmp_path):
 
     with pytest.raises(ValueError):
         tbl.append_parquet(str(outside), copy_if_outside=False)
+
 
 def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
     root = tmp_path / "table"

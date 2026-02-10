@@ -1,6 +1,7 @@
 import pytest
 import timeseries_table_format as ttf
 
+
 def test_create_then_open(tmp_path):
     root = tmp_path / "table"
 
@@ -15,6 +16,7 @@ def test_create_then_open(tmp_path):
 
     t2 = ttf.TimeSeriesTable.open(str(root))
     assert isinstance(t2, ttf.TimeSeriesTable)
+
 
 def test_open_error_includes_root_in_message(tmp_path):
     root = tmp_path / "empty_root"
@@ -107,4 +109,3 @@ def test_create_rejects_unsupported_scheme_includes_root():
     e = excinfo.value
     assert root in str(e)
     assert getattr(e, "table_root", None) == root
-    

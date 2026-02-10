@@ -26,10 +26,8 @@ class TimeSeriesTable:
         entity_columns: list[str] | None = None,
         timezone: str | None = None,
     ) -> TimeSeriesTable: ...
-
     @classmethod
     def open(cls, table_root: str) -> TimeSeriesTable: ...
-
     @classmethod
     def append_parquet(
         self,
