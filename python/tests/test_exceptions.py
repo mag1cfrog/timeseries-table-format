@@ -7,6 +7,8 @@ import pytest
 
 import timeseries_table_format as ttf
 
+if not hasattr(ttf, "timeseries_table_format") or not hasattr(ttf.timeseries_table_format, "_testing"):
+    pytest.skip("Rust extension built without feature 'test-utils'", allow_module_level=True)
 
 def test_coverage_overlap_maps_to_specific_exception():
     with tempfile.TemporaryDirectory() as tmp:
