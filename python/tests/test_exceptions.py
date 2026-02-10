@@ -48,38 +48,36 @@ def test_test_sleep_without_gil_allows_other_threads_to_run():
         pytest.skip("Rust extension built without feature 'test-utils'")
         return
 
-    duration_ms = 200
+    duration_ms = 500
     duration_s = duration_ms / 1000.0
 
-    # Baseline: how many Python increments we can do in `duration_s` with no other work.
-    baseline = 0
-    t0 = time.perf_counter()
-    while (time.perf_counter() - t0) < duration_s:
-        baseline += 1
-    assert baseline > 10_000
+    def run_counter_while(fn) -> int:
+        ready = threading.Event()
+        stop = threading.Event()
+        counter = [0]
 
-    entered = threading.Event()
-    done = threading.Event()
+        def counter_thread():
+            ready.set()
+            while not stop.is_set():
+                counter[0] += 1
 
-    def worker():
-        entered.set()
-        testing._test_sleep_without_gil(duration_ms)
-        done.set()
+        t = threading.Thread(target=counter_thread)
+        t.start()
+        assert ready.wait(timeout=1.0)
 
-    t = threading.Thread(target=worker)
-    t.start()
-    assert entered.wait(timeout=1.0)
+        fn()
+        stop.set()
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        return counter[0]
 
-    # While the other thread is sleeping in Rust, we should still be able to run Python
-    # if the binding releases the GIL.
-    count = 0
-    t0 = time.perf_counter()
-    while (time.perf_counter() - t0) < duration_s:
-        count += 1
+    # Baseline: other thread runs while we do a pure-Python sleep (releases GIL).
+    baseline = run_counter_while(lambda: time.sleep(duration_s))
 
-    t.join(timeout=2.0)
-    assert done.is_set()
-    assert not t.is_alive()
+    # Experiment: other thread should still run while Rust blocks if the binding releases the GIL.
+    during_rust = run_counter_while(lambda: testing._test_sleep_without_gil(duration_ms))
 
-    # If the GIL was held for the whole call, `count` will be near zero vs baseline.
-    assert count >= int(baseline * 0.2)
+    # Avoid flaky absolute thresholds: compare against baseline measured on the same machine.
+    # If the Rust call doesn't release the GIL, `during_rust` will be near zero relative to baseline.
+    assert baseline > 0
+    assert during_rust >= max(1, int(baseline * 0.2))
