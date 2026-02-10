@@ -1,3 +1,6 @@
+from types import ModuleType
+__version__: str
+
 class TimeseriesTableError(Exception): ...
 class StorageError(TimeseriesTableError): ...
 class ConflictError(TimeseriesTableError): ...
@@ -10,4 +13,25 @@ class CoverageOverlapError(TimeseriesTableError):
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
 
-def _test_trigger_overlap(table_root: str, parquet_path: str) -> None: ...
+class Session:
+    def __init__(self) -> None: ...
+
+class TimeSeriesTable:
+    @classmethod
+    def create(
+        cls,
+        *,
+        table_root: str,
+        time_column: str,
+        bucket: str,
+        entity_columns: list[str] | None = None,
+        timezone: str | None = None,
+    ) -> TimeSeriesTable: ...
+
+    @classmethod
+    def open(cls, table_root: str) -> TimeSeriesTable: ...
+
+class _TestingModule(ModuleType):
+    def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
+
+_testing: _TestingModule
