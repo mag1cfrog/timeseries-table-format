@@ -34,4 +34,7 @@ class TimeSeriesTable:
 class _TestingModule(ModuleType):
     def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
 
-_testing: _TestingModule
+class _NativeExtensionModule(ModuleType):
+    _testing: _TestingModule
+
+timeseries_table_format: _NativeExtensionModule
