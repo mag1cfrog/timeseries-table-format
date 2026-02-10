@@ -212,22 +212,22 @@ mod _dev {
                         // but refuse parent traversal.
                         let rel = match rel {
                             Some(r) => r,
-	                            None if !src_path.is_absolute() => {
-	                                if src_path
-	                                    .components()
-	                                    .any(|c| matches!(c, Component::ParentDir))
-	                                {
-	                                    return Err(AppendParquetError::ValueError(format!(
-	                                        "parquet_path must not contain '..' when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
-	                                    )));
-	                                }
-	                                src_path.to_path_buf()
-	                            }
-	                            None => {
-	                                return Err(AppendParquetError::ValueError(format!(
-	                                    "parquet_path must be under table_root when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
-	                                )));
-	                            }
+                            None if !src_path.is_absolute() => {
+                                if src_path
+                                    .components()
+                                    .any(|c| matches!(c, Component::ParentDir))
+                                {
+                                    return Err(AppendParquetError::ValueError(format!(
+                                        "parquet_path must not contain '..' when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                    )));
+                                }
+                                src_path.to_path_buf()
+                            }
+                            None => {
+                                return Err(AppendParquetError::ValueError(format!(
+                                    "parquet_path must be under table_root when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                )));
+                            }
                         };
 
                         if rel.as_os_str().is_empty() {
@@ -264,9 +264,9 @@ mod _dev {
     /// Test-only helper: creates a table at `table_root`, copies `parquet_path`
     /// under the table root if needed, appends it twice, and expects the second
     /// append to fail with a coverage overlap.
-	    #[cfg(feature = "test-utils")]
-	    #[pyfunction]
-	    fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
         use crate::{error_map, tokio_runner};
 
         let rt = tokio_runner::new_runtime()?;
@@ -322,18 +322,18 @@ mod _dev {
             error_map::table_error_to_py,
         )?;
 
-	        Ok(())
-	    }
+        Ok(())
+    }
 
-	    /// Test-only helper: blocks for `millis` while releasing the GIL.
-	    #[cfg(feature = "test-utils")]
-	    #[pyfunction]
-	    fn _test_sleep_without_gil(py: Python<'_>, millis: u64) -> PyResult<()> {
-	        use std::time::Duration;
+    /// Test-only helper: blocks for `millis` while releasing the GIL.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_sleep_without_gil(py: Python<'_>, millis: u64) -> PyResult<()> {
+        use std::time::Duration;
 
-	        py.detach(move || std::thread::sleep(Duration::from_millis(millis)));
-	        Ok(())
-	    }
+        py.detach(move || std::thread::sleep(Duration::from_millis(millis)));
+        Ok(())
+    }
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -356,23 +356,23 @@ mod _dev {
             "CoverageOverlapError",
             py.get_type::<CoverageOverlapError>(),
         )?;
-	        m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
-	        m.add("DataFusionError", py.get_type::<DataFusionError>())?;
+        m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
+        m.add("DataFusionError", py.get_type::<DataFusionError>())?;
 
-	        // Feature-gated: present only when built with `--features test-utils`.
-	        // Always add the attribute (defaulting to None) to keep the module surface stable.
-	        m.add("_testing", py.None())?;
+        // Feature-gated: present only when built with `--features test-utils`.
+        // Always add the attribute (defaulting to None) to keep the module surface stable.
+        m.add("_testing", py.None())?;
 
-	        #[cfg(feature = "test-utils")]
-	        {
-	            // Internal test-only hook (kept under a clearly private namespace).
-	            let py = m.py();
-	            let testing = PyModule::new(py, "timeseries_table_format._dev._testing")?;
-	            testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
-	            testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
-	            m.add("_testing", &testing)?;
-	            m.add_submodule(&testing)?;
-	        }
+        #[cfg(feature = "test-utils")]
+        {
+            // Internal test-only hook (kept under a clearly private namespace).
+            let py = m.py();
+            let testing = PyModule::new(py, "timeseries_table_format._dev._testing")?;
+            testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
+            m.add("_testing", &testing)?;
+            m.add_submodule(&testing)?;
+        }
 
         Ok(())
     }
