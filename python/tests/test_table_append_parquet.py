@@ -1,5 +1,4 @@
 import pytest
-from lib2to3.fixes.fix_print import parend_expr
 from fileinput import close
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -7,7 +6,7 @@ import pyarrow.parquet as pq
 import timeseries_table_format as ttf
 
 def _write_parquet(path: str, ts_us: list[int], symbol: list[str], close: list[float]) -> None:
-    tbl = pa.Table(
+    tbl = pa.table(
         {
             "ts": pa.array(ts_us, type=pa.timestamp("us")),
             "symbol": pa.array(symbol, type=pa.string()),
