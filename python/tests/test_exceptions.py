@@ -9,11 +9,11 @@ import pytest
 import timeseries_table_format as ttf
 import timeseries_table_format._dev as dev
 
-class TestingModule(Protocol):
+class _TestingModule(Protocol):
     def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
 
 def test_coverage_overlap_maps_to_specific_exception():
-    testing: TestingModule | None = getattr(dev, "_testing", None)
+    testing: _TestingModule | None = getattr(dev, "_testing", None)
     if testing is None:
         pytest.skip("Rust extension built without feature 'test-utils'")
         return
