@@ -8,7 +8,6 @@ mod timeseries_table_format {
 
     use pyo3::{
         Bound, PyErr, PyResult,
-        exceptions::PyRuntimeError,
         prelude::*,
         pyclass, pymethods,
         types::{PyModule, PyType},
@@ -78,9 +77,11 @@ mod timeseries_table_format {
             use timeseries_table_core::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
 
             let bucket = TimeBucket::parse(&bucket).map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "invalid bucket spec {bucket:?} (table_root={table_root}): {e}"
-                ))
+                let msg = format!("invalid bucket spec {bucket:?} (table_root={table_root}): {e}");
+                let py_err = TimeseriesTableError::new_err(msg);
+                let exc = py_err.value(py);
+                let _ = exc.setattr("table_root", table_root.clone());
+                py_err
             })?;
 
             let index = TimeIndexSpec {
