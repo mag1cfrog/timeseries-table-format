@@ -26,3 +26,21 @@ def test_open_error_includes_root_in_message(tmp_path):
     msg = str(excinfo.value)
     assert str(root) in msg
     assert getattr(excinfo.value, "table_root", None) == str(root)
+
+
+def test_create_invalid_bucket_includes_root(tmp_path):
+    root = tmp_path / "table"
+
+    with pytest.raises(ttf.TimeseriesTableError) as excinfo:
+        ttf.TimeSeriesTable.create(
+            table_root=str(root),
+            time_column="ts",
+            bucket="bogus",
+            entity_columns=None,
+            timezone=None,
+        )
+
+    e = excinfo.value
+    assert str(root) in str(e)
+    assert getattr(e, "table_root", None) == str(root)
+    
