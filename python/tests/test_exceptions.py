@@ -75,7 +75,9 @@ def test_test_sleep_without_gil_allows_other_threads_to_run():
     baseline = run_counter_while(lambda: time.sleep(duration_s))
 
     # Experiment: other thread should still run while Rust blocks if the binding releases the GIL.
-    during_rust = run_counter_while(lambda: testing._test_sleep_without_gil(duration_ms))
+    during_rust = run_counter_while(
+        lambda: testing._test_sleep_without_gil(duration_ms)
+    )
 
     # Avoid flaky absolute thresholds: compare against baseline measured on the same machine.
     # If the Rust call doesn't release the GIL, `during_rust` will be near zero relative to baseline.

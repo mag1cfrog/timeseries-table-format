@@ -32,6 +32,7 @@ def _write_parquet_with_ts2(
     )
     pq.write_table(tbl, path)
 
+
 def _write_parquet_close_int(
     path: str, ts_us: list[int], symbol: list[str], close: list[int]
 ) -> None:
@@ -84,7 +85,10 @@ def test_append_parquet_outside_and_inside_root(tmp_path):
     with pytest.raises(ValueError):
         tbl.append_parquet(str(outside), copy_if_outside=False)
 
-def test_append_parquet_copy_if_outside_true_when_already_under_root_does_not_copy(tmp_path):
+
+def test_append_parquet_copy_if_outside_true_when_already_under_root_does_not_copy(
+    tmp_path,
+):
     root = tmp_path / "table"
 
     tbl = ttf.TimeSeriesTable.create(

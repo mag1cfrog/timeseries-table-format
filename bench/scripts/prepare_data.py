@@ -94,7 +94,9 @@ def split_daily(parquet_path: pathlib.Path, out_dir: pathlib.Path, time_col: str
                 if isinstance(date_val, dt.date):
                     date_str = date_val.isoformat()
                 else:
-                    date_str = (dt.date(1970, 1, 1) + dt.timedelta(days=int(date_val))).isoformat()
+                    date_str = (
+                        dt.date(1970, 1, 1) + dt.timedelta(days=int(date_val))
+                    ).isoformat()
                 out_path = out_dir / f"fhvhv_{date_str}.parquet"
                 if date_str not in writers:
                     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,42 +175,50 @@ def main():
         writer = csv.writer(f)
         writer.writerow(["path", "rows", "bytes", "kind", "format"])
         for raw in raw_files:
-            writer.writerow([
-                str(raw.relative_to(dataset_dir)),
-                parquet_rows(raw),
-                raw.stat().st_size,
-                "raw",
-                "parquet",
-            ])
+            writer.writerow(
+                [
+                    str(raw.relative_to(dataset_dir)),
+                    parquet_rows(raw),
+                    raw.stat().st_size,
+                    "raw",
+                    "parquet",
+                ]
+            )
         for daily in sorted(daily_dir.glob("fhvhv_*.parquet")):
-            writer.writerow([
-                str(daily.relative_to(dataset_dir)),
-                parquet_rows(daily),
-                daily.stat().st_size,
-                "daily",
-                "parquet",
-            ])
+            writer.writerow(
+                [
+                    str(daily.relative_to(dataset_dir)),
+                    parquet_rows(daily),
+                    daily.stat().st_size,
+                    "daily",
+                    "parquet",
+                ]
+            )
         if args.generate_csv:
             for raw in raw_files:
                 csv_path = csv_dir / "raw" / (raw.stem + ".csv")
-                writer.writerow([
-                    str(csv_path.relative_to(dataset_dir)),
-                    parquet_rows(raw),
-                    csv_path.stat().st_size,
-                    "raw",
-                    "csv",
-                ])
+                writer.writerow(
+                    [
+                        str(csv_path.relative_to(dataset_dir)),
+                        parquet_rows(raw),
+                        csv_path.stat().st_size,
+                        "raw",
+                        "csv",
+                    ]
+                )
             for daily in sorted((csv_dir / "daily").glob("fhvhv_*.csv")):
                 date_part = daily.stem.replace("fhvhv_", "")
                 parquet_path = daily_dir / f"fhvhv_{date_part}.parquet"
                 rows = parquet_rows(parquet_path) if parquet_path.exists() else ""
-                writer.writerow([
-                    str(daily.relative_to(dataset_dir)),
-                    rows,
-                    daily.stat().st_size,
-                    "daily",
-                    "csv",
-                ])
+                writer.writerow(
+                    [
+                        str(daily.relative_to(dataset_dir)),
+                        rows,
+                        daily.stat().st_size,
+                        "daily",
+                        "csv",
+                    ]
+                )
 
     print("Done.")
 
