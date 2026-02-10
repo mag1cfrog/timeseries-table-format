@@ -1,5 +1,4 @@
 import pytest
-from fileinput import close
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -9,6 +8,18 @@ def _write_parquet(path: str, ts_us: list[int], symbol: list[str], close: list[f
     tbl = pa.table(
         {
             "ts": pa.array(ts_us, type=pa.timestamp("us")),
+            "symbol": pa.array(symbol, type=pa.string()),
+            "close": pa.array(close, type=pa.float64()),
+        }
+    )
+    pq.write_table(tbl, path)
+
+def _write_parquet_with_ts2(
+    path: str, ts2_us: list[int], symbol: list[str], close: list[float]
+) -> None:
+    tbl = pa.table(
+        {
+            "ts2": pa.array(ts2_us, type=pa.timestamp("us")),
             "symbol": pa.array(symbol, type=pa.string()),
             "close": pa.array(close, type=pa.float64()),
         }
@@ -37,6 +48,7 @@ def test_append_parquet_outside_and_inside_root(tmp_path):
     v1 = tbl.append_parquet(str(outside))
     assert isinstance(v1, int)
     assert v1 >= 2
+    assert (root / "data" / "outside.parquet").exists()
 
     (root / "data").mkdir(parents=True, exist_ok=True)
     inside = root / "data" / "inside.parquet"
@@ -90,3 +102,31 @@ def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
     assert isinstance(e.segment_path, str)
     assert isinstance(e.overlap_count, int)
     assert e.overlap_count > 0
+    assert getattr(e, "table_root", None) == str(root)
+
+
+def test_append_parquet_time_column_override(tmp_path):
+    root = tmp_path / "table"
+
+    tbl = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=None,
+    )
+
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    seg = root / "data" / "ts2.parquet"
+    _write_parquet_with_ts2(
+        str(seg),
+        ts2_us=[0, 3_600 * 1_000_000],
+        symbol=["NVDA", "NVDA"],
+        close=[1.0, 2.0],
+    )
+
+    with pytest.raises(ttf.TimeseriesTableError):
+        tbl.append_parquet(str(seg), copy_if_outside=False)
+
+    v = tbl.append_parquet(str(seg), time_column="ts2", copy_if_outside=False)
+    assert isinstance(v, int)
