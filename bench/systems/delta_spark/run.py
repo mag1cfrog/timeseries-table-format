@@ -27,7 +27,9 @@ def iso_date(iso_ts: str) -> str:
     return iso_ts.split("T", 1)[0]
 
 
-def inject_partition_predicate(sql: str, start_date: str, end_date: str, partition_col: str) -> str:
+def inject_partition_predicate(
+    sql: str, start_date: str, end_date: str, partition_col: str
+) -> str:
     base = sql.strip().rstrip(";")
     predicate = f"{partition_col} >= '{start_date}' AND {partition_col} < '{end_date}'"
     lower = base.lower()
@@ -55,7 +57,7 @@ def rewrite_select_star(sql: str, select_cols) -> str:
     idx = lower.find(needle)
     if idx == -1:
         return sql
-    return sql[:idx] + f"SELECT {select_list(select_cols)}" + sql[idx + len(needle):]
+    return sql[:idx] + f"SELECT {select_list(select_cols)}" + sql[idx + len(needle) :]
 
 
 def render_sql(path, start, end, min_miles, partition_col, select_cols):
@@ -65,7 +67,9 @@ def render_sql(path, start, end, min_miles, partition_col, select_cols):
     sql = sql.replace("{END}", end)
     sql = sql.replace("{MIN_MILES}", str(min_miles))
     sql = rewrite_select_star(sql, select_cols)
-    return inject_partition_predicate(sql, iso_date(start), iso_date(end), partition_col)
+    return inject_partition_predicate(
+        sql, iso_date(start), iso_date(end), partition_col
+    )
 
 
 def execute_query(df, full_scan: bool):
@@ -97,29 +101,45 @@ def main():
         results_csv.parent.mkdir(parents=True, exist_ok=True)
         with open(results_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["system","test","file","rows","bytes","elapsed_ms","cpu_limit","mem_limit","notes"])
+            writer.writerow(
+                [
+                    "system",
+                    "test",
+                    "file",
+                    "rows",
+                    "bytes",
+                    "elapsed_ms",
+                    "cpu_limit",
+                    "mem_limit",
+                    "notes",
+                ]
+            )
 
     def emit(test, rel_path, elapsed_ms, notes=""):
         row = manifest.get(rel_path, {})
         with open(results_csv, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "delta_spark",
-                test,
-                rel_path,
-                row.get("rows", ""),
-                row.get("bytes", ""),
-                elapsed_ms,
-                cpu_limit,
-                mem_limit,
-                notes,
-            ])
+            writer.writerow(
+                [
+                    "delta_spark",
+                    test,
+                    rel_path,
+                    row.get("rows", ""),
+                    row.get("bytes", ""),
+                    elapsed_ms,
+                    cpu_limit,
+                    mem_limit,
+                    notes,
+                ]
+            )
 
     spark = (
-        SparkSession.builder
-        .appName("delta-bench")
+        SparkSession.builder.appName("delta-bench")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
         .getOrCreate()
     )
 
@@ -133,20 +153,26 @@ def main():
     print("delta_spark: bulk ingest start", flush=True)
     start = now_ms()
     bulk_df = with_partition(spark.read.parquet(str(bulk_path)))
-    bulk_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy(partition_col).save(table_path_bulk)
+    bulk_df.write.format("delta").mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).partitionBy(partition_col).save(table_path_bulk)
     elapsed = now_ms() - start
     emit("bulk_ingest", bulk_rel, elapsed)
     print(f"delta_spark: bulk ingest done ({elapsed} ms)", flush=True)
 
     print("delta_spark: daily table init", flush=True)
-    bulk_df.limit(0).write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy(partition_col).save(table_path_daily)
+    bulk_df.limit(0).write.format("delta").mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).partitionBy(partition_col).save(table_path_daily)
     print("delta_spark: daily appends start", flush=True)
 
     daily_files = sorted(daily_dir.glob("fhvhv_*.parquet"))
     for file_path in daily_files:
         rel = f"daily/{file_path.name}"
         start = now_ms()
-        with_partition(spark.read.parquet(str(file_path))).write.format("delta").mode("append").partitionBy(partition_col).save(table_path_daily)
+        with_partition(spark.read.parquet(str(file_path))).write.format("delta").mode(
+            "append"
+        ).partitionBy(partition_col).save(table_path_daily)
         elapsed = now_ms() - start
         emit("daily_append", rel, elapsed)
 
@@ -166,7 +192,14 @@ def main():
         "q5_date_trunc",
     ]:
         print(f"delta_spark: query {q}", flush=True)
-        sql = render_sql(queries_dir / f"{q}.sql", query_start, query_end, min_miles, partition_col, data_cols)
+        sql = render_sql(
+            queries_dir / f"{q}.sql",
+            query_start,
+            query_end,
+            min_miles,
+            partition_col,
+            data_cols,
+        )
         start = now_ms()
         df = spark.sql(sql)
         execute_query(df, q == "q1_time_range")

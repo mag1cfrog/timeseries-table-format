@@ -52,7 +52,7 @@ DATA = {
 def format_time(ms: float) -> str:
     """Format milliseconds to human readable string."""
     if ms >= 1000:
-        return f"{ms/1000:.1f}s"
+        return f"{ms / 1000:.1f}s"
     return f"{int(ms)}ms"
 
 

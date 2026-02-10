@@ -8,6 +8,7 @@ mod _dev {
 
     use pyo3::{
         Bound, PyErr, PyResult,
+        exceptions::PyValueError,
         prelude::*,
         pyclass, pymethods,
         types::{PyModule, PyType},
@@ -17,6 +18,11 @@ mod _dev {
         ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
         TimeseriesTableError,
     };
+
+    enum AppendParquetError {
+        Table(timeseries_table_core::table::TableError),
+        ValueError(String),
+    }
 
     fn table_error_to_py_with_root(
         py: Python<'_>,
@@ -148,6 +154,111 @@ mod _dev {
                 table_root: table_root_for_err,
             })
         }
+
+        #[pyo3(signature = (parquet_path, time_column=None, copy_if_outside=true))]
+        fn append_parquet(
+            &mut self,
+            py: Python<'_>,
+            parquet_path: String,
+            time_column: Option<String>,
+            copy_if_outside: bool,
+        ) -> PyResult<u64> {
+            use crate::tokio_runner;
+
+            use std::path::{Component, Path};
+
+            use timeseries_table_core::storage::StorageLocation;
+            use timeseries_table_core::table::TableError;
+
+            let rt = tokio_runner::new_runtime()?;
+
+            let effective_time_column =
+                time_column.unwrap_or_else(|| self.inner.index_spec().timestamp_column.clone());
+
+            let table_root_for_err = self.table_root.clone();
+            let table_root_for_err_cp = table_root_for_err.clone();
+
+            // Clone location before taking a mutable borrow of `self.inner`.
+            let location = self.inner.location().clone();
+            let table = &mut self.inner;
+
+            tokio_runner::run_blocking_map_err(
+                py,
+                &rt,
+                async move {
+                    let rel_path = if copy_if_outside {
+                        location
+                            .ensure_parquet_under_root(Path::new(&parquet_path))
+                            .await
+                            .map_err(|source| {
+                                AppendParquetError::Table(TableError::Storage { source })
+                            })?
+                    } else {
+                        let root_path = match location.storage() {
+                            StorageLocation::Local(p) => p.as_path(),
+                        };
+
+                        let src_path = Path::new(&parquet_path);
+
+                        // 1) If caller passes a path *including* table root, strip it.
+                        // (works for absolute-under-root and also some relative cases).
+                        let rel = src_path
+                            .strip_prefix(root_path)
+                            .or_else(|_| src_path.strip_prefix(Path::new(&table_root_for_err)))
+                            .ok()
+                            .map(|p| p.to_path_buf());
+
+                        // 2) Otherwise, if caller passed a relative path, treat it as already relative-to-root,
+                        // but refuse parent traversal.
+                        let rel = match rel {
+                            Some(r) => r,
+                            None if !src_path.is_absolute() => {
+                                if src_path
+                                    .components()
+                                    .any(|c| matches!(c, Component::ParentDir))
+                                {
+                                    return Err(AppendParquetError::ValueError(format!(
+                                        "parquet_path must not contain '..' when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                    )));
+                                }
+                                src_path.to_path_buf()
+                            }
+                            None => {
+                                return Err(AppendParquetError::ValueError(format!(
+                                    "parquet_path must be under table_root when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                )));
+                            }
+                        };
+
+                        if rel.as_os_str().is_empty() {
+                            return Err(AppendParquetError::ValueError(format!(
+                                "parquet_path must point to a file under table_root, not the root itself (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                            )));
+                        }
+
+                        rel
+                    };
+
+                    let mut rel_str = rel_path.to_string_lossy().to_string();
+                    if cfg!(windows) {
+                        rel_str = rel_str.replace('\\', "/");
+                    }
+
+                    let version = table
+                        .append_parquet_segment(&rel_str, &effective_time_column)
+                        .await
+                        .map_err(AppendParquetError::Table)?;
+
+                    Ok::<u64, AppendParquetError>(version)
+                },
+                move |py, err| match err {
+                    AppendParquetError::Table(e) => {
+                        table_error_to_py_with_root(py, &table_root_for_err_cp, e)
+                    }
+                    AppendParquetError::ValueError(msg) => PyValueError::new_err(msg),
+                },
+            )
+        }
     }
 
     /// Test-only helper: creates a table at `table_root`, copies `parquet_path`
@@ -214,6 +325,16 @@ mod _dev {
         Ok(())
     }
 
+    /// Test-only helper: blocks for `millis` while releasing the GIL.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_sleep_without_gil(py: Python<'_>, millis: u64) -> PyResult<()> {
+        use std::time::Duration;
+
+        py.detach(move || std::thread::sleep(Duration::from_millis(millis)));
+        Ok(())
+    }
+
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -238,12 +359,18 @@ mod _dev {
         m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
         m.add("DataFusionError", py.get_type::<DataFusionError>())?;
 
+        // Feature-gated: present only when built with `--features test-utils`.
+        // Always add the attribute (defaulting to None) to keep the module surface stable.
+        m.add("_testing", py.None())?;
+
         #[cfg(feature = "test-utils")]
         {
             // Internal test-only hook (kept under a clearly private namespace).
             let py = m.py();
             let testing = PyModule::new(py, "timeseries_table_format._dev._testing")?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
+            m.add("_testing", &testing)?;
             m.add_submodule(&testing)?;
         }
 
