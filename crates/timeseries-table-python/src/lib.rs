@@ -14,9 +14,14 @@ mod _dev {
         types::{PyDict, PyModule, PyType},
     };
 
-    use crate::exceptions::{
-        ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
-        TimeseriesTableError,
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    use crate::{
+        exceptions::{
+            ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
+            StorageError, TimeseriesTableError,
+        },
+        tokio_runner,
     };
 
     enum AppendParquetError {
@@ -45,14 +50,23 @@ mod _dev {
         py_err
     }
 
+    #[allow(unused)]
     #[pyclass]
-    struct Session;
+    struct Session {
+        rt: tokio::runtime::Runtime,
+        ctx: SessionContext,
+    }
 
     #[pymethods]
     impl Session {
         #[new]
-        fn new() -> Self {
-            Self
+        fn new() -> PyResult<Self> {
+            let rt = tokio_runner::new_runtime()?;
+
+            let cfg = SessionConfig::new();
+            let ctx = SessionContext::new_with_config(cfg);
+
+            Ok(Self { rt, ctx })
         }
     }
 
