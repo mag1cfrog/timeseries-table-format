@@ -23,6 +23,6 @@ def test_open_error_includes_root_in_message(tmp_path):
     with pytest.raises(ttf.TimeseriesTableError) as excinfo:
         ttf.TimeSeriesTable.open(str(root))
 
-        msg = str(excinfo.value)
-        assert str(root) in msg
-        assert getattr(excinfo.value, "table_root", None) == str(root)
+    msg = str(excinfo.value)
+    assert str(root) in msg
+    assert getattr(excinfo.value, "table_root", None) == str(root)
