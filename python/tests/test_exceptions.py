@@ -1,3 +1,4 @@
+from typing import Protocol
 import os
 import tempfile
 
@@ -6,9 +7,17 @@ import pyarrow.parquet as pq
 import pytest
 
 import timeseries_table_format as ttf
+import timeseries_table_format._dev as dev
 
+class TestingModule(Protocol):
+    def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
 
 def test_coverage_overlap_maps_to_specific_exception():
+    testing: TestingModule | None = getattr(dev, "_testing", None)
+    if testing is None:
+        pytest.skip("Rust extension built without feature 'test-utils'")
+        return
+
     with tempfile.TemporaryDirectory() as tmp:
         table_root = os.path.join(tmp, "table")
         parquet_path = os.path.join(tmp, "seg.parquet")
@@ -17,9 +26,9 @@ def test_coverage_overlap_maps_to_specific_exception():
         v = pa.array([1, 2], type=pa.int64())
         tbl = pa.table({"ts": ts, "v": v})
         pq.write_table(tbl, parquet_path)
-
+        
         with pytest.raises(ttf.CoverageOverlapError) as excinfo:
-            ttf._testing._test_trigger_overlap(table_root, parquet_path)
+            testing._test_trigger_overlap(table_root, parquet_path)
 
         e = excinfo.value
         assert isinstance(e.segment_path, str)
