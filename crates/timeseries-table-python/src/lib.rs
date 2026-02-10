@@ -6,12 +6,39 @@ mod tokio_runner;
 #[pyo3::pymodule]
 mod timeseries_table_format {
 
-    use pyo3::{Bound, PyResult, prelude::*, pyclass, pymethods, types::PyModule};
+    use pyo3::{
+        Bound, PyErr, PyResult,
+        exceptions::PyRuntimeError,
+        prelude::*,
+        pyclass, pymethods,
+        types::{PyModule, PyType},
+    };
 
     use crate::exceptions::{
         ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
         TimeseriesTableError,
     };
+
+    fn table_error_to_py_with_root(
+        py: Python<'_>,
+        table_root: &str,
+        err: timeseries_table_core::table::TableError,
+    ) -> PyErr {
+        let base_msg = err.to_string();
+        let py_err = crate::error_map::table_error_to_py(py, err);
+        let exc = py_err.value(py);
+
+        if let Err(e) = exc.setattr("table_root", table_root.to_string()) {
+            return e;
+        }
+
+        let msg = format!("{base_msg} (table_root={table_root})");
+        if let Err(e) = exc.setattr("args", (msg,)) {
+            return e;
+        }
+
+        py_err
+    }
 
     #[pyclass]
     struct Session;
@@ -25,13 +52,68 @@ mod timeseries_table_format {
     }
 
     #[pyclass]
-    struct TimeSeriesTable;
+    struct TimeSeriesTable {
+        inner: timeseries_table_core::table::TimeSeriesTable,
+        table_root: String,
+    }
 
     #[pymethods]
     impl TimeSeriesTable {
-        #[new]
-        fn new() -> Self {
-            Self
+        #[classmethod]
+        #[pyo3(signature = (*, table_root, time_column, bucket, entity_columns=None, timezone=None))]
+        fn create(
+            _cls: &Bound<'_, PyType>,
+            py: Python<'_>,
+            table_root: String,
+            time_column: String,
+            bucket: String,
+            entity_columns: Option<Vec<String>>,
+            timezone: Option<String>,
+        ) -> PyResult<Self> {
+            use crate::tokio_runner;
+
+            use timeseries_table_core::storage::TableLocation;
+            use timeseries_table_core::table::TableError;
+            use timeseries_table_core::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
+
+            let bucket = TimeBucket::parse(&bucket).map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "invalid bucket spec {bucket:?} (table_root={table_root}): {e}"
+                ))
+            })?;
+
+            let index = TimeIndexSpec {
+                timestamp_column: time_column,
+                bucket,
+                timezone,
+                entity_columns: entity_columns.unwrap_or_default(),
+            };
+            let meta = TableMeta::new_time_series(index);
+
+            let rt = tokio_runner::new_runtime()?;
+            let table_root_for_err = table_root.clone();
+
+            let value = table_root_for_err.clone();
+            let inner = tokio_runner::run_blocking_map_err(
+                py,
+                &rt,
+                async move {
+                    let location = TableLocation::parse(&table_root)
+                        .map_err(|e| TableError::Storage { source: e })?;
+
+                    let table =
+                        timeseries_table_core::table::TimeSeriesTable::create(location, meta)
+                            .await?;
+
+                    Ok::<_, TableError>(table)
+                },
+                move |py, err| table_error_to_py_with_root(py, &value, err),
+            )?;
+
+            Ok(Self {
+                inner,
+                table_root: table_root_for_err,
+            })
         }
     }
 
