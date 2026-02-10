@@ -11,7 +11,9 @@ def _safe_name(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
 
 
-def _write_parquet(path: str, ts_us: list[int], symbol: list[str], close: list[float]) -> None:
+def _write_parquet(
+    path: str, ts_us: list[int], symbol: list[str], close: list[float]
+) -> None:
     tbl = pa.table(
         {
             "ts": pa.array(ts_us, type=pa.timestamp("us")),
@@ -40,7 +42,12 @@ def test_table_introspection_matches_expected_spec(tmp_path):
     assert isinstance(tbl.version(), int)
 
     spec = tbl.index_spec()
-    assert set(spec.keys()) == {"timestamp_column", "entity_columns", "bucket", "timezone"}
+    assert set(spec.keys()) == {
+        "timestamp_column",
+        "entity_columns",
+        "bucket",
+        "timezone",
+    }
     assert spec == {
         "timestamp_column": "ts",
         "entity_columns": ["symbol"],
@@ -66,7 +73,12 @@ def test_table_introspection_defaults_and_timezone(tmp_path):
     )
 
     spec = tbl.index_spec()
-    assert set(spec.keys()) == {"timestamp_column", "entity_columns", "bucket", "timezone"}
+    assert set(spec.keys()) == {
+        "timestamp_column",
+        "entity_columns",
+        "bucket",
+        "timezone",
+    }
     assert spec == {
         "timestamp_column": "timestamp",
         "entity_columns": [],
@@ -99,7 +111,9 @@ def test_table_introspection_defaults_and_timezone(tmp_path):
         ("6H", "6h"),
     ],
 )
-def test_table_introspection_bucket_formatting_canonical(bucket_spec, expected, tmp_path):
+def test_table_introspection_bucket_formatting_canonical(
+    bucket_spec, expected, tmp_path
+):
     root = tmp_path / f"table_{_safe_name(bucket_spec)}"
 
     tbl = ttf.TimeSeriesTable.create(
@@ -174,7 +188,12 @@ def test_table_introspection_returns_python_native_types(tmp_path):
     assert isinstance(tbl.version(), int)
 
     spec = tbl.index_spec()
-    assert set(spec.keys()) == {"timestamp_column", "entity_columns", "bucket", "timezone"}
+    assert set(spec.keys()) == {
+        "timestamp_column",
+        "entity_columns",
+        "bucket",
+        "timezone",
+    }
     assert isinstance(spec["timestamp_column"], str)
     assert isinstance(spec["entity_columns"], list)
     assert all(isinstance(x, str) for x in spec["entity_columns"])
