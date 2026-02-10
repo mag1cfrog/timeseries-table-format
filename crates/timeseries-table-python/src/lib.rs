@@ -93,7 +93,7 @@ mod timeseries_table_format {
             let rt = tokio_runner::new_runtime()?;
             let table_root_for_err = table_root.clone();
 
-            let value = table_root_for_err.clone();
+            let table_root_for_err_cp = table_root_for_err.clone();
             let inner = tokio_runner::run_blocking_map_err(
                 py,
                 &rt,
@@ -107,7 +107,38 @@ mod timeseries_table_format {
 
                     Ok::<_, TableError>(table)
                 },
-                move |py, err| table_error_to_py_with_root(py, &value, err),
+                move |py, err| table_error_to_py_with_root(py, &table_root_for_err_cp, err),
+            )?;
+
+            Ok(Self {
+                inner,
+                table_root: table_root_for_err,
+            })
+        }
+
+        #[classmethod]
+        fn open(_cls: &Bound<'_, PyType>, py: Python<'_>, table_root: String) -> PyResult<Self> {
+            use crate::tokio_runner;
+
+            use timeseries_table_core::{storage::TableLocation, table::TableError};
+
+            let rt = tokio_runner::new_runtime()?;
+            let table_root_for_err = table_root.clone();
+            let table_root_for_err_cp = table_root_for_err.clone();
+
+            let inner = tokio_runner::run_blocking_map_err(
+                py,
+                &rt,
+                async move {
+                    let location = TableLocation::parse(&table_root)
+                        .map_err(|e| TableError::Storage { source: e })?;
+
+                    let table =
+                        timeseries_table_core::table::TimeSeriesTable::open(location).await?;
+
+                    Ok::<_, TableError>(table)
+                },
+                move |py, err| table_error_to_py_with_root(py, &table_root_for_err_cp, err),
             )?;
 
             Ok(Self {
