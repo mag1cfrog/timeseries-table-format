@@ -42,3 +42,5 @@ python/**/*.dylib
 # direnv (developer-specific)
 .envrc
 .direnv/
+
+.vscode/**
