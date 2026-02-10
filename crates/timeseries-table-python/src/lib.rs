@@ -51,6 +51,7 @@ mod timeseries_table_format {
         }
     }
 
+    #[allow(unused)]
     #[pyclass]
     struct TimeSeriesTable {
         inner: timeseries_table_core::table::TimeSeriesTable,
