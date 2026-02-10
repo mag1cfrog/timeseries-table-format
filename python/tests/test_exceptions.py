@@ -19,7 +19,7 @@ def test_coverage_overlap_maps_to_specific_exception():
         pq.write_table(tbl, parquet_path)
 
         with pytest.raises(ttf.CoverageOverlapError) as excinfo:
-            ttf._testing._test_trigger_overlap(table_root, parquet_path)
+            ttf.timeseries_table_format._testing._test_trigger_overlap(table_root, parquet_path)
 
         e = excinfo.value
         assert isinstance(e.segment_path, str)
