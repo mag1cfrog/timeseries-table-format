@@ -23,6 +23,7 @@ mod _dev {
 
     use timeseries_table_datafusion::TsTableProvider;
 
+    use crate::error_map::datafusion_error_to_py;
     use crate::{
         exceptions::{
             ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
@@ -68,6 +69,7 @@ mod _dev {
         rt: Arc<tokio::runtime::Runtime>,
         ctx: SessionContext,
         tables: Mutex<BTreeSet<String>>,
+        catalog_lock: Mutex<()>,
     }
 
     #[pymethods]
@@ -83,6 +85,7 @@ mod _dev {
                 rt,
                 ctx,
                 tables: Mutex::new(BTreeSet::new()),
+                catalog_lock: Mutex::new(()),
             })
         }
 
@@ -99,7 +102,6 @@ mod _dev {
                 return Err(PyValueError::new_err("name must be non-empty"));
             }
 
-            let ctx = self.ctx.clone();
             let name_for_df = name.clone();
 
             // For better error messages / attributes
@@ -109,6 +111,7 @@ mod _dev {
                 py,
                 self.rt.as_ref(),
                 async move {
+                    // 1) IO: open table (async)
                     let location = TableLocation::parse(&table_root)
                         .map_err(|e| TableError::Storage { source: e })
                         .map_err(RegisterTsTableError::Table)?;
@@ -117,18 +120,14 @@ mod _dev {
                         .await
                         .map_err(RegisterTsTableError::Table)?;
 
+                    // 2) provider creation (sync)
                     let provider = TsTableProvider::try_new(Arc::new(table))
                         .map_err(RegisterTsTableError::DataFusion)?;
 
-                    // Replace existing registration (if any)
-                    let _ = ctx
-                        .deregister_table(name_for_df.as_str())
-                        .map_err(RegisterTsTableError::DataFusion)?;
-
-                    ctx.register_table(name_for_df.as_str(), Arc::new(provider))
-                        .map_err(RegisterTsTableError::DataFusion)?;
-
-                    Ok::<(), RegisterTsTableError>(())
+                    // 3) atomic-ish replace (serialize this section per Session)
+                    Ok::<Arc<dyn datafusion::catalog::TableProvider>, RegisterTsTableError>(
+                        Arc::new(provider),
+                    )
                 },
                 move |py, err| match err {
                     RegisterTsTableError::Table(e) => {
@@ -138,16 +137,32 @@ mod _dev {
                         crate::error_map::datafusion_error_to_py(py, e)
                     }
                 },
-            )?;
+            )
+            .and_then(|provider| {
+                // This closure runs back on the Python thread after the GIL-free block_on completed.
+                let _guard = self
+                    .catalog_lock
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("Session catalog lock poisoned"))?;
 
-            let mut tables = self
-                .tables
-                .lock()
-                .map_err(|_| PyRuntimeError::new_err("Session tables lock poisoned"))?;
+                // Replace existing registration (if any)
+                self.ctx
+                    .deregister_table(name_for_df.as_str())
+                    .map_err(|e| datafusion_error_to_py(py, e))?;
 
-            tables.insert(name);
+                self.ctx
+                    .register_table(name_for_df.as_str(), provider)
+                    .map_err(|e| datafusion_error_to_py(py, e))?;
 
-            Ok(())
+                let mut tables = self
+                    .tables
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("Session tables lock poisoned"))?;
+
+                tables.insert(name);
+
+                Ok(())
+            })
         }
     }
 
