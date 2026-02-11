@@ -7,11 +7,12 @@ mod tokio_runner;
 mod _dev {
 
     use std::collections::BTreeSet;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use datafusion::error::DataFusionError as DFError;
     use datafusion::prelude::{SessionConfig, SessionContext};
 
+    use pyo3::exceptions::PyRuntimeError;
     use pyo3::{
         Bound, PyErr, PyResult, Python,
         exceptions::PyValueError,
@@ -66,7 +67,7 @@ mod _dev {
     struct Session {
         rt: Arc<tokio::runtime::Runtime>,
         ctx: SessionContext,
-        tables: BTreeSet<String>,
+        tables: Mutex<BTreeSet<String>>,
     }
 
     #[pymethods]
@@ -81,12 +82,12 @@ mod _dev {
             Ok(Self {
                 rt,
                 ctx,
-                tables: BTreeSet::new(),
+                tables: Mutex::new(BTreeSet::new()),
             })
         }
 
         fn register_tstable(
-            &mut self,
+            &self,
             py: Python<'_>,
             name: String,
             table_root: String,
@@ -139,7 +140,13 @@ mod _dev {
                 },
             )?;
 
-            self.tables.insert(name);
+            let mut tables = self
+                .tables
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("Session tables lock poisoned"))?;
+
+            tables.insert(name);
+
             Ok(())
         }
     }
