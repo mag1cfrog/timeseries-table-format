@@ -27,6 +27,7 @@ def _make_table(root) -> ttf.TimeSeriesTable:
         timezone=None,
     )
 
+
 def _make_table_with_schema(root, seg_path) -> ttf.TimeSeriesTable:
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
@@ -38,6 +39,7 @@ def _make_table_with_schema(root, seg_path) -> ttf.TimeSeriesTable:
     _write_parquet(str(seg_path))
     tbl.append_parquet(str(seg_path))  # this should cause schema adoption
     return tbl
+
 
 def test_register_tstable_succeeds_and_replaces(tmp_path):
     root = tmp_path / "table"
@@ -110,6 +112,7 @@ def test_register_tstable_succeeds_and_replaces_with_different_root(tmp_path):
     sess.register_tstable("prices", str(root1))
     sess.register_tstable("prices", str(root2))  # replacement should succeed
 
+
 def test_register_tstable_concurrent_replace_does_not_crash(tmp_path):
     root1 = tmp_path / "t1"
     root2 = tmp_path / "t2"
@@ -136,7 +139,10 @@ def test_register_tstable_concurrent_replace_does_not_crash(tmp_path):
     assert not a.is_alive() and not b.is_alive()
     assert not errors, errors[0]
 
-def test_register_tstable_never_appended_table_raises_then_succeeds_after_append(tmp_path):
+
+def test_register_tstable_never_appended_table_raises_then_succeeds_after_append(
+    tmp_path,
+):
     root = tmp_path / "table"
 
     # Create table but do NOT append -> no canonical logical schema yet.

@@ -15,7 +15,7 @@ workspace = true
 
 [lib]
 crate-type = ["cdylib"]
-name = "_dev"
+name = "_native"
 
 [features]
 default = []
