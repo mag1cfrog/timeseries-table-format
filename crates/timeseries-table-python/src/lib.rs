@@ -279,6 +279,7 @@ mod _native {
                         let msg = format!(
                             "failed to register parquet: {original} (name={name_for_err}, path={path_for_err}); additionally failed to restore previous registration: {restore}"
                         );
+
                         let py_err = DataFusionError::new_err(msg);
                         let exc = py_err.value(py);
                         let _ = exc.setattr("name", name_for_err.clone());
@@ -620,9 +621,10 @@ mod _native {
             py,
             rt.as_ref(),
             async move {
-                let _permit = sema.acquire_owned().await.map_err(|_| {
-                    ExistsError::Runtime("Session catalog semaphore closed")
-                })?;
+                let _permit = sema
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ExistsError::Runtime("Session catalog semaphore closed"))?;
 
                 let exists = ctx
                     .table_exist(name.as_str())
