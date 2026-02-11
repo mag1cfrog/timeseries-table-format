@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import timeseries_table_format as ttf
-import timeseries_table_format._dev as dev
+import timeseries_table_format._native as native
 
 
 class _TestingModule(Protocol):
@@ -18,7 +18,7 @@ class _TestingModule(Protocol):
 
 
 def test_coverage_overlap_maps_to_specific_exception():
-    testing: _TestingModule | None = getattr(dev, "_testing", None)
+    testing: _TestingModule | None = getattr(native, "_testing", None)
     if testing is None:
         pytest.skip("Rust extension built without feature 'test-utils'")
         return
@@ -43,7 +43,7 @@ def test_coverage_overlap_maps_to_specific_exception():
 
 
 def test_test_sleep_without_gil_allows_other_threads_to_run():
-    testing: _TestingModule | None = getattr(dev, "_testing", None)
+    testing: _TestingModule | None = getattr(native, "_testing", None)
     if testing is None:
         pytest.skip("Rust extension built without feature 'test-utils'")
         return
