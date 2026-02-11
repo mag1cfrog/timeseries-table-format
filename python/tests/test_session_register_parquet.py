@@ -6,16 +6,16 @@ import pyarrow.parquet as pq
 import timeseries_table_format as ttf
 import timeseries_table_format._native as native
 
+
 def _write_dim_parquet(path: str) -> None:
     tbl = pa.table(
         {
-            "symbol": pa.array(["NVDA", "AAPL"],
-type=pa.string()),
-            "exchange": pa.array(["NASDAQ", "NASDAQ"],
-type=pa.string()),
+            "symbol": pa.array(["NVDA", "AAPL"], type=pa.string()),
+            "exchange": pa.array(["NASDAQ", "NASDAQ"], type=pa.string()),
         }
     )
     pq.write_table(tbl, path)
+
 
 def _testing_module():
     testing = getattr(native, "_testing", None)
@@ -23,13 +23,15 @@ def _testing_module():
         pytest.skip("Rust extension built without feature 'test-utils'")
     return testing
 
+
 def test_register_parquet_file_succeeds_and_replaces(tmp_path):
     p = tmp_path / "dim.parquet"
     _write_dim_parquet(str(p))
 
     sess = ttf.Session()
     sess.register_parquet("dim", str(p))
-    sess.register_parquet("dim", str(p)) # replace existing registration
+    sess.register_parquet("dim", str(p))  # replace existing registration
+
 
 def test_register_parquet_directory_succeeds(tmp_path):
     d = tmp_path / "dim_dir"
@@ -40,6 +42,7 @@ def test_register_parquet_directory_succeeds(tmp_path):
     sess = ttf.Session()
     sess.register_parquet("dim", str(d))
 
+
 def test_register_parquet_empty_name_rejected(tmp_path):
     p = tmp_path / "dim.parquet"
     _write_dim_parquet(str(p))
@@ -47,6 +50,7 @@ def test_register_parquet_empty_name_rejected(tmp_path):
     sess = ttf.Session()
     with pytest.raises(ValueError):
         sess.register_parquet("", str(p))
+
 
 def test_register_parquet_missing_path_raises_with_path_context(tmp_path):
     # Use an invalid extension to force DataFusion to reject registration at register time
@@ -56,11 +60,12 @@ def test_register_parquet_missing_path_raises_with_path_context(tmp_path):
     sess = ttf.Session()
     with pytest.raises(ttf.DataFusionError) as excinfo:
         sess.register_parquet("dim", str(missing))
-    
+
     e = excinfo.value
     assert str(missing) in str(e)
     assert getattr(e, "name", None) == "dim"
     assert getattr(e, "path", None) == str(missing)
+
 
 def test_register_parquet_concurrent_replace_does_not_crash(tmp_path):
     p = tmp_path / "dim.parquet"
