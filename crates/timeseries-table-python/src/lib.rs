@@ -173,12 +173,13 @@ mod _native {
 
                     if let Err(e) = ctx.register_table(name.as_str(), provider) {
                         if let Some(old_provider) = old
-                            && let Err(restore) = ctx.register_table(name.as_str(), old_provider) {
-                                return Err(RegisterTsTableError::RestoreFailed {
-                                    original: e,
-                                    restore,
-                                });
-                            }
+                            && let Err(restore) = ctx.register_table(name.as_str(), old_provider)
+                        {
+                            return Err(RegisterTsTableError::RestoreFailed {
+                                original: e,
+                                restore,
+                            });
+                        }
                         return Err(RegisterTsTableError::DataFusion(e));
                     }
 
@@ -247,12 +248,12 @@ mod _native {
                             if let Some(old_provider) = old
                                 && let Err(restore) =
                                     ctx.register_table(name.as_str(), old_provider)
-                                {
-                                    return Err(RegisterParquetError::RestoreFailed {
-                                        original: e,
-                                        restore,
-                                    });
-                                }
+                            {
+                                return Err(RegisterParquetError::RestoreFailed {
+                                    original: e,
+                                    restore,
+                                });
+                            }
                             return Err(RegisterParquetError::DataFusion(e));
                         }
                     }
