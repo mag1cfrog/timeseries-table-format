@@ -598,6 +598,45 @@ mod _native {
         Ok(())
     }
 
+    /// Test-only helper: checks if a table name is currently registered in the DataFusion catalog.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_session_table_exists(
+        py: Python<'_>,
+        session: PyRef<'_, Session>,
+        name: &str,
+    ) -> PyResult<bool> {
+        enum ExistsError {
+            DataFusion(DFError),
+            Runtime(&'static str),
+        }
+
+        let rt = Arc::clone(&session.rt);
+        let ctx = session.ctx.clone();
+        let sema = Arc::clone(&session.catalog_sema);
+        let name = name.to_string();
+
+        tokio_runner::run_blocking_map_err(
+            py,
+            rt.as_ref(),
+            async move {
+                let _permit = sema.acquire_owned().await.map_err(|_| {
+                    ExistsError::Runtime("Session catalog semaphore closed")
+                })?;
+
+                let exists = ctx
+                    .table_exist(name.as_str())
+                    .map_err(ExistsError::DataFusion)?;
+
+                Ok::<bool, ExistsError>(exists)
+            },
+            move |py, err| match err {
+                ExistsError::DataFusion(e) => crate::error_map::datafusion_error_to_py(py, e),
+                ExistsError::Runtime(msg) => PyRuntimeError::new_err(msg),
+            },
+        )
+    }
+
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -633,6 +672,7 @@ mod _native {
             let testing = PyModule::new(py, "timeseries_table_format._native._testing")?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(_test_session_table_exists, py)?)?;
             m.add("_testing", &testing)?;
             m.add_submodule(&testing)?;
         }
