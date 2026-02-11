@@ -10,12 +10,11 @@ mod _native {
     use std::sync::{Arc, Mutex};
 
     use datafusion::error::DataFusionError as DFError;
-    use datafusion::prelude::{SessionConfig, SessionContext};
+    use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
-    use pyo3::exceptions::PyRuntimeError;
     use pyo3::{
         Bound, PyErr, PyResult, Python,
-        exceptions::PyValueError,
+        exceptions::{PyRuntimeError, PyValueError},
         prelude::*,
         pyclass, pymethods,
         types::{PyDict, PyModule, PyType},
@@ -56,6 +55,31 @@ mod _native {
         }
 
         let msg = format!("{base_msg} (table_root={table_root})");
+        if let Err(e) = exc.setattr("args", (msg,)) {
+            return e;
+        }
+
+        py_err
+    }
+
+    fn datafusion_error_to_py_with_name_and_path(
+        py: Python<'_>,
+        name: &str,
+        path: &str,
+        err: DFError,
+    ) -> PyErr {
+        let base_msg = err.to_string();
+        let py_err = crate::error_map::datafusion_error_to_py(py, err);
+        let exc = py_err.value(py);
+
+        if let Err(e) = exc.setattr("name", name.to_string()) {
+            return e;
+        }
+        if let Err(e) = exc.setattr("path", path.to_string()) {
+            return e;
+        }
+
+        let msg = format!("{base_msg} (name={name}, path={path})");
         if let Err(e) = exc.setattr("args", (msg,)) {
             return e;
         }
@@ -163,6 +187,57 @@ mod _native {
 
                 Ok(())
             })
+        }
+
+        fn register_parquet(&self, py: Python<'_>, name: String, path: String) -> PyResult<()> {
+            if name.is_empty() {
+                return Err(PyValueError::new_err("name must be non-empty"));
+            }
+            if path.is_empty() {
+                return Err(PyValueError::new_err("path must be non-empty"));
+            }
+
+            // Serialize catalog updates (replace semantics + avoid concurrent catalog mutation).
+            let _guard = self
+                .catalog_lock
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("Session catalog lock poisoned"))?;
+
+            // Replace existing registration (if any).
+            self.ctx
+                .deregister_table(name.as_str())
+                .map_err(|e| datafusion_error_to_py(py, e))?;
+
+            let ctx = self.ctx.clone();
+            let name_for_df = name.clone();
+            let path_for_df = path.clone();
+
+            let name_for_err = name.clone();
+            let path_for_err = path.clone();
+
+            tokio_runner::run_blocking_map_err(
+                py,
+                self.rt.as_ref(),
+                async move {
+                    ctx.register_parquet(
+                        name_for_df.as_str(),
+                        path_for_df.as_str(),
+                        ParquetReadOptions::default(),
+                    )
+                    .await
+                },
+                move |py, err| {
+                    datafusion_error_to_py_with_name_and_path(py, &name_for_err, &path_for_err, err)
+                },
+            )?;
+
+            let mut tables = self
+                .tables
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("Session tables lock poisoned"))?;
+            tables.insert(name);
+
+            Ok(())
         }
     }
 
