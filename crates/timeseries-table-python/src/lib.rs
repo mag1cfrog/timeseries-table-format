@@ -22,7 +22,6 @@ mod _native {
 
     use timeseries_table_datafusion::TsTableProvider;
 
-    use crate::error_map::datafusion_error_to_py;
     use crate::{
         exceptions::{
             ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
@@ -39,6 +38,14 @@ mod _native {
     enum RegisterTsTableError {
         Table(timeseries_table_core::table::TableError),
         DataFusion(DFError),
+        RestoreFailed { original: DFError, restore: DFError },
+        Runtime(&'static str),
+    }
+
+    enum RegisterParquetError {
+        DataFusion(DFError),
+        RestoreFailed { original: DFError, restore: DFError },
+        Runtime(&'static str),
     }
 
     fn table_error_to_py_with_root(
@@ -93,7 +100,7 @@ mod _native {
         rt: Arc<tokio::runtime::Runtime>,
         ctx: SessionContext,
         tables: Mutex<BTreeSet<String>>,
-        catalog_lock: Mutex<()>,
+        catalog_sema: Arc<tokio::sync::Semaphore>,
     }
 
     #[pymethods]
@@ -109,7 +116,7 @@ mod _native {
                 rt,
                 ctx,
                 tables: Mutex::new(BTreeSet::new()),
-                catalog_lock: Mutex::new(()),
+                catalog_sema: Arc::new(tokio::sync::Semaphore::new(1)),
             })
         }
 
@@ -128,8 +135,13 @@ mod _native {
 
             let name_for_df = name.clone();
 
+            let ctx = self.ctx.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+            let tables = &self.tables;
+
             // For better error messages / attributes
             let table_root_for_err = table_root.clone();
+            let name_for_err = name.clone();
 
             tokio_runner::run_blocking_map_err(
                 py,
@@ -149,9 +161,34 @@ mod _native {
                         .map_err(RegisterTsTableError::DataFusion)?;
 
                     // 3) atomic-ish replace (serialize this section per Session)
-                    Ok::<Arc<dyn datafusion::catalog::TableProvider>, RegisterTsTableError>(
-                        Arc::new(provider),
-                    )
+                    let provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(provider);
+
+                    let _permit = sema.acquire_owned().await.map_err(|_| {
+                        RegisterTsTableError::Runtime("Session catalog semaphore closed")
+                    })?;
+
+                    let old = ctx
+                        .deregister_table(name_for_df.as_str())
+                        .map_err(RegisterTsTableError::DataFusion)?;
+
+                    if let Err(e) = ctx.register_table(name.as_str(), provider) {
+                        if let Some(old_provider) = old {
+                            if let Err(restore) = ctx.register_table(name.as_str(), old_provider) {
+                                return Err(RegisterTsTableError::RestoreFailed {
+                                    original: e,
+                                    restore,
+                                });
+                            }
+                        }
+                        return Err(RegisterTsTableError::DataFusion(e));
+                    }
+
+                    let mut t = tables.lock().map_err(|_| {
+                        RegisterTsTableError::Runtime("Session tables lock poisoned")
+                    })?;
+                    t.insert(name);
+
+                    Ok::<(), RegisterTsTableError>(())
                 },
                 move |py, err| match err {
                     RegisterTsTableError::Table(e) => {
@@ -160,33 +197,14 @@ mod _native {
                     RegisterTsTableError::DataFusion(e) => {
                         crate::error_map::datafusion_error_to_py(py, e)
                     }
+                    RegisterTsTableError::RestoreFailed { original, restore } => {
+                        DataFusionError::new_err(format!(
+                            "failed to register table {name_for_err:?}: {original}; additionally failed to restore previous registration: {restore}"
+                        ))
+                    }
+                    RegisterTsTableError::Runtime(msg) => PyRuntimeError::new_err(msg),
                 },
             )
-            .and_then(|provider| {
-                // This closure runs back on the Python thread after the GIL-free block_on completed.
-                let _guard = self
-                    .catalog_lock
-                    .lock()
-                    .map_err(|_| PyRuntimeError::new_err("Session catalog lock poisoned"))?;
-
-                // Replace existing registration (if any)
-                self.ctx
-                    .deregister_table(name_for_df.as_str())
-                    .map_err(|e| datafusion_error_to_py(py, e))?;
-
-                self.ctx
-                    .register_table(name_for_df.as_str(), provider)
-                    .map_err(|e| datafusion_error_to_py(py, e))?;
-
-                let mut tables = self
-                    .tables
-                    .lock()
-                    .map_err(|_| PyRuntimeError::new_err("Session tables lock poisoned"))?;
-
-                tables.insert(name);
-
-                Ok(())
-            })
         }
 
         fn register_parquet(&self, py: Python<'_>, name: String, path: String) -> PyResult<()> {
@@ -197,20 +215,9 @@ mod _native {
                 return Err(PyValueError::new_err("path must be non-empty"));
             }
 
-            // Serialize catalog updates (replace semantics + avoid concurrent catalog mutation).
-            let _guard = self
-                .catalog_lock
-                .lock()
-                .map_err(|_| PyRuntimeError::new_err("Session catalog lock poisoned"))?;
-
-            // Replace existing registration (if any).
-            self.ctx
-                .deregister_table(name.as_str())
-                .map_err(|e| datafusion_error_to_py(py, e))?;
-
             let ctx = self.ctx.clone();
-            let name_for_df = name.clone();
-            let path_for_df = path.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+            let tables = &self.tables;
 
             let name_for_err = name.clone();
             let path_for_err = path.clone();
@@ -219,25 +226,68 @@ mod _native {
                 py,
                 self.rt.as_ref(),
                 async move {
-                    ctx.register_parquet(
-                        name_for_df.as_str(),
-                        path_for_df.as_str(),
-                        ParquetReadOptions::default(),
-                    )
-                    .await
-                },
-                move |py, err| {
-                    datafusion_error_to_py_with_name_and_path(py, &name_for_err, &path_for_err, err)
-                },
-            )?;
+                    let _permit = sema.acquire_owned().await.map_err(|_| {
+                        RegisterParquetError::Runtime("Session catalog semaphore closed")
+                    })?;
 
-            let mut tables = self
-                .tables
-                .lock()
-                .map_err(|_| PyRuntimeError::new_err("Session tables lock poisoned"))?;
-            tables.insert(name);
+                    // Swap with rollback.
+                    let old = ctx
+                        .deregister_table(name.as_str())
+                        .map_err(RegisterParquetError::DataFusion)?;
 
-            Ok(())
+                    match ctx
+                        .register_parquet(
+                            name.as_str(),
+                            path.as_str(),
+                            ParquetReadOptions::default(),
+                        )
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            if let Some(old_provider) = old {
+                                if let Err(restore) =
+                                    ctx.register_table(name.as_str(), old_provider)
+                                {
+                                    return Err(RegisterParquetError::RestoreFailed {
+                                        original: e,
+                                        restore,
+                                    });
+                                }
+                            }
+                            return Err(RegisterParquetError::DataFusion(e));
+                        }
+                    }
+
+                    let mut t = tables.lock().map_err(|_| {
+                        RegisterParquetError::Runtime("Session tables lock poisoned")
+                    })?;
+                    t.insert(name);
+
+                    Ok::<(), RegisterParquetError>(())
+                },
+                move |py, err| match err {
+                    RegisterParquetError::DataFusion(e) => {
+                        datafusion_error_to_py_with_name_and_path(
+                            py,
+                            &name_for_err,
+                            &path_for_err,
+                            e,
+                        )
+                    }
+                    RegisterParquetError::RestoreFailed { original, restore } => {
+                        let msg = format!(
+                            "failed to register parquet: {original} (name={name_for_err}, path={path_for_err}); additionally failed to restore previous registration: {restore}"
+                        );
+                        let py_err = DataFusionError::new_err(msg);
+                        let exc = py_err.value(py);
+                        let _ = exc.setattr("name", name_for_err.clone());
+                        let _ = exc.setattr("path", path_for_err.clone());
+                        py_err
+                    }
+                    RegisterParquetError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                },
+            )
         }
     }
 
