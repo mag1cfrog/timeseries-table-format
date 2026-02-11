@@ -1,5 +1,6 @@
 //! Tokio runtime runner helpers for calling async Rust from sync Python bindings.
 
+use std::sync::{Arc, OnceLock};
 use std::{fmt::Display, future::Future};
 
 use pyo3::{PyErr, PyResult, Python, exceptions::PyRuntimeError};
@@ -11,6 +12,30 @@ pub(crate) fn new_runtime() -> PyResult<Runtime> {
         .enable_all()
         .build()
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+static GLOBAL_RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
+
+pub(crate) fn global_runtime() -> PyResult<Arc<Runtime>> {
+    if let Some(rt) = GLOBAL_RUNTIME.get() {
+        return Ok(Arc::clone(rt));
+    }
+
+    let rt = Arc::new(new_runtime()?);
+
+    // If we win the race, keep our runtime.
+    if GLOBAL_RUNTIME.set(Arc::clone(&rt)).is_ok() {
+        return Ok(rt);
+    }
+
+    // If we lost the race, use the already-initialized runtime.
+    if let Some(rt) = GLOBAL_RUNTIME.get() {
+        return Ok(Arc::clone(rt));
+    }
+
+    Err(PyRuntimeError::new_err(
+        "failed to initialize global Tokio runtime",
+    ))
 }
 
 #[allow(dead_code)]
@@ -57,6 +82,16 @@ mod tests {
         let v =
             pyo3::Python::attach(|py| run_blocking(py, &rt, async { Ok::<_, &'static str>(123) }))?;
         assert_eq!(v, 123);
+        Ok(())
+    }
+
+    #[test]
+    fn global_runtime_is_singleton() -> pyo3::PyResult<()> {
+        let a = crate::tokio_runner::global_runtime()?;
+        let b = crate::tokio_runner::global_runtime()?;
+
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+
         Ok(())
     }
 }

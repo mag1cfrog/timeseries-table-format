@@ -6,6 +6,8 @@ mod tokio_runner;
 #[pyo3::pymodule]
 mod _dev {
 
+    use std::sync::Arc;
+
     use pyo3::{
         Bound, PyErr, PyResult,
         exceptions::PyValueError,
@@ -14,9 +16,14 @@ mod _dev {
         types::{PyDict, PyModule, PyType},
     };
 
-    use crate::exceptions::{
-        ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
-        TimeseriesTableError,
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    use crate::{
+        exceptions::{
+            ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
+            StorageError, TimeseriesTableError,
+        },
+        tokio_runner,
     };
 
     enum AppendParquetError {
@@ -45,14 +52,23 @@ mod _dev {
         py_err
     }
 
+    #[allow(unused)]
     #[pyclass]
-    struct Session;
+    struct Session {
+        rt: Arc<tokio::runtime::Runtime>,
+        ctx: SessionContext,
+    }
 
     #[pymethods]
     impl Session {
         #[new]
-        fn new() -> Self {
-            Self
+        fn new() -> PyResult<Self> {
+            let rt = tokio_runner::global_runtime()?;
+
+            let cfg = SessionConfig::new();
+            let ctx = SessionContext::new_with_config(cfg);
+
+            Ok(Self { rt, ctx })
         }
     }
 
@@ -98,13 +114,13 @@ mod _dev {
             };
             let meta = TableMeta::new_time_series(index);
 
-            let rt = tokio_runner::new_runtime()?;
+            let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = table_root.clone();
 
             let table_root_for_err_cp = table_root_for_err.clone();
             let inner = tokio_runner::run_blocking_map_err(
                 py,
-                &rt,
+                rt.as_ref(),
                 async move {
                     let location = TableLocation::parse(&table_root)
                         .map_err(|e| TableError::Storage { source: e })?;
@@ -130,13 +146,13 @@ mod _dev {
 
             use timeseries_table_core::{storage::TableLocation, table::TableError};
 
-            let rt = tokio_runner::new_runtime()?;
+            let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = table_root.clone();
             let table_root_for_err_cp = table_root_for_err.clone();
 
             let inner = tokio_runner::run_blocking_map_err(
                 py,
-                &rt,
+                rt.as_ref(),
                 async move {
                     let location = TableLocation::parse(&table_root)
                         .map_err(|e| TableError::Storage { source: e })?;
@@ -199,7 +215,7 @@ mod _dev {
             use timeseries_table_core::storage::StorageLocation;
             use timeseries_table_core::table::TableError;
 
-            let rt = tokio_runner::new_runtime()?;
+            let rt = tokio_runner::global_runtime()?;
 
             let effective_time_column =
                 time_column.unwrap_or_else(|| self.inner.index_spec().timestamp_column.clone());
@@ -213,7 +229,7 @@ mod _dev {
 
             tokio_runner::run_blocking_map_err(
                 py,
-                &rt,
+                rt.as_ref(),
                 async move {
                     let rel_path = if copy_if_outside {
                         location
@@ -298,14 +314,14 @@ mod _dev {
     fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
         use crate::{error_map, tokio_runner};
 
-        let rt = tokio_runner::new_runtime()?;
+        let rt = tokio_runner::global_runtime()?;
 
         let table_root = table_root.to_string();
         let parquet_path = parquet_path.to_string();
 
         tokio_runner::run_blocking_map_err(
             py,
-            &rt,
+            rt.as_ref(),
             async move {
                 use std::path::Path;
 
