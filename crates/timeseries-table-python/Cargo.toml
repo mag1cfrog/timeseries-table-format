@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 pyo3 = { version = "0.28" }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 timeseries-table-core = { path = "../timeseries-table-core" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion" }
 datafusion = { workspace = true }
