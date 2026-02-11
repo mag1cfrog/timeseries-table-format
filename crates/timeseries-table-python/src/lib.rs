@@ -4,7 +4,7 @@ mod exceptions;
 mod tokio_runner;
 
 #[pyo3::pymodule]
-mod _dev {
+mod _native {
 
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
@@ -505,7 +505,7 @@ mod _dev {
         {
             // Internal test-only hook (kept under a clearly private namespace).
             let py = m.py();
-            let testing = PyModule::new(py, "timeseries_table_format._dev._testing")?;
+            let testing = PyModule::new(py, "timeseries_table_format._native._testing")?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
             m.add("_testing", &testing)?;
