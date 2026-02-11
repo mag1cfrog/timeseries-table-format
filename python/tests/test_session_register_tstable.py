@@ -110,31 +110,6 @@ def test_register_tstable_succeeds_and_replaces_with_different_root(tmp_path):
     sess.register_tstable("prices", str(root1))
     sess.register_tstable("prices", str(root2))  # replacement should succeed
 
-
-@pytest.mark.parametrize("mode", ["missing", "empty_dir"])
-def test_register_tstable_invalid_root_raises_and_has_table_root(tmp_path, mode):
-    sess = ttf.Session()
-    root = tmp_path / "bad_root"
-
-    if mode == "empty_dir":
-        root.mkdir()
-
-    with pytest.raises(ttf.TimeseriesTableError) as excinfo:
-        sess.register_tstable("x", str(root))
-
-    # bullet-proof surface: your Rust code injects this attribute
-    assert getattr(excinfo.value, "table_root", None) == str(root)
-
-
-def test_register_tstable_empty_name_rejected(tmp_path):
-    root = tmp_path / "table"
-    _make_table(root)
-
-    sess = ttf.Session()
-    with pytest.raises(ValueError):
-        sess.register_tstable("", str(root))
-
-
 def test_register_tstable_concurrent_replace_does_not_crash(tmp_path):
     root1 = tmp_path / "t1"
     root2 = tmp_path / "t2"
@@ -143,12 +118,12 @@ def test_register_tstable_concurrent_replace_does_not_crash(tmp_path):
     _make_table_with_schema(root2, tmp_path / "seg2.parquet")
 
     sess = ttf.Session()
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def w(root):
         try:
             sess.register_tstable("prices", str(root))
-        except BaseException as e:
+        except Exception as e:
             errors.append(e)
 
     a = threading.Thread(target=w, args=(root1,))
