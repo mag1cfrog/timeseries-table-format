@@ -6,17 +6,21 @@ mod tokio_runner;
 #[pyo3::pymodule]
 mod _dev {
 
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
+    use datafusion::error::DataFusionError as DFError;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
     use pyo3::{
-        Bound, PyErr, PyResult,
+        Bound, PyErr, PyResult, Python,
         exceptions::PyValueError,
         prelude::*,
         pyclass, pymethods,
         types::{PyDict, PyModule, PyType},
     };
 
-    use datafusion::prelude::{SessionConfig, SessionContext};
+    use timeseries_table_datafusion::TsTableProvider;
 
     use crate::{
         exceptions::{
@@ -29,6 +33,11 @@ mod _dev {
     enum AppendParquetError {
         Table(timeseries_table_core::table::TableError),
         ValueError(String),
+    }
+
+    enum RegisterTsTableError {
+        Table(timeseries_table_core::table::TableError),
+        DataFusion(DFError),
     }
 
     fn table_error_to_py_with_root(
@@ -57,6 +66,7 @@ mod _dev {
     struct Session {
         rt: Arc<tokio::runtime::Runtime>,
         ctx: SessionContext,
+        tables: BTreeSet<String>,
     }
 
     #[pymethods]
@@ -68,11 +78,72 @@ mod _dev {
             let cfg = SessionConfig::new();
             let ctx = SessionContext::new_with_config(cfg);
 
-            Ok(Self { rt, ctx })
+            Ok(Self {
+                rt,
+                ctx,
+                tables: BTreeSet::new(),
+            })
+        }
+
+        fn register_tstable(
+            &mut self,
+            py: Python<'_>,
+            name: String,
+            table_root: String,
+        ) -> PyResult<()> {
+            use timeseries_table_core::storage::TableLocation;
+            use timeseries_table_core::table::{TableError, TimeSeriesTable};
+
+            if name.is_empty() {
+                return Err(PyValueError::new_err("name must be non-empty"));
+            }
+
+            let ctx = self.ctx.clone();
+            let name_for_df = name.clone();
+
+            // For better error messages / attributes
+            let table_root_for_err = table_root.clone();
+
+            tokio_runner::run_blocking_map_err(
+                py,
+                self.rt.as_ref(),
+                async move {
+                    let location = TableLocation::parse(&table_root)
+                        .map_err(|e| TableError::Storage { source: e })
+                        .map_err(RegisterTsTableError::Table)?;
+
+                    let table = TimeSeriesTable::open(location)
+                        .await
+                        .map_err(RegisterTsTableError::Table)?;
+
+                    let provider = TsTableProvider::try_new(Arc::new(table))
+                        .map_err(RegisterTsTableError::DataFusion)?;
+
+                    // Replace existing registration (if any)
+                    let _ = ctx
+                        .deregister_table(name_for_df.as_str())
+                        .map_err(RegisterTsTableError::DataFusion)?;
+
+                    ctx.register_table(name_for_df.as_str(), Arc::new(provider))
+                        .map_err(RegisterTsTableError::DataFusion)?;
+
+                    Ok::<(), RegisterTsTableError>(())
+                },
+                move |py, err| match err {
+                    RegisterTsTableError::Table(e) => {
+                        table_error_to_py_with_root(py, &table_root_for_err, e)
+                    }
+                    RegisterTsTableError::DataFusion(e) => {
+                        crate::error_map::datafusion_error_to_py(py, e)
+                    }
+                },
+            )?;
+
+            self.tables.insert(name);
+            Ok(())
         }
     }
 
-    #[allow(unused)]
     #[pyclass]
     struct TimeSeriesTable {
         inner: timeseries_table_core::table::TimeSeriesTable,
