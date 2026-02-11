@@ -1,6 +1,6 @@
-from . import _dev as _dev
-from ._dev import *
+from . import _native as _native
+from ._native import *
 
-__doc__ = _dev.__doc__
-if hasattr(_dev, "__all__"):
-    __all__ = _dev.__all__
+__doc__ = _native.__doc__
+if hasattr(_native, "__all__"):
+    __all__ = _native.__all__
