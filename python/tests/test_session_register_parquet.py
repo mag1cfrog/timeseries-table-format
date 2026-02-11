@@ -130,3 +130,29 @@ def test_register_parquet_value_error_does_not_remove_existing_registration(tmp_
         sess.register_parquet("dim", "")
 
     assert testing._test_session_table_exists(sess, "dim") is True
+
+
+def test_register_parquet_empty_path_does_not_register_when_none_existed(tmp_path):
+    testing = _testing_module()
+
+    sess = ttf.Session()
+    with pytest.raises(ValueError):
+        sess.register_parquet("dim", "")
+
+    assert testing._test_session_table_exists(sess, "dim") is False
+
+
+def test_register_parquet_empty_directory_registers_empty_table(tmp_path):
+    testing = _testing_module()
+
+    d = tmp_path / "empty_dir"
+    d.mkdir()
+
+    sess = ttf.Session()
+    sess.register_parquet("dim", str(d))
+
+    # DataFusion allows registering a directory with zero parquet files; it becomes an empty table.
+    assert testing._test_session_table_exists(sess, "dim") is True
+
+
+# TODO(Session.sql): query registered parquet and joins (tstable + dim parquet).
