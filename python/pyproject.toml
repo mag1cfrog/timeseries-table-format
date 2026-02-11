@@ -16,7 +16,7 @@ build-backend = "maturin"
 manifest-path = "../crates/timeseries-table-python/Cargo.toml"
 bindings = "pyo3"
 python-source = "src"
-module-name = "timeseries_table_format._dev"
+module-name = "timeseries_table_format._native"
 
 [dependency-groups]
 dev = [
