@@ -22,7 +22,6 @@ class Session:
     def register_parquet(self, name: str, path: str) -> None: ...
     def sql(self, query: str, *, params: object | None = None) -> pyarrow.Table: ...
 
-
 class TimeSeriesTable:
     @classmethod
     def create(
