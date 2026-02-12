@@ -63,8 +63,7 @@ def test_session_sql_join_tstable_and_parquet(tmp_path):
 
     out2 = sess.sql(
         """
-        select p.ts as ts, p.symbol as symbol, p.close as close, s.exchange
-as exchange
+        select p.ts as ts, p.symbol as symbol, p.close as close, s.exchange as exchange
         from prices p
         join symbols s
         on p.symbol = s.symbol
