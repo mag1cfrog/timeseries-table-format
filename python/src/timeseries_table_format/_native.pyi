@@ -1,5 +1,7 @@
 from types import ModuleType
 
+import pyarrow
+
 __version__: str
 
 class TimeseriesTableError(Exception): ...
@@ -18,6 +20,8 @@ class Session:
     def __init__(self) -> None: ...
     def register_tstable(self, name: str, table_root: str) -> None: ...
     def register_parquet(self, name: str, path: str) -> None: ...
+    def sql(self, query: str, *, params: object | None = None) -> pyarrow.Table: ...
+
 
 class TimeSeriesTable:
     @classmethod
