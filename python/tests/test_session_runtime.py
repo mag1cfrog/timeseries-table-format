@@ -16,7 +16,7 @@ def test_many_session_construct_and_drop():
 
 
 def test_session_construct_and_drop_in_python_thread():
-    err: list[BaseException] = []
+    err: list[Exception] = []
 
     def worker() -> None:
         try:
@@ -24,7 +24,7 @@ def test_session_construct_and_drop_in_python_thread():
             del s
             gc.collect()
             gc.collect()
-        except BaseException as e:
+        except Exception as e:
             err.append(e)
 
     t = threading.Thread(target=worker)

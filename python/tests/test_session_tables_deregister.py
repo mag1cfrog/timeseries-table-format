@@ -81,7 +81,7 @@ def test_session_deregister_concurrent_one_wins(tmp_path):
     sess = ttf.Session()
     sess.register_parquet("dim", str(p))
 
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
     ok = 0
     lock = threading.Lock()
 
@@ -91,7 +91,7 @@ def test_session_deregister_concurrent_one_wins(tmp_path):
             sess.deregister("dim")
             with lock:
                 ok += 1
-        except BaseException as e:
+        except Exception as e:
             with lock:
                 errors.append(e)
 
