@@ -530,7 +530,7 @@ mod _native {
             Ok(table.into())
         }
 
-        /// Return the lsit of currently registered table names (sorted).
+        /// Return the list of currently registered table names (sorted).
         fn tables(&self, py: Python<'_>) -> PyResult<Vec<String>> {
             enum TablesError {
                 Runtime(&'static str),
@@ -571,6 +571,7 @@ mod _native {
         fn deregister(&self, py: Python<'_>, name: String) -> PyResult<()> {
             enum DeregisterError {
                 NotFound(String),
+                Invariant(&'static str),
                 DataFusion(DFError),
                 Runtime(&'static str),
             }
@@ -591,23 +592,40 @@ mod _native {
                         DeregisterError::Runtime("Session catalog semaphore closed")
                     })?;
 
+                    {
+                        let t = tables
+                            .lock()
+                            .map_err(|_| DeregisterError::Runtime("Session tables lock poisoned"))?;
+
+                        if !t.contains(name.as_str()) {
+                            return Err(DeregisterError::NotFound(name));
+                        }
+                    }
+
+                    let removed = ctx
+                        .deregister_table(name.as_str())
+                        .map_err(DeregisterError::DataFusion)?;
+
+                    if removed.is_none() {
+                        return Err(DeregisterError::Invariant(
+                            "invariant violation: table tracked as registered, but DataFusion had no registration",
+                        ));
+                    }
+
                     let mut t = tables
                         .lock()
                         .map_err(|_| DeregisterError::Runtime("Session tables lock poisoned"))?;
-
-                    if !t.contains(name.as_str()) {
-                        return Err(DeregisterError::NotFound(name));
+                    if !t.remove(name.as_str()) {
+                        return Err(DeregisterError::Invariant(
+                            "invariant violation: table existed during check but could not be removed from tracked set",
+                        ));
                     }
-
-                    ctx.deregister_table(name.as_str())
-                        .map_err(DeregisterError::DataFusion)?;
-
-                    t.remove(name.as_str());
 
                     Ok::<(), DeregisterError>(())
                 },
                 move |py, err| match err {
                     DeregisterError::NotFound(n) => PyKeyError::new_err(n),
+                    DeregisterError::Invariant(msg) => PyRuntimeError::new_err(msg),
                     DeregisterError::DataFusion(e) => datafusion_error_to_py(py, e),
                     DeregisterError::Runtime(msg) => PyRuntimeError::new_err(msg),
                 },
