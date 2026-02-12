@@ -15,7 +15,7 @@ def test_session_constructs_many_times():
 
 
 def test_session_drop_does_not_hang_or_crash():
-    s = ttf.Session
+    s = ttf.Session()
     del s
     gc.collect()
     gc.collect()
