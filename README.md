@@ -52,13 +52,14 @@ But if you're working with **time-series specifically**, you might have noticed:
 - Financial data stores where overlap = disaster
 - Learning how modern table formats work (well-documented internals!)
 
-> **Bucket size (important):** `bucket=1h` does **not** mean your data is “hourly”.
+> **Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
 >
 > The bucket is the time grid used for **coverage** (“do I have data for this range?”) and **overlap checks** (“did I already ingest this time window?”).
 >
 > Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00). In v0.1, appending two rows for the same entity in the same bucket is treated as **overlap** and will be rejected.
 >
-> Rule of thumb: choose a bucket so you normally have **at most one row per entity per bucket** (minute bars → `1m`, second-level data → `1s`, etc.).
+> Practical rule: choose a bucket that matches the **granularity you expect to be unique per entity**.
+> Hourly bars → `1h`, minute bars → `1m`, etc. If you expect multiple rows per entity within an hour, don’t use `1h` in v0.1.
 
 ---
 
