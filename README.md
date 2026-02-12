@@ -19,7 +19,7 @@
 
 ---
 
-## Features ✨
+## Key Features
 
 | | |
 |---|---|
@@ -29,11 +29,11 @@
 | **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
 | **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
 | **Pure Rust** | Pure Rust, no JVM, no Python runtime—just `cargo install` and go |
-| **Fast ingest** | [7–27× faster](#performance-) than ClickHouse/PostgreSQL on bulk loads and daily appends |
+| **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
 
 ---
 
-## Why not just use Delta Lake / Iceberg? 🤔
+## Why Not Use Delta Lake or Iceberg?
 
 Great question. You probably *should* use them for general-purpose analytics.
 
@@ -56,7 +56,7 @@ But if you're working with **time-series specifically**, you might have noticed:
 
 ---
 
-## Performance ⚡
+## Performance Benchmarks
 
 Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appends):
 
@@ -92,9 +92,9 @@ Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appen
 
 ---
 
-## Quick Start 🚀
+## Getting Started
 
-### CLI (Easiest)
+### Command-Line Interface (CLI)
 
 ```bash
 # Install
@@ -144,7 +144,7 @@ See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) 
 
 ---
 
-### Example walkthrough: NVDA 1h + MA5 🥾
+### Example Walkthrough: NVDA 1h with MA(5)
 
 Fastest way to see the format end-to-end (no external services needed):
 
@@ -178,7 +178,7 @@ Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bar
 
 ---
 
-## Architecture 🏗️
+## Architecture
 
 <p align="center">
   <img src="docs/assets/high-level-architecture.png" alt="high level architecture" width="1920" />
@@ -233,7 +233,7 @@ A time-series table consists of:
 
 ---
 
-## Contributing 🤝
+## Contributing
 
 Contributions welcome! This project is also a learning exercise in building table formats from scratch—if you're curious about the internals, the code is heavily commented.
 

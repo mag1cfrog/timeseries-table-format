@@ -9,19 +9,22 @@ mod _native {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
+    use datafusion::arrow::error::ArrowError;
+    use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
     use pyo3::{
         Bound, PyErr, PyResult, Python,
-        exceptions::{PyRuntimeError, PyValueError},
+        exceptions::{PyImportError, PyRuntimeError, PyTypeError, PyValueError},
         prelude::*,
         pyclass, pymethods,
-        types::{PyDict, PyModule, PyType},
+        types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
     };
 
     use timeseries_table_datafusion::TsTableProvider;
 
+    use crate::error_map::datafusion_error_to_py;
     use crate::{
         exceptions::{
             ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
@@ -46,6 +49,87 @@ mod _native {
         DataFusion(DFError),
         RestoreFailed { original: DFError, restore: DFError },
         Runtime(&'static str),
+    }
+
+    enum QueryParams {
+        Positional(Vec<ScalarValue>),
+        Named(Vec<(String, ScalarValue)>),
+    }
+
+    fn py_any_to_scalar_value(v: &Bound<'_, pyo3::types::PyAny>) -> PyResult<ScalarValue> {
+        use pyo3::types;
+
+        if v.is_none() {
+            return Ok(ScalarValue::Null);
+        }
+
+        // bool must come before int (since bool is a subclass of int in Python)
+        if v.is_instance_of::<types::PyBool>() {
+            let b: bool = v.extract()?;
+            return Ok(ScalarValue::Boolean(Some(b)));
+        }
+
+        if v.is_instance_of::<types::PyInt>() {
+            let n: i64 = v.extract().map_err(|e| {
+                PyValueError::new_err(format!("int parameter out of i64 range: {e}"))
+            })?;
+            return Ok(ScalarValue::Int64(Some(n)));
+        }
+
+        if v.is_instance_of::<types::PyFloat>() {
+            let f: f64 = v.extract()?;
+            return Ok(ScalarValue::Float64(Some(f)));
+        }
+
+        if v.is_instance_of::<types::PyString>() {
+            let s: String = v.extract()?;
+            return Ok(ScalarValue::Utf8(Some(s)));
+        }
+
+        if v.is_instance_of::<types::PyBytes>() {
+            let b: Vec<u8> = v.extract()?;
+            return Ok(ScalarValue::Binary(Some(b)));
+        }
+
+        Err(PyTypeError::new_err(
+            "params values must be one of: None, bool, int (i64), float, str, bytes",
+        ))
+    }
+
+    fn parse_query_params(params: &Bound<'_, pyo3::types::PyAny>) -> PyResult<QueryParams> {
+        if let Ok(d) = params.cast::<PyDict>() {
+            let mut out: Vec<(String, ScalarValue)> = Vec::with_capacity(d.len());
+            for (k, v) in d.iter() {
+                let key: String = k
+                    .extract()
+                    .map_err(|_| PyTypeError::new_err("params dict keys must be str"))?;
+
+                let key = key.strip_prefix('$').unwrap_or(key.as_str()).to_string();
+                let sv = py_any_to_scalar_value(&v)?;
+                out.push((key, sv));
+            }
+            return Ok(QueryParams::Named(out));
+        }
+
+        if let Ok(l) = params.cast::<PyList>() {
+            let mut out: Vec<ScalarValue> = Vec::with_capacity(l.len());
+            for v in l.iter() {
+                out.push(py_any_to_scalar_value(&v)?);
+            }
+            return Ok(QueryParams::Positional(out));
+        }
+
+        if let Ok(t) = params.cast::<PyTuple>() {
+            let mut out: Vec<ScalarValue> = Vec::with_capacity(t.len());
+            for v in t.iter() {
+                out.push(py_any_to_scalar_value(&v)?);
+            }
+            return Ok(QueryParams::Positional(out));
+        }
+
+        Err(PyTypeError::new_err(
+            "params must be a dict (named $param) or list/tuple (positional $1, $2, ...)",
+        ))
     }
 
     fn table_error_to_py_with_root(
@@ -94,7 +178,6 @@ mod _native {
         py_err
     }
 
-    #[allow(unused)]
     #[pyclass]
     struct Session {
         rt: Arc<tokio::runtime::Runtime>,
@@ -106,6 +189,9 @@ mod _native {
     #[pymethods]
     impl Session {
         #[new]
+        /// Create a new DataFusion-backed SQL session.
+        ///
+        /// The session owns an internal Tokio runtime used to run async Rust internals.
         fn new() -> PyResult<Self> {
             let rt = tokio_runner::global_runtime()?;
 
@@ -120,6 +206,31 @@ mod _native {
             })
         }
 
+        /// Register a time-series table under a name for SQL queries.
+        ///
+        /// Parameters
+        /// ----------
+        /// name:
+        ///     SQL table name to register under.
+        /// table_root:
+        ///     Filesystem directory containing the table (created by `TimeSeriesTable.create`).
+        ///
+        /// Notes
+        /// -----
+        /// If `name` is already registered, it is replaced atomically (with rollback on failure).
+        ///
+        /// The table must have a canonical logical schema adopted (typically after the first
+        /// successful append). If the table has never had data appended, registration may fail with
+        /// a `DataFusionError`.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError:
+        ///     If `name` is empty.
+        /// TimeseriesTableError:
+        ///     If opening the table fails. The exception includes a `table_root` attribute.
+        /// DataFusionError:
+        ///     If provider creation or registration fails.
         fn register_tstable(
             &self,
             py: Python<'_>,
@@ -207,6 +318,25 @@ mod _native {
             )
         }
 
+        /// Register a Parquet file or directory under a name for SQL queries.
+        ///
+        /// Parameters
+        /// ----------
+        /// name:
+        ///     SQL table name to register under.
+        /// path:
+        ///     Filesystem path to a Parquet file or a directory of Parquet files.
+        ///
+        /// Notes
+        /// -----
+        /// If `name` is already registered, it is replaced atomically (with rollback on failure).
+        ///
+        /// Raises
+        /// ------
+        /// ValueError:
+        ///     If `name` or `path` is empty.
+        /// DataFusionError:
+        ///     If registration fails. The exception includes `name` and `path` attributes.
         fn register_parquet(&self, py: Python<'_>, name: String, path: String) -> PyResult<()> {
             if name.is_empty() {
                 return Err(PyValueError::new_err("name must be non-empty"));
@@ -289,6 +419,116 @@ mod _native {
                 },
             )
         }
+
+        /// Run a SQL query and return the results as a `pyarrow.Table`.
+        ///
+        /// This method runs synchronously from Python, but uses an internal Tokio runtime and
+        /// releases the GIL while planning/executing the query.
+        ///
+        /// Parameters
+        /// ----------
+        /// query:
+        ///     SQL query string.
+        /// params:
+        ///     Optional query parameter values for DataFusion SQL placeholders:
+        ///
+        ///     - Positional: pass a list/tuple to bind `$1`, `$2`, ...
+        ///       Example: `sess.sql("select * from t where x = $1", params=[1])`
+        ///     - Named: pass a dict to bind `$name` placeholders (keys may optionally start with `$`).
+        ///       Example: `sess.sql("select * from t where x = $a", params={"a": 1})`
+        ///
+        ///     Supported Python value types: `None`, `bool`, `int` (i64 range), `float`, `str`, `bytes`.
+        ///
+        /// Notes
+        /// -----
+        /// DataFusion infers placeholder types from context when possible (e.g. in `WHERE` clauses).
+        /// If you use placeholders in a `SELECT` projection without type context, you may need an
+        /// explicit cast, e.g. `SELECT CAST($1 AS BIGINT) AS x`.
+        ///
+        /// Raises
+        /// ------
+        /// ImportError:
+        ///     If `pyarrow` cannot be imported.
+        /// DataFusionError:
+        ///     If the SQL fails to plan or execute.
+        /// TypeError, ValueError:
+        ///     If `params` has an invalid shape or contains unsupported value types.
+        #[pyo3(signature = (query, *, params=None))]
+        fn sql(
+            &self,
+            py: Python<'_>,
+            query: String,
+            params: Option<Py<PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
+            enum SqlError {
+                DataFusion(DFError),
+                Arrow(ArrowError),
+                Runtime(&'static str),
+            }
+
+            let params = match params {
+                None => None,
+                Some(obj) => {
+                    let bound = obj.bind(py);
+                    Some(parse_query_params(bound)?)
+                }
+            };
+
+            let ctx = self.ctx.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+
+            let ipc_bytes: Vec<u8> = tokio_runner::run_blocking_map_err(
+                py,
+                self.rt.as_ref(),
+                async move {
+                    let _permit = sema
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| SqlError::Runtime("Session catalog semaphore closed"))?;
+
+                    let mut df = ctx.sql(&query).await.map_err(SqlError::DataFusion)?;
+
+                    if let Some(p) = params {
+                        df = match p {
+                            QueryParams::Positional(v) => df.with_param_values(v),
+                            QueryParams::Named(v) => df.with_param_values(v),
+                        }
+                        .map_err(SqlError::DataFusion)?;
+                    }
+
+                    let schema = df.schema().as_arrow().clone();
+                    let batches = df.collect().await.map_err(SqlError::DataFusion)?;
+
+                    let mut buf: Vec<u8> = Vec::new();
+                    {
+                        let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema)
+                            .map_err(SqlError::Arrow)?;
+                        for batch in &batches {
+                            w.write(batch).map_err(SqlError::Arrow)?;
+                        }
+                        w.finish().map_err(SqlError::Arrow)?;
+                    }
+
+                    Ok::<Vec<u8>, SqlError>(buf)
+                },
+                move |py, err| match err {
+                    SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
+                    SqlError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
+                    SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                },
+            )?;
+
+            // Back on the GIL: construct pyarrow.Table from IPC stream bytes.
+            let ipc_mod = PyModule::import(py, "pyarrow.ipc").map_err(|e| {
+                PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
+            })?;
+
+            let b = PyBytes::new(py, &ipc_bytes);
+            let reader = ipc_mod.getattr("open_stream")?.call1((b,))?;
+            let table = reader.call_method0("read_all")?;
+
+            Ok(table.into())
+        }
     }
 
     #[pyclass]
@@ -301,6 +541,31 @@ mod _native {
     impl TimeSeriesTable {
         #[classmethod]
         #[pyo3(signature = (*, table_root, time_column, bucket, entity_columns=None, timezone=None))]
+        /// Create a new time-series table at `table_root`.
+        ///
+        /// Parameters
+        /// ----------
+        /// table_root:
+        ///     Filesystem directory where the table will be created.
+        /// time_column:
+        ///     Name of the timestamp column.
+        /// bucket:
+        ///     Time bucket specification string such as `"1h"`, `"5m"`, `"30s"`, `"1d"`.
+        /// entity_columns:
+        ///     Column names that define the entity identity for this table. For v0, a table is
+        ///     effectively scoped to a single entity identity; all appended segments must match the
+        ///     entity values established by the first successful append.
+        /// timezone:
+        ///     Optional timezone name for bucketing; `None` means no timezone normalization.
+        ///
+        /// Notes
+        /// -----
+        /// The table's canonical schema is typically adopted on the first successful append.
+        ///
+        /// Raises
+        /// ------
+        /// TimeseriesTableError:
+        ///     If creation fails. The exception includes a `table_root` attribute.
         fn create(
             _cls: &Bound<'_, PyType>,
             py: Python<'_>,
@@ -359,6 +624,12 @@ mod _native {
         }
 
         #[classmethod]
+        /// Open an existing time-series table at `table_root`.
+        ///
+        /// Raises
+        /// ------
+        /// TimeseriesTableError:
+        ///     If opening fails. The exception includes a `table_root` attribute.
         fn open(_cls: &Bound<'_, PyType>, py: Python<'_>, table_root: String) -> PyResult<Self> {
             use crate::tokio_runner;
 
@@ -389,14 +660,19 @@ mod _native {
             })
         }
 
+        /// Return the table root path.
         fn root(&self) -> String {
             self.table_root.clone()
         }
 
+        /// Return the current table version.
         fn version(&self) -> u64 {
             self.inner.state().version
         }
 
+        /// Return the index specification as a Python dict.
+        ///
+        /// Keys: `timestamp_column`, `entity_columns`, `bucket`, `timezone`.
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
             use timeseries_table_core::transaction_log::TimeBucket;
 
@@ -419,6 +695,32 @@ mod _native {
         }
 
         #[pyo3(signature = (parquet_path, time_column=None, copy_if_outside=true))]
+        /// Append a Parquet segment to the table.
+        ///
+        /// Parameters
+        /// ----------
+        /// parquet_path:
+        ///     Path to a Parquet file.
+        /// time_column:
+        ///     Optional override for the timestamp column name in the Parquet file.
+        /// copy_if_outside:
+        ///     If `True`, copies the file under the table root before appending.
+        ///     If `False`, the path must already be under the table root (parent traversal via
+        ///     `..` is rejected).
+        ///
+        /// Returns
+        /// -------
+        /// int
+        ///     The new table version after the append.
+        ///
+        /// Raises
+        /// ------
+        /// CoverageOverlapError:
+        ///     If the segment overlaps existing coverage.
+        /// SchemaMismatchError:
+        ///     If the segment schema does not match the table schema.
+        /// TimeseriesTableError:
+        ///     For other table errors. The exception includes a `table_root` attribute.
         fn append_parquet(
             &mut self,
             py: Python<'_>,

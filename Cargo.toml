@@ -13,6 +13,7 @@ panic = "deny"
 [workspace.dependencies]
 arrow = "57.1.0"
 arrow-array = "57.1.0"
+arrow-ipc = "57.1.0"
 arrow-select = "57.1.0"
 arrow-csv = "57.1.0"
 arrow-json = "57.1.0"
