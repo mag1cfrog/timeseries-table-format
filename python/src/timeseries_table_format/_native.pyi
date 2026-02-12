@@ -91,6 +91,8 @@ class Session:
 
             Raises
             ------
+            ValueError:
+                If `name` is empty.
             KeyError:
                 If `name` is not registered.
             """
