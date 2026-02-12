@@ -373,6 +373,37 @@ mod _native {
             )
         }
 
+        /// Run a SQL query and return the results as a `pyarrow.Table`.
+        ///
+        /// This method runs synchronously from Python, but uses an internal Tokio runtime and
+        /// releases the GIL while planning/executing the query.
+        ///
+        /// Parameters
+        /// ----------
+        /// query:
+        ///     SQL query string.
+        /// params:
+        ///     Optional query parameter values for DataFusion SQL placeholders:
+        ///
+        ///     - Positional: pass a list/tuple to bind `$1`, `$2`, ...
+        ///       Example: `sess.sql("select * from t where x = $1", params=[1])`
+        ///     - Named: pass a dict to bind `$name` placeholders (keys may optionally start with `$`).
+        ///       Example: `sess.sql("select * from t where x = $a", params={"a": 1})`
+        ///
+        /// Notes
+        /// -----
+        /// DataFusion infers placeholder types from context when possible (e.g. in `WHERE` clauses).
+        /// If you use placeholders in a `SELECT` projection without type context, you may need an
+        /// explicit cast, e.g. `SELECT CAST($1 AS BIGINT) AS x`.
+        ///
+        /// Raises
+        /// ------
+        /// ImportError:
+        ///     If `pyarrow` cannot be imported.
+        /// DataFusionError:
+        ///     If the SQL fails to plan or execute.
+        /// TypeError, ValueError:
+        ///     If `params` has an invalid shape or contains unsupported value types.
         #[pyo3(signature = (query, *, params=None))]
         fn sql(
             &self,
