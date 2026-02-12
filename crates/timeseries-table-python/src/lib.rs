@@ -16,7 +16,7 @@ mod _native {
 
     use pyo3::{
         Bound, PyErr, PyResult, Python,
-        exceptions::{PyImportError, PyRuntimeError, PyTypeError, PyValueError},
+        exceptions::{PyImportError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError},
         prelude::*,
         pyclass, pymethods,
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
@@ -528,6 +528,90 @@ mod _native {
             let table = reader.call_method0("read_all")?;
 
             Ok(table.into())
+        }
+
+        /// Return the lsit of currently registered table names (sorted).
+        fn tables(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+            enum TablesError {
+                Runtime(&'static str),
+            }
+
+            let sema = Arc::clone(&self.catalog_sema);
+            let tables = &self.tables;
+
+            tokio_runner::run_blocking_map_err(
+                py,
+                self.rt.as_ref(),
+                async move {
+                    let _permit = sema
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| TablesError::Runtime("Session catalog semaphore closed"))?;
+
+                    let t = tables
+                        .lock()
+                        .map_err(|_| TablesError::Runtime("Session tables lock poisoned"))?;
+
+                    Ok::<Vec<String>, TablesError>(t.iter().cloned().collect())
+                },
+                move |_py, err| match err {
+                    TablesError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                },
+            )
+        }
+
+        /// Deregister a previously registered table name.
+        ///
+        /// Raises
+        /// ------
+        /// KeyError:
+        ///     If `name` is not registered.
+        /// ValueError:
+        ///     If `name` is empty.
+        fn deregister(&self, py: Python<'_>, name: String) -> PyResult<()> {
+            enum DeregisterError {
+                NotFound(String),
+                DataFusion(DFError),
+                Runtime(&'static str),
+            }
+
+            if name.is_empty() {
+                return Err(PyValueError::new_err("name must be non-empty"));
+            }
+
+            let ctx = self.ctx.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+            let tables = &self.tables;
+
+            tokio_runner::run_blocking_map_err(
+                py,
+                self.rt.as_ref(),
+                async move {
+                    let _permit = sema.acquire_owned().await.map_err(|_| {
+                        DeregisterError::Runtime("Session catalog semaphore closed")
+                    })?;
+
+                    let mut t = tables
+                        .lock()
+                        .map_err(|_| DeregisterError::Runtime("Session tables lock poisoned"))?;
+
+                    if !t.contains(name.as_str()) {
+                        return Err(DeregisterError::NotFound(name));
+                    }
+
+                    ctx.deregister_table(name.as_str())
+                        .map_err(DeregisterError::DataFusion)?;
+
+                    t.remove(name.as_str());
+
+                    Ok::<(), DeregisterError>(())
+                },
+                move |py, err| match err {
+                    DeregisterError::NotFound(n) => PyKeyError::new_err(n),
+                    DeregisterError::DataFusion(e) => datafusion_error_to_py(py, e),
+                    DeregisterError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                },
+            )
         }
     }
 
