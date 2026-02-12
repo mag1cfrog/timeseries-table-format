@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arrow-ipc = { workspace = true }
+datafusion = { workspace = true }
+
 pyo3 = { version = "0.28" }
+
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+
 timeseries-table-core = { path = "../timeseries-table-core" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion" }
-datafusion = { workspace = true }
+
 
 [lints]
 workspace = true
