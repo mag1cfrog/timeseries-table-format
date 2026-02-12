@@ -9,7 +9,6 @@ mod _native {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    use datafusion::arrow::array::Scalar;
     use datafusion::arrow::error::ArrowError;
     use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
@@ -18,7 +17,6 @@ mod _native {
     use pyo3::{
         Bound, PyErr, PyResult, Python,
         exceptions::{PyImportError, PyRuntimeError, PyTypeError, PyValueError},
-        ffi::PyObject,
         prelude::*,
         pyclass, pymethods,
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
@@ -26,6 +24,7 @@ mod _native {
 
     use timeseries_table_datafusion::TsTableProvider;
 
+    use crate::error_map::datafusion_error_to_py;
     use crate::{
         exceptions::{
             ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
@@ -179,7 +178,6 @@ mod _native {
         py_err
     }
 
-    #[allow(unused)]
     #[pyclass]
     struct Session {
         rt: Arc<tokio::runtime::Runtime>,
@@ -373,6 +371,83 @@ mod _native {
                     RegisterParquetError::Runtime(msg) => PyRuntimeError::new_err(msg),
                 },
             )
+        }
+
+        #[pyo3(signature = (query, *, params=None))]
+        fn sql(
+            &self,
+            py: Python<'_>,
+            query: String,
+            params: Option<Py<PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
+            enum SqlError {
+                DataFusion(DFError),
+                Arrow(ArrowError),
+                Runtime(&'static str),
+            }
+
+            let params = match params {
+                None => None,
+                Some(obj) => {
+                    let bound = obj.bind(py);
+                    Some(parse_query_params(bound)?)
+                }
+            };
+
+            let ctx = self.ctx.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+
+            let ipc_bytes: Vec<u8> = tokio_runner::run_blocking_map_err(
+                py,
+                self.rt.as_ref(),
+                async move {
+                    let _permit = sema
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| SqlError::Runtime("Session catalog semaphore closed"))?;
+
+                    let mut df = ctx.sql(&query).await.map_err(SqlError::DataFusion)?;
+
+                    if let Some(p) = params {
+                        df = match p {
+                            QueryParams::Positional(v) => df.with_param_values(v),
+                            QueryParams::Named(v) => df.with_param_values(v),
+                        }
+                        .map_err(SqlError::DataFusion)?;
+                    }
+
+                    let schema = df.schema().as_arrow().clone();
+                    let batches = df.collect().await.map_err(SqlError::DataFusion)?;
+
+                    let mut buf: Vec<u8> = Vec::new();
+                    {
+                        let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema)
+                            .map_err(SqlError::Arrow)?;
+                        for batch in &batches {
+                            w.write(batch).map_err(SqlError::Arrow)?;
+                        }
+                        w.finish().map_err(SqlError::Arrow)?;
+                    }
+
+                    Ok::<Vec<u8>, SqlError>(buf)
+                },
+                move |py, err| match err {
+                    SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
+                    SqlError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
+                    SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                },
+            )?;
+
+            // Back on the GIL: construct pyarrow.Table from IPC stream bytes.
+            let ipc_mod = PyModule::import(py, "pyarrow.ipc").map_err(|e| {
+                PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
+            })?;
+
+            let b = PyBytes::new(py, &ipc_bytes);
+            let reader = ipc_mod.getattr("open_stream")?.call1((b,))?;
+            let table = reader.call_method0("read_all")?;
+
+            Ok(table.into())
         }
     }
 
