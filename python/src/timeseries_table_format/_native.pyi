@@ -82,21 +82,21 @@ class Session:
         """
         ...
 
-        def tables(self) -> list[str]:
-            """Return the list of currently registered table names (sorted)."""
-            ...
+    def tables(self) -> list[str]:
+        """Return the list of currently registered table names (sorted)."""
+        ...
 
-        def deregister(self, name: str) -> None:
-            """Deregister a previously registered table name.
+    def deregister(self, name: str) -> None:
+        """Deregister a previously registered table name.
 
-            Raises
-            ------
-            ValueError:
-                If `name` is empty.
-            KeyError:
-                If `name` is not registered.
-            """
-            ...
+        Raises
+        ------
+        ValueError:
+            If `name` is empty.
+        KeyError:
+            If `name` is not registered.
+        """
+        ...
 
 class TimeSeriesTable:
     @classmethod
