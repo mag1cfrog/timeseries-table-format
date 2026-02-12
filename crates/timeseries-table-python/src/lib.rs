@@ -593,9 +593,9 @@ mod _native {
                     })?;
 
                     {
-                        let t = tables
-                            .lock()
-                            .map_err(|_| DeregisterError::Runtime("Session tables lock poisoned"))?;
+                        let t = tables.lock().map_err(|_| {
+                            DeregisterError::Runtime("Session tables lock poisoned")
+                        })?;
 
                         if !t.contains(name.as_str()) {
                             return Err(DeregisterError::NotFound(name));
