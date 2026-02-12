@@ -9,15 +9,19 @@ mod _native {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
+    use datafusion::arrow::array::Scalar;
+    use datafusion::arrow::error::ArrowError;
+    use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
     use pyo3::{
         Bound, PyErr, PyResult, Python,
-        exceptions::{PyRuntimeError, PyValueError},
+        exceptions::{PyImportError, PyRuntimeError, PyTypeError, PyValueError},
+        ffi::PyObject,
         prelude::*,
         pyclass, pymethods,
-        types::{PyDict, PyModule, PyType},
+        types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
     };
 
     use timeseries_table_datafusion::TsTableProvider;
@@ -46,6 +50,87 @@ mod _native {
         DataFusion(DFError),
         RestoreFailed { original: DFError, restore: DFError },
         Runtime(&'static str),
+    }
+
+    enum QueryParams {
+        Positional(Vec<ScalarValue>),
+        Named(Vec<(String, ScalarValue)>),
+    }
+
+    fn py_any_to_scalar_value(v: &Bound<'_, pyo3::types::PyAny>) -> PyResult<ScalarValue> {
+        use pyo3::types;
+
+        if v.is_none() {
+            return Ok(ScalarValue::Null);
+        }
+
+        // bool must come before int (since bool is a subclass of int in Python)
+        if v.is_instance_of::<types::PyBool>() {
+            let b: bool = v.extract()?;
+            return Ok(ScalarValue::Boolean(Some(b)));
+        }
+
+        if v.is_instance_of::<types::PyInt>() {
+            let n: i64 = v.extract().map_err(|e| {
+                PyValueError::new_err(format!("int parameter out of i64 range: {e}"))
+            })?;
+            return Ok(ScalarValue::Int64(Some(n)));
+        }
+
+        if v.is_instance_of::<types::PyFloat>() {
+            let f: f64 = v.extract()?;
+            return Ok(ScalarValue::Float64(Some(f)));
+        }
+
+        if v.is_instance_of::<types::PyString>() {
+            let s: String = v.extract()?;
+            return Ok(ScalarValue::Utf8(Some(s)));
+        }
+
+        if v.is_instance_of::<types::PyBytes>() {
+            let b: Vec<u8> = v.extract()?;
+            return Ok(ScalarValue::Binary(Some(b)));
+        }
+
+        Err(PyTypeError::new_err(
+            "params values must be one of: None, bool, int (i64), float, str, bytes",
+        ))
+    }
+
+    fn parse_query_params(params: &Bound<'_, pyo3::types::PyAny>) -> PyResult<QueryParams> {
+        if let Ok(d) = params.cast::<PyDict>() {
+            let mut out: Vec<(String, ScalarValue)> = Vec::with_capacity(d.len());
+            for (k, v) in d.iter() {
+                let key: String = k
+                    .extract()
+                    .map_err(|_| PyTypeError::new_err("params dict keys must be str"))?;
+
+                let key = key.strip_prefix('$').unwrap_or(key.as_str()).to_string();
+                let sv = py_any_to_scalar_value(&v)?;
+                out.push((key, sv));
+            }
+            return Ok(QueryParams::Named(out));
+        }
+
+        if let Ok(l) = params.cast::<PyList>() {
+            let mut out: Vec<ScalarValue> = Vec::with_capacity(l.len());
+            for v in l.iter() {
+                out.push(py_any_to_scalar_value(&v)?);
+            }
+            return Ok(QueryParams::Positional(out));
+        }
+
+        if let Ok(t) = params.cast::<PyTuple>() {
+            let mut out: Vec<ScalarValue> = Vec::with_capacity(t.len());
+            for v in t.iter() {
+                out.push(py_any_to_scalar_value(&v)?);
+            }
+            return Ok(QueryParams::Positional(out));
+        }
+
+        Err(PyTypeError::new_err(
+            "params must be a dict (named &param) or list/tuple (positional $1, $2, ...)",
+        ))
     }
 
     fn table_error_to_py_with_root(
