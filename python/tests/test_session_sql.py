@@ -1,5 +1,6 @@
 import datetime
 import threading
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -31,7 +32,8 @@ def test_session_sql_named_params():
 def test_session_sql_params_kw_only_enforced():
     sess = ttf.Session()
     with pytest.raises(TypeError):
-        sess.sql("select 1 as x", [1])
+        sql: Any = sess.sql
+        sql("select 1 as x", [1])  # type: ignore[too-many-positional-arguments]
 
 
 @pytest.mark.parametrize("params", [1, {1}, object()])
