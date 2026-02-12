@@ -14,7 +14,9 @@ import timeseries_table_format as ttf
 def _write_tiny_prices_parquet(path: Path) -> None:
     table = pa.table(
         {
-            "ts": pa.array([0, 3_600 * 1_000_000, 7_200 * 1_000_000], type=pa.timestamp("us")),
+            "ts": pa.array(
+                [0, 3_600 * 1_000_000, 7_200 * 1_000_000], type=pa.timestamp("us")
+            ),
             "symbol": pa.array(["NVDA", "NVDA", "NVDA"], type=pa.string()),
             "close": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
         }
