@@ -128,7 +128,7 @@ mod _native {
         }
 
         Err(PyTypeError::new_err(
-            "params must be a dict (named &param) or list/tuple (positional $1, $2, ...)",
+            "params must be a dict (named $param) or list/tuple (positional $1, $2, ...)",
         ))
     }
 
