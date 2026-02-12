@@ -19,13 +19,34 @@ From the repo root:
 ```bash
 cd python
 uv venv -p 3.12 .venv
-uv pip install -p .venv/bin/python -e .
+uv pip install -p .venv/bin/python -e . --group dev
 ```
 
 ## Smoke test
 
 ```bash
 .venv/bin/python -c "import timeseries_table_format as m; print(m.__version__); print(m.Session); print(m.TimeSeriesTable)"
+```
+
+## Run tests (pytest)
+
+Tests are end-to-end and generate tiny Parquet files on the fly via `pyarrow` (no fixtures, no network at runtime).
+
+```bash
+cd python
+.venv/bin/python -m pytest
+```
+
+### Alternative: build with `maturin` directly
+
+If you prefer calling `maturin` yourself (instead of via `uv pip install`), run:
+
+```bash
+cd python
+uv venv -p 3.12 .venv
+uv pip install -p .venv/bin/python pyarrow --group dev
+uv run -p .venv/bin/python maturin develop -m pyproject.toml
+.venv/bin/python -m pytest
 ```
 
 ## SQL queries (Session)
