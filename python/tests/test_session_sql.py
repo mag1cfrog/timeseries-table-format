@@ -129,14 +129,14 @@ def test_session_sql_missing_table_maps_to_datafusion_error():
 
 def test_session_sql_concurrent_calls_do_not_deadlock_or_crash():
     sess = ttf.Session()
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def worker() -> None:
         try:
             for _ in range(20):
                 out = sess.sql("select 1 as x")
                 assert out["x"].to_pylist() == [1]
-        except BaseException as e:
+        except Exception as e:
             errors.append(e)
 
     threads = [threading.Thread(target=worker) for _ in range(10)]
@@ -162,7 +162,7 @@ def test_session_register_and_sql_concurrently_stays_consistent(tmp_path):
     sess = ttf.Session()
     sess.register_parquet("dim", str(dim_path))
 
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
     start = threading.Event()
 
     def registrar() -> None:
@@ -170,7 +170,7 @@ def test_session_register_and_sql_concurrently_stays_consistent(tmp_path):
             start.wait(timeout=1.0)
             for _ in range(20):
                 sess.register_parquet("dim", str(dim_path))
-        except BaseException as e:
+        except Exception as e:
             errors.append(e)
 
     def querier() -> None:
@@ -179,7 +179,7 @@ def test_session_register_and_sql_concurrently_stays_consistent(tmp_path):
             for _ in range(50):
                 out = sess.sql("select count(*) as n from dim")
                 assert out["n"].to_pylist() == [2]
-        except BaseException as e:
+        except Exception as e:
             errors.append(e)
 
     t1 = threading.Thread(target=registrar)
