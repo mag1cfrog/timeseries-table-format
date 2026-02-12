@@ -28,7 +28,7 @@
 | **Coverage tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
 | **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
 | **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
-| **Pure Rust** | Pure Rust, no JVM, no Python runtime—just `cargo install` and go |
+| **Rust core** | Rust-first (CLI + libraries), with optional Python bindings for local workflows |
 | **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
 
 ---
@@ -52,7 +52,13 @@ But if you're working with **time-series specifically**, you might have noticed:
 - Financial data stores where overlap = disaster
 - Learning how modern table formats work (well-documented internals!)
 
-> **Note:** A bucket (1s, 1m, 1h, etc.) defines the *logical time slot* for coverage tracking—not the sample rate. Choose a bucket that matches your data’s natural resolution: hourly bars → `1h`, minute candles → `1m`. Multiple records in the same slot are treated as overlap (v0.1 rejects duplicates; merge policies planned for v0.2).
+> **Bucket size (important):** `bucket=1h` does **not** mean your data is “hourly”.
+>
+> The bucket is the time grid used for **coverage** (“do I have data for this range?”) and **overlap checks** (“did I already ingest this time window?”).
+>
+> Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00). In v0.1, appending two rows for the same entity in the same bucket is treated as **overlap** and will be rejected.
+>
+> Rule of thumb: choose a bucket so you normally have **at most one row per entity per bucket** (minute bars → `1m`, second-level data → `1s`, etc.).
 
 ---
 
@@ -111,6 +117,10 @@ tstable query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
 ```
 
 See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full command reference.
+
+### Python bindings
+
+For a Python-first workflow (create/append/query and returning `pyarrow.Table`), see `python/README.md`.
 
 ### Rust API
 
