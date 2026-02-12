@@ -22,3 +22,7 @@ module-name = "timeseries_table_format._native"
 dev = [
     "pytest>=9.0.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra"]
