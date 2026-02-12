@@ -53,6 +53,8 @@ sess.sql("select 1 as x where 1 = $1", params=[1])
 sess.sql("select 1 as x where 1 = $a", params={"a": 1})
 ```
 
+Supported Python parameter value types: `None`, `bool`, `int` (i64 range), `float`, `str`, `bytes`.
+
 If a placeholder appears in a `SELECT` projection without type context, you may need an explicit cast:
 
 ```python

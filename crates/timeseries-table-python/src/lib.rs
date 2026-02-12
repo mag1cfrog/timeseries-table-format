@@ -437,6 +437,8 @@ mod _native {
         ///     - Named: pass a dict to bind `$name` placeholders (keys may optionally start with `$`).
         ///       Example: `sess.sql("select * from t where x = $a", params={"a": 1})`
         ///
+        ///     Supported Python value types: `None`, `bool`, `int` (i64 range), `float`, `str`, `bytes`.
+        ///
         /// Notes
         /// -----
         /// DataFusion infers placeholder types from context when possible (e.g. in `WHERE` clauses).
