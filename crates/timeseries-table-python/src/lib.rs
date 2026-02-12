@@ -189,6 +189,9 @@ mod _native {
     #[pymethods]
     impl Session {
         #[new]
+        /// Create a new DataFusion-backed SQL session.
+        ///
+        /// The session owns an internal Tokio runtime used to run async Rust internals.
         fn new() -> PyResult<Self> {
             let rt = tokio_runner::global_runtime()?;
 
@@ -203,6 +206,31 @@ mod _native {
             })
         }
 
+        /// Register a time-series table under a name for SQL queries.
+        ///
+        /// Parameters
+        /// ----------
+        /// name:
+        ///     SQL table name to register under.
+        /// table_root:
+        ///     Filesystem directory containing the table (created by `TimeSeriesTable.create`).
+        ///
+        /// Notes
+        /// -----
+        /// If `name` is already registered, it is replaced atomically (with rollback on failure).
+        ///
+        /// The table must have a canonical logical schema adopted (typically after the first
+        /// successful append). If the table has never had data appended, registration may fail with
+        /// a `DataFusionError`.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError:
+        ///     If `name` is empty.
+        /// TimeseriesTableError:
+        ///     If opening the table fails. The exception includes a `table_root` attribute.
+        /// DataFusionError:
+        ///     If provider creation or registration fails.
         fn register_tstable(
             &self,
             py: Python<'_>,
@@ -290,6 +318,25 @@ mod _native {
             )
         }
 
+        /// Register a Parquet file or directory under a name for SQL queries.
+        ///
+        /// Parameters
+        /// ----------
+        /// name:
+        ///     SQL table name to register under.
+        /// path:
+        ///     Filesystem path to a Parquet file or a directory of Parquet files.
+        ///
+        /// Notes
+        /// -----
+        /// If `name` is already registered, it is replaced atomically (with rollback on failure).
+        ///
+        /// Raises
+        /// ------
+        /// ValueError:
+        ///     If `name` or `path` is empty.
+        /// DataFusionError:
+        ///     If registration fails. The exception includes `name` and `path` attributes.
         fn register_parquet(&self, py: Python<'_>, name: String, path: String) -> PyResult<()> {
             if name.is_empty() {
                 return Err(PyValueError::new_err("name must be non-empty"));
@@ -492,6 +539,31 @@ mod _native {
     impl TimeSeriesTable {
         #[classmethod]
         #[pyo3(signature = (*, table_root, time_column, bucket, entity_columns=None, timezone=None))]
+        /// Create a new time-series table at `table_root`.
+        ///
+        /// Parameters
+        /// ----------
+        /// table_root:
+        ///     Filesystem directory where the table will be created.
+        /// time_column:
+        ///     Name of the timestamp column.
+        /// bucket:
+        ///     Time bucket specification string such as `"1h"`, `"5m"`, `"30s"`, `"1d"`.
+        /// entity_columns:
+        ///     Column names that define the entity identity for this table. For v0, a table is
+        ///     effectively scoped to a single entity identity; all appended segments must match the
+        ///     entity values established by the first successful append.
+        /// timezone:
+        ///     Optional timezone name for bucketing; `None` means no timezone normalization.
+        ///
+        /// Notes
+        /// -----
+        /// The table's canonical schema is typically adopted on the first successful append.
+        ///
+        /// Raises
+        /// ------
+        /// TimeseriesTableError:
+        ///     If creation fails. The exception includes a `table_root` attribute.
         fn create(
             _cls: &Bound<'_, PyType>,
             py: Python<'_>,
@@ -550,6 +622,12 @@ mod _native {
         }
 
         #[classmethod]
+        /// Open an existing time-series table at `table_root`.
+        ///
+        /// Raises
+        /// ------
+        /// TimeseriesTableError:
+        ///     If opening fails. The exception includes a `table_root` attribute.
         fn open(_cls: &Bound<'_, PyType>, py: Python<'_>, table_root: String) -> PyResult<Self> {
             use crate::tokio_runner;
 
@@ -580,14 +658,19 @@ mod _native {
             })
         }
 
+        /// Return the table root path.
         fn root(&self) -> String {
             self.table_root.clone()
         }
 
+        /// Return the current table version.
         fn version(&self) -> u64 {
             self.inner.state().version
         }
 
+        /// Return the index specification as a Python dict.
+        ///
+        /// Keys: `timestamp_column`, `entity_columns`, `bucket`, `timezone`.
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
             use timeseries_table_core::transaction_log::TimeBucket;
 
@@ -610,6 +693,32 @@ mod _native {
         }
 
         #[pyo3(signature = (parquet_path, time_column=None, copy_if_outside=true))]
+        /// Append a Parquet segment to the table.
+        ///
+        /// Parameters
+        /// ----------
+        /// parquet_path:
+        ///     Path to a Parquet file.
+        /// time_column:
+        ///     Optional override for the timestamp column name in the Parquet file.
+        /// copy_if_outside:
+        ///     If `True`, copies the file under the table root before appending.
+        ///     If `False`, the path must already be under the table root (parent traversal via
+        ///     `..` is rejected).
+        ///
+        /// Returns
+        /// -------
+        /// int
+        ///     The new table version after the append.
+        ///
+        /// Raises
+        /// ------
+        /// CoverageOverlapError:
+        ///     If the segment overlaps existing coverage.
+        /// SchemaMismatchError:
+        ///     If the segment schema does not match the table schema.
+        /// TimeseriesTableError:
+        ///     For other table errors. The exception includes a `table_root` attribute.
         fn append_parquet(
             &mut self,
             py: Python<'_>,
