@@ -1,0 +1,164 @@
+name: Python dist (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      os-json:
+        description: JSON array of runner labels.
+        required: false
+        type: string
+        default: '["ubuntu-latest","macos-latest","windows-latest"]'
+      python-versions-json:
+        description: JSON array of Python versions.
+        required: false
+        type: string
+        default: '["3.12","3.13"]'
+      include-sdist:
+        description: Build sdist (once, on ubuntu + sdist-python-version).
+        required: false
+        type: boolean
+        default: false
+      sdist-python-version:
+        description: Which Python version should build sdist on ubuntu.
+        required: false
+        type: string
+        default: "3.12"
+      run-pytest:
+        description: Install built wheel and run pytest.
+        required: false
+        type: boolean
+        default: true
+      artifact-prefix:
+        description: Artifact name prefix.
+        required: false
+        type: string
+        default: "dist"
+      maturin-args:
+        description: Args passed to maturin build.
+        required: false
+        type: string
+        default: "--release -o dist"
+      sdist-args:
+        description: Args passed to maturin sdist.
+        required: false
+        type: string
+        default: "-o dist"
+      dev-prerelease:
+        description: Rewrite Cargo package version to a prerelease snapshot (for TestPyPI).
+        required: false
+        type: boolean
+        default: false
+      dev-prerelease-label:
+        description: SemVer prerelease label to use when dev-prerelease is true (e.g. alpha, beta, rc).
+        required: false
+        type: string
+        default: "dev"
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os-json) }}
+        python-version: ${{ fromJSON(inputs.python-versions-json) }}
+    env:
+      # Speed up release builds (especially on Windows) by disabling debuginfo.
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: python-dist-v1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+
+      - name: Set snapshot version (Cargo)
+        if: ${{ inputs.dev-prerelease }}
+        shell: bash
+        env:
+          DEV_LABEL: ${{ inputs.dev-prerelease-label }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          
+          cargo_toml = pathlib.Path("crates/timeseries-table-python/Cargo.toml")
+          text = cargo_toml.read_text(encoding="utf-8")
+          m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+          if not m:
+              raise SystemExit("Could not find version in crates/timeseries-table-python/Cargo.toml")
+          base = m.group(1)
+          core = base.split("-", 1)[0]
+          label = os.environ["DEV_LABEL"]
+          run_number = int(os.environ["GITHUB_RUN_NUMBER"])
+          run_attempt = int(os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
+          snapshot = run_number * 100 + run_attempt
+          new_version = f"{core}-{label}.{snapshot}"
+          text2, n = re.subn(
+              r'(?m)^version\s*=\s*"([^"]+)"',
+              f'version = "{new_version}"',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("Failed to rewrite version in Cargo.toml")
+          cargo_toml.write_text(text2, encoding="utf-8")
+          print(f"Using snapshot version: {base} -> {new_version}")
+          PY
+
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: build
+          args: ${{ inputs.maturin-args }}
+
+      - name: Build sdist (once)
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: ${{ inputs.sdist-args }}
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: python/dist/*
+          if-no-files-found: error
+
+      - name: Install wheel + run pytest
+        if: ${{ inputs.run-pytest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install python/dist/*.whl pytest
+          python -m pytest -q -c python/pyproject.toml python/tests

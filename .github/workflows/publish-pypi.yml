@@ -1,0 +1,67 @@
+name: Publish (PyPI)
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "timeseries-table-python-v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/python-dist.yml
+    permissions:
+      actions: write
+      contents: read
+    with:
+      include-sdist: true
+      run-pytest: true
+      artifact-prefix: dist
+
+  publish:
+    name: publish (PyPI)
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: pypi
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo version
+        if: ${{ github.ref_type == 'tag' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          expected="${tag#timeseries-table-python-v}"
+          actual="$(
+            grep -E '^version\\s*=\\s*\"' crates/timeseries-table-python/Cargo.toml \
+              | head -n1 \
+              | sed -E 's/.*\"([^\"]+)\".*/\\1/'
+          )"
+          if [[ "${tag}" != timeseries-table-python-v* ]]; then
+            echo "Unexpected tag format: ${tag}"
+            exit 1
+          fi
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Tag/version mismatch: tag=${expected} cargo=${actual}"
+            exit 1
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
