@@ -31,6 +31,8 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::object_store::ObjectStoreUrl;
 
+use object_store::path::Path as ObjectStorePath;
+
 use datafusion::logical_expr::Expr;
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
@@ -268,9 +270,9 @@ impl TableProvider for TsTableProvider {
         let selected = self.prune_segments_by_time(segments, filters);
         for seg in selected {
             let abs = self.segment_abs_path(seg)?;
-            let abs = tokio::fs::canonicalize(&abs).await.map_err(|e| {
+            let abs = std::path::absolute(&abs).map_err(|e| {
                 df_exec(format!(
-                    "failed to canonicalize segment path {}: {}",
+                    "failed to make segment path absolute {}: {}",
                     abs.display(),
                     e
                 ))
@@ -278,9 +280,11 @@ impl TableProvider for TsTableProvider {
 
             let file_size = self.segment_file_size(seg).await?;
 
-            // PartitionedFile takes a "location" string. For local filesystem Parquet scans, passing
-            // an absolute path is fine (DataFusion's local filesystem object store can open it).
-            let pf = PartitionedFile::new(abs.display().to_string(), file_size);
+            // PartitionedFile expects an object_store Path string delimited by `/` (file URI
+            // semantics). Convert from the platform-native filesystem path to avoid Windows
+            // path quirks (e.g. `\\?\` canonicalization prefixes).
+            let location = ObjectStorePath::from_absolute_path(&abs).map_err(df_external)?;
+            let pf = PartitionedFile::new(location.as_ref(), file_size);
 
             builder = builder.with_file(pf);
         }
