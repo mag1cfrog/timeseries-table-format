@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: true
+      upload-artifacts:
+        description: Upload dist artifacts (wheels/sdists) to Actions.
+        required: false
+        type: boolean
+        default: true
       artifact-prefix:
         description: Artifact name prefix.
         required: false
@@ -148,6 +153,7 @@ jobs:
           args: ${{ inputs.sdist-args }}
 
       - name: Upload dist artifacts
+        if: ${{ inputs.upload-artifacts }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}
