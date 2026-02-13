@@ -35,6 +35,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13"]
+    env:
+      # Speed up release builds (especially on Windows) by disabling debuginfo.
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +48,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: python-wheels-v1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
 
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
