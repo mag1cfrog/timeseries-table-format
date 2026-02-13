@@ -20,7 +20,10 @@ module-name = "timeseries_table_format._native"
 
 [dependency-groups]
 dev = [
+    "ruff",
+    "ty",
     "pytest>=9.0.2",
+    "maturin>=1.11.0,<2.0",
 ]
 
 [tool.pytest.ini_options]
