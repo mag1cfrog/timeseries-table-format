@@ -41,9 +41,14 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           expected="${tag#timeseries-table-python-v}"
           actual="$(
-            grep -E '^version\\s*=\\s*\"' crates/timeseries-table-python/Cargo.toml \
-              | head -n1 \
-              | sed -E 's/.*\"([^\"]+)\".*/\\1/'
+            python3 - <<'PY'
+            import pathlib
+            import tomllib
+
+            cargo_toml = pathlib.Path("crates/timeseries-table-python/Cargo.toml").read_text(encoding="utf-8")
+            data = tomllib.loads(cargo_toml)
+            print(data["package"]["version"])
+            PY
           )"
           if [[ "${tag}" != timeseries-table-python-v* ]]; then
             echo "Unexpected tag format: ${tag}"
