@@ -12,7 +12,7 @@ on:
         description: JSON array of Python versions.
         required: false
         type: string
-        default: '["3.10","3.11","3.12","3.13"]'
+        default: '["3.10","3.11","3.12","3.13","3.14"]'
       include-sdist:
         description: Build sdist (once, on ubuntu + sdist-python-version).
         required: false
