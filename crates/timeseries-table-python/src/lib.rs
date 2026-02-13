@@ -885,21 +885,21 @@ mod _native {
                                     .any(|c| matches!(c, Component::ParentDir))
                                 {
                                     return Err(AppendParquetError::ValueError(format!(
-                                        "parquet_path must not contain '..' when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                        "parquet_path must not contain '..' when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err})"
                                     )));
                                 }
                                 src_path.to_path_buf()
                             }
                             None => {
                                 return Err(AppendParquetError::ValueError(format!(
-                                    "parquet_path must be under table_root when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                    "parquet_path must be under table_root when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err})"
                                 )));
                             }
                         };
 
                         if rel.as_os_str().is_empty() {
                             return Err(AppendParquetError::ValueError(format!(
-                                "parquet_path must point to a file under table_root, not the root itself (parquet_path={parquet_path:?}, table_root={table_root_for_err:?})"
+                                "parquet_path must point to a file under table_root, not the root itself (parquet_path={parquet_path:?}, table_root={table_root_for_err})"
                             )));
                         }
 
