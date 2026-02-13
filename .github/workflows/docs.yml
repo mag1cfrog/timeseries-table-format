@@ -37,6 +37,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            docs-site/requirements.txt
+            python/pyproject.toml
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,17 +65,20 @@ jobs:
       - name: Install docs dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r docs-site/requirements.txt
+          python -m pip install -r docs-site/requirements.txt maturin
 
-      - name: Install package (build extension)
+      - name: Build + install extension (debug, no deps)
         run: |
-          python -m pip install ./python
+          rm -rf docs-site/.wheels
+          maturin build --debug -m python/pyproject.toml -o docs-site/.wheels
+          python -m pip install --no-deps docs-site/.wheels/*.whl
 
       - name: Build docs
         run: |
           mkdocs build --strict -f docs-site/mkdocs.yml
 
       - name: Upload Pages artifact
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs-site/site
@@ -86,4 +93,3 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
-
