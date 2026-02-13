@@ -69,11 +69,11 @@ jobs:
 
       - name: Build + install extension (debug, no deps)
         run: |
-          rm -rf docs-site/.wheels
+          rm -rf ../docs-site/.wheels
           # Force a debug-style build for faster docs CI. (maturin build defaults can vary depending
           # on invocation/config; `--profile dev` makes the intent explicit.)
           maturin build --profile dev -i python -o ../docs-site/.wheels
-          python -m pip install --no-deps docs-site/.wheels/*.whl
+          python -m pip install --no-deps ../docs-site/.wheels/*.whl
         working-directory: python
 
       - name: Build docs
