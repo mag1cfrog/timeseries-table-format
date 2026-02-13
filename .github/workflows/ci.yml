@@ -204,6 +204,8 @@ jobs:
       python-versions-json: '["3.10","3.11","3.12","3.13","3.14"]'
       include-sdist: false
       run-pytest: true
+      # PR validation: debug wheels compile faster; release wheels are built in publish workflows.
+      maturin-args: "-o dist"
       artifact-prefix: ci-wheel
 
   ci-summary:
