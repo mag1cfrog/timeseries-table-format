@@ -12,6 +12,12 @@ on:
       - "crates/timeseries-table-python/**/*.rs"
       - "crates/timeseries-table-python/Cargo.toml"
       - "crates/timeseries-table-python/build.rs"
+      - "crates/timeseries-table-core/**/*.rs"
+      - "crates/timeseries-table-core/Cargo.toml"
+      - "crates/timeseries-table-core/build.rs"
+      - "crates/timeseries-table-datafusion/**/*.rs"
+      - "crates/timeseries-table-datafusion/Cargo.toml"
+      - "crates/timeseries-table-datafusion/build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
   workflow_dispatch: {}
