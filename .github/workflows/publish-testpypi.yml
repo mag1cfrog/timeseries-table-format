@@ -1,11 +1,32 @@
 name: Publish (TestPyPI)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      snapshot:
+        description: Publish a unique prerelease snapshot version (recommended).
+        required: true
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths:
+      - "python/**/*.py"
+      - "python/**/*.pyi"
+      - "python/pyproject.toml"
+      - "python/uv.lock"
+      - "python/.python-version"
+      - "crates/timeseries-table-python/**/*.rs"
       - "crates/timeseries-table-python/Cargo.toml"
+      - "crates/timeseries-table-python/build.rs"
+      - "crates/timeseries-table-core/**/*.rs"
+      - "crates/timeseries-table-core/Cargo.toml"
+      - "crates/timeseries-table-core/build.rs"
+      - "crates/timeseries-table-datafusion/**/*.rs"
+      - "crates/timeseries-table-datafusion/Cargo.toml"
+      - "crates/timeseries-table-datafusion/build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +42,8 @@ jobs:
       include-sdist: true
       run-pytest: true
       artifact-prefix: dist
+      dev-prerelease: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.snapshot) }}
+      dev-prerelease-label: alpha
 
   publish:
     name: publish (TestPyPI)
