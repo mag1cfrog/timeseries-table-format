@@ -1,0 +1,68 @@
+name: Python wheels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "python/**/*.py"
+      - "python/**/*.pyi"
+      - "python/pyproject.toml"
+      - "python/uv.lock"
+      - "python/.python-version"
+      - "crates/timeseries-table-python/**/*.rs"
+      - "crates/timeseries-table-python/Cargo.toml"
+      - "crates/timeseries-table-python/build.rs"
+      - "crates/timeseries-table-core/**/*.rs"
+      - "crates/timeseries-table-core/Cargo.toml"
+      - "crates/timeseries-table-core/build.rs"
+      - "crates/timeseries-table-datafusion/**/*.rs"
+      - "crates/timeseries-table-datafusion/Cargo.toml"
+      - "crates/timeseries-table-datafusion/build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wheel-and-pytest:
+    name: wheel+pytest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: build
+          args: --release -o dist
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+      - name: Install wheel + run pytest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install python/dist/*.whl pytest
+          python -m pytest -q -c python/pyproject.toml python/tests

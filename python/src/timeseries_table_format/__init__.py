@@ -1,6 +1,27 @@
 from . import _native as _native
-from ._native import *
 
 __doc__ = _native.__doc__
-if hasattr(_native, "__all__"):
-    __all__ = _native.__all__
+
+__version__ = _native.__version__
+
+TimeseriesTableError = _native.TimeseriesTableError
+StorageError = _native.StorageError
+ConflictError = _native.ConflictError
+CoverageOverlapError = _native.CoverageOverlapError
+SchemaMismatchError = _native.SchemaMismatchError
+DataFusionError = _native.DataFusionError
+
+Session = _native.Session
+TimeSeriesTable = _native.TimeSeriesTable
+
+__all__ = [
+    "__version__",
+    "TimeseriesTableError",
+    "StorageError",
+    "ConflictError",
+    "CoverageOverlapError",
+    "SchemaMismatchError",
+    "DataFusionError",
+    "Session",
+    "TimeSeriesTable",
+]
