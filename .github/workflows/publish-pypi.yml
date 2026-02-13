@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
   push:
     tags:
-      - "py-v*"
+      - "timeseries-table-python-v*"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -89,13 +89,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          expected="${tag#py-v}"
+          expected="${tag#timeseries-table-python-v}"
           actual="$(
             grep -E '^version\\s*=\\s*\"' crates/timeseries-table-python/Cargo.toml \
               | head -n1 \
               | sed -E 's/.*\"([^\"]+)\".*/\\1/'
           )"
-          if [[ "${tag}" != py-v* ]]; then
+          if [[ "${tag}" != timeseries-table-python-v* ]]; then
             echo "Unexpected tag format: ${tag}"
             exit 1
           fi
