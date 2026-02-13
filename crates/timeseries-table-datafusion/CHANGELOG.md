@@ -1,5 +1,20 @@
 # Changelog
 All notable changes to timeseries-table-datafusion will be documented in this file.
+## 0.1.1
+
+
+### Bug Fixes
+
+- Update path handling for Windows compatibility in TsTableProvider ([9106eec](https://github.com/mag1cfrog/timeseries-table-format/commit/9106eecbbced1590127a3d54964f0cb5aadb43d5))
+
+- Refine path handling for Windows compatibility in TsTableProvider ([fd96d40](https://github.com/mag1cfrog/timeseries-table-format/commit/fd96d400b955a3a73f3cbc5b2f219036b3335b23))
+
+
+### Features
+
+- Add object_store dependency to Cargo.toml ([fa2c9cb](https://github.com/mag1cfrog/timeseries-table-format/commit/fa2c9cb5ee4af6461f25bed49b5bb7c0d317620f))
+
+
 ## 0.1.0
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-format"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Append-only time-series table format with gap/overlap tracking"
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ datafusion = ["dep:timeseries-table-datafusion"]
 
 [dependencies]
 timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.0", optional = true }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.1", optional = true }
 
 [lints]
 workspace = true
