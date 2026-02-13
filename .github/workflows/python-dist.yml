@@ -43,6 +43,16 @@ on:
         required: false
         type: string
         default: "-o dist"
+      dev-prerelease:
+        description: Rewrite Cargo package version to a prerelease snapshot (for TestPyPI).
+        required: false
+        type: boolean
+        default: false
+      dev-prerelease-label:
+        description: SemVer prerelease label to use when dev-prerelease is true (e.g. alpha, beta, rc).
+        required: false
+        type: string
+        default: "alpha"
 
 jobs:
   build:
@@ -85,6 +95,40 @@ jobs:
         run: |
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+
+      - name: Set snapshot version (Cargo)
+        if: ${{ inputs.dev-prerelease }}
+        shell: bash
+        env:
+          DEV_LABEL: ${{ inputs.dev-prerelease-label }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          
+          cargo_toml = pathlib.Path("crates/timeseries-table-python/Cargo.toml")
+          text = cargo_toml.read_text(encoding="utf-8")
+          m = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', text)
+          if not m:
+              raise SystemExit("Could not find version in crates/timeseries-table-python/Cargo.toml")
+          base = m.group(1)
+          core = base.split("-", 1)[0]
+          label = os.environ["DEV_LABEL"]
+          run_number = os.environ["GITHUB_RUN_NUMBER"]
+          new_version = f"{core}-{label}.{run_number}"
+          text2, n = re.subn(
+              r'(?m)^version\\s*=\\s*"([^"]+)"',
+              f'version = "{new_version}"',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("Failed to rewrite version in Cargo.toml")
+          cargo_toml.write_text(text2, encoding="utf-8")
+          print(f"Using snapshot version: {base} -> {new_version}")
+          PY
 
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
