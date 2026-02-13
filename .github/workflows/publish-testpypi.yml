@@ -43,7 +43,7 @@ jobs:
       run-pytest: true
       artifact-prefix: dist
       dev-prerelease: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.snapshot) }}
-      dev-prerelease-label: alpha
+      dev-prerelease-label: dev
 
   publish:
     name: publish (TestPyPI)
