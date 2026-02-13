@@ -52,7 +52,7 @@ on:
         description: SemVer prerelease label to use when dev-prerelease is true (e.g. alpha, beta, rc).
         required: false
         type: string
-        default: "alpha"
+        default: "dev"
 
 jobs:
   build:
@@ -110,16 +110,18 @@ jobs:
           
           cargo_toml = pathlib.Path("crates/timeseries-table-python/Cargo.toml")
           text = cargo_toml.read_text(encoding="utf-8")
-          m = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', text)
+          m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
           if not m:
               raise SystemExit("Could not find version in crates/timeseries-table-python/Cargo.toml")
           base = m.group(1)
           core = base.split("-", 1)[0]
           label = os.environ["DEV_LABEL"]
-          run_number = os.environ["GITHUB_RUN_NUMBER"]
-          new_version = f"{core}-{label}.{run_number}"
+          run_number = int(os.environ["GITHUB_RUN_NUMBER"])
+          run_attempt = int(os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
+          snapshot = run_number * 100 + run_attempt
+          new_version = f"{core}-{label}.{snapshot}"
           text2, n = re.subn(
-              r'(?m)^version\\s*=\\s*"([^"]+)"',
+              r'(?m)^version\s*=\s*"([^"]+)"',
               f'version = "{new_version}"',
               text,
               count=1,
