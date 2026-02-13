@@ -185,7 +185,7 @@ jobs:
           set -euo pipefail
           rm -rf python/dist
           # Build a non-release wheel here to avoid recompiling in a separate profile.
-          # The full release wheel matrix is validated on `push` to `main` in python-wheels.yml.
+          # The full release wheel matrix is validated by the publish workflows.
           (cd python && .venv/bin/python -m maturin build -o dist -i .venv/bin/python)
           venv_dir="$(mktemp -d)"
           uv venv -p 3.12 "${venv_dir}"
