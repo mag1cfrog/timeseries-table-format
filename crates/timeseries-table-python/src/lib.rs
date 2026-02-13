@@ -178,6 +178,13 @@ mod _native {
         py_err
     }
 
+    /// SQL session backed by DataFusion.
+    ///
+    /// Use `Session` to register one or more tables (including multiple time-series tables) and
+    /// run SQL queries—joins included. Query results are returned to Python as a `pyarrow.Table`.
+    ///
+    /// The Python API is synchronous. Internally, long-running Rust operations run on an
+    /// internal Tokio runtime and release the GIL.
     #[pyclass]
     struct Session {
         rt: Arc<tokio::runtime::Runtime>,
@@ -633,6 +640,12 @@ mod _native {
         }
     }
 
+    /// Local filesystem time-series table rooted at `table_root`.
+    ///
+    /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Parquet). For SQL
+    /// querying across one or more registered tables, use `Session`.
+    ///
+    /// Appends are overlap-checked according to the table's time bucket configuration.
     #[pyclass]
     struct TimeSeriesTable {
         inner: timeseries_table_core::table::TimeSeriesTable,
