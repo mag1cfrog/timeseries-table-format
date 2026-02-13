@@ -206,6 +206,7 @@ jobs:
       run-pytest: true
       # PR validation: debug wheels compile faster; release wheels are built in publish workflows.
       maturin-args: "-o dist"
+      upload-artifacts: false
       artifact-prefix: ci-wheel
 
   ci-summary:
