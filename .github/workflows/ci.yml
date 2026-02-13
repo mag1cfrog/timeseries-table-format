@@ -152,11 +152,10 @@ jobs:
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
 
-      - name: Create venv + install lint deps
+      - name: Create venv + install dev deps
         run: |
           uv venv -p 3.12 .venv
-          uv pip install -p .venv/bin/python --upgrade pip
-          uv pip install -p .venv/bin/python ruff ty pyarrow maturin
+          uv pip install -p .venv/bin/python -e . --group dev -C build-args="--features test-utils"
 
       - name: ruff
         run: .venv/bin/ruff check src tests
@@ -165,9 +164,7 @@ jobs:
         run: .venv/bin/ty check src tests
 
       - name: pytest (editable, test-utils)
-        run: |
-          uv pip install -p .venv/bin/python -e . --group dev -C build-args="--features test-utils"
-          .venv/bin/python -m pytest -q
+        run: .venv/bin/python -m pytest -q
 
       - name: wheel smoke (linux, py3.12)
         working-directory: .
@@ -175,7 +172,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf python/dist
-          python/.venv/bin/maturin build --release -m python/pyproject.toml -o python/dist -i "${PYO3_PYTHON}"
+          python/.venv/bin/python -m maturin build --release -m python/pyproject.toml -o python/dist -i python/.venv/bin/python
           venv_dir="$(mktemp -d)"
           uv venv -p 3.12 "${venv_dir}"
           uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
