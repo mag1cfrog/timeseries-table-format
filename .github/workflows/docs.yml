@@ -70,7 +70,9 @@ jobs:
       - name: Build + install extension (debug, no deps)
         run: |
           rm -rf docs-site/.wheels
-          maturin build --debug -m python/pyproject.toml -o docs-site/.wheels
+          # Force a debug-style build for faster docs CI. (maturin build defaults can vary depending
+          # on invocation/config; `--profile dev` makes the intent explicit.)
+          maturin build -m python/pyproject.toml -o docs-site/.wheels --profile dev
           python -m pip install --no-deps docs-site/.wheels/*.whl
 
       - name: Build docs
