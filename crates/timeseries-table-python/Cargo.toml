@@ -11,7 +11,7 @@ pyo3 = { version = "0.28" }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 
-timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.0" }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.0" }
 
 
