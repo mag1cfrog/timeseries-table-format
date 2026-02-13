@@ -12,7 +12,7 @@ on:
         description: JSON array of Python versions.
         required: false
         type: string
-        default: '["3.12","3.13"]'
+        default: '["3.10","3.11","3.12","3.13","3.14"]'
       include-sdist:
         description: Build sdist (once, on ubuntu + sdist-python-version).
         required: false
@@ -25,6 +25,11 @@ on:
         default: "3.12"
       run-pytest:
         description: Install built wheel and run pytest.
+        required: false
+        type: boolean
+        default: true
+      upload-artifacts:
+        description: Upload dist artifacts (wheels/sdists) to Actions.
         required: false
         type: boolean
         default: true
@@ -148,6 +153,7 @@ jobs:
           args: ${{ inputs.sdist-args }}
 
       - name: Upload dist artifacts
+        if: ${{ inputs.upload-artifacts }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}

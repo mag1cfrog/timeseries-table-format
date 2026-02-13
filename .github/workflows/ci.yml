@@ -192,10 +192,27 @@ jobs:
           uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
           "${venv_dir}/bin/python" -m pytest -q -c python/pyproject.toml python/tests
 
+  python-wheel-matrix:
+    needs: [detect-python-changes]
+    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      os-json: '["ubuntu-latest"]'
+      python-versions-json: '["3.10","3.11","3.12","3.13","3.14"]'
+      include-sdist: false
+      run-pytest: true
+      # PR validation: debug wheels compile faster; release wheels are built in publish workflows.
+      maturin-args: "-o dist"
+      upload-artifacts: false
+      artifact-prefix: ci-wheel
+
   ci-summary:
     # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
-    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-quality-gate]
+    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-quality-gate, python-wheel-matrix]
     if: ${{ always() }}
     steps:
       - name: Summarize outcome
@@ -210,6 +227,8 @@ jobs:
           if [ "${{ needs['detect-python-changes'].outputs.code }}" = "true" ]; then
             echo "Python/binding changed; python gate result: ${{ needs['python-quality-gate'].result }}"
             [ "${{ needs['python-quality-gate'].result }}" = "success" ] || exit 1
+            echo "Python/binding changed; wheel matrix result: ${{ needs['python-wheel-matrix'].result }}"
+            [ "${{ needs['python-wheel-matrix'].result }}" = "success" ] || exit 1
           else
             echo "No Python/binding changes; skipping python checks."
           fi

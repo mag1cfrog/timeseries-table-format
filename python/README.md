@@ -12,7 +12,7 @@ v0 is local-filesystem-only (no S3/object store backend yet).
 
 Prereqs:
 - Rust toolchain installed
-- Python 3.12+
+- Python 3.10+ (CI targets 3.10–3.14; examples below use 3.12)
 - `uv` installed
 
 ```bash
