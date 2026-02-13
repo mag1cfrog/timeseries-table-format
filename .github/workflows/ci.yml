@@ -152,10 +152,17 @@ jobs:
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
 
-      - name: Create venv + install dev deps
+      - name: Rust cache (for extension build)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: rust-cache-v1
+
+      - name: Create venv + install deps (no extension build)
         run: |
           uv venv -p 3.12 .venv
-          uv pip install -p .venv/bin/python -e . --group dev -C build-args="--features test-utils"
+          uv sync --frozen --group dev --no-install-project
 
       - name: ruff
         run: .venv/bin/ruff check src tests
@@ -164,7 +171,9 @@ jobs:
         run: .venv/bin/ty check src tests
 
       - name: pytest (editable, test-utils)
-        run: .venv/bin/python -m pytest -q
+        run: |
+          uv sync --frozen --group dev -C build-args="--features test-utils"
+          .venv/bin/python -m pytest -q
 
       - name: wheel smoke (linux, py3.12)
         working-directory: .
