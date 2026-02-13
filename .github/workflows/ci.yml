@@ -28,6 +28,31 @@ jobs:
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - '**/build.rs'
+
+  detect-python-changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'python/**/*.py'
+              - 'python/**/*.pyi'
+              - 'python/pyproject.toml'
+              - 'python/uv.lock'
+              - 'python/.python-version'
+              - 'crates/timeseries-table-python/**/*.rs'
+              - 'crates/timeseries-table-python/Cargo.toml'
+              - 'crates/timeseries-table-python/build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
   
   rust-quality-gate:
     runs-on: ubuntu-latest
@@ -93,10 +118,68 @@ jobs:
       - name: test
         run: cargo nextest run --workspace --all-features --no-fail-fast
 
+  python-quality-gate:
+    runs-on: ubuntu-latest
+    needs: [detect-python-changes]
+    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    defaults:
+      run:
+        working-directory: python
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure PyO3 env
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "${libdir}" ]]; then
+            echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
+          fi
+
+      - name: ruff
+        run: uvx ruff check src tests
+
+      - name: ty
+        run: uvx ty check src tests
+
+      - name: pytest (editable, test-utils)
+        run: |
+          uv venv -p 3.12 .venv
+          uv pip install -p .venv/bin/python -e . --group dev -C build-args="--features test-utils"
+          .venv/bin/python -m pytest -q
+
+      - name: wheel smoke (linux, py3.12)
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf python/dist
+          uvx maturin build --release -m python/pyproject.toml -o python/dist -i "${PYO3_PYTHON}"
+          venv_dir="$(mktemp -d)"
+          uv venv -p 3.12 "${venv_dir}"
+          uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
+          "${venv_dir}/bin/python" -m pytest -q -c python/pyproject.toml python/tests
+
   ci-summary:
     # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
-    needs: [detect-rust-changes, rust-quality-gate]
+    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-quality-gate]
     if: ${{ always() }}
     steps:
       - name: Summarize outcome
@@ -106,4 +189,11 @@ jobs:
             [ "${{ needs['rust-quality-gate'].result }}" = "success" ] || exit 1
           else
             echo "No code changes; skipping heavy checks."
+          fi
+
+          if [ "${{ needs['detect-python-changes'].outputs.code }}" = "true" ]; then
+            echo "Python/binding changed; python gate result: ${{ needs['python-quality-gate'].result }}"
+            [ "${{ needs['python-quality-gate'].result }}" = "success" ] || exit 1
+          else
+            echo "No Python/binding changes; skipping python checks."
           fi
