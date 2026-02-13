@@ -162,7 +162,8 @@ jobs:
       - name: Create venv + install deps (no extension build)
         run: |
           uv venv -p 3.12 .venv
-          uv sync --frozen --group dev --no-install-project
+          source .venv/bin/activate
+          uv sync --group dev --no-install-project --active
 
       - name: ruff
         run: .venv/bin/ruff check src tests
@@ -172,7 +173,8 @@ jobs:
 
       - name: pytest (editable, test-utils)
         run: |
-          uv sync --frozen --group dev -C build-args="--features test-utils"
+          source .venv/bin/activate
+          uv sync --group dev -C build-args="--features test-utils" --active
           .venv/bin/python -m pytest -q
 
       - name: wheel smoke (linux, py3.12)
