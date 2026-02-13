@@ -3,6 +3,7 @@ release = false
 release_always = false
 git_only = true
 publish = false
+publish_no_verify = true
 semver_check = false
 changelog_update = false
 changelog_config = "cliff.toml"
