@@ -1,0 +1,51 @@
+site_name: timeseries-table-format (Python)
+repo_name: mag1cfrog/timeseries-table-format
+repo_url: https://github.com/mag1cfrog/timeseries-table-format
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            show_source: false
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.snippets:
+      base_path:
+        - ..
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - Installation: install.md
+  - Tutorials:
+      - Create, append, query: tutorials/create_append_query.md
+      - Register + join: tutorials/register_and_join.md
+      - Parameterized queries: tutorials/parameterized_queries.md
+  - Concepts:
+      - Table root layout: concepts/table_root.md
+      - Buckets + overlap: concepts/bucketing_and_overlap.md
+  - Reference:
+      - Session: reference/session.md
+      - TimeSeriesTable: reference/timeseries_table.md
+      - Exceptions: reference/exceptions.md
+  - Troubleshooting: troubleshooting.md
+
