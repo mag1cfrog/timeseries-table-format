@@ -30,7 +30,10 @@ markdown_extensions:
       anchor_linenums: true
   - pymdownx.snippets:
       base_path:
-        - ../..
+        # Resolve snippet paths relative to this mkdocs.yml (which lives in docs-site/),
+        # so snippets can reliably include files from the repo root (e.g. python/examples/*)
+        # regardless of the current working directory used to build the docs.
+        - !relative $config_dir/..
       check_paths: true
 
 nav:
