@@ -152,15 +152,20 @@ jobs:
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
 
+      - name: Create venv + install lint deps
+        run: |
+          uv venv -p 3.12 .venv
+          uv pip install -p .venv/bin/python --upgrade pip
+          uv pip install -p .venv/bin/python ruff ty pyarrow maturin
+
       - name: ruff
-        run: uvx ruff check src tests
+        run: .venv/bin/ruff check src tests
 
       - name: ty
-        run: uvx ty check src tests
+        run: .venv/bin/ty check src tests
 
       - name: pytest (editable, test-utils)
         run: |
-          uv venv -p 3.12 .venv
           uv pip install -p .venv/bin/python -e . --group dev -C build-args="--features test-utils"
           .venv/bin/python -m pytest -q
 
@@ -170,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf python/dist
-          uvx maturin build --release -m python/pyproject.toml -o python/dist -i "${PYO3_PYTHON}"
+          python/.venv/bin/maturin build --release -m python/pyproject.toml -o python/dist -i "${PYO3_PYTHON}"
           venv_dir="$(mktemp -d)"
           uv venv -p 3.12 "${venv_dir}"
           uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
