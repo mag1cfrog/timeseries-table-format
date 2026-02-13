@@ -1,11 +1,17 @@
 name: Python wheels
 
 on:
-  pull_request:
+  push:
     branches: [main]
     paths:
-      - "python/**"
-      - "crates/timeseries-table-python/**"
+      - "python/**/*.py"
+      - "python/**/*.pyi"
+      - "python/pyproject.toml"
+      - "python/uv.lock"
+      - "python/.python-version"
+      - "crates/timeseries-table-python/**/*.rs"
+      - "crates/timeseries-table-python/Cargo.toml"
+      - "crates/timeseries-table-python/build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
   workflow_dispatch: {}
@@ -23,11 +29,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13"]
-
-    defaults:
-      run:
-        shell: bash
-        working-directory: python
 
     steps:
       - uses: actions/checkout@v4
@@ -53,31 +54,9 @@ jobs:
           if-no-files-found: error
 
       - name: Install wheel + run pytest
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl pytest
-          python -m pytest -q
-
-  pytest-test-utils:
-    name: pytest (test-utils, ubuntu, py3.12)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Python deps
-        working-directory: python
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install maturin pyarrow pytest
-
-      - name: Build extension with test-utils + run pytest
-        working-directory: python
-        run: |
-          maturin develop -m pyproject.toml --features test-utils
-          python -m pytest -q
+          python -m pip install python/dist/*.whl pytest
+          python -m pytest -q -c python/pyproject.toml python/tests
