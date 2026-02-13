@@ -1,5 +1,18 @@
 # Changelog
 All notable changes to timeseries-table-core will be documented in this file.
+## 0.2.1
+
+
+### Bug Fixes
+
+- Use const initialization for thread-local Cell in rebuild counter ([31da389](https://github.com/mag1cfrog/timeseries-table-format/commit/31da389fbe1e693ecc80e792fc2e48333565d700))
+
+
+### Code Refactoring
+
+- Replace AtomicUsize with thread-local Cell for rebuild counter ([89d763e](https://github.com/mag1cfrog/timeseries-table-format/commit/89d763e14fdf52fe51cc350dc204a1256fb961ad))
+
+
 ## 0.2.0
 
 
