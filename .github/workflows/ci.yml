@@ -127,6 +127,7 @@ jobs:
         working-directory: python
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      RUSTFLAGS: "-C debuginfo=0"
 
     steps:
       - uses: actions/checkout@v4
@@ -174,7 +175,7 @@ jobs:
       - name: pytest (editable, test-utils)
         run: |
           source .venv/bin/activate
-          uv sync --group dev -C build-args="--features test-utils" --active
+          .venv/bin/python -m maturin develop -m pyproject.toml --features test-utils
           .venv/bin/python -m pytest -q
 
       - name: wheel smoke (linux, py3.12)
@@ -183,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf python/dist
-          python/.venv/bin/python -m maturin build --release -m python/pyproject.toml -o python/dist -i python/.venv/bin/python
+          python/.venv/bin/python -m maturin build --release -o python/dist -i python/.venv/bin/python
           venv_dir="$(mktemp -d)"
           uv venv -p 3.12 "${venv_dir}"
           uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
