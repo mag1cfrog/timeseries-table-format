@@ -72,8 +72,9 @@ jobs:
           rm -rf docs-site/.wheels
           # Force a debug-style build for faster docs CI. (maturin build defaults can vary depending
           # on invocation/config; `--profile dev` makes the intent explicit.)
-          maturin build -m python/pyproject.toml -o docs-site/.wheels --profile dev
+          maturin build --profile dev -i python -o ../docs-site/.wheels
           python -m pip install --no-deps docs-site/.wheels/*.whl
+        working-directory: python
 
       - name: Build docs
         run: |
