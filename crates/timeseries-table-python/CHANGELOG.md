@@ -1,5 +1,13 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.1
+
+
+### Bug Fixes
+
+- Update error messages in AppendParquetError for clarity ([7861f34](https://github.com/mag1cfrog/timeseries-table-format/commit/7861f3410b5250f5b0c0a31b3b10453439c6d92f))
+
+
 ## 0.1.0
 
 

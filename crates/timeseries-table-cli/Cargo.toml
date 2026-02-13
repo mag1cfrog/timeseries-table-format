@@ -22,7 +22,7 @@ snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
 timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.0" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.1" }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
