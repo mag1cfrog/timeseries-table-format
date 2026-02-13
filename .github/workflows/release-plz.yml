@@ -53,12 +53,23 @@ jobs:
           workspaces: |
             . -> target
           shared-key: rust-cache-v1
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
       - name: Run release-plz (release)
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+      - name: sccache stats
+        if: ${{ always() }}
+        shell: bash
+        run: sccache --show-stats || true
 
   release-plz-pr:
     name: Release-plz PR
@@ -111,9 +122,20 @@ jobs:
           workspaces: |
             . -> target
           shared-key: rust-cache-v1
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+      - name: sccache stats
+        if: ${{ always() }}
+        shell: bash
+        run: sccache --show-stats || true
