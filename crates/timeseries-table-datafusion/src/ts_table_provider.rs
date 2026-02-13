@@ -283,8 +283,7 @@ impl TableProvider for TsTableProvider {
             // PartitionedFile expects an object_store Path string delimited by `/` (file URI
             // semantics). Convert from the platform-native filesystem path to avoid Windows
             // path quirks (e.g. `\\?\` canonicalization prefixes).
-            let location =
-                ObjectStorePath::from_absolute_path(&abs).map_err(df_external)?;
+            let location = ObjectStorePath::from_absolute_path(&abs).map_err(df_external)?;
             let pf = PartitionedFile::new(location.as_ref(), file_size);
 
             builder = builder.with_file(pf);
