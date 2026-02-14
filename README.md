@@ -1,6 +1,8 @@
 # timeseries-table-format
 
 [![Rust](https://img.shields.io/badge/Developed%20in-Rust-orange?logo=rust)](https://www.rust-lang.org)
+[![PyPI](https://img.shields.io/pypi/v/timeseries-table-format)](https://pypi.org/project/timeseries-table-format/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python)](https://pypi.org/project/timeseries-table-format/)
 ![License](https://img.shields.io/badge/license-MIT-informational)
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
@@ -17,40 +19,123 @@
   to time-series data—with built-in coverage tracking for gaps and overlaps.
 </p>
 
----
-
-## Key Features
-
-| | |
-|---|---|
-| **ACID-like transactions** | Append-only commit log with optimistic concurrency control—no more corrupted datasets from failed writes |
-| **Time-first layout** | Timestamp column, entity partitioning, and configurable bucket granularity baked into the format |
-| **Coverage tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
-| **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
-| **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
-| **Rust core** | Rust-first (CLI + libraries), with optional Python bindings for local workflows |
-| **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
+<p align="center">
+  Built in Rust. Python bindings available on PyPI.
+</p>
 
 ---
 
-## Why Not Use Delta Lake or Iceberg?
+## Install (Python)
 
-Great question. You probably *should* use them for general-purpose analytics.
+```bash
+pip install timeseries-table-format
+```
 
-But if you're working with **time-series specifically**, you might have noticed:
+Python docs: https://mag1cfrog.github.io/timeseries-table-format/
 
-| Problem | Delta/Iceberg | This Project |
-|---------|---------------|--------------|
-| "Do I have data for 2024-01-15 to 2024-03-20?" | Scan metadata or query | coverage.ratio() → instant |
-| "Where are the gaps in my dataset?" | Write custom logic | coverage.gaps() → built-in |
-| "Will this append overlap existing data?" | Hope for the best | Automatic overlap detection |
-| Deployment complexity | JVM/Spark ecosystem | Single Rust binary |
+## Python quickstart
 
-**This project is ideal for:**
-- Backtesting systems that need gap-aware data loading
-- Sensor/IoT data pipelines with strict coverage requirements  
-- Financial data stores where overlap = disaster
-- Learning how modern table formats work (well-documented internals!)
+**TL;DR:** `Session.sql(...)` returns a `pyarrow.Table`:
+
+```python
+import timeseries_table_format as ttf
+
+out = ttf.Session().sql("select 1 as x")
+print(type(out))  # pyarrow.Table
+```
+
+Convert to Polars: `import polars as pl; pl.from_arrow(out)`
+
+More examples:
+- `python/examples/quickstart_create_append_query.py`
+- `python/examples/register_and_join_two_tables.py`
+
+<details>
+<summary><strong>End-to-end example (create → append → register 2 tables → join)</strong></summary>
+
+```python
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+import timeseries_table_format as ttf
+
+
+def _write_parquet_prices(path: Path) -> None:
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array([0, 3_600 * 1_000_000], type=pa.timestamp("us")),
+                "symbol": pa.array(["NVDA", "NVDA"], type=pa.string()),
+                "close": pa.array([1.0, 2.0], type=pa.float64()),
+            }
+        ),
+        str(path),
+    )
+
+
+def _write_parquet_volumes(path: Path) -> None:
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array([0, 3_600 * 1_000_000], type=pa.timestamp("us")),
+                "symbol": pa.array(["NVDA", "NVDA"], type=pa.string()),
+                "volume": pa.array([10, 20], type=pa.int64()),
+            }
+        ),
+        str(path),
+    )
+
+
+with tempfile.TemporaryDirectory() as d:
+    base_dir = Path(d)
+
+    prices_root = base_dir / "prices_tbl"
+    prices = ttf.TimeSeriesTable.create(
+        table_root=str(prices_root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=None,
+    )
+    prices_seg = base_dir / "prices.parquet"
+    _write_parquet_prices(prices_seg)
+    prices.append_parquet(str(prices_seg))
+
+    volumes_root = base_dir / "volumes_tbl"
+    volumes = ttf.TimeSeriesTable.create(
+        table_root=str(volumes_root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=None,
+    )
+    volumes_seg = base_dir / "volumes.parquet"
+    _write_parquet_volumes(volumes_seg)
+    volumes.append_parquet(str(volumes_seg))
+
+    sess = ttf.Session()
+    sess.register_tstable("prices", str(prices_root))
+    sess.register_tstable("volumes", str(volumes_root))
+
+    out = sess.sql(
+        """
+        select p.ts as ts, p.symbol as symbol, p.close as close, v.volume as volume
+        from prices p
+        join volumes v
+        on p.ts = v.ts and p.symbol = v.symbol
+        order by p.ts
+        """
+    )
+    print(type(out))  # pyarrow.Table
+    print(out)
+```
+
+</details>
 
 > **Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
 >
@@ -61,41 +146,17 @@ But if you're working with **time-series specifically**, you might have noticed:
 > Practical rule: choose a bucket that matches the **granularity you expect to be unique per entity**.
 > Hourly bars → `1h`, minute bars → `1m`, etc. If you expect multiple rows per entity within an hour, don’t use `1h` in v0.1.
 
----
+## Key Features
 
-## Performance Benchmarks
-
-Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appends):
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-chart.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-chart-light.png">
-    <img alt="Benchmark comparison chart" src="docs/assets/benchmark-chart.png" width="900">
-  </picture>
-</p>
-
-<table>
-<tr><td>
-
-| vs ClickHouse | Speedup |
-|---------------|---------|
-| Bulk ingest | **7.7×** |
-| Daily append | **3.3×** |
-| Time-range scan | **2.5×** |
-
-</td><td>
-
-| vs PostgreSQL | Speedup |
-|---------------|---------|
-| Bulk ingest | **27×** |
-| Daily append | **5.5×** |
-| Time-range scan | **80×** |
-
-</td></tr>
-</table>
-
-<sub>Aggregation queries (GROUP BY, filtering) are competitive with ClickHouse. Delta + Spark Q1 is now 964ms with partitioned Delta. See [full benchmark methodology and results](docs/benchmarks/README.md).</sub>
+| | |
+|---|---|
+| **ACID-like transactions** | Append-only commit log with optimistic concurrency control—no more corrupted datasets from failed writes |
+| **Time-first layout** | Timestamp column, entity partitioning, and configurable bucket granularity baked into the format |
+| **Coverage tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
+| **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
+| **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
+| **Rust core + Python bindings** | Rust-first core (CLI + libraries) with Python bindings for local workflows |
+| **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
 
 ---
 
@@ -121,7 +182,7 @@ See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full 
 
 ### Python bindings
 
-For a Python-first workflow (create/append/query and returning `pyarrow.Table`), see `python/README.md`.
+See the **Install (Python)** and **Python quickstart** sections above (or https://mag1cfrog.github.io/timeseries-table-format/).
 
 ### Rust API
 
@@ -189,6 +250,69 @@ Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bar
 
 ---
 
+<details>
+<summary><strong>Why not use Delta Lake or Iceberg?</strong></summary>
+
+You probably *should* use them for general-purpose analytics.
+
+But if you're working with **time-series specifically**, you might have noticed:
+
+| Problem | Delta/Iceberg | This Project |
+|---------|---------------|--------------|
+| "Do I have data for 2024-01-15 to 2024-03-20?" | Scan metadata or query | coverage.ratio() → instant |
+| "Where are the gaps in my dataset?" | Write custom logic | coverage.gaps() → built-in |
+| "Will this append overlap existing data?" | Hope for the best | Automatic overlap detection |
+| Deployment complexity | JVM/Spark ecosystem | Single Rust binary |
+
+**This project is ideal for:**
+- Backtesting systems that need gap-aware data loading
+- Sensor/IoT data pipelines with strict coverage requirements
+- Financial data stores where overlap = disaster
+- Learning how modern table formats work (well-documented internals!)
+
+**Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
+See the bucket size note above.
+
+</details>
+
+---
+
+## Performance Benchmarks
+
+Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appends):
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-chart.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-chart-light.png">
+    <img alt="Benchmark comparison chart" src="docs/assets/benchmark-chart.png" width="900">
+  </picture>
+</p>
+
+<table>
+<tr><td>
+
+| vs ClickHouse | Speedup |
+|---------------|---------|
+| Bulk ingest | **7.7×** |
+| Daily append | **3.3×** |
+| Time-range scan | **2.5×** |
+
+</td><td>
+
+| vs PostgreSQL | Speedup |
+|---------------|---------|
+| Bulk ingest | **27×** |
+| Daily append | **5.5×** |
+| Time-range scan | **80×** |
+
+</td></tr>
+</table>
+
+<sub>Aggregation queries (GROUP BY, filtering) are competitive with ClickHouse. Delta + Spark Q1 is now 964ms with partitioned Delta. See [full benchmark methodology and results](docs/benchmarks/README.md).</sub>
+
+---
+
 ## Architecture
 
 <p align="center">
@@ -238,6 +362,7 @@ A time-series table consists of:
 ## Further Reading
 
 - [Benchmark methodology & results](docs/benchmarks/README.md)
+- [Python docs](https://mag1cfrog.github.io/timeseries-table-format/)
 - [CLI reference](crates/timeseries-table-cli/README.md)
 - [Core library API](crates/timeseries-table-core/README.md)
 - [DataFusion integration](crates/timeseries-table-datafusion/README.md)
