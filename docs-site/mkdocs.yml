@@ -44,10 +44,12 @@ nav:
       - Register + join: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md
   - Concepts:
-      - Table root layout: concepts/table_root.md
+      - When to use this: concepts/when_to_use_this.md
       - Buckets + overlap: concepts/bucketing_and_overlap.md
+      - Table root layout: concepts/table_root.md
   - Reference:
       - Session: reference/session.md
       - TimeSeriesTable: reference/timeseries_table.md
       - Exceptions: reference/exceptions.md
   - Troubleshooting: troubleshooting.md
+  - FAQ: faq.md

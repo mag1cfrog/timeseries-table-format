@@ -1,9 +1,26 @@
 # Tutorial: create, append, query
 
-This tutorial walks through:
-1) Creating a time-series table
-2) Appending a Parquet segment
-3) Querying it with SQL via `Session`
+**Goal:** Create a table on disk, append a Parquet segment, then query it with SQL.
+
+**Prereqs:** Installed `timeseries-table-format` (see [Installation](../install.md)).
+
+**What you’ll learn:**
+- How a table root is created and stays self-contained on disk
+- How appends work (and what overlap detection is protecting you from)
+- How `Session` queries registered tables and returns Arrow
+
+!!! tip "Mental model"
+    - `TimeSeriesTable` manages the on-disk table and appends.
+    - `Session` runs SQL over what you register (tables, Parquet datasets, etc.).
+
+## Steps
+
+1) Create a table root (`TimeSeriesTable.create`)
+2) Write a tiny Parquet segment (toy data)
+3) Append it (`append_parquet`)
+4) Create a SQL session (`Session`)
+5) Register the table (`register_tstable`)
+6) Query (`Session.sql`) → `pyarrow.Table`
 
 The full example below is the exact code used in docs (kept in sync with the repo):
 
@@ -34,3 +51,7 @@ before being committed (so the table is self-contained on disk).
     The Python API is synchronous. Internally, long-running Rust operations run on an internal
     Tokio runtime and release the GIL.
 
+Next:
+- Tutorial: [Register + join](register_and_join.md)
+- Concept: [Buckets + overlap](../concepts/bucketing_and_overlap.md)
+- Reference: [Session](../reference/session.md)
