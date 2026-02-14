@@ -27,4 +27,3 @@ If you see a `pyarrow.Table` printed, you’re good to go.
     If `pip install` tries to compile from source instead of downloading a wheel,
     you’ll need a Rust toolchain available. For most users on supported platforms,
     PyPI wheels should avoid that.
-
