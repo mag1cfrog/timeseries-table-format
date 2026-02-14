@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/mag1cfrog/timeseries-table-format"
 description = "Core engine for a Rust-native log-structured time-series table format (metadata log + coverage bitmaps)."
+readme = "README.md"
 
 [dependencies]
 arrow = { workspace = true }
