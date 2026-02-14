@@ -14,8 +14,8 @@ The goal is simple: keep SQL queries fast without changing your data.
 
 ```toml
 [dependencies]
-timeseries-table-datafusion = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
-datafusion = "46"
+timeseries-table-datafusion = "0.1"
+datafusion = "51"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 ```
 
@@ -203,5 +203,5 @@ Queries still run correctly; they just won’t be pruned.
 
 ## Related
 
-- [timeseries-table-cli](../timeseries-table-cli/README.md) — Command-line tool for managing and querying tables (no Rust code required)
-- [timeseries-table-core](../timeseries-table-core/README.md) — Core library for table creation, appends, and coverage tracking
+- `timeseries-table-cli` — Command-line tool for managing and querying tables (no Rust code required)
+- `timeseries-table-core` — Core library for table creation, appends, and coverage tracking
