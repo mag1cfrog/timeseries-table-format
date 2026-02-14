@@ -2,6 +2,10 @@
 name = "timeseries-table-datafusion"
 version = "0.1.1"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/mag1cfrog/timeseries-table-format"
+description = "DataFusion SQL integration for timeseries-table-core tables (TableProvider + segment pruning)."
+readme = "README.md"
 
 [dependencies]
 timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1" }

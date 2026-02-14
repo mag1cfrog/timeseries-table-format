@@ -3,6 +3,10 @@ name = "timeseries-table-cli"
 version = "0.1.0"
 edition = "2024"
 default-run = "tstable"
+license = "MIT"
+repository = "https://github.com/mag1cfrog/timeseries-table-format"
+description = "Command-line tool for creating, managing, and querying time-series tables (powered by DataFusion)."
+readme = "README.md"
 
 [[bin]]
 name = "tstable"

@@ -1,6 +1,8 @@
 # timeseries-table-format
 
 [![Rust](https://img.shields.io/badge/Developed%20in-Rust-orange?logo=rust)](https://www.rust-lang.org)
+[![crates.io](https://img.shields.io/crates/v/timeseries-table-format)](https://crates.io/crates/timeseries-table-format)
+[![docs.rs](https://img.shields.io/docsrs/timeseries-table-format)](https://docs.rs/timeseries-table-format)
 [![PyPI](https://img.shields.io/pypi/v/timeseries-table-format)](https://pypi.org/project/timeseries-table-format/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python)](https://pypi.org/project/timeseries-table-format/)
 ![License](https://img.shields.io/badge/license-MIT-informational)
@@ -166,7 +168,7 @@ with tempfile.TemporaryDirectory() as d:
 
 ```bash
 # Install
-cargo install --git https://github.com/mag1cfrog/timeseries-table-format --bin tstable
+cargo install timeseries-table-cli --bin tstable
 
 # Create a table with 1-hour buckets
 tstable create --table ./my_table --time-column ts --bucket 1h
@@ -186,20 +188,33 @@ See the **Install (Python)** and **Python quickstart** sections above (or https:
 
 ### Rust API
 
+```bash
+cargo add timeseries-table-format
+```
+
 ```toml
 [dependencies]
-timeseries-table-format = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+timeseries-table-format = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+chrono = "0.4"
 ```
 
 ```rust
-use timeseries_table_format::TimeSeriesTable;
+use chrono::{TimeZone, Utc};
+use timeseries_table_format::{TableError, TableLocation, TimeSeriesTable};
 
-// Open and query coverage
-let table = TimeSeriesTable::open("./my_table")?;
-let coverage = table.coverage()?;
+#[tokio::main]
+async fn main() -> Result<(), TableError> {
+    let table = TimeSeriesTable::open(TableLocation::local("./my_table")).await?;
 
-println!("Coverage ratio: {:.1}%", coverage.ratio() * 100.0);
-println!("Gaps: {:?}", coverage.gaps());
+    let start = Utc.timestamp_opt(0, 0).single().unwrap();
+    let end = Utc.timestamp_opt(120, 0).single().unwrap();
+
+    let ratio = table.coverage_ratio_for_range(start, end).await?;
+    println!("Coverage ratio: {:.1}%", ratio * 100.0);
+
+    Ok(())
+}
 ```
 
 
@@ -209,7 +224,7 @@ See [timeseries-table-core](crates/timeseries-table-core/README.md) for full API
 
 ```toml
 [dependencies]
-timeseries-table-format = { git = "https://github.com/mag1cfrog/timeseries-table-format" }
+timeseries-table-format = "0.1"
 ```
 
 See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) for SQL query examples.
@@ -259,8 +274,8 @@ But if you're working with **time-series specifically**, you might have noticed:
 
 | Problem | Delta/Iceberg | This Project |
 |---------|---------------|--------------|
-| "Do I have data for 2024-01-15 to 2024-03-20?" | Scan metadata or query | coverage.ratio() → instant |
-| "Where are the gaps in my dataset?" | Write custom logic | coverage.gaps() → built-in |
+| "Do I have data for 2024-01-15 to 2024-03-20?" | Scan metadata or query | coverage_ratio_for_range(...) → instant |
+| "Where are the gaps in my dataset?" | Write custom logic | max_gap_len_for_range(...) → built-in |
 | "Will this append overlap existing data?" | Hope for the best | Automatic overlap detection |
 | Deployment complexity | JVM/Spark ecosystem | Single Rust binary |
 

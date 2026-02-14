@@ -2,6 +2,7 @@
 name = "timeseries-table-python"
 version = "0.1.1"
 edition = "2024"
+publish = false
 
 [dependencies]
 arrow-ipc = { workspace = true }

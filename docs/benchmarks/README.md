@@ -73,7 +73,7 @@ Load the first month of data (~20M rows) into an empty table.
 
 | System | Method |
 |--------|--------|
-| timeseries-table | `timeseries-table-cli append --parquet` |
+| timeseries-table | `tstable append --parquet` |
 | ClickHouse | `INSERT INTO ... FORMAT CSVWithNames` |
 | Delta + Spark | `df.write.format("delta").partitionBy("pickup_date").save()` |
 | PostgreSQL | `\copy ... FROM ... WITH (FORMAT csv)` |
