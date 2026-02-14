@@ -5,6 +5,10 @@
 It does **not** resample your data. Instead, it affects how the table decides whether a new segment
 overlaps existing coverage.
 
+Example: with `bucket="1h"`, timestamps `10:05` and `10:55` fall into the same bucket window
+(10:00–11:00). In v0, appending two rows for the same entity in the same bucket is treated as
+overlap and will be rejected.
+
 ## Overlap behavior (v0)
 
 When you append a segment, the table computes which time buckets are covered (per entity identity)
@@ -21,4 +25,3 @@ Examples:
 - Minute bars → `bucket="1m"`
 
 If you expect multiple rows per entity within the same bucket window, choose a finer bucket.
-
