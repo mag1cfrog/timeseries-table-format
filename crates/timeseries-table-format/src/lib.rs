@@ -8,9 +8,20 @@
 //!
 //! - `datafusion` (default): Enables DataFusion integration for SQL queries
 //!
-//! ## Example
+//! ## Quick start
 //!
-//! ```rust,ignore
+//! Open an existing table (async; returns a `Future`):
+//!
+//! ```rust
+//! use timeseries_table_format::{TableLocation, TimeSeriesTable};
+//!
+//! let location = TableLocation::local("./my_table");
+//! let _open = TimeSeriesTable::open(location);
+//! ```
+//!
+//! Or import the stable, supported surface via the prelude:
+//!
+//! ```rust
 //! use timeseries_table_format::prelude::*;
 //! ```
 
