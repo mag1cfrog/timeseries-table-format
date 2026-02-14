@@ -55,11 +55,28 @@ jobs:
           shared-key: rust-cache-v1
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.6
-      - name: Enable sccache
+      - name: Preflight sccache
+        id: sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if SCCACHE_GHA_ENABLED=true sccache --start-server; then
+            echo "mode=gha" >> "$GITHUB_OUTPUT"
+          elif SCCACHE_DIR="${RUNNER_TEMP}/sccache" sccache --start-server; then
+            echo "mode=local" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=off" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Enable sccache (best-effort)
+        if: ${{ steps.sccache.outputs.mode != 'off' }}
         shell: bash
         run: |
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [[ "${{ steps.sccache.outputs.mode }}" == "gha" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
+          fi
       - name: Run release-plz (release)
         uses: release-plz/action@v0.5
         with:
@@ -124,11 +141,28 @@ jobs:
           shared-key: rust-cache-v1
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.6
-      - name: Enable sccache
+      - name: Preflight sccache
+        id: sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if SCCACHE_GHA_ENABLED=true sccache --start-server; then
+            echo "mode=gha" >> "$GITHUB_OUTPUT"
+          elif SCCACHE_DIR="${RUNNER_TEMP}/sccache" sccache --start-server; then
+            echo "mode=local" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=off" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Enable sccache (best-effort)
+        if: ${{ steps.sccache.outputs.mode != 'off' }}
         shell: bash
         run: |
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [[ "${{ steps.sccache.outputs.mode }}" == "gha" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
+          fi
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:
