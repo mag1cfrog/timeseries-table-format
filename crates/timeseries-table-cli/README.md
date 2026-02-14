@@ -14,10 +14,10 @@ Instead of manually managing scattered Parquet files, you get:
 
 ## Installation
 
-### From GitHub
+### From crates.io
 
 ```bash
-cargo install --git https://github.com/mag1cfrog/timeseries-table-format --bin tstable
+cargo install timeseries-table-cli --bin tstable
 ```
 
 ### From a local clone
