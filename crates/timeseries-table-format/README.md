@@ -3,8 +3,8 @@
 Append-only time-series table format with gap/overlap tracking.
 
 This is the main entry point crate that re-exports:
-- [`timeseries-table-core`](../timeseries-table-core) — Core storage and coverage logic
-- [`timeseries-table-datafusion`](../timeseries-table-datafusion) — DataFusion SQL integration (optional)
+- `timeseries-table-core` — core storage + coverage logic
+- `timeseries-table-datafusion` — DataFusion SQL integration (optional)
 
 ## Installation
 
@@ -24,4 +24,5 @@ cargo add timeseries-table-format
 use timeseries_table_format::TimeSeriesTable;
 ```
 
-See the [main README](../../README.md) for full documentation.
+For more documentation and examples, see the repository README:
+https://github.com/mag1cfrog/timeseries-table-format
