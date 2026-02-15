@@ -9,15 +9,58 @@ on:
       - "timeseries-table-format-v*"
       - "timeseries-table-cli-v*"
 
-concurrency:
-  group: crates-io-publish
-  cancel-in-progress: false
-
 jobs:
-  publish:
-    name: publish (crates.io)
+  decide:
+    name: decide leader tag
     if: ${{ github.repository_owner == 'mag1cfrog' }}
     runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - id: decide
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA}"
+          current="${GITHUB_REF_NAME}"
+
+          mapfile -t tags < <(git tag --points-at "${sha}")
+          echo "Tags on ${sha}: ${tags[*]:-<none>}"
+
+          leader=""
+          for pat in \
+            "timeseries-table-core-v*" \
+            "timeseries-table-datafusion-v*" \
+            "timeseries-table-format-v*" \
+            "timeseries-table-cli-v*"
+          do
+            for t in "${tags[@]}"; do
+              if [[ "${t}" == ${pat} ]]; then
+                leader="${t}"
+                break 2
+              fi
+            done
+          done
+
+          echo "Leader tag: ${leader:-<none>}"
+          if [[ -n "${leader}" && "${current}" == "${leader}" ]]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: publish (crates.io)
+    needs: [decide]
+    if: ${{ needs.decide.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: crates-io-publish
+      cancel-in-progress: false
     timeout-minutes: 30
     environment: crates-io-release
     permissions:
@@ -33,6 +76,9 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -100,6 +146,11 @@ jobs:
           set -euo pipefail
           ua="mag1cfrog/timeseries-table-format publish-crates (GitHub Actions)"
 
+          has_tag_on_sha() {
+            local tag="$1"
+            git tag --points-at "${GITHUB_SHA}" | grep -Fxq "${tag}"
+          }
+
           has_version() {
             local crate="$1"
             local ver="$2"
@@ -157,6 +208,10 @@ jobs:
               echo "Skipping ${crate} v${ver} (already on crates.io)"
               return 0
             fi
+            if ! has_tag_on_sha "${crate}-v${ver}"; then
+              echo "Refusing to publish ${crate} v${ver}: tag ${crate}-v${ver} is not on commit ${GITHUB_SHA}"
+              return 1
+            fi
             echo "Publishing ${crate} v${ver}"
             if ! retry 5 15 cargo publish -p "${crate}"; then
               if has_version "${crate}" "${ver}"; then
@@ -175,7 +230,37 @@ jobs:
           fmt_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-format/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
           cli_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-cli/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
 
-          publish_if_missing "timeseries-table-core" "${core_ver}"
-          publish_if_missing "timeseries-table-datafusion" "${df_ver}"
-          publish_if_missing "timeseries-table-format" "${fmt_ver}"
-          publish_if_missing "timeseries-table-cli" "${cli_ver}"
+          # Only publish versions that correspond to tags on this commit (release-plz creates per-crate tags).
+          core_tag="timeseries-table-core-v${core_ver}"
+          df_tag="timeseries-table-datafusion-v${df_ver}"
+          fmt_tag="timeseries-table-format-v${fmt_ver}"
+          cli_tag="timeseries-table-cli-v${cli_ver}"
+
+          core_on_sha=false
+          df_on_sha=false
+          fmt_on_sha=false
+          cli_on_sha=false
+          if has_tag_on_sha "${core_tag}"; then core_on_sha=true; fi
+          if has_tag_on_sha "${df_tag}"; then df_on_sha=true; fi
+          if has_tag_on_sha "${fmt_tag}"; then fmt_on_sha=true; fi
+          if has_tag_on_sha "${cli_tag}"; then cli_on_sha=true; fi
+
+          echo "Tag matrix on ${GITHUB_SHA}: core=${core_on_sha} df=${df_on_sha} fmt=${fmt_on_sha} cli=${cli_on_sha}"
+
+          if [[ "${core_on_sha}" == true ]]; then
+            publish_if_missing "timeseries-table-core" "${core_ver}"
+          fi
+          if [[ "${df_on_sha}" == true ]]; then
+            publish_if_missing "timeseries-table-core" "${core_ver}"
+            publish_if_missing "timeseries-table-datafusion" "${df_ver}"
+          fi
+          if [[ "${fmt_on_sha}" == true ]]; then
+            publish_if_missing "timeseries-table-core" "${core_ver}"
+            publish_if_missing "timeseries-table-datafusion" "${df_ver}"
+            publish_if_missing "timeseries-table-format" "${fmt_ver}"
+          fi
+          if [[ "${cli_on_sha}" == true ]]; then
+            publish_if_missing "timeseries-table-core" "${core_ver}"
+            publish_if_missing "timeseries-table-datafusion" "${df_ver}"
+            publish_if_missing "timeseries-table-cli" "${cli_ver}"
+          fi
