@@ -1,0 +1,124 @@
+name: Publish (crates.io)
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "timeseries-table-core-v*"
+      - "timeseries-table-datafusion-v*"
+      - "timeseries-table-format-v*"
+      - "timeseries-table-cli-v*"
+
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish (crates.io)
+    if: ${{ github.repository_owner == 'mag1cfrog' }}
+    runs-on: ubuntu-latest
+    environment: crates-io-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-C debuginfo=0"
+      # Keep target artifacts stable across steps (and compatible with rust-cache).
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: rust-cache-v1
+
+      - name: Verify tag matches Cargo version
+        if: ${{ github.ref_type == 'tag' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          case "${tag}" in
+            timeseries-table-core-v*)
+              crate="timeseries-table-core"
+              crate_dir="crates/timeseries-table-core"
+              ;;
+            timeseries-table-datafusion-v*)
+              crate="timeseries-table-datafusion"
+              crate_dir="crates/timeseries-table-datafusion"
+              ;;
+            timeseries-table-format-v*)
+              crate="timeseries-table-format"
+              crate_dir="crates/timeseries-table-format"
+              ;;
+            timeseries-table-cli-v*)
+              crate="timeseries-table-cli"
+              crate_dir="crates/timeseries-table-cli"
+              ;;
+            *)
+              echo "Unexpected tag format: ${tag}"
+              exit 1
+              ;;
+          esac
+
+          expected="${tag#${crate}-v}"
+          actual="$(
+            python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('${crate_dir}/Cargo.toml').read_text(encoding='utf-8'))['package']['version'])"
+          )"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Tag/version mismatch for ${crate}: tag=${expected} cargo=${actual}"
+            exit 1
+          fi
+
+      - name: Mint crates.io token (OIDC)
+        id: cratesio
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crates (skip already-published versions)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          has_version() {
+            local crate="$1"
+            local ver="$2"
+            curl -fsS "https://crates.io/api/v1/crates/${crate}/${ver}" >/dev/null 2>&1
+          }
+
+          publish_if_missing() {
+            local crate="$1"
+            local ver="$2"
+            if has_version "${crate}" "${ver}"; then
+              echo "Skipping ${crate} v${ver} (already on crates.io)"
+              return 0
+            fi
+            echo "Publishing ${crate} v${ver}"
+            cargo publish -p "${crate}" --locked
+          }
+
+          core_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-core/Cargo.toml").read_text())["package"]["version"])')"
+          df_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-datafusion/Cargo.toml").read_text())["package"]["version"])')"
+          fmt_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-format/Cargo.toml").read_text())["package"]["version"])')"
+          cli_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-cli/Cargo.toml").read_text())["package"]["version"])')"
+
+          publish_if_missing "timeseries-table-core" "${core_ver}"
+          publish_if_missing "timeseries-table-datafusion" "${df_ver}"
+          publish_if_missing "timeseries-table-format" "${fmt_ver}"
+          publish_if_missing "timeseries-table-cli" "${cli_ver}"
