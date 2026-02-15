@@ -1,5 +1,18 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.2
+
+
+### Bug Fixes
+
+- Set publish flag to false in Cargo.toml ([fae263e](https://github.com/mag1cfrog/timeseries-table-format/commit/fae263e58c4b79d18cb64f4730c89970206154b4))
+
+
+### Features
+
+- Enhance documentation for Session and TimeSeriesTable structs ([314cc55](https://github.com/mag1cfrog/timeseries-table-format/commit/314cc558d9646ee7f629a7545c7257c1381cc907))
+
+
 ## 0.1.1
 
 
