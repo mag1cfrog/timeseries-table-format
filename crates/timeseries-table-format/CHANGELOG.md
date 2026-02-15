@@ -1,5 +1,13 @@
 # Changelog
 All notable changes to timeseries-table-format will be documented in this file.
+## 0.1.3
+
+
+### Bug Fixes
+
+- Update documentation for quick start example in lib.rs ([029423c](https://github.com/mag1cfrog/timeseries-table-format/commit/029423ccdae2d857cf8f6cda3f07141036cadf90))
+
+
 ## 0.1.2
 
 
