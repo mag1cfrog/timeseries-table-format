@@ -34,6 +34,10 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
       - name: Install Python (for PyO3)
         uses: actions/setup-python@v5
         with:
@@ -120,6 +124,10 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
       - name: Install Python (for PyO3)
         uses: actions/setup-python@v5
         with:
