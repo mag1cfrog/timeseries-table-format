@@ -15,7 +15,8 @@ v0 is local-filesystem-only (no S3/object storage backend yet).
 pip install timeseries-table-format
 ```
 
-Requires: Python 3.10+.
+Requires: Python 3.10+. `pyarrow` is installed automatically (dependency: `pyarrow>=23.0.0`).
+If `pip` tries to build from source (Rust errors), see Troubleshooting below.
 
 ## Verify installation
 
@@ -25,6 +26,12 @@ import timeseries_table_format as ttf
 out = ttf.Session().sql("select 1 as x")
 print(type(out))  # pyarrow.Table
 ```
+
+## Return type and interop
+
+`Session.sql(...)` returns a `pyarrow.Table`.
+
+- Polars: `pip install polars`, then `polars.from_arrow(out)`
 
 ## Quickstart: create → append → query
 
@@ -77,11 +84,100 @@ with tempfile.TemporaryDirectory() as d:
 
 ## Join multiple tables
 
-See the tutorial: https://mag1cfrog.github.io/timeseries-table-format/tutorials/register_and_join/
+```python
+# Aligned with python/examples/register_and_join_two_tables.py
+import tempfile
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+import timeseries_table_format as ttf
+
+with tempfile.TemporaryDirectory() as d:
+    base_dir = Path(d)
+
+    prices_root = base_dir / "prices_tbl"
+    prices = ttf.TimeSeriesTable.create(
+        table_root=str(prices_root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=None,
+    )
+    prices_seg = base_dir / "prices.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array([0, 3_600 * 1_000_000], type=pa.timestamp("us")),
+                "symbol": pa.array(["NVDA", "NVDA"], type=pa.string()),
+                "close": pa.array([1.0, 2.0], type=pa.float64()),
+            }
+        ),
+        str(prices_seg),
+    )
+    prices.append_parquet(str(prices_seg))
+
+    volumes_root = base_dir / "volumes_tbl"
+    volumes = ttf.TimeSeriesTable.create(
+        table_root=str(volumes_root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=None,
+    )
+    volumes_seg = base_dir / "volumes.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array([0, 3_600 * 1_000_000], type=pa.timestamp("us")),
+                "symbol": pa.array(["NVDA", "NVDA"], type=pa.string()),
+                "volume": pa.array([10, 20], type=pa.int64()),
+            }
+        ),
+        str(volumes_seg),
+    )
+    volumes.append_parquet(str(volumes_seg))
+
+    sess = ttf.Session()
+    sess.register_tstable("prices", str(prices_root))
+    sess.register_tstable("volumes", str(volumes_root))
+
+    out = sess.sql(
+        """
+        select p.ts as ts, p.symbol as symbol, p.close as close, v.volume as volume
+        from prices p
+        join volumes v
+        on p.ts = v.ts and p.symbol = v.symbol
+        order by p.ts
+        """
+    )
+    print(out)  # pyarrow.Table
+```
 
 ## Parameterized queries
 
-See the tutorial: https://mag1cfrog.github.io/timeseries-table-format/tutorials/parameterized_queries/
+DataFusion infers placeholder types from context when possible (e.g. in `WHERE` clauses).
+If you use placeholders in a `SELECT` projection without type context, you may need an explicit cast.
+
+```python
+# Aligned with python/examples/parameterized_queries.py
+import timeseries_table_format as ttf
+
+sess = ttf.Session()
+
+out_positional = sess.sql(
+    "select cast($1 as bigint) as x, cast($2 as varchar) as y",
+    params=[1, "hello"],
+)
+out_named = sess.sql(
+    "select cast($a as bigint) as x, cast($b as varchar) as y",
+    params={"a": 2, "b": "world"},
+)
+
+print(out_positional)
+print(out_named)
+```
 
 ## Building from source (contributors)
 
@@ -110,5 +206,8 @@ uv run -p .venv/bin/python maturin develop -m pyproject.toml
 
 ## Troubleshooting
 
-- Rebuild the Rust extension after changing Rust code:
-  - `uv pip install -p python/.venv/bin/python -e python`
+- `pip` is building from source / fails with Rust errors: no wheel is available for your platform/Python; install Rust and retry, or use a supported Python/platform combination.
+- `DataFusionError` about an unknown table name: call `sess.register_tstable("name", "/path/to/table")` first; use `sess.tables()` to list registrations.
+- Append fails with a time column error: the timestamp column must be an Arrow `timestamp(...)`, and the unit should remain consistent across segments (e.g. `timestamp("us")`).
+- `SchemaMismatchError` on append: the new Parquet segment schema must match the table's adopted schema (column names and types).
+- SQL errors / parameter placeholders: try an explicit `CAST(...)` for placeholders used in `SELECT` projections.
