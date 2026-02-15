@@ -135,15 +135,16 @@ jobs:
             local tmp
             tmp="$(mktemp -d)"
             mkdir -p "${tmp}/src"
-            cat >"${tmp}/Cargo.toml" <<EOF
-[package]
-name = "registry-probe"
-version = "0.0.0"
-edition = "2021"
-
-[dependencies]
-${crate} = "=${ver}"
-EOF
+            {
+              printf '%s\n' \
+                '[package]' \
+                'name = "registry-probe"' \
+                'version = "0.0.0"' \
+                'edition = "2021"' \
+                '' \
+                '[dependencies]' \
+                "${crate} = \"=${ver}\""
+            } >"${tmp}/Cargo.toml"
             echo "fn main() {}" >"${tmp}/src/main.rs"
 
             retry 10 5 bash -lc "cd '${tmp}' && cargo fetch -q"
