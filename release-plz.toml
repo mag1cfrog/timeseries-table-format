@@ -31,6 +31,13 @@ changelog_path = "crates/timeseries-table-datafusion/CHANGELOG.md"
 git_release_enable = true
 
 [[package]]
+name = "timeseries-table-cli"
+release = true
+changelog_update = true
+changelog_path = "crates/timeseries-table-cli/CHANGELOG.md"
+git_release_enable = true
+
+[[package]]
 name = "timeseries-table-python"
 release = true
 git_only = true
