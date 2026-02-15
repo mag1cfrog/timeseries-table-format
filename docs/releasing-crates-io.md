@@ -18,7 +18,7 @@ Publishing is done from GitHub Actions using crates.io Trusted Publishing (OIDC)
 2) **crates.io Trusted Publisher (per crate)**
    - For each crate above, configure a Trusted Publisher on crates.io:
      - Repository: `mag1cfrog/timeseries-table-format`
-     - Workflow file: `.github/workflows/publish-crates.yml`
+     - Workflow filename: `publish-crates.yml` (must live in `.github/workflows/`)
      - Environment: `crates-io-release`
 
 ## Release flow
