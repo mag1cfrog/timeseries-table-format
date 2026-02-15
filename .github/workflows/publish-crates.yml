@@ -18,6 +18,7 @@ jobs:
     name: publish (crates.io)
     if: ${{ github.repository_owner == 'mag1cfrog' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: crates-io-release
     permissions:
       contents: read
@@ -26,6 +27,8 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-C debuginfo=0"
+      CARGO_NET_RETRY: "10"
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
       # Keep target artifacts stable across steps (and compatible with rust-cache).
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
@@ -95,11 +98,55 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
         run: |
           set -euo pipefail
+          ua="mag1cfrog/timeseries-table-format publish-crates (GitHub Actions)"
 
           has_version() {
             local crate="$1"
             local ver="$2"
-            curl -fsS "https://crates.io/api/v1/crates/${crate}/${ver}" >/dev/null 2>&1
+            curl -A "${ua}" -fsS "https://crates.io/api/v1/crates/${crate}/${ver}" >/dev/null 2>&1
+          }
+
+          retry() {
+            local attempts="$1"
+            local delay_s="$2"
+            shift 2
+
+            local i
+            for ((i=1; i<=attempts; i++)); do
+              if "$@"; then
+                return 0
+              fi
+              if (( i == attempts )); then
+                return 1
+              fi
+              echo "Retrying ($i/${attempts}) after ${delay_s}s: $*"
+              sleep "${delay_s}"
+              delay_s="$((delay_s * 2))"
+              if (( delay_s > 60 )); then
+                delay_s=60
+              fi
+            done
+          }
+
+          wait_for_registry() {
+            local crate="$1"
+            local ver="$2"
+
+            local tmp
+            tmp="$(mktemp -d)"
+            mkdir -p "${tmp}/src"
+            cat >"${tmp}/Cargo.toml" <<EOF
+[package]
+name = "registry-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+${crate} = "=${ver}"
+EOF
+            echo "fn main() {}" >"${tmp}/src/main.rs"
+
+            retry 10 5 bash -lc "cd '${tmp}' && cargo fetch -q"
           }
 
           publish_if_missing() {
@@ -110,13 +157,22 @@ jobs:
               return 0
             fi
             echo "Publishing ${crate} v${ver}"
-            cargo publish -p "${crate}" --locked
+            if ! retry 5 15 cargo publish -p "${crate}"; then
+              if has_version "${crate}" "${ver}"; then
+                echo "cargo publish failed but ${crate} v${ver} exists on crates.io; continuing"
+              else
+                return 1
+              fi
+            fi
+            if [[ "${crate}" != "timeseries-table-cli" ]]; then
+              wait_for_registry "${crate}" "${ver}"
+            fi
           }
 
-          core_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-core/Cargo.toml").read_text())["package"]["version"])')"
-          df_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-datafusion/Cargo.toml").read_text())["package"]["version"])')"
-          fmt_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-format/Cargo.toml").read_text())["package"]["version"])')"
-          cli_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-cli/Cargo.toml").read_text())["package"]["version"])')"
+          core_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-core/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          df_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-datafusion/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          fmt_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-format/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          cli_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-cli/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
 
           publish_if_missing "timeseries-table-core" "${core_ver}"
           publish_if_missing "timeseries-table-datafusion" "${df_ver}"
