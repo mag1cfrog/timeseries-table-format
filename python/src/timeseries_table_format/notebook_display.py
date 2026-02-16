@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 import pyarrow as pa
 
+from .notebook_display_config import load_notebook_display_config_file
+
 
 @dataclass
 class _NotebookDisplayConfig:
@@ -27,8 +29,20 @@ class _NotebookDisplayState:
 
 _STATE = _NotebookDisplayState()
 
-_SCROLL_Y_THRESHOLD_ROWS = 15
-_SCROLL_Y_MAX_HEIGHT_PX = 420
+@dataclass
+class _NotebookDisplayTuning:
+    scroll_y_threshold_rows: int = 15
+    scroll_y_max_height_px: int = 420
+
+    col_min_ch_num: int = 6
+    col_min_ch_other: int = 12
+    col_max_ch: int = 64
+
+    header_display_max_chars: int = 64
+    header_title_max_chars: int = 256
+
+
+_TUNING = _NotebookDisplayTuning()
 
 
 def _truthy_env(value: str | None) -> bool:
@@ -154,13 +168,7 @@ def _head_tail_indices(total: int, limit: int) -> tuple[list[int], int, int, boo
     return idx, head, tail, gap
 
 
-_COL_MIN_CH_NUM = 6
-_COL_MIN_CH_OTHER = 12
-_COL_MAX_CH = 64
-
-
-_HEADER_DISPLAY_MAX_CHARS = 64
-_HEADER_TITLE_MAX_CHARS = 256
+_CONFIG_ENV = "TTF_NOTEBOOK_CONFIG"
 
 
 def _cell_len_cap(value: Any, *, cap: int) -> int:
@@ -198,12 +206,75 @@ def _column_width_ch(
     # so long strings don't collapse to the minimum width.
     sample_len = 0
     for v in values:
-        sample_len = max(sample_len, _cell_len_cap(v, cap=_COL_MAX_CH))
-        if sample_len >= _COL_MAX_CH:
+        sample_len = max(sample_len, _cell_len_cap(v, cap=_TUNING.col_max_ch))
+        if sample_len >= _TUNING.col_max_ch:
             break
     content_len = max(len(name), len(type_str), sample_len)
-    min_w = _COL_MIN_CH_NUM if numeric else _COL_MIN_CH_OTHER
-    return max(min_w, min(content_len + 2, _COL_MAX_CH))
+    min_w = _TUNING.col_min_ch_num if numeric else _TUNING.col_min_ch_other
+    return max(min_w, min(content_len + 2, _TUNING.col_max_ch))
+
+
+def load_notebook_display_config(path: str) -> bool:
+    """
+    Load a TOML config file and apply its `notebook_display` section.
+
+    This updates the in-memory configuration used by the notebook HTML formatter.
+    It does not force-enable display outside IPython/Jupyter.
+    """
+    data = load_notebook_display_config_file(path)
+    if not data:
+        return False
+
+    def _apply_int(key: str, *, attr: str) -> None:
+        if key not in data:
+            return
+        v = data.get(key)
+        if v is None:
+            return
+        try:
+            iv = int(v)
+        except Exception:
+            return
+        if iv <= 0:
+            return
+        setattr(_STATE.config, attr, iv)
+
+    def _apply_tuning_int(key: str, *, attr: str) -> None:
+        if key not in data:
+            return
+        v = data.get(key)
+        if v is None:
+            return
+        try:
+            iv = int(v)
+        except Exception:
+            return
+        if iv <= 0:
+            return
+        setattr(_TUNING, attr, iv)
+
+    _apply_int("max_rows", attr="max_rows")
+    _apply_int("max_cols", attr="max_cols")
+    _apply_int("max_cell_chars", attr="max_cell_chars")
+
+    if "align" in data:
+        _STATE.config.align = _normalize_align(str(data.get("align")))
+
+    _apply_tuning_int("scroll_y_threshold_rows", attr="scroll_y_threshold_rows")
+    _apply_tuning_int("scroll_y_max_height_px", attr="scroll_y_max_height_px")
+    _apply_tuning_int("col_min_ch_num", attr="col_min_ch_num")
+    _apply_tuning_int("col_min_ch_other", attr="col_min_ch_other")
+    _apply_tuning_int("col_max_ch", attr="col_max_ch")
+    _apply_tuning_int("header_display_max_chars", attr="header_display_max_chars")
+    _apply_tuning_int("header_title_max_chars", attr="header_title_max_chars")
+
+    return True
+
+
+def _load_config_from_env() -> None:
+    path = os.getenv(_CONFIG_ENV)
+    if path:
+        load_notebook_display_config(path)
 
 
 def render_arrow_table_html(
@@ -439,10 +510,10 @@ def render_arrow_table_html(
 
     header_cells: list[str] = []
     for idx, (name, type_str) in enumerate(zip(col_names, col_types)):
-        name_disp = _ellipsize_middle(name, max_chars=_HEADER_DISPLAY_MAX_CHARS)
-        type_disp = _ellipsize_middle(type_str, max_chars=_HEADER_DISPLAY_MAX_CHARS)
+        name_disp = _ellipsize_middle(name, max_chars=_TUNING.header_display_max_chars)
+        type_disp = _ellipsize_middle(type_str, max_chars=_TUNING.header_display_max_chars)
         title_raw = _ellipsize_middle(
-            f"{name} ({type_str})", max_chars=_HEADER_TITLE_MAX_CHARS
+            f"{name} ({type_str})", max_chars=_TUNING.header_title_max_chars
         )
 
         name_esc = _html.escape(name_disp, quote=True)
@@ -519,16 +590,16 @@ def render_arrow_table_html(
 
     wrap_cls = "ttf-wrap"
     wrap_style = ""
-    tall = rows_shown >= _SCROLL_Y_THRESHOLD_ROWS
+    tall = rows_shown >= _TUNING.scroll_y_threshold_rows
     if tall:
         wrap_cls += " ttf-scroll-y"
-        wrap_style = f' style="--ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
+        wrap_style = f' style="--ttf-max-height: {_TUNING.scroll_y_max_height_px}px;"'
 
     if cols_shown == 0:
         empty_style = ' style="padding:10px;"'
         if tall:
             empty_style = (
-                f' style="padding:10px; --ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
+                f' style="padding:10px; --ttf-max-height: {_TUNING.scroll_y_max_height_px}px;"'
             )
         empty = (
             f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
@@ -666,6 +737,8 @@ def disable_notebook_display() -> bool:
 def _auto_enable_notebook_display() -> bool:
     if not _auto_enabled_by_default():
         return False
+
+    _load_config_from_env()
 
     align_env = os.getenv("TTF_NOTEBOOK_ALIGN")
     if align_env is not None:
