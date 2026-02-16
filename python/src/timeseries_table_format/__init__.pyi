@@ -13,7 +13,7 @@ from ._native import (
 def enable_notebook_display(
     *,
     max_rows: int = 20,
-    max_cols: int = 20,
+    max_cols: int = 50,
     max_cell_chars: int = 30,
     align: str = "right",
 ) -> bool: ...
