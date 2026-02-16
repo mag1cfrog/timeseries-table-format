@@ -1,6 +1,7 @@
 import html as _html
-import importlib
+import builtins
 import os
+import sys
 from typing import Callable, Any
 from dataclasses import dataclass, field
 
@@ -54,16 +55,22 @@ def _auto_enabled_by_default() -> bool:
 
 
 def _get_ipython_html_formatter() -> Any | None:
+    # Avoid importing IPython at import-time in non-notebook contexts.
+    # Prefer a builtins-provided `get_ipython` (present when actually running under IPython),
+    # then fall back to a pre-imported `IPython` module if it already exists.
+    get_ipython = getattr(builtins, "get_ipython", None)
+    if get_ipython is None:
+        ipy = sys.modules.get("IPython")
+        if ipy is None:
+            return None
+        get_ipython = getattr(ipy, "get_ipython", None)
+        if get_ipython is None:
+            return None
+
     try:
-        ipython = importlib.import_module("IPython")
+        shell = get_ipython()
     except Exception:
         return None
-
-    get_ipython = getattr(ipython, "get_ipython", None)
-    if get_ipython is None:
-        return None
-
-    shell = get_ipython()
     if shell is None:
         return None
 
