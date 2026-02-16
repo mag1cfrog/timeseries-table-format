@@ -59,8 +59,8 @@ align = "auto"
 
 The PyPI package version is derived from `crates/timeseries-table-python/Cargo.toml` (via maturin).
 If you change the pure-Python sources under `python/src/` (or `python/pyproject.toml` / `python/README.md`),
-the `Update python wheel stamp` GitHub workflow will automatically update
-`crates/timeseries-table-python/python-src.stamp` on PRs from branches in this repository.
+CI will automatically update `crates/timeseries-table-python/python-src.stamp` on PRs from branches in
+this repository.
 
 If you need to update it locally (e.g. working on a fork, or before pushing), run:
 

@@ -64,6 +64,45 @@ jobs:
         run: |
           set -euo pipefail
           echo "skip=${SKIP_PYTHON}" >> "$GITHUB_OUTPUT"
+
+  python-wheel-stamp-autofix:
+    name: Auto-fix python wheel stamp
+    needs: [detect-python-changes]
+    if: ${{ github.event_name == 'pull_request' && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Update python wheel stamp
+        id: stamp
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/update_python_wheel_stamp.py
+          if git diff --quiet -- crates/timeseries-table-python/python-src.stamp; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/timeseries-table-python/python-src.stamp
+          git commit -m "chore(python-stamp): update python wheel stamp"
+          git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+    outputs:
+      pushed: ${{ steps.stamp.outputs.pushed }}
   
   rust-quality-gate:
     runs-on: ubuntu-latest
@@ -131,8 +170,8 @@ jobs:
 
   python-quality-gate:
     runs-on: ubuntu-latest
-    needs: [detect-python-changes]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [detect-python-changes, python-wheel-stamp-autofix]
+    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
     defaults:
       run:
         working-directory: python
@@ -207,8 +246,8 @@ jobs:
           "${venv_dir}/bin/python" -m pytest -q -c python/pyproject.toml python/tests
 
   python-wheel-matrix:
-    needs: [detect-python-changes]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [detect-python-changes, python-wheel-stamp-autofix]
+    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
     permissions:
       actions: write
       contents: read
