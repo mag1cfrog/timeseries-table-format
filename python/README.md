@@ -247,6 +247,33 @@ uv run -p .venv/bin/python maturin develop -m pyproject.toml
 .venv/bin/python -m pytest
 ```
 
+## Benchmark: SQL conversion (IPC bridge)
+
+This repo returns SQL results to Python as a `pyarrow.Table` via an in-memory Arrow IPC stream.
+To estimate the IPC encode/decode overhead, run:
+
+```bash
+cd python
+uv pip install -p .venv/bin/python numpy
+uv run -p .venv/bin/python maturin develop -m pyproject.toml --features test-utils
+.venv/bin/python bench/sql_conversion.py --target-ipc-gb 2
+```
+
+Optional: benchmark IPC ZSTD compression (requires building with `ipc-zstd`):
+
+```bash
+uv run -p .venv/bin/python maturin develop -m pyproject.toml --features test-utils,ipc-zstd
+.venv/bin/python bench/sql_conversion.py --target-ipc-gb 2 --ipc-compression zstd
+```
+
+The script prints JSON with separate timings for:
+- end-to-end `Session.sql(...)`
+- Rust-side query+IPC encode (`_native._testing._bench_sql_ipc`)
+- Python-side IPC decode (`pyarrow.ipc.open_stream(...).read_all()`)
+
+Large targets can require high peak RAM (IPC bytes + decoded Table + intermediate buffers). Start with
+`--target-ipc-gb 2` and scale up to `3` or `6` on a machine with plenty of memory.
+
 ## Troubleshooting
 
 - `pip` is building from source / fails with Rust errors: no wheel is available for your platform/Python; install Rust and retry, or use a supported Python/platform combination.
