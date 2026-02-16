@@ -73,11 +73,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@v2
+        id: generate-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Checkout PR head
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
+          persist-credentials: true
+          token: ${{ steps.generate-token.outputs.token }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -265,11 +274,16 @@ jobs:
   ci-summary:
     # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
-    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-quality-gate, python-wheel-matrix]
+    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-wheel-stamp-autofix, python-quality-gate, python-wheel-matrix]
     if: ${{ always() }}
     steps:
       - name: Summarize outcome
         run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs['python-wheel-stamp-autofix'].outputs.pushed }}" = "true" ]; then
+            echo "Python wheel stamp was updated in this run; waiting for the follow-up CI run on the new commit."
+            exit 0
+          fi
+
           if [ "${{ needs['detect-rust-changes'].outputs.code }}" = "true" ]; then
             echo "Code changed; heavy job result: ${{ needs['rust-quality-gate'].result }}"
             [ "${{ needs['rust-quality-gate'].result }}" = "success" ] || exit 1
