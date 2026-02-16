@@ -18,6 +18,7 @@ def enable_notebook_display(
     align: str = "right",
 ) -> bool: ...
 def disable_notebook_display() -> bool: ...
+def load_notebook_display_config(path: str) -> bool: ...
 
 __all__ = [
     "__version__",
@@ -31,4 +32,5 @@ __all__ = [
     "TimeSeriesTable",
     "enable_notebook_display",
     "disable_notebook_display",
+    "load_notebook_display_config",
 ]

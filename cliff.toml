@@ -24,5 +24,6 @@ commit_parsers = [
   { message = "^refactor", group = "Code Refactoring" },
   { message = "^test", group = "Testing" },
   { message = "^chore\\(release\\):", skip = true },
+  { message = "^chore\\(python-stamp\\):", skip = true },
   { message = "^chore", group = "Maintenance" }
 ]

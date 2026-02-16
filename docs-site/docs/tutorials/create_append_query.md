@@ -53,6 +53,7 @@ before being committed (so the table is self-contained on disk).
     - Opt-out: set `TTF_NOTEBOOK_DISPLAY=0` before importing `timeseries_table_format`, or call `timeseries_table_format.disable_notebook_display()`
     - Configure: call `timeseries_table_format.enable_notebook_display(max_rows=..., max_cols=..., max_cell_chars=..., align=...)`
     - Alignment: set `TTF_NOTEBOOK_ALIGN=auto|left|right` before importing `timeseries_table_format` (or pass `align=...` to `enable_notebook_display(...)`)
+    - Config file (TOML): set `TTF_NOTEBOOK_CONFIG=path/to/ttf.toml` before importing `timeseries_table_format` (on Python 3.10, install `tomli` to enable TOML parsing)
 
 !!! note
     The Python API is synchronous. Internally, long-running Rust operations run on an internal

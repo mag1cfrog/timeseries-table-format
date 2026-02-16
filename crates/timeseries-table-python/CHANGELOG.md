@@ -12,6 +12,12 @@ All notable changes to timeseries-table-python will be documented in this file.
 
 - Enhance documentation for Session and TimeSeriesTable structs ([314cc55](https://github.com/mag1cfrog/timeseries-table-format/commit/314cc558d9646ee7f629a7545c7257c1381cc907))
 
+- Auto-register a Jupyter/IPython HTML formatter for `pyarrow.Table` results (bounded preview, safe escaping) ([5f4ee65](https://github.com/mag1cfrog/timeseries-table-format/commit/5f4ee6538a55ed1126c148db756574f8eb203ab3))
+
+- Improve notebook table rendering with head/tail previews for large results ([694d5ca](https://github.com/mag1cfrog/timeseries-table-format/commit/694d5ca8d3711bb6ed2933ce6557fd33a96dcbd8))
+
+- Add notebook display configuration via env vars and TOML config files ([3566607](https://github.com/mag1cfrog/timeseries-table-format/commit/3566607be8ae1cf48a5c089a77a31ab8373aeb36))
+
 
 ## 0.1.1
 
@@ -156,4 +162,3 @@ All notable changes to timeseries-table-python will be documented in this file.
 All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
-

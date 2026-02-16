@@ -2,6 +2,7 @@ from timeseries_table_format.notebook_display import _auto_enable_notebook_displ
 from timeseries_table_format.notebook_display import (
     disable_notebook_display,
     enable_notebook_display,
+    load_notebook_display_config,
 )
 from . import _native as _native
 
@@ -34,4 +35,5 @@ __all__ = [
     "TimeSeriesTable",
     "enable_notebook_display",
     "disable_notebook_display",
+    "load_notebook_display_config",
 ]
