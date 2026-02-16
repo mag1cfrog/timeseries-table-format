@@ -175,7 +175,11 @@ def main(argv: list[str]) -> int:
                 table_root=str(table_root),
                 time_column="ts",
                 bucket="1h",
-                entity_columns=["entity_id"],
+                # v0 entity identity extraction currently only supports string entity columns and
+                # requires them to be constant within a segment. For this conversion benchmark we
+                # keep entity identity disabled (empty list) and treat `entity_id` as a normal
+                # column used only for query shape/bytes.
+                entity_columns=[],
                 timezone=None,
             )
 
