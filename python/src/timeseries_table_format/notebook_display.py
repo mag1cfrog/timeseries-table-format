@@ -87,6 +87,14 @@ def _truncate(s: str, max_chars: int) -> str:
     return s if len(s) <= max_chars else s[:max_chars]
 
 
+def _truncate_with_flag(s: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0:
+        return "", bool(s)
+    if len(s) <= max_chars:
+        return s, False
+    return s[:max_chars], True
+
+
 def _format_cell_value(value: Any) -> str:
     if value is None:
         return ""
@@ -310,6 +318,18 @@ def render_arrow_table_html(
   font-style: italic;
 }
 
+.ttf-arrow-preview .ttf-null {
+  color: var(--ttf-muted);
+  font-style: italic;
+}
+
+.ttf-arrow-preview .ttf-cell[data-truncated="1"]::after {
+  content: "…";
+  padding-left: 0.25ch;
+  color: var(--ttf-muted);
+  user-select: none;
+}
+
 .ttf-arrow-preview tbody tr.ttf-gap-row td {
   text-align: center !important;
   color: var(--ttf-muted);
@@ -385,9 +405,14 @@ def render_arrow_table_html(
                     tds.append('<td class="ttf-gap">…</td>')
                 continue
             raw = col_values[j][value_i] if value_i < len(col_values[j]) else None
-            s = _format_cell_value(raw)
-            s = _truncate(s, max_cell_chars)
-            s = _html.escape(s, quote=True)
+            if raw is None:
+                s = '<span class="ttf-null">null</span>'
+            else:
+                cell_text = _format_cell_value(raw)
+                cell_text, truncated = _truncate_with_flag(cell_text, max_cell_chars)
+                cell_text = _html.escape(cell_text, quote=True)
+                trunc_attr = ' data-truncated="1"' if truncated else ""
+                s = f'<span class="ttf-cell"{trunc_attr}>{cell_text}</span>'
             cls = "ttf-num" if numeric_cols[j] else ""
             cls_attr = f' class="{cls}"' if cls else ""
             tds.append(f"<td{cls_attr}>{s}</td>")
@@ -452,6 +477,8 @@ def render_arrow_table_html(
 
 
 def _make_printer() -> Callable[[pa.Table], str]:
+    # Intentionally reads from `_STATE.config` at call time so that repeated calls to
+    # `enable_notebook_display(...)` update behavior without re-registering a printer.
     def _printer(table: pa.Table) -> str:
         cfg = _STATE.config
         return render_arrow_table_html(
@@ -576,9 +603,5 @@ def _auto_enable_notebook_display() -> bool:
     html_formatter = _get_ipython_html_formatter()
     if html_formatter is None:
         return False
-
-    # Auto-enable: do not override an existing pa.Table HTML printer.
-    if _STATE.our_printer is None:
-        _STATE.our_printer = _make_printer()
 
     return _install_into_html_formatter(html_formatter, override_existing=False)

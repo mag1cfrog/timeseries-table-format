@@ -33,6 +33,15 @@ print(type(out))  # pyarrow.Table
 
 - Polars: `pip install polars`, then `polars.from_arrow(out)`
 
+## Notebook display (Jupyter/IPython)
+
+In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results will display as a bounded HTML preview by default (the return type is still a real `pyarrow.Table`).
+
+- Defaults: `max_rows=20` (head/tail), `max_cols=50` (left/right), `max_cell_chars=200`
+- Opt-out: set `TTF_NOTEBOOK_DISPLAY=0` before importing `timeseries_table_format`, or call `timeseries_table_format.disable_notebook_display()`
+- Configure: call `timeseries_table_format.enable_notebook_display(max_rows=..., max_cols=..., max_cell_chars=..., align=...)`
+- Alignment: `align="right"` (default) or `align="auto"` (strings left, numbers right); auto-enable can be configured with `TTF_NOTEBOOK_ALIGN=auto|left|right`
+
 ## Quickstart: create → append → query
 
 ```python

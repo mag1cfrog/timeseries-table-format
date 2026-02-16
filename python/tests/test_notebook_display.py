@@ -62,8 +62,8 @@ def test_render_html_truncates_columns():
 def test_render_html_rows_head_tail_preview():
     t = pa.table({"x": [f"r{i}" for i in range(30)]})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
-    assert ">r0</td>" in html
-    assert ">r29</td>" in html
+    assert ">r0</span>" in html
+    assert ">r29</span>" in html
     assert "r15" not in html
     assert 'class="ttf-gap-row"' in html
     assert "Showing <b>20</b> of <b>30</b> rows" in html
@@ -73,8 +73,8 @@ def test_render_html_rows_head_tail_preview():
 def test_render_html_rows_odd_split_is_balanced():
     t = pa.table({"x": [f"r{i}" for i in range(10)]})
     html = nd.render_arrow_table_html(t, max_rows=5, max_cols=50, max_cell_chars=200)
-    assert ">r0</td>" in html
-    assert ">r9</td>" in html
+    assert ">r0</span>" in html
+    assert ">r9</span>" in html
     assert "r5" not in html
     assert "(3 head + 2 tail)" in html
 
@@ -103,15 +103,17 @@ def test_render_html_duplicate_column_names_preserved():
     t = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
     assert html.count('class="ttf-colname">x</span>') == 2
-    assert html.find(">1</td>") < html.find(">2</td>")
+    assert html.find('class="ttf-num"><span class="ttf-cell">1</span>') < html.find(
+        'class="ttf-num"><span class="ttf-cell">2</span>'
+    )
 
 
 def test_render_html_duplicate_column_names_with_truncation_does_not_error():
     t = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=1, max_cell_chars=200)
     assert html.count("<th ") == 1
-    assert ">1</td>" in html
-    assert ">2</td>" not in html
+    assert ">1</span>" in html
+    assert ">2</span>" not in html
 
 
 def test_render_html_escapes_quotes_in_cells():
@@ -131,7 +133,20 @@ def test_render_html_escapes_column_names():
 def test_render_html_bytes_render_as_hex():
     t = pa.table({"x": [b"\x00\xff"]})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
-    assert ">00ff</td>" in html
+    assert ">00ff</span>" in html
+
+
+def test_render_html_sets_truncated_flag_on_cell():
+    t = pa.table({"x": ["abcdefghijklmnopqrstuvwxyz"]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=5)
+    assert 'data-truncated="1"' in html
+
+
+def test_render_html_null_distinct_from_empty_string():
+    t = pa.table({"x": [None, ""], "y": ["", None]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert 'class="ttf-null"' in html
+    assert ">null</span>" in html
 
 
 def test_render_html_invalid_bounds_fall_back_to_defaults():
@@ -199,6 +214,23 @@ def test_install_when_already_installed_is_noop():
 
     assert nd._install_into_html_formatter(fake, override_existing=True) is True
     assert nd._install_into_html_formatter(fake, override_existing=True) is False
+
+
+def test_printer_reads_latest_config_without_reregistration():
+    nd._STATE.config.max_rows = 5
+    nd._STATE.config.max_cols = 7
+    nd._STATE.config.max_cell_chars = 9
+    nd._STATE.config.align = "left"
+    printer = nd._make_printer()
+
+    nd._STATE.config.max_rows = 11
+    nd._STATE.config.max_cols = 13
+    nd._STATE.config.max_cell_chars = 15
+    nd._STATE.config.align = "auto"
+
+    html = printer(pa.table({"x": [1]}))
+    assert "(max_rows=11, max_cols=13, max_cell_chars=15)" in html
+    assert "ttf-align-auto" in html
 
 
 def test_auto_install_does_not_override_existing():
