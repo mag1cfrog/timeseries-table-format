@@ -83,6 +83,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Verify python wheel stamp
+        run: python scripts/update_python_wheel_stamp.py --check
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache

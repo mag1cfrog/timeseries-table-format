@@ -49,9 +49,11 @@ jobs:
               - 'python/pyproject.toml'
               - 'python/uv.lock'
               - 'python/.python-version'
+              - 'scripts/update_python_wheel_stamp.py'
               - 'crates/timeseries-table-python/**/*.rs'
               - 'crates/timeseries-table-python/Cargo.toml'
               - 'crates/timeseries-table-python/build.rs'
+              - 'crates/timeseries-table-python/python-src.stamp'
               - 'Cargo.toml'
               - 'Cargo.lock'
       - name: Check for skip label
@@ -161,6 +163,9 @@ jobs:
           if [[ -n "${libdir}" ]]; then
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
+
+      - name: Verify python wheel stamp
+        run: python ../scripts/update_python_wheel_stamp.py --check
 
       - name: Rust cache (for extension build)
         uses: Swatinem/rust-cache@v2
