@@ -87,9 +87,9 @@ def _write_parquet_generated(seg_path: Path, spec: DatasetSpec) -> dict[str, int
             ts = (np.arange(start, start + n, dtype=np.int64) * 1_000_000_000).astype(
                 np.int64, copy=False
             )
-            entity_id = (np.arange(start, start + n, dtype=np.int64) % spec.entities).astype(
-                np.int32, copy=False
-            )
+            entity_id = (
+                np.arange(start, start + n, dtype=np.int64) % spec.entities
+            ).astype(np.int32, copy=False)
 
             cols: dict[str, pa.Array] = {
                 "ts": pa.array(ts, type=pa.timestamp("ns")),
@@ -121,7 +121,9 @@ def _summarize_seconds(xs: list[float]) -> dict[str, object]:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="Micro-benchmark: SQL -> Arrow IPC -> pyarrow.Table")
+    ap = argparse.ArgumentParser(
+        description="Micro-benchmark: SQL -> Arrow IPC -> pyarrow.Table"
+    )
     ap.add_argument("--target-ipc-gb", type=float, default=2.0)
     ap.add_argument("--ipc-compression", choices=["none", "zstd"], default="none")
     ap.add_argument("--entities", type=int, default=1000)
@@ -267,7 +269,9 @@ def main(argv: list[str]) -> int:
                     )
                     bench_sql_ipc_times.append(t_bench)
 
-                    t_decode, table = _timed(lambda: pa_ipc.open_stream(ipc_bytes).read_all())
+                    t_decode, table = _timed(
+                        lambda: pa_ipc.open_stream(ipc_bytes).read_all()
+                    )
                     decode_only_times.append(t_decode)
 
                     # Rust-side metrics (per run).
@@ -294,7 +298,8 @@ def main(argv: list[str]) -> int:
                         "ipc_bytes_len": ipc_bytes_lens,
                         "arrow_mem_bytes": arrow_mem_bytes,
                         "ipc_to_arrow_ratio": [
-                            (b / m) if m else None for b, m in zip(ipc_bytes_lens, arrow_mem_bytes)
+                            (b / m) if m else None
+                            for b, m in zip(ipc_bytes_lens, arrow_mem_bytes)
                         ],
                         "row_count": row_counts,
                         "batch_count": batch_counts,
