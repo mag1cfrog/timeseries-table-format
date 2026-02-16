@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib
 import json
 import os
 import platform
@@ -30,13 +31,12 @@ def _require_testing_module():
 
 def _require_numpy():
     try:
-        import numpy as np  # type: ignore
+        return importlib.import_module("numpy")
     except ModuleNotFoundError as e:  # pragma: no cover
         raise RuntimeError(
             "This benchmark requires numpy for efficient Parquet generation. "
             "Install it (e.g. `uv pip install numpy` or `pip install numpy`) and retry."
         ) from e
-    return np
 
 
 def _now() -> float:
