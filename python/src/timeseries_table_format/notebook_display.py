@@ -132,7 +132,7 @@ def render_arrow_table_html(
     # Convert bounded preview to Python values.
     data = preview.to_pydict()
 
-    # Precompute nemeric columns for CSS classing.
+    # Precompute numeric columns for CSS classing.
     numeric_cols: set[str] = set()
     for field in schema:
         if _is_numeric_arrow_type(field.type):
@@ -141,19 +141,91 @@ def render_arrow_table_html(
     # Build HTML.
     style = """
 <style>
-.ttf-arrow-preview { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
-sans-serif; font-size: 12px; color: #111; }
-.ttf-arrow-preview .ttf-wrap { max-width: 100%; overflow: auto; border: 1px solid #e5e7eb;
-border-radius: 8px; background: #fff; }
-.ttf-arrow-preview table { border-collapse: collapse; width: 100%; }
-.ttf-arrow-preview th, .ttf-arrow-preview td { padding: 6px 10px; border-bottom: 1px solid
-#f1f5f9; white-space: nowrap; }
-.ttf-arrow-preview thead th { position: sticky; top: 0; z-index: 1; background: #f8fafc; border-
-bottom: 1px solid #e5e7eb; text-align: left; }
-.ttf-arrow-preview tbody tr:nth-child(even) { background: #fbfdff; }
-.ttf-arrow-preview td.ttf-num { text-align: right; font-variant-numeric: tabular-nums; }
-.ttf-arrow-preview .ttf-footer { margin-top: 6px; color: #475569; }
-.ttf-arrow-preview .ttf-meta { color: #64748b; font-size: 11px; }
+.ttf-arrow-preview {
+  /* Theme-aware defaults: prefers VS Code/Jupyter variables when available. */
+  --ttf-bg: var(--vscode-editor-background, #ffffff);
+  --ttf-fg: var(--vscode-editor-foreground, #111827);
+  --ttf-muted: var(--vscode-descriptionForeground, #64748b);
+  --ttf-border: rgba(127, 127, 127, 0.35);
+  --ttf-grid: rgba(127, 127, 127, 0.18);
+  --ttf-head-bg: rgba(127, 127, 127, 0.10);
+  --ttf-zebra: rgba(127, 127, 127, 0.05);
+  --ttf-hover: rgba(127, 127, 127, 0.08);
+
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ttf-fg);
+}
+
+@media (prefers-color-scheme: dark) {
+  .ttf-arrow-preview {
+    --ttf-bg: var(--vscode-editor-background, #0b1220);
+    --ttf-fg: var(--vscode-editor-foreground, #e5e7eb);
+    --ttf-muted: var(--vscode-descriptionForeground, #94a3b8);
+    --ttf-border: rgba(160, 160, 160, 0.35);
+    --ttf-grid: rgba(160, 160, 160, 0.18);
+    --ttf-head-bg: rgba(255, 255, 255, 0.07);
+    --ttf-zebra: rgba(255, 255, 255, 0.04);
+    --ttf-hover: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.ttf-arrow-preview .ttf-wrap {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--ttf-border);
+  border-radius: 10px;
+  background: var(--ttf-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.ttf-arrow-preview table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+}
+
+.ttf-arrow-preview th,
+.ttf-arrow-preview td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ttf-grid);
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.ttf-arrow-preview thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ttf-head-bg);
+  border-bottom: 1px solid var(--ttf-border);
+  text-align: left;
+  font-weight: 600;
+}
+
+.ttf-arrow-preview tbody tr:nth-child(even) {
+  background: var(--ttf-zebra);
+}
+
+.ttf-arrow-preview tbody tr:hover {
+  background: var(--ttf-hover);
+}
+
+.ttf-arrow-preview td.ttf-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ttf-arrow-preview .ttf-footer {
+  margin-top: 6px;
+  color: var(--ttf-muted);
+}
+
+.ttf-arrow-preview .ttf-meta {
+  color: var(--ttf-muted);
+  font-size: 11px;
+}
 </style>
 """.strip()
 
