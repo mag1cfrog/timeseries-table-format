@@ -41,6 +41,7 @@ git_release_enable = true
 name = "timeseries-table-python"
 release = true
 git_only = true
+git_tag_name = "timeseries-table-python-v{{ version }}"
 semver_check = false
 changelog_update = true
 changelog_path = "crates/timeseries-table-python/CHANGELOG.md"

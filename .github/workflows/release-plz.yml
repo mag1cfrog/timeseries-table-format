@@ -87,6 +87,10 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+
+      - name: Verify tags exist for released packages
+        run: python scripts/check_release_tags.py
+
       - name: sccache stats
         if: ${{ always() }}
         shell: bash
