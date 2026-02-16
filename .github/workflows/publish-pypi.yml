@@ -33,6 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Verify tag matches Cargo version
         if: ${{ github.ref_type == 'tag' }}
         shell: bash
@@ -40,16 +45,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           expected="${tag#timeseries-table-python-v}"
-          actual="$(
-            python3 - <<'PY'
-            import pathlib
-            import tomllib
-
-            cargo_toml = pathlib.Path("crates/timeseries-table-python/Cargo.toml").read_text(encoding="utf-8")
-            data = tomllib.loads(cargo_toml)
-            print(data["package"]["version"])
-            PY
-          )"
+          actual="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-python/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
           if [[ "${tag}" != timeseries-table-python-v* ]]; then
             echo "Unexpected tag format: ${tag}"
             exit 1
