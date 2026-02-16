@@ -74,6 +74,9 @@ jobs:
     env:
       # Speed up release builds (especially on Windows) by disabling debuginfo.
       CARGO_PROFILE_RELEASE_DEBUG: "0"
+      # PR validation uses non-release wheels; on Windows, PDB/debug info tends to reduce sccache
+      # reuse across runs. Disabling debuginfo improves cache hit rates and build times.
+      CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
 
     steps:
