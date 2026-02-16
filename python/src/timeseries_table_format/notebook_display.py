@@ -10,7 +10,8 @@ import pyarrow as pa
 class _NotebookDisplayConfig:
     max_rows: int = 20
     max_cols: int = 20
-    max_cell_chars: int = 100
+    max_cell_chars: int = 30
+    align: str = "right"  # "right" | "auto" | "left"
 
 
 @dataclass
@@ -104,6 +105,19 @@ def _is_numeric_arrow_type(t: pa.DataType) -> bool:
         pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t)
     )
 
+def _normalize_align(value: str | None) -> str:
+    if value is None:
+        return "right"
+    v = value.strip().lower()
+    if v in {"auto", "best", "mixed", "smart"}:
+        return "auto"
+    if v in {"left", "l"}:
+        return "left"
+    if v in {"right", "r"}:
+        return "right"
+    return "right"
+
+
 def _column_width_ch(name: str, type_str: str) -> int:
     # Approximate a sensible column width from the header content length.
     # Keep it bounded so a single long name/type doesn't blow out the layout.
@@ -116,11 +130,13 @@ def render_arrow_table_html(
     *,
     max_rows: int = 20,
     max_cols: int = 20,
-    max_cell_chars: int = 100,
+    max_cell_chars: int = 30,
+    align: str = "right",
 ) -> str:
     max_rows = _safe_int(max_rows, default=20)
     max_cols = _safe_int(max_cols, default=20)
-    max_cell_chars = _safe_int(max_cell_chars, default=100)
+    max_cell_chars = _safe_int(max_cell_chars, default=30)
+    align = _normalize_align(align)
 
     total_rows = int(table.num_rows)
     total_cols = int(table.num_columns)
@@ -205,13 +221,32 @@ def render_arrow_table_html(
   text-overflow: ellipsis;
 }
 
+.ttf-arrow-preview.ttf-align-right th,
+.ttf-arrow-preview.ttf-align-right td {
+  text-align: right;
+}
+
+.ttf-arrow-preview.ttf-align-left th,
+.ttf-arrow-preview.ttf-align-left td {
+  text-align: left;
+}
+
+.ttf-arrow-preview.ttf-align-auto th,
+.ttf-arrow-preview.ttf-align-auto td {
+  text-align: left;
+}
+
+.ttf-arrow-preview.ttf-align-auto th.ttf-num,
+.ttf-arrow-preview.ttf-align-auto td.ttf-num {
+  text-align: right;
+}
+
 .ttf-arrow-preview thead th {
   position: sticky;
   top: 0;
   z-index: 1;
   background: var(--ttf-head-bg);
   border-bottom: 1px solid var(--ttf-border);
-  text-align: left;
   font-weight: 600;
 }
 
@@ -238,13 +273,13 @@ def render_arrow_table_html(
 }
 
 .ttf-arrow-preview td.ttf-num {
-  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
 .ttf-arrow-preview .ttf-footer {
   margin-top: 6px;
   color: var(--ttf-muted);
+  text-align: left;
 }
 
 .ttf-arrow-preview .ttf-meta {
@@ -266,8 +301,10 @@ def render_arrow_table_html(
         name_esc = _html.escape(name, quote=True)
         type_esc = _html.escape(type_str, quote=True)
         title = _html.escape(f"{name} ({type_str})", quote=True)
+        cls = "ttf-num" if name in numeric_cols else ""
+        cls_attr = f' class="{cls}"' if cls else ""
         header_cells.append(
-            f'<th title="{title}">'
+            f"<th{cls_attr} title=\"{title}\">"
             f'<span class="ttf-colname">{name_esc}</span>'
             f'<span class="ttf-coltype">{type_esc}</span>'
             f"</th>"
@@ -299,13 +336,13 @@ def render_arrow_table_html(
 
     if cols_shown == 0:
         empty = (
-            f'<div class="ttf-arrow-preview">{style}'
+            f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
             f'<div class="ttf-wrap" style="padding:10px;">(No columns)</div>{footer}</div>'
         )
         return empty
 
     return (
-        f'<div class="ttf-arrow-preview">{style}'
+        f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
         f'<div class="ttf-wrap"><table>'
         f"{colgroup}"
         f"<thead>{header_html}</thead>"
@@ -323,6 +360,7 @@ def _make_printer() -> Callable[[pa.Table], str]:
             max_rows=cfg.max_rows,
             max_cols=cfg.max_cols,
             max_cell_chars=cfg.max_cell_chars,
+            align=cfg.align,
         )
 
     return _printer
@@ -397,12 +435,14 @@ def enable_notebook_display(
     *,
     max_rows: int = 20,
     max_cols: int = 20,
-    max_cell_chars: int = 100,
+    max_cell_chars: int = 30,
+    align: str = "right",
 ) -> bool:
     _STATE.config = _NotebookDisplayConfig(
         max_rows=_safe_int(max_rows, default=20),
         max_cols=_safe_int(max_cols, default=20),
-        max_cell_chars=_safe_int(max_cell_chars, default=100),
+        max_cell_chars=_safe_int(max_cell_chars, default=30),
+        align=_normalize_align(align),
     )
 
     html_formatter = _get_ipython_html_formatter()
@@ -429,6 +469,10 @@ def disable_notebook_display() -> bool:
 def _auto_enable_notebook_display() -> bool:
     if not _auto_enabled_by_default():
         return False
+
+    align_env = os.getenv("TTF_NOTEBOOK_ALIGN")
+    if align_env is not None:
+        _STATE.config.align = _normalize_align(align_env)
 
     html_formatter = _get_ipython_html_formatter()
     if html_formatter is None:
