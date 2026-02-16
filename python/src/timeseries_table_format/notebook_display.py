@@ -54,7 +54,7 @@ def _auto_enabled_by_default() -> bool:
 
 def _get_ipython_html_formatter() -> Any | None:
     try:
-        from IPython import get_ipython  # type: ignore[import-not-found]
+        from IPython import get_ipython
     except Exception:
         return None
 
