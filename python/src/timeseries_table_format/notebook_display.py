@@ -392,7 +392,9 @@ def render_arrow_table_html(
 
     # Header
     col_widths = [
-        _column_width_ch(col_names[i], col_types[i], col_values[i], numeric=numeric_cols[i])
+        _column_width_ch(
+            col_names[i], col_types[i], col_values[i], numeric=numeric_cols[i]
+        )
         for i in range(len(col_names))
     ]
     table_width_ch = sum(col_widths) + (3 if col_gap else 0)

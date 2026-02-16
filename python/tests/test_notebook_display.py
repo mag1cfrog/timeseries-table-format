@@ -149,7 +149,9 @@ def test_render_html_sets_table_width_var_so_long_cells_dont_expand_layout():
 
 
 def test_render_html_uses_preview_values_to_avoid_string_columns_collapsing_to_min_width():
-    t = pa.table({"id": list(range(5)), "text": ["x" * 10, "y" * 50, "z" * 400, "a", "b"]})
+    t = pa.table(
+        {"id": list(range(5)), "text": ["x" * 10, "y" * 50, "z" * 400, "a", "b"]}
+    )
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     import re
 
