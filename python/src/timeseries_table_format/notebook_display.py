@@ -103,6 +103,7 @@ def _is_numeric_arrow_type(t: pa.DataType) -> bool:
         pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t)
     )
 
+
 def _normalize_align(value: str | None) -> str:
     if value is None:
         return "right"
@@ -180,7 +181,9 @@ def render_arrow_table_html(
 
     # Convert bounded preview to Python values. Use per-column take/to_pylist to preserve
     # duplicate column names (to_pydict() collapses duplicates) and support head/tail rows.
-    col_values: list[list[Any]] = [col.take(row_idx_arr).to_pylist() for col in preview.columns]
+    col_values: list[list[Any]] = [
+        col.take(row_idx_arr).to_pylist() for col in preview.columns
+    ]
 
     # Precompute numeric columns for CSS classing.
     numeric_cols = [_is_numeric_arrow_type(f.type) for f in fields]
@@ -357,7 +360,7 @@ def render_arrow_table_html(
         cls = "ttf-num" if numeric_cols[idx] else ""
         cls_attr = f' class="{cls}"' if cls else ""
         header_cells.append(
-            f"<th{cls_attr} title=\"{title}\">"
+            f'<th{cls_attr} title="{title}">'
             f'<span class="ttf-colname">{name_esc}</span>'
             f'<span class="ttf-coltype">{type_esc}</span>'
             f"</th>"
@@ -371,6 +374,7 @@ def render_arrow_table_html(
     # Body rows
     body_rows: list[str] = []
     value_i = 0
+
     def _append_row(*, is_gap: bool) -> None:
         nonlocal value_i
         tds: list[str] = []
@@ -427,7 +431,9 @@ def render_arrow_table_html(
     if cols_shown == 0:
         empty_style = ' style="padding:10px;"'
         if tall:
-            empty_style = f' style="padding:10px; --ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
+            empty_style = (
+                f' style="padding:10px; --ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
+            )
         empty = (
             f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
             f'<div class="{wrap_cls}"{empty_style}>(No columns)</div>{footer}</div>'
