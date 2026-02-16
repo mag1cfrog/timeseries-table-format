@@ -18,46 +18,88 @@ WHEEL_INPUT_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _git_tracked_files() -> list[pathlib.Path]:
-    # Use git-indexed files to avoid hashing build artifacts (e.g. .so, __pycache__),
-    # which can appear locally but aren't part of the source distribution.
+def _git_tracked_file_blobs() -> list[tuple[str, str]]:
+    # Return (repo-relative posix path, git blob oid) pairs.
+    #
+    # Important: we hash git *blobs* (not working tree bytes) to avoid cross-platform differences
+    # from git's line-ending conversion (core.autocrlf).
     try:
         out = subprocess.check_output(
-            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", *WHEEL_INPUT_PREFIXES],
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-s", "-z", *WHEEL_INPUT_PREFIXES],
             stderr=subprocess.DEVNULL,
         )
     except Exception:
         return []
 
-    files: list[pathlib.Path] = []
+    pairs: list[tuple[str, str]] = []
     for raw in out.split(b"\0"):
         if not raw:
             continue
-        p = REPO_ROOT / raw.decode("utf-8")
-        if p.is_file():
-            files.append(p)
-    return files
+        # Format: "{mode} {oid} {stage}\t{path}"
+        try:
+            meta, path_raw = raw.split(b"\t", 1)
+            parts = meta.split()
+            oid = parts[1].decode("ascii")
+            path = path_raw.decode("utf-8")
+        except Exception:
+            continue
+        pairs.append((path, oid))
+
+    # Deterministic ordering, stable across platforms.
+    return sorted(pairs, key=lambda t: t[0])
 
 
 def _hash_inputs() -> tuple[str, int]:
     h = hashlib.sha256()
-    files = _git_tracked_files()
-    if not files:
+    blobs = _git_tracked_file_blobs()
+    if not blobs:
         raise RuntimeError(
             "Could not find git-tracked inputs for stamp; run from a git checkout."
         )
 
-    # Deterministic ordering, stable across platforms.
-    files = sorted(set(files), key=lambda p: p.relative_to(REPO_ROOT).as_posix())
+    proc = subprocess.Popen(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
 
-    for p in files:
-        rel = p.relative_to(REPO_ROOT).as_posix().encode("utf-8")
-        h.update(rel)
+    for _path, oid in blobs:
+        proc.stdin.write(oid.encode("ascii") + b"\n")
+    proc.stdin.close()
+
+    for path, _oid in blobs:
+        header = proc.stdout.readline()
+        if not header:
+            raise RuntimeError("Unexpected EOF from git cat-file --batch")
+        # Format: "{oid} {type} {size}\n"
+        try:
+            _obj, obj_type, size_s = header.decode("ascii").rstrip("\n").split(" ", 2)
+        except Exception as e:
+            raise RuntimeError(f"Unexpected cat-file header: {header!r}") from e
+        if obj_type != "blob":
+            raise RuntimeError(f"Expected blob for {path}, got {obj_type}")
+        try:
+            size = int(size_s)
+        except ValueError as e:
+            raise RuntimeError(f"Unexpected blob size for {path}: {size_s!r}") from e
+
+        content = proc.stdout.read(size)
+        # cat-file outputs a trailing newline after the object content
+        proc.stdout.read(1)
+
+        h.update(path.encode("utf-8"))
         h.update(b"\0")
-        h.update(p.read_bytes())
+        h.update(content)
         h.update(b"\0")
 
-    return h.hexdigest(), len(files)
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"git cat-file --batch failed with exit code {rc}")
+
+    return h.hexdigest(), len(blobs)
 
 
 def _read_stamp_sha256() -> str | None:
