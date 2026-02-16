@@ -26,3 +26,4 @@ name = "_native"
 [features]
 default = []
 test-utils = []
+ipc-zstd = ["arrow-ipc/zstd"]

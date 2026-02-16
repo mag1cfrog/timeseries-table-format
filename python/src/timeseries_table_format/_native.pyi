@@ -170,6 +170,13 @@ class _TestingModule(ModuleType):
     def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
     def _test_sleep_without_gil(self, millis: int) -> None: ...
     def _test_session_table_exists(self, session: Session, name: str) -> bool: ...
+    def _bench_sql_ipc(
+        self,
+        session: Session,
+        query: str,
+        *,
+        ipc_compression: str = "none",
+    ) -> tuple[bytes, dict[str, object]]: ...
 
 # Feature-gated: present only when built with `--features test-utils`.
 _testing: _TestingModule | None
