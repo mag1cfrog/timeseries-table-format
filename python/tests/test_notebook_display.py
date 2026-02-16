@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import pyarrow as pa
-
 import timeseries_table_format.notebook_display as nd
 
 
@@ -349,3 +348,62 @@ def test_auto_enable_reads_align_env(monkeypatch):
     printer = html_formatter.type_printers[pa.Table]
     out = printer(pa.table({"x": ["a"], "y": [1]}))
     assert "ttf-align-auto" in out
+
+
+def test_auto_enable_loads_config_file_from_env(monkeypatch, tmp_path):
+    html_formatter = FakeHTMLFormatter(type_printers={})
+    shell = FakeShell(
+        display_formatter=FakeDisplayFormatter(formatters={"text/html": html_formatter})
+    )
+
+    ipy = types.ModuleType("IPython")
+    ipy.get_ipython = lambda: shell  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "IPython", ipy)
+
+    cfg = tmp_path / "ttf.toml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "[notebook_display]",
+                "max_rows = 5",
+                "max_cols = 7",
+                "max_cell_chars = 9",
+                "align = \"left\"",
+                "col_max_ch = 20",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # Env config loads first; align env overrides file.
+    monkeypatch.setenv("TTF_NOTEBOOK_CONFIG", str(cfg))
+    monkeypatch.setenv("TTF_NOTEBOOK_ALIGN", "auto")
+
+    # Snapshot + restore globals to avoid cross-test pollution.
+    config_before = nd._STATE.config
+    tuning_before = vars(nd._TUNING).copy()
+    try:
+        nd._STATE.enabled = False
+        nd._STATE.our_printer = None
+        nd._STATE.had_prev_printer = False
+        nd._STATE.prev_printer = None
+        nd._STATE.config = nd._NotebookDisplayConfig()
+        for k, v in tuning_before.items():
+            setattr(nd._TUNING, k, v)
+
+        assert nd._auto_enable_notebook_display() is True
+        printer = html_formatter.type_printers[pa.Table]
+        out = printer(pa.table({"id": [0], "text": ["z" * 200]}))
+        assert "(max_rows=5, max_cols=7, max_cell_chars=9)" in out
+        assert "ttf-align-auto" in out
+
+        import re
+
+        widths = [int(x) for x in re.findall(r'<col style="width:([0-9]+)ch" />', out)]
+        assert len(widths) >= 2
+        assert widths[1] == 20
+    finally:
+        nd._STATE.config = config_before
+        for k, v in tuning_before.items():
+            setattr(nd._TUNING, k, v)
