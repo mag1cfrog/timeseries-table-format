@@ -168,6 +168,23 @@ def test_render_html_null_distinct_from_empty_string():
     assert ">null</span>" in html
 
 
+def test_render_html_truncates_very_long_column_names_and_types_in_header():
+    long_name = "col_" + ("x" * 500)
+    t = pa.table({long_name: ["a"]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
+    assert long_name not in html
+    assert "…" in html
+
+    # Type strings can also be long (nested structs/lists).
+    nested_type = pa.struct([(f"f{i}", pa.list_(pa.string())) for i in range(60)])
+    t2 = pa.Table.from_arrays([pa.array([None], type=nested_type)], names=["nested"])
+    html2 = nd.render_arrow_table_html(
+        t2, max_rows=20, max_cols=50, max_cell_chars=2000
+    )
+    assert str(nested_type) not in html2
+    assert "…" in html2
+
+
 def test_render_html_invalid_bounds_fall_back_to_defaults():
     t = pa.table({"x": [1]})
     html = nd.render_arrow_table_html(t, max_rows=0, max_cols=0, max_cell_chars=0)
