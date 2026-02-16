@@ -208,6 +208,8 @@ def render_arrow_table_html(
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable both-edges;
+  /* Give room for overlay scrollbars / rounded corners so the last column doesn't get clipped. */
+  padding-bottom: 8px;
 }
 
 .ttf-arrow-preview .ttf-wrap.ttf-scroll-y {
@@ -220,6 +222,7 @@ def render_arrow_table_html(
   border-spacing: 0;
   table-layout: fixed;
   width: max-content;
+  margin-right: 12px;
 }
 
 .ttf-arrow-preview th,
