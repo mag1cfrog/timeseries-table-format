@@ -40,8 +40,20 @@ In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results will d
 - Defaults: `max_rows=20` (head/tail), `max_cols=50` (left/right), `max_cell_chars=2000`
 - Opt-out: set `TTF_NOTEBOOK_DISPLAY=0` before importing `timeseries_table_format`, or call `timeseries_table_format.disable_notebook_display()`
 - Configure: call `timeseries_table_format.enable_notebook_display(max_rows=..., max_cols=..., max_cell_chars=..., align=...)`
+- Config file (TOML): set `TTF_NOTEBOOK_CONFIG=path/to/ttf.toml` before importing `timeseries_table_format` (or call `timeseries_table_format.load_notebook_display_config("path/to/ttf.toml")`)
+  (On Python 3.10, install `tomli` to enable TOML parsing.)
 - Alignment: `align="right"` (default) or `align="auto"` (strings left, numbers right); auto-enable can be configured with `TTF_NOTEBOOK_ALIGN=auto|left|right`
 - Cells are visually clipped to a bounded column width with an ellipsis indicator; copying a cell copies the underlying value (up to `max_cell_chars`).
+
+Example `ttf.toml`:
+
+```toml
+[notebook_display]
+max_rows = 20
+max_cols = 50
+max_cell_chars = 2000
+align = "auto"
+```
 
 ## Maintainers: releasing the Python package
 
