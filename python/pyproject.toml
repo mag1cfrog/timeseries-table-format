@@ -17,6 +17,12 @@ dependencies = [
     "pyarrow>=23.0.0",
 ]
 
+[project.urls]
+Documentation = "https://mag1cfrog.github.io/timeseries-table-format/"
+Repository = "https://github.com/mag1cfrog/timeseries-table-format"
+Issues = "https://github.com/mag1cfrog/timeseries-table-format/issues"
+Changelog = "https://github.com/mag1cfrog/timeseries-table-format/blob/main/crates/timeseries-table-python/CHANGELOG.md"
+
 [build-system]
 requires = ["maturin>=1.11.0,<2.0"]
 build-backend = "maturin"
