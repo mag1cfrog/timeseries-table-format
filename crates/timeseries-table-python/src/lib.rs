@@ -1052,7 +1052,152 @@ mod _native {
                 ExistsError::DataFusion(e) => crate::error_map::datafusion_error_to_py(py, e),
                 ExistsError::Runtime(msg) => PyRuntimeError::new_err(msg),
             },
-        )
+            )
+    }
+
+    /// Benchmark helper: run a SQL query and return Arrow IPC stream bytes plus Rust-side timing
+    /// and sizing metrics.
+    ///
+    /// This is intentionally feature-gated and exported only under `_native._testing` to avoid
+    /// committing to a stable public API surface.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    #[pyo3(signature = (session, query, *, ipc_compression="none"))]
+    fn _bench_sql_ipc<'py>(
+        py: Python<'py>,
+        session: PyRef<'_, Session>,
+        query: String,
+        ipc_compression: &str,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyDict>)> {
+        use std::time::Instant;
+
+        enum BenchSqlIpcError {
+            DataFusion(DFError),
+            Arrow(ArrowError),
+            Runtime(&'static str),
+        }
+
+        let compression = ipc_compression.trim().to_ascii_lowercase();
+        let (compression_label, compression_type): (String, Option<arrow_ipc::CompressionType>) =
+            match compression.as_str() {
+                "" | "none" => ("none".to_string(), None),
+                "zstd" => {
+                    #[cfg(feature = "ipc-zstd")]
+                    {
+                        ("zstd".to_string(), Some(arrow_ipc::CompressionType::ZSTD))
+                    }
+                    #[cfg(not(feature = "ipc-zstd"))]
+                    {
+                        return Err(PyValueError::new_err(
+                            "ipc_compression='zstd' requires building the extension with --features ipc-zstd",
+                        ));
+                    }
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "invalid ipc_compression={other:?}; expected 'none' or 'zstd'"
+                    )));
+                }
+            };
+
+        let rt = Arc::clone(&session.rt);
+        let ctx = session.ctx.clone();
+        let sema = Arc::clone(&session.catalog_sema);
+        let query = query.to_string();
+
+        struct BenchResult {
+            ipc_bytes: Vec<u8>,
+            plan_ms: f64,
+            collect_ms: f64,
+            ipc_encode_ms: f64,
+            total_ms: f64,
+            arrow_mem_bytes: usize,
+            row_count: usize,
+            batch_count: usize,
+        }
+
+        let result: BenchResult = tokio_runner::run_blocking_map_err(
+            py,
+            rt.as_ref(),
+            async move {
+                let t_total = Instant::now();
+
+                let _permit = sema
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| BenchSqlIpcError::Runtime("Session catalog semaphore closed"))?;
+
+                let t_plan = Instant::now();
+                let df = ctx.sql(&query).await.map_err(BenchSqlIpcError::DataFusion)?;
+                let plan_ms = t_plan.elapsed().as_secs_f64() * 1000.0;
+
+                let schema = df.schema().as_arrow().clone();
+
+                let t_collect = Instant::now();
+                let batches = df.collect().await.map_err(BenchSqlIpcError::DataFusion)?;
+                let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
+
+                let arrow_mem_bytes: usize =
+                    batches.iter().map(|b| b.get_array_memory_size()).sum();
+                let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+                let batch_count = batches.len();
+
+                let t_ipc = Instant::now();
+                let mut buf: Vec<u8> = Vec::new();
+                {
+                    let mut write_options = arrow_ipc::writer::IpcWriteOptions::default();
+                    if let Some(ct) = compression_type {
+                        write_options = write_options
+                            .try_with_compression(Some(ct))
+                            .map_err(BenchSqlIpcError::Arrow)?;
+                    }
+
+                    let mut w = arrow_ipc::writer::StreamWriter::try_new_with_options(
+                        &mut buf,
+                        &schema,
+                        write_options,
+                    )
+                    .map_err(BenchSqlIpcError::Arrow)?;
+                    for batch in &batches {
+                        w.write(batch).map_err(BenchSqlIpcError::Arrow)?;
+                    }
+                    w.finish().map_err(BenchSqlIpcError::Arrow)?;
+                }
+                let ipc_encode_ms = t_ipc.elapsed().as_secs_f64() * 1000.0;
+
+                let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+                Ok::<BenchResult, BenchSqlIpcError>(BenchResult {
+                    ipc_bytes: buf,
+                    plan_ms,
+                    collect_ms,
+                    ipc_encode_ms,
+                    total_ms,
+                    arrow_mem_bytes,
+                    row_count,
+                    batch_count,
+                })
+            },
+            move |py, err| match err {
+                BenchSqlIpcError::DataFusion(e) => datafusion_error_to_py(py, e),
+                BenchSqlIpcError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
+                BenchSqlIpcError::Runtime(msg) => PyRuntimeError::new_err(msg),
+            },
+        )?;
+
+        let metrics = PyDict::new(py);
+        metrics.set_item("ipc_compression", compression_label)?;
+        metrics.set_item("ipc_bytes_len", result.ipc_bytes.len())?;
+        metrics.set_item("arrow_mem_bytes", result.arrow_mem_bytes)?;
+        metrics.set_item("row_count", result.row_count)?;
+        metrics.set_item("batch_count", result.batch_count)?;
+        metrics.set_item("plan_ms", result.plan_ms)?;
+        metrics.set_item("collect_ms", result.collect_ms)?;
+        metrics.set_item("ipc_encode_ms", result.ipc_encode_ms)?;
+        metrics.set_item("total_ms", result.total_ms)?;
+
+        let b = PyBytes::new(py, &result.ipc_bytes);
+        Ok((b, metrics))
     }
 
     #[pymodule_init]
@@ -1091,6 +1236,7 @@ mod _native {
             testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_session_table_exists, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_ipc, py)?)?;
             m.add("_testing", &testing)?;
             m.add_submodule(&testing)?;
         }
