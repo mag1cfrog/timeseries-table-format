@@ -10,7 +10,7 @@ import pyarrow as pa
 class _NotebookDisplayConfig:
     max_rows: int = 20
     max_cols: int = 50
-    max_cell_chars: int = 200
+    max_cell_chars: int = 2000
     align: str = "right"  # "right" | "auto" | "left"
 
 
@@ -142,11 +142,39 @@ def _head_tail_indices(total: int, limit: int) -> tuple[list[int], int, int, boo
     return idx, head, tail, gap
 
 
-def _column_width_ch(name: str, type_str: str) -> int:
-    # Approximate a sensible column width from the header content length.
-    # Keep it bounded so a single long name/type doesn't blow out the layout.
-    content_len = max(len(name), len(type_str))
-    return max(6, min(content_len + 2, 32))
+_COL_MIN_CH_NUM = 6
+_COL_MIN_CH_OTHER = 12
+_COL_MAX_CH = 64
+
+
+def _cell_len_cap(value: Any, *, cap: int) -> int:
+    # Return a cheap-ish estimate of the displayed content length, capped.
+    # Avoid `repr(...)` for nested containers since it can be arbitrarily large.
+    if value is None:
+        return 4  # "null"
+    if isinstance(value, str):
+        return min(len(value), cap)
+    if isinstance(value, bytes):
+        # Rendered as lowercase hex.
+        return min(len(value) * 2, cap)
+    if isinstance(value, (list, tuple, dict, set)):
+        return cap
+    return min(len(str(value)), cap)
+
+
+def _column_width_ch(
+    name: str, type_str: str, values: list[Any], *, numeric: bool
+) -> int:
+    # Size columns primarily from header content, but also consider previewed values
+    # so long strings don't collapse to the minimum width.
+    sample_len = 0
+    for v in values:
+        sample_len = max(sample_len, _cell_len_cap(v, cap=_COL_MAX_CH))
+        if sample_len >= _COL_MAX_CH:
+            break
+    content_len = max(len(name), len(type_str), sample_len)
+    min_w = _COL_MIN_CH_NUM if numeric else _COL_MIN_CH_OTHER
+    return max(min_w, min(content_len + 2, _COL_MAX_CH))
 
 
 def render_arrow_table_html(
@@ -154,12 +182,12 @@ def render_arrow_table_html(
     *,
     max_rows: int = 20,
     max_cols: int = 50,
-    max_cell_chars: int = 200,
+    max_cell_chars: int = 2000,
     align: str = "right",
 ) -> str:
     max_rows = _safe_int(max_rows, default=20)
     max_cols = _safe_int(max_cols, default=50)
-    max_cell_chars = _safe_int(max_cell_chars, default=200)
+    max_cell_chars = _safe_int(max_cell_chars, default=2000)
     align = _normalize_align(align)
 
     total_rows = int(table.num_rows)
@@ -254,7 +282,8 @@ def render_arrow_table_html(
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
-  width: max-content;
+  /* Width is set via an inline CSS variable to avoid long cell values expanding the table. */
+  width: var(--ttf-table-width, auto);
   margin-right: 12px;
 }
 
@@ -362,7 +391,12 @@ def render_arrow_table_html(
 """.strip()
 
     # Header
-    col_widths = [_column_width_ch(n, t) for n, t in zip(col_names, col_types)]
+    col_widths = [
+        _column_width_ch(col_names[i], col_types[i], col_values[i], numeric=numeric_cols[i])
+        for i in range(len(col_names))
+    ]
+    table_width_ch = sum(col_widths) + (3 if col_gap else 0)
+    table_style = f' style="--ttf-table-width:{table_width_ch}ch"'
 
     colgroup_parts: list[str] = ["<colgroup>"]
     for i in range(len(col_names)):
@@ -467,7 +501,7 @@ def render_arrow_table_html(
 
     return (
         f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
-        f'<div class="{wrap_cls}"{wrap_style}><table>'
+        f'<div class="{wrap_cls}"{wrap_style}><table{table_style}>'
         f"{colgroup}"
         f"<thead>{header_html}</thead>"
         f"<tbody>{body_html}</tbody>"
@@ -561,13 +595,13 @@ def enable_notebook_display(
     *,
     max_rows: int = 20,
     max_cols: int = 50,
-    max_cell_chars: int = 200,
+    max_cell_chars: int = 2000,
     align: str = "right",
 ) -> bool:
     _STATE.config = _NotebookDisplayConfig(
         max_rows=_safe_int(max_rows, default=20),
         max_cols=_safe_int(max_cols, default=50),
-        max_cell_chars=_safe_int(max_cell_chars, default=200),
+        max_cell_chars=_safe_int(max_cell_chars, default=2000),
         align=_normalize_align(align),
     )
 

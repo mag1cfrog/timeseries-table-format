@@ -14,7 +14,7 @@ def enable_notebook_display(
     *,
     max_rows: int = 20,
     max_cols: int = 50,
-    max_cell_chars: int = 200,
+    max_cell_chars: int = 2000,
     align: str = "right",
 ) -> bool: ...
 def disable_notebook_display() -> bool: ...

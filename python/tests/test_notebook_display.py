@@ -52,7 +52,7 @@ def test_render_html_adds_vertical_scroll_class_for_many_rows():
 
 def test_render_html_truncates_columns():
     t = pa.table({f"c{i}": [i] for i in range(60)})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert html.count("<th ") == 51
     assert 'class="ttf-gap"' in html
     assert ", <b>50</b> of <b>60</b> columns" in html
@@ -61,7 +61,7 @@ def test_render_html_truncates_columns():
 
 def test_render_html_rows_head_tail_preview():
     t = pa.table({"x": [f"r{i}" for i in range(30)]})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert ">r0</span>" in html
     assert ">r29</span>" in html
     assert "r15" not in html
@@ -72,7 +72,7 @@ def test_render_html_rows_head_tail_preview():
 
 def test_render_html_rows_odd_split_is_balanced():
     t = pa.table({"x": [f"r{i}" for i in range(10)]})
-    html = nd.render_arrow_table_html(t, max_rows=5, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=5, max_cols=50, max_cell_chars=2000)
     assert ">r0</span>" in html
     assert ">r9</span>" in html
     assert "r5" not in html
@@ -81,7 +81,7 @@ def test_render_html_rows_odd_split_is_balanced():
 
 def test_render_html_cols_head_tail_preview():
     t = pa.table({f"c{i}": [i] for i in range(30)})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=2000)
     assert 'class="ttf-colname">c0</span>' in html
     assert 'class="ttf-colname">c29</span>' in html
     assert "c15" not in html
@@ -92,7 +92,7 @@ def test_render_html_cols_head_tail_preview():
 
 def test_render_html_cols_odd_split_is_balanced():
     t = pa.table({f"c{i}": [i] for i in range(10)})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=5, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=5, max_cell_chars=2000)
     assert 'class="ttf-colname">c0</span>' in html
     assert 'class="ttf-colname">c9</span>' in html
     assert "c5" not in html
@@ -101,7 +101,7 @@ def test_render_html_cols_odd_split_is_balanced():
 
 def test_render_html_duplicate_column_names_preserved():
     t = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert html.count('class="ttf-colname">x</span>') == 2
     assert html.find('class="ttf-num"><span class="ttf-cell">1</span>') < html.find(
         'class="ttf-num"><span class="ttf-cell">2</span>'
@@ -110,7 +110,7 @@ def test_render_html_duplicate_column_names_preserved():
 
 def test_render_html_duplicate_column_names_with_truncation_does_not_error():
     t = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=1, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=1, max_cell_chars=2000)
     assert html.count("<th ") == 1
     assert ">1</span>" in html
     assert ">2</span>" not in html
@@ -118,21 +118,21 @@ def test_render_html_duplicate_column_names_with_truncation_does_not_error():
 
 def test_render_html_escapes_quotes_in_cells():
     t = pa.table({"x": ['" onclick="alert(1)']})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert 'onclick="' not in html
     assert "&quot; onclick=&quot;" in html
 
 
 def test_render_html_escapes_column_names():
     t = pa.table({'x"><img src=x onerror=alert(1)>': [1]})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert "<img" not in html
     assert "&lt;img" in html
 
 
 def test_render_html_bytes_render_as_hex():
     t = pa.table({"x": [b"\x00\xff"]})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert ">00ff</span>" in html
 
 
@@ -142,9 +142,26 @@ def test_render_html_sets_truncated_flag_on_cell():
     assert 'data-truncated="1"' in html
 
 
+def test_render_html_sets_table_width_var_so_long_cells_dont_expand_layout():
+    t = pa.table({"id": [0, 1], "text": ["x" * 10, "z" * 400]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
+    assert "--ttf-table-width:" in html
+
+
+def test_render_html_uses_preview_values_to_avoid_string_columns_collapsing_to_min_width():
+    t = pa.table({"id": list(range(5)), "text": ["x" * 10, "y" * 50, "z" * 400, "a", "b"]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
+    import re
+
+    widths = [int(x) for x in re.findall(r'<col style="width:([0-9]+)ch" />', html)]
+    assert len(widths) >= 2
+    assert widths[1] > widths[0]
+    assert widths[1] == 64
+
+
 def test_render_html_null_distinct_from_empty_string():
     t = pa.table({"x": [None, ""], "y": ["", None]})
-    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=2000)
     assert 'class="ttf-null"' in html
     assert ">null</span>" in html
 
@@ -152,7 +169,7 @@ def test_render_html_null_distinct_from_empty_string():
 def test_render_html_invalid_bounds_fall_back_to_defaults():
     t = pa.table({"x": [1]})
     html = nd.render_arrow_table_html(t, max_rows=0, max_cols=0, max_cell_chars=0)
-    assert "(max_rows=20, max_cols=50, max_cell_chars=200)" in html
+    assert "(max_rows=20, max_cols=50, max_cell_chars=2000)" in html
 
 
 def test_render_html_zero_rows_still_renders_header_and_footer():
