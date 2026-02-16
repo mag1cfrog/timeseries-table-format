@@ -1,3 +1,8 @@
+from timeseries_table_format.notebook_display import _auto_enable_notebook_display
+from timeseries_table_format.notebook_display import (
+    disable_notebook_display,
+    enable_notebook_display,
+)
 from . import _native as _native
 
 __doc__ = _native.__doc__
@@ -14,6 +19,9 @@ DataFusionError = _native.DataFusionError
 Session = _native.Session
 TimeSeriesTable = _native.TimeSeriesTable
 
+_auto_enable_notebook_display()
+del _auto_enable_notebook_display
+
 __all__ = [
     "__version__",
     "TimeseriesTableError",
@@ -24,4 +32,6 @@ __all__ = [
     "DataFusionError",
     "Session",
     "TimeSeriesTable",
+    "enable_notebook_display",
+    "disable_notebook_display",
 ]
