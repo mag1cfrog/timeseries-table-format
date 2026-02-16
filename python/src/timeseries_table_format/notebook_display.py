@@ -1,4 +1,5 @@
 import html as _html
+import importlib
 import os
 from typing import Callable, Any
 from dataclasses import dataclass, field
@@ -54,8 +55,12 @@ def _auto_enabled_by_default() -> bool:
 
 def _get_ipython_html_formatter() -> Any | None:
     try:
-        from IPython import get_ipython
+        ipython = importlib.import_module("IPython")
     except Exception:
+        return None
+
+    get_ipython = getattr(ipython, "get_ipython", None)
+    if get_ipython is None:
         return None
 
     shell = get_ipython()
