@@ -1,0 +1,331 @@
+import html as _html
+import os
+from typing import Callable, Any
+from dataclasses import dataclass
+
+import pyarrow as pa
+
+
+@dataclass
+class _NotebookDisplayConfig:
+    max_rows: int = 20
+    max_cols: int = 20
+    max_cell_chars: int = 100
+
+
+@dataclass
+class _NotebookDisplayState:
+    enabled: bool = False
+    config: _NotebookDisplayConfig = _NotebookDisplayConfig()
+    our_printer: Callable[[pa.Table], str] | None = None
+    had_prev_printer: bool = False
+    prev_printer: Callable[[Any], str] | None = None
+
+
+_STATE = _NotebookDisplayState()
+
+
+def _truthy_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    v = value.strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+
+def _falsey_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    v = value.strip().lower()
+    return v in {"0", "false", "no", "n", "off"}
+
+
+def _auto_enabled_by_default() -> bool:
+    # On-by-default in notebooks; allow explicit opt-out.
+    # If set to a truthy value, we still enable; if set to falsey, we disable.
+    env = os.getenv("TTF_NOTEBOOK_DISPLAY")
+    if _falsey_env(env):
+        return False
+    return True
+
+
+def _get_ipython_html_formatter() -> Any | None:
+    try:
+        from IPython import get_ipython  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    shell = get_ipython()
+    if shell is None:
+        return None
+
+    display_formatter = getattr(shell, "display_formatter", None)
+    if display_formatter is None:
+        return None
+
+    formatters = getattr(display_formatter, "formatters", None)
+    if not isinstance(formatters, dict):
+        return None
+
+    return formatters.get("text/html")
+
+
+def _safe_int(value: int, *, default: int) -> int:
+    try:
+        iv = int(value)
+    except Exception:
+        return default
+    return iv if iv > 0 else default
+
+
+def _truncate(s: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    if max_chars == 1:
+        return "…"
+
+    return s[: max_chars - 1] + "…"
+
+
+def _format_cell_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        # Stable + readable; truncation handled later.
+        return value.hex()
+    if isinstance(value, (dict, list, tuple, set)):
+        return repr(value)
+    return str(value)
+
+
+def _is_numeric_arrow_type(t: pa.DataType) -> bool:
+    return bool(
+        pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t)
+    )
+
+
+def render_arrow_table_html(
+    table: pa.Table,
+    *,
+    max_rows: int = 20,
+    max_cols: int = 20,
+    max_cell_chars: int = 100,
+) -> str:
+    max_rows = _safe_int(max_rows, default=20)
+    max_cols = _safe_int(max_cols, default=20)
+    max_cell_chars = _safe_int(max_cell_chars, default=100)
+
+    total_rows = int(table.num_rows)
+    total_cols = int(table.num_columns)
+
+    rows_shown = min(total_rows, max_rows)
+    cols_shown = min(total_cols, max_cols)
+
+    preview = table.slice(0, rows_shown)
+    if total_cols > cols_shown:
+        preview = preview.select(preview.column_names[:cols_shown])
+
+    schema = preview.schema
+    col_names = list(preview.column_names)
+
+    # Convert bounded preview to Python values.
+    data = preview.to_pydict()
+
+    # Precompute nemeric columns for CSS classing.
+    numeric_cols: set[str] = set()
+    for field in schema:
+        if _is_numeric_arrow_type(field.type):
+            numeric_cols.add(field.name)
+
+    # Build HTML.
+    style = """
+<style>
+.ttf-arrow-preview { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+sans-serif; font-size: 12px; color: #111; }
+.ttf-arrow-preview .ttf-wrap { max-width: 100%; overflow: auto; border: 1px solid #e5e7eb;
+border-radius: 8px; background: #fff; }
+.ttf-arrow-preview table { border-collapse: collapse; width: 100%; }
+.ttf-arrow-preview th, .ttf-arrow-preview td { padding: 6px 10px; border-bottom: 1px solid
+#f1f5f9; white-space: nowrap; }
+.ttf-arrow-preview thead th { position: sticky; top: 0; z-index: 1; background: #f8fafc; border-
+bottom: 1px solid #e5e7eb; text-align: left; }
+.ttf-arrow-preview tbody tr:nth-child(even) { background: #fbfdff; }
+.ttf-arrow-preview td.ttf-num { text-align: right; font-variant-numeric: tabular-nums; }
+.ttf-arrow-preview .ttf-footer { margin-top: 6px; color: #475569; }
+.ttf-arrow-preview .ttf-meta { color: #64748b; font-size: 11px; }
+</style>
+""".strip()
+
+    # Header
+    header_cells: list[str] = []
+    for field in schema:
+        name_esc = _html.escape(field.name, quote=True)
+        type_str = _html.escape(str(field.type), quote=True)
+        header_cells.append(f'<th title="{type_str}">{name_esc}</th>')
+    header_html = "<tr>" + "".join(header_cells) + "</tr>"
+
+    # Body rows
+    body_rows: list[str] = []
+    for i in range(rows_shown):
+        tds: list[str] = []
+        for name in col_names:
+            raw = data[name][i] if name in data else None
+            s = _format_cell_value(raw)
+            s = _truncate(s, max_cell_chars)
+            s = _html.escape(s, quote=True)
+            cls = "ttf-num" if name in numeric_cols else ""
+            cls_attr = f' class="{cls}"' if cls else ""
+            tds.append(f"<td{cls_attr}>{s}</td>")
+        body_rows.append("<tr>" + "".join(tds) + "</tr>")
+    body_html = "".join(body_rows)
+
+    footer = (
+        f'<div class="ttf-footer">'
+        f"Showing <b>{rows_shown}</b> of <b>{total_rows}</b> rows, "
+        f"<b>{cols_shown}</b> of <b>{total_cols}</b> columns."
+        f' <span class="ttf-meta">(max_rows={max_rows}, max_cols={max_cols}, max_cell_chars={max_cell_chars})</span>'
+        f"</div>"
+    )
+
+    if cols_shown == 0:
+        empty = (
+            f'<div class="ttf-arrow-preview">{style}'
+            f'<div class="ttf-wrap" style="padding:10px;">(No columns)</div>{footer}</div>'
+        )
+        return empty
+
+    return (
+        f'<div class="ttf-arrow-preview">{style}'
+        f'<div class="ttf-wrap"><table>'
+        f"<thead>{header_html}</thead>"
+        f"<tbody>{body_html}</tbody>"
+        f"</table></div>"
+        f"{footer}</div>"
+    )
+
+
+def _make_printer() -> Callable[[pa.Table], str]:
+    def _printer(table: pa.Table) -> str:
+        cfg = _STATE.config
+        return render_arrow_table_html(
+            table,
+            max_rows=cfg.max_rows,
+            max_cols=cfg.max_cols,
+            max_cell_chars=cfg.max_cell_chars,
+        )
+
+    return _printer
+
+
+def _install_into_html_formatter(
+    html_formatter: Any, *, override_existing: bool
+) -> bool:
+    if html_formatter is None:
+        return False
+
+    type_printers = getattr(html_formatter, "type_printers", None)
+    if not isinstance(type_printers, dict):
+        return False
+
+    current = type_printers.get(pa.Table)
+
+    # If we already installed ours, nothing to do (unless config changed, which is handled elsewhere).
+    if _STATE.our_printer is not None and current is _STATE.our_printer:
+        _STATE.enabled = True
+        return False
+
+    if (current is not None) and (not override_existing):
+        return False
+
+    # Stash prior printer (if any) for restore.
+    _STATE.had_prev_printer = current is not None
+    _STATE.prev_printer = current
+
+    our = _STATE.our_printer or _make_printer()
+    _STATE.our_printer = our
+
+    # Prefer IPython's supported API when present.
+    for_type = getattr(html_formatter, "for_type", None)
+    if callable(for_type):
+        for_type(pa.Table, our)
+    else:
+        type_printers[pa.Table] = our
+
+    _STATE.enabled = True
+    return True
+
+
+def _uninstall_from_html_formatter(html_formatter: Any) -> bool:
+    if html_formatter is None:
+        return False
+
+    type_printers = getattr(html_formatter, "type_printers", None)
+    if not isinstance(type_printers, dict):
+        return False
+
+    if _STATE.our_printer is None:
+        _STATE.enabled = False
+        return False
+
+    current = type_printers.get(pa.Table)
+    if current is not _STATE.our_printer:
+        # Don't clobber another library's printer if we aren't the active one.
+        _STATE.enabled = False
+        return False
+
+    if _STATE.had_prev_printer and _STATE.prev_printer is not None:
+        type_printers[pa.Table] = _STATE.prev_printer
+    else:
+        type_printers.pop(pa.Table, None)
+
+    _STATE.enabled = False
+    return True
+
+
+def enable_notebook_display(
+    *,
+    max_rows: int = 20,
+    max_cols: int = 20,
+    max_cell_chars: int = 100,
+) -> bool:
+    _STATE.config = _NotebookDisplayConfig(
+        max_rows=_safe_int(max_rows, default=20),
+        max_cols=_safe_int(max_cols, default=20),
+        max_cell_chars=_safe_int(max_cell_chars, default=100),
+    )
+
+    html_formatter = _get_ipython_html_formatter()
+    # Explicit enable: override any existing HTML formatter for pa.Table.
+    changed = _install_into_html_formatter(html_formatter, override_existing=True)
+    # If we were already installed, config may still have changed; in that case we return True.
+    if not changed and (_STATE.our_printer is not None):
+        current = (
+            getattr(html_formatter, "type_printers", {}).get(pa.Table)
+            if html_formatter is not None
+            else None
+        )
+        if current is _STATE.our_printer:
+            return True
+    return changed
+
+
+def disable_notebook_display() -> bool:
+    html_formatter = _get_ipython_html_formatter()
+    changed = _uninstall_from_html_formatter(html_formatter)
+    return changed
+
+
+def _auto_enable_notebook_display() -> bool:
+    if not _auto_enabled_by_default():
+        return False
+
+    html_formatter = _get_ipython_html_formatter()
+    if html_formatter is None:
+        return False
+
+    # Auto-enable: do not override an existing pa.Table HTML printer.
+    if _STATE.our_printer is None:
+        _STATE.our_printer = _make_printer()
+
+    return _install_into_html_formatter(html_formatter, override_existing=False)
