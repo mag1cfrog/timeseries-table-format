@@ -25,6 +25,9 @@ class _NotebookDisplayState:
 
 _STATE = _NotebookDisplayState()
 
+_SCROLL_Y_THRESHOLD_ROWS = 15
+_SCROLL_Y_MAX_HEIGHT_PX = 420
+
 
 def _truthy_env(value: str | None) -> bool:
     if value is None:
@@ -204,6 +207,10 @@ def render_arrow_table_html(
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
+.ttf-arrow-preview .ttf-wrap.ttf-scroll-y {
+  max-height: var(--ttf-max-height, 420px);
+}
+
 .ttf-arrow-preview table {
   border-collapse: separate;
   border-spacing: 0;
@@ -334,16 +341,26 @@ def render_arrow_table_html(
         f"</div>"
     )
 
+    wrap_cls = "ttf-wrap"
+    wrap_style = ""
+    tall = rows_shown > _SCROLL_Y_THRESHOLD_ROWS
+    if tall:
+        wrap_cls += " ttf-scroll-y"
+        wrap_style = f' style="--ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
+
     if cols_shown == 0:
+        empty_style = ' style="padding:10px;"'
+        if tall:
+            empty_style = f' style="padding:10px; --ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
         empty = (
             f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
-            f'<div class="ttf-wrap" style="padding:10px;">(No columns)</div>{footer}</div>'
+            f'<div class="{wrap_cls}"{empty_style}>(No columns)</div>{footer}</div>'
         )
         return empty
 
     return (
         f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
-        f'<div class="ttf-wrap"><table>'
+        f'<div class="{wrap_cls}"{wrap_style}><table>'
         f"{colgroup}"
         f"<thead>{header_html}</thead>"
         f"<tbody>{body_html}</tbody>"
