@@ -43,6 +43,24 @@ In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results will d
 - Alignment: `align="right"` (default) or `align="auto"` (strings left, numbers right); auto-enable can be configured with `TTF_NOTEBOOK_ALIGN=auto|left|right`
 - Cells are visually clipped to a bounded column width with an ellipsis indicator; copying a cell copies the underlying value (up to `max_cell_chars`).
 
+## Maintainers: releasing the Python package
+
+The PyPI package version is derived from `crates/timeseries-table-python/Cargo.toml` (via maturin).
+If you change the pure-Python sources under `python/src/` (or `python/pyproject.toml` / `python/README.md`),
+update `crates/timeseries-table-python/python-src.stamp` by running:
+
+```bash
+python3 scripts/update_python_wheel_stamp.py
+```
+
+If your development environment uses the repo venv, you can also run:
+
+```bash
+python/.venv/bin/python scripts/update_python_wheel_stamp.py
+```
+
+CI enforces the stamp, and it helps the release automation notice python-only changes for version bumps.
+
 ## Quickstart: create → append → query
 
 ```python
