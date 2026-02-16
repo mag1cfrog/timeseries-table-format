@@ -31,6 +31,11 @@ def test_render_html_align_modes_set_container_class():
     assert "ttf-align-auto" in nd.render_arrow_table_html(t, align="auto")
 
 
+def test_render_html_adds_vertical_scroll_class_for_many_rows():
+    t = pa.table({"x": list(range(20))})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=30)
+    assert "ttf-scroll-y" in html
+
 def test_render_html_zero_rows_still_renders_header_and_footer():
     t = pa.table({"x": pa.array([], type=pa.int64())})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=100)
