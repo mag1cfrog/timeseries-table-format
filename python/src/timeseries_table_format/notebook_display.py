@@ -116,6 +116,23 @@ def _normalize_align(value: str | None) -> str:
     return "right"
 
 
+def _head_tail_counts(total: int, limit: int) -> tuple[int, int, bool]:
+    if total <= limit:
+        return total, 0, False
+    head = (limit + 1) // 2
+    tail = limit // 2
+    gap = head > 0 and tail > 0
+    return head, tail, gap
+
+
+def _head_tail_indices(total: int, limit: int) -> tuple[list[int], int, int, bool]:
+    head, tail, gap = _head_tail_counts(total, limit)
+    idx: list[int] = list(range(head))
+    if tail:
+        idx.extend(range(total - tail, total))
+    return idx, head, tail, gap
+
+
 def _column_width_ch(name: str, type_str: str) -> int:
     # Approximate a sensible column width from the header content length.
     # Keep it bounded so a single long name/type doesn't blow out the layout.
@@ -139,24 +156,31 @@ def render_arrow_table_html(
     total_rows = int(table.num_rows)
     total_cols = int(table.num_columns)
 
-    rows_shown = min(total_rows, max_rows)
-    cols_shown = min(total_cols, max_cols)
+    if total_cols == 0:
+        cols_shown = 0
+    else:
+        cols_shown = min(total_cols, max_cols)
 
-    preview = table.slice(0, rows_shown)
-    if total_cols > cols_shown:
-        # Select by integer indices to preserve order and avoid ambiguity/errors
-        # when duplicate column names exist (e.g. `select a as x, b as x`).
-        preview = preview.select(list(range(cols_shown)))
+    row_indices, row_head, row_tail, row_gap = _head_tail_indices(total_rows, max_rows)
+    col_indices, col_head, col_tail, col_gap = _head_tail_indices(total_cols, max_cols)
+
+    rows_shown = row_head + row_tail
+
+    preview = table
+    if col_indices:
+        preview = table.select(col_indices)
+    elif total_cols == 0:
+        preview = table
 
     schema = preview.schema
     col_names = list(preview.column_names)
     fields = list(schema)
     col_types = [str(f.type) for f in fields]
-    col_widths = [_column_width_ch(n, t) for n, t in zip(col_names, col_types)]
+    row_idx_arr = pa.array(row_indices, type=pa.int64())
 
-    # Convert bounded preview to Python values. Use per-column conversion to preserve
-    # duplicate column names (to_pydict() collapses duplicates).
-    col_values: list[list[Any]] = [col.to_pylist() for col in preview.columns]
+    # Convert bounded preview to Python values. Use per-column take/to_pylist to preserve
+    # duplicate column names (to_pydict() collapses duplicates) and support head/tail rows.
+    col_values: list[list[Any]] = [col.take(row_idx_arr).to_pylist() for col in preview.columns]
 
     # Precompute numeric columns for CSS classing.
     numeric_cols = [_is_numeric_arrow_type(f.type) for f in fields]
@@ -276,6 +300,19 @@ def render_arrow_table_html(
   white-space: nowrap;
 }
 
+.ttf-arrow-preview th.ttf-gap,
+.ttf-arrow-preview td.ttf-gap {
+  text-align: center !important;
+  color: var(--ttf-muted);
+  font-style: italic;
+}
+
+.ttf-arrow-preview tbody tr.ttf-gap-row td {
+  text-align: center !important;
+  color: var(--ttf-muted);
+  font-style: italic;
+}
+
 .ttf-arrow-preview tbody tr:nth-child(even) {
   background: var(--ttf-zebra);
 }
@@ -302,11 +339,15 @@ def render_arrow_table_html(
 """.strip()
 
     # Header
-    colgroup = (
-        "<colgroup>"
-        + "".join(f'<col style="width:{w}ch" />' for w in col_widths)
-        + "</colgroup>"
-    )
+    col_widths = [_column_width_ch(n, t) for n, t in zip(col_names, col_types)]
+
+    colgroup_parts: list[str] = ["<colgroup>"]
+    for i in range(len(col_names)):
+        colgroup_parts.append(f'<col style="width:{col_widths[i]}ch" />')
+        if col_gap and i == col_head - 1:
+            colgroup_parts.append('<col style="width:3ch" />')
+    colgroup_parts.append("</colgroup>")
+    colgroup = "".join(colgroup_parts)
 
     header_cells: list[str] = []
     for idx, (name, type_str) in enumerate(zip(col_names, col_types)):
@@ -321,27 +362,57 @@ def render_arrow_table_html(
             f'<span class="ttf-coltype">{type_esc}</span>'
             f"</th>"
         )
+        if col_gap and idx == col_head - 1:
+            header_cells.append(
+                '<th class="ttf-gap" title="(columns omitted)"><span class="ttf-colname">…</span><span class="ttf-coltype"></span></th>'
+            )
     header_html = "<tr>" + "".join(header_cells) + "</tr>"
 
     # Body rows
     body_rows: list[str] = []
-    for i in range(rows_shown):
+    value_i = 0
+    def _append_row(*, is_gap: bool) -> None:
+        nonlocal value_i
         tds: list[str] = []
         for j in range(cols_shown):
-            raw = col_values[j][i] if i < len(col_values[j]) else None
+            if is_gap:
+                tds.append('<td class="ttf-gap">…</td>')
+                if col_gap and j == col_head - 1:
+                    tds.append('<td class="ttf-gap">…</td>')
+                continue
+            raw = col_values[j][value_i] if value_i < len(col_values[j]) else None
             s = _format_cell_value(raw)
             s = _truncate(s, max_cell_chars)
             s = _html.escape(s, quote=True)
             cls = "ttf-num" if numeric_cols[j] else ""
             cls_attr = f' class="{cls}"' if cls else ""
             tds.append(f"<td{cls_attr}>{s}</td>")
-        body_rows.append("<tr>" + "".join(tds) + "</tr>")
+            if col_gap and j == col_head - 1:
+                tds.append('<td class="ttf-gap">…</td>')
+        if not is_gap:
+            value_i += 1
+        tr_cls = ' class="ttf-gap-row"' if is_gap else ""
+        body_rows.append(f"<tr{tr_cls}>" + "".join(tds) + "</tr>")
+
+    for _ in range(row_head):
+        _append_row(is_gap=False)
+    if row_gap:
+        _append_row(is_gap=True)
+    for _ in range(row_tail):
+        _append_row(is_gap=False)
     body_html = "".join(body_rows)
+
+    rows_previewed = min(total_rows, max_rows)
+    cols_previewed = min(total_cols, max_cols)
 
     footer = (
         f'<div class="ttf-footer">'
-        f"Showing <b>{rows_shown}</b> of <b>{total_rows}</b> rows, "
-        f"<b>{cols_shown}</b> of <b>{total_cols}</b> columns."
+        f"Showing <b>{rows_previewed}</b> of <b>{total_rows}</b> rows"
+        + (f" ({row_head} head + {row_tail} tail)" if row_gap else "")
+        + ", "
+        f"<b>{cols_previewed}</b> of <b>{total_cols}</b> columns"
+        + (f" ({col_head} left + {col_tail} right)" if col_gap else "")
+        + "."
         f' <span class="ttf-meta">(max_rows={max_rows}, max_cols={max_cols}, max_cell_chars={max_cell_chars})</span>'
         f"</div>"
     )

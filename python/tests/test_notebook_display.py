@@ -53,7 +53,50 @@ def test_render_html_adds_vertical_scroll_class_for_many_rows():
 def test_render_html_truncates_columns():
     t = pa.table({f"c{i}": [i] for i in range(60)})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
-    assert html.count("<th ") == 50
+    assert html.count("<th ") == 51
+    assert 'class="ttf-gap"' in html
+    assert ", <b>50</b> of <b>60</b> columns" in html
+    assert "(25 left + 25 right)" in html
+
+
+def test_render_html_rows_head_tail_preview():
+    t = pa.table({"x": [f"r{i}" for i in range(30)]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert ">r0</td>" in html
+    assert ">r29</td>" in html
+    assert "r15" not in html
+    assert 'class="ttf-gap-row"' in html
+    assert "Showing <b>20</b> of <b>30</b> rows" in html
+    assert "(10 head + 10 tail)" in html
+
+
+def test_render_html_rows_odd_split_is_balanced():
+    t = pa.table({"x": [f"r{i}" for i in range(10)]})
+    html = nd.render_arrow_table_html(t, max_rows=5, max_cols=50, max_cell_chars=200)
+    assert ">r0</td>" in html
+    assert ">r9</td>" in html
+    assert "r5" not in html
+    assert "(3 head + 2 tail)" in html
+
+
+def test_render_html_cols_head_tail_preview():
+    t = pa.table({f"c{i}": [i] for i in range(30)})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=200)
+    assert 'class="ttf-colname">c0</span>' in html
+    assert 'class="ttf-colname">c29</span>' in html
+    assert "c15" not in html
+    assert 'class="ttf-gap"' in html
+    assert ", <b>20</b> of <b>30</b> columns" in html
+    assert "(10 left + 10 right)" in html
+
+
+def test_render_html_cols_odd_split_is_balanced():
+    t = pa.table({f"c{i}": [i] for i in range(10)})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=5, max_cell_chars=200)
+    assert 'class="ttf-colname">c0</span>' in html
+    assert 'class="ttf-colname">c9</span>' in html
+    assert "c5" not in html
+    assert "(3 left + 2 right)" in html
 
 
 def test_render_html_duplicate_column_names_preserved():
