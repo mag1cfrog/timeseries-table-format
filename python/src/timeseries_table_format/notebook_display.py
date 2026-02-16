@@ -104,10 +104,11 @@ def _is_numeric_arrow_type(t: pa.DataType) -> bool:
         pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t)
     )
 
-def _column_width_ch(name: str) -> int:
-    # Approximate a sensible column width from the header name length.
-    # Keep it bounded so a single long column name doesn't blow out the layout.
-    return max(6, min(len(name) + 2, 32))
+def _column_width_ch(name: str, type_str: str) -> int:
+    # Approximate a sensible column width from the header content length.
+    # Keep it bounded so a single long name/type doesn't blow out the layout.
+    content_len = max(len(name), len(type_str))
+    return max(6, min(content_len + 2, 32))
 
 
 def render_arrow_table_html(
@@ -133,7 +134,8 @@ def render_arrow_table_html(
 
     schema = preview.schema
     col_names = list(preview.column_names)
-    col_widths = [_column_width_ch(n) for n in col_names]
+    col_types = [str(schema.field(n).type) for n in col_names]
+    col_widths = [_column_width_ch(n, t) for n, t in zip(col_names, col_types)]
 
     # Convert bounded preview to Python values.
     data = preview.to_pydict()
@@ -213,6 +215,20 @@ def render_arrow_table_html(
   font-weight: 600;
 }
 
+.ttf-arrow-preview thead th .ttf-colname {
+  display: block;
+  white-space: nowrap;
+}
+
+.ttf-arrow-preview thead th .ttf-coltype {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ttf-muted);
+  white-space: nowrap;
+}
+
 .ttf-arrow-preview tbody tr:nth-child(even) {
   background: var(--ttf-zebra);
 }
@@ -246,11 +262,16 @@ def render_arrow_table_html(
     )
 
     header_cells: list[str] = []
-    for field in schema:
-        name_esc = _html.escape(field.name, quote=True)
-        type_str = _html.escape(str(field.type), quote=True)
-        title = _html.escape(f"{field.name} ({field.type})", quote=True)
-        header_cells.append(f'<th title="{title}">{name_esc}</th>')
+    for name, type_str in zip(col_names, col_types):
+        name_esc = _html.escape(name, quote=True)
+        type_esc = _html.escape(type_str, quote=True)
+        title = _html.escape(f"{name} ({type_str})", quote=True)
+        header_cells.append(
+            f'<th title="{title}">'
+            f'<span class="ttf-colname">{name_esc}</span>'
+            f'<span class="ttf-coltype">{type_esc}</span>'
+            f"</th>"
+        )
     header_html = "<tr>" + "".join(header_cells) + "</tr>"
 
     # Body rows
