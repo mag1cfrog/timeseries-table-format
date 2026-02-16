@@ -19,8 +19,9 @@ class FakeHTMLFormatter:
 def test_render_html_escapes_and_truncates():
     t = pa.table({"x": ["<b>hello</b>"], "y": [123]})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=5)
-    assert "&lt;b&gt;" in html
-    assert "…" in html
+    assert "text-overflow: ellipsis" in html
+    assert "&lt;b&gt;h" in html
+    assert "hello" not in html
     assert "ttf-align-right" in html
 
 
