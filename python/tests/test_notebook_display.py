@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import types
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -16,6 +17,16 @@ class FakeHTMLFormatter:
         self.type_printers[typ] = func
 
 
+@dataclass
+class FakeDisplayFormatter:
+    formatters: dict[str, Any]
+
+
+@dataclass
+class FakeShell:
+    display_formatter: FakeDisplayFormatter
+
+
 def test_render_html_escapes_and_truncates():
     t = pa.table({"x": ["<b>hello</b>"], "y": [123]})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=5)
@@ -30,12 +41,61 @@ def test_render_html_align_modes_set_container_class():
     assert "ttf-align-right" in nd.render_arrow_table_html(t, align="right")
     assert "ttf-align-left" in nd.render_arrow_table_html(t, align="left")
     assert "ttf-align-auto" in nd.render_arrow_table_html(t, align="auto")
+    assert "ttf-align-right" in nd.render_arrow_table_html(t, align="nonsense")
 
 
 def test_render_html_adds_vertical_scroll_class_for_many_rows():
     t = pa.table({"x": list(range(20))})
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=30)
     assert "ttf-scroll-y" in html
+
+
+def test_render_html_truncates_columns():
+    t = pa.table({f"c{i}": [i] for i in range(60)})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert html.count("<th ") == 50
+
+
+def test_render_html_duplicate_column_names_preserved():
+    t = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert html.count('class="ttf-colname">x</span>') == 2
+    assert html.find(">1</td>") < html.find(">2</td>")
+
+
+def test_render_html_duplicate_column_names_with_truncation_does_not_error():
+    t = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=1, max_cell_chars=200)
+    assert html.count("<th ") == 1
+    assert ">1</td>" in html
+    assert ">2</td>" not in html
+
+
+def test_render_html_escapes_quotes_in_cells():
+    t = pa.table({"x": ['" onclick="alert(1)']})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert 'onclick="' not in html
+    assert "&quot; onclick=&quot;" in html
+
+
+def test_render_html_escapes_column_names():
+    t = pa.table({'x"><img src=x onerror=alert(1)>': [1]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert "<img" not in html
+    assert "&lt;img" in html
+
+
+def test_render_html_bytes_render_as_hex():
+    t = pa.table({"x": [b"\x00\xff"]})
+    html = nd.render_arrow_table_html(t, max_rows=20, max_cols=50, max_cell_chars=200)
+    assert ">00ff</td>" in html
+
+
+def test_render_html_invalid_bounds_fall_back_to_defaults():
+    t = pa.table({"x": [1]})
+    html = nd.render_arrow_table_html(t, max_rows=0, max_cols=0, max_cell_chars=0)
+    assert "(max_rows=20, max_cols=50, max_cell_chars=200)" in html
+
 
 def test_render_html_zero_rows_still_renders_header_and_footer():
     t = pa.table({"x": pa.array([], type=pa.int64())})
@@ -72,6 +132,32 @@ def test_install_and_uninstall_restores_previous_printer():
     assert prev_called["n"] == 1
 
 
+def test_install_then_uninstall_with_no_previous_printer_removes_entry():
+    fake = FakeHTMLFormatter(type_printers={})
+
+    nd._STATE.enabled = False
+    nd._STATE.our_printer = None
+    nd._STATE.had_prev_printer = False
+    nd._STATE.prev_printer = None
+
+    assert nd._install_into_html_formatter(fake, override_existing=True) is True
+    assert pa.Table in fake.type_printers
+    assert nd._uninstall_from_html_formatter(fake) is True
+    assert pa.Table not in fake.type_printers
+
+
+def test_install_when_already_installed_is_noop():
+    fake = FakeHTMLFormatter(type_printers={})
+
+    nd._STATE.enabled = False
+    nd._STATE.our_printer = None
+    nd._STATE.had_prev_printer = False
+    nd._STATE.prev_printer = None
+
+    assert nd._install_into_html_formatter(fake, override_existing=True) is True
+    assert nd._install_into_html_formatter(fake, override_existing=True) is False
+
+
 def test_auto_install_does_not_override_existing():
     def existing(_: Any) -> str:
         return "existing"
@@ -86,3 +172,69 @@ def test_auto_install_does_not_override_existing():
     changed = nd._install_into_html_formatter(fake, override_existing=False)
     assert changed is False
     assert fake.type_printers[pa.Table] is existing
+
+
+def test_uninstall_does_not_clobber_other_printer():
+    fake = FakeHTMLFormatter(type_printers={})
+
+    nd._STATE.enabled = False
+    nd._STATE.our_printer = None
+    nd._STATE.had_prev_printer = False
+    nd._STATE.prev_printer = None
+
+    assert nd._install_into_html_formatter(fake, override_existing=True) is True
+    our = fake.type_printers[pa.Table]
+
+    def other(_: Any) -> str:
+        return "other"
+
+    fake.type_printers[pa.Table] = other
+
+    assert nd._uninstall_from_html_formatter(fake) is False
+    assert fake.type_printers[pa.Table] is other
+    assert our is not other
+
+
+def test_auto_enable_respects_env_disable(monkeypatch):
+    html_formatter = FakeHTMLFormatter(type_printers={})
+    shell = FakeShell(
+        display_formatter=FakeDisplayFormatter(formatters={"text/html": html_formatter})
+    )
+
+    ipy = types.ModuleType("IPython")
+    ipy.get_ipython = lambda: shell  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "IPython", ipy)
+
+    monkeypatch.setenv("TTF_NOTEBOOK_DISPLAY", "0")
+
+    nd._STATE.enabled = False
+    nd._STATE.our_printer = None
+    nd._STATE.had_prev_printer = False
+    nd._STATE.prev_printer = None
+
+    assert nd._auto_enable_notebook_display() is False
+    assert pa.Table not in html_formatter.type_printers
+
+
+def test_auto_enable_reads_align_env(monkeypatch):
+    html_formatter = FakeHTMLFormatter(type_printers={})
+    shell = FakeShell(
+        display_formatter=FakeDisplayFormatter(formatters={"text/html": html_formatter})
+    )
+
+    ipy = types.ModuleType("IPython")
+    ipy.get_ipython = lambda: shell  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "IPython", ipy)
+
+    monkeypatch.delenv("TTF_NOTEBOOK_DISPLAY", raising=False)
+    monkeypatch.setenv("TTF_NOTEBOOK_ALIGN", "auto")
+
+    nd._STATE.enabled = False
+    nd._STATE.our_printer = None
+    nd._STATE.had_prev_printer = False
+    nd._STATE.prev_printer = None
+
+    assert nd._auto_enable_notebook_display() is True
+    printer = html_formatter.type_printers[pa.Table]
+    out = printer(pa.table({"x": ["a"], "y": [1]}))
+    assert "ttf-align-auto" in out

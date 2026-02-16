@@ -144,21 +144,22 @@ def render_arrow_table_html(
 
     preview = table.slice(0, rows_shown)
     if total_cols > cols_shown:
-        preview = preview.select(preview.column_names[:cols_shown])
+        # Select by integer indices to preserve order and avoid ambiguity/errors
+        # when duplicate column names exist (e.g. `select a as x, b as x`).
+        preview = preview.select(list(range(cols_shown)))
 
     schema = preview.schema
     col_names = list(preview.column_names)
-    col_types = [str(schema.field(n).type) for n in col_names]
+    fields = list(schema)
+    col_types = [str(f.type) for f in fields]
     col_widths = [_column_width_ch(n, t) for n, t in zip(col_names, col_types)]
 
-    # Convert bounded preview to Python values.
-    data = preview.to_pydict()
+    # Convert bounded preview to Python values. Use per-column conversion to preserve
+    # duplicate column names (to_pydict() collapses duplicates).
+    col_values: list[list[Any]] = [col.to_pylist() for col in preview.columns]
 
     # Precompute numeric columns for CSS classing.
-    numeric_cols: set[str] = set()
-    for field in schema:
-        if _is_numeric_arrow_type(field.type):
-            numeric_cols.add(field.name)
+    numeric_cols = [_is_numeric_arrow_type(f.type) for f in fields]
 
     # Build HTML.
     style = """
@@ -308,11 +309,11 @@ def render_arrow_table_html(
     )
 
     header_cells: list[str] = []
-    for name, type_str in zip(col_names, col_types):
+    for idx, (name, type_str) in enumerate(zip(col_names, col_types)):
         name_esc = _html.escape(name, quote=True)
         type_esc = _html.escape(type_str, quote=True)
         title = _html.escape(f"{name} ({type_str})", quote=True)
-        cls = "ttf-num" if name in numeric_cols else ""
+        cls = "ttf-num" if numeric_cols[idx] else ""
         cls_attr = f' class="{cls}"' if cls else ""
         header_cells.append(
             f"<th{cls_attr} title=\"{title}\">"
@@ -326,12 +327,12 @@ def render_arrow_table_html(
     body_rows: list[str] = []
     for i in range(rows_shown):
         tds: list[str] = []
-        for name in col_names:
-            raw = data[name][i] if name in data else None
+        for j in range(cols_shown):
+            raw = col_values[j][i] if i < len(col_values[j]) else None
             s = _format_cell_value(raw)
             s = _truncate(s, max_cell_chars)
             s = _html.escape(s, quote=True)
-            cls = "ttf-num" if name in numeric_cols else ""
+            cls = "ttf-num" if numeric_cols[j] else ""
             cls_attr = f' class="{cls}"' if cls else ""
             tds.append(f"<td{cls_attr}>{s}</td>")
         body_rows.append("<tr>" + "".join(tds) + "</tr>")
