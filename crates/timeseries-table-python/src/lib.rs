@@ -1052,7 +1052,7 @@ mod _native {
                 ExistsError::DataFusion(e) => crate::error_map::datafusion_error_to_py(py, e),
                 ExistsError::Runtime(msg) => PyRuntimeError::new_err(msg),
             },
-            )
+        )
     }
 
     /// Benchmark helper: run a SQL query and return Arrow IPC stream bytes plus Rust-side timing
@@ -1128,7 +1128,10 @@ mod _native {
                     .map_err(|_| BenchSqlIpcError::Runtime("Session catalog semaphore closed"))?;
 
                 let t_plan = Instant::now();
-                let df = ctx.sql(&query).await.map_err(BenchSqlIpcError::DataFusion)?;
+                let df = ctx
+                    .sql(&query)
+                    .await
+                    .map_err(BenchSqlIpcError::DataFusion)?;
                 let plan_ms = t_plan.elapsed().as_secs_f64() * 1000.0;
 
                 let schema = df.schema().as_arrow().clone();
