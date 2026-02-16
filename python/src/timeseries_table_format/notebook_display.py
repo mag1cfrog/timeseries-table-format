@@ -1,7 +1,7 @@
 import html as _html
 import os
 from typing import Callable, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pyarrow as pa
 
@@ -16,7 +16,7 @@ class _NotebookDisplayConfig:
 @dataclass
 class _NotebookDisplayState:
     enabled: bool = False
-    config: _NotebookDisplayConfig = _NotebookDisplayConfig()
+    config: _NotebookDisplayConfig = field(default_factory=_NotebookDisplayConfig)
     our_printer: Callable[[pa.Table], str] | None = None
     had_prev_printer: bool = False
     prev_printer: Callable[[Any], str] | None = None
