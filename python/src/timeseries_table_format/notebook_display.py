@@ -9,7 +9,7 @@ import pyarrow as pa
 @dataclass
 class _NotebookDisplayConfig:
     max_rows: int = 20
-    max_cols: int = 20
+    max_cols: int = 50
     max_cell_chars: int = 30
     align: str = "right"  # "right" | "auto" | "left"
 
@@ -132,12 +132,12 @@ def render_arrow_table_html(
     table: pa.Table,
     *,
     max_rows: int = 20,
-    max_cols: int = 20,
+    max_cols: int = 50,
     max_cell_chars: int = 30,
     align: str = "right",
 ) -> str:
     max_rows = _safe_int(max_rows, default=20)
-    max_cols = _safe_int(max_cols, default=20)
+    max_cols = _safe_int(max_cols, default=50)
     max_cell_chars = _safe_int(max_cell_chars, default=30)
     align = _normalize_align(align)
 
@@ -200,15 +200,19 @@ def render_arrow_table_html(
 
 .ttf-arrow-preview .ttf-wrap {
   max-width: 100%;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid var(--ttf-border);
   border-radius: 10px;
   background: var(--ttf-bg);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable both-edges;
 }
 
 .ttf-arrow-preview .ttf-wrap.ttf-scroll-y {
   max-height: var(--ttf-max-height, 420px);
+  overflow-y: auto;
 }
 
 .ttf-arrow-preview table {
@@ -343,7 +347,7 @@ def render_arrow_table_html(
 
     wrap_cls = "ttf-wrap"
     wrap_style = ""
-    tall = rows_shown > _SCROLL_Y_THRESHOLD_ROWS
+    tall = rows_shown >= _SCROLL_Y_THRESHOLD_ROWS
     if tall:
         wrap_cls += " ttf-scroll-y"
         wrap_style = f' style="--ttf-max-height: {_SCROLL_Y_MAX_HEIGHT_PX}px;"'
@@ -451,13 +455,13 @@ def _uninstall_from_html_formatter(html_formatter: Any) -> bool:
 def enable_notebook_display(
     *,
     max_rows: int = 20,
-    max_cols: int = 20,
+    max_cols: int = 50,
     max_cell_chars: int = 30,
     align: str = "right",
 ) -> bool:
     _STATE.config = _NotebookDisplayConfig(
         max_rows=_safe_int(max_rows, default=20),
-        max_cols=_safe_int(max_cols, default=20),
+        max_cols=_safe_int(max_cols, default=50),
         max_cell_chars=_safe_int(max_cell_chars, default=30),
         align=_normalize_align(align),
     )
