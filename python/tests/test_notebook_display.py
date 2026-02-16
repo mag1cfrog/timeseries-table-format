@@ -21,6 +21,14 @@ def test_render_html_escapes_and_truncates():
     html = nd.render_arrow_table_html(t, max_rows=20, max_cols=20, max_cell_chars=5)
     assert "&lt;b&gt;" in html
     assert "…" in html
+    assert "ttf-align-right" in html
+
+
+def test_render_html_align_modes_set_container_class():
+    t = pa.table({"x": ["a"], "y": [1]})
+    assert "ttf-align-right" in nd.render_arrow_table_html(t, align="right")
+    assert "ttf-align-left" in nd.render_arrow_table_html(t, align="left")
+    assert "ttf-align-auto" in nd.render_arrow_table_html(t, align="auto")
 
 
 def test_render_html_zero_rows_still_renders_header_and_footer():
