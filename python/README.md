@@ -243,7 +243,7 @@ Alternative: build with `maturin` directly:
 cd python
 uv venv -p 3.12 .venv
 uv pip install -p .venv/bin/python pyarrow --group dev
-uv run -p .venv/bin/python maturin develop -m pyproject.toml
+uv run -p .venv/bin/python maturin develop
 .venv/bin/python -m pytest
 ```
 
@@ -255,14 +255,14 @@ To estimate the IPC encode/decode overhead, run:
 ```bash
 cd python
 uv pip install -p .venv/bin/python numpy
-uv run -p .venv/bin/python maturin develop -m pyproject.toml --features test-utils
+uv run -p .venv/bin/python maturin develop --features test-utils
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2
 ```
 
 Optional: benchmark IPC ZSTD compression (requires building with `ipc-zstd`):
 
 ```bash
-uv run -p .venv/bin/python maturin develop -m pyproject.toml --features test-utils,ipc-zstd
+uv run -p .venv/bin/python maturin develop --features test-utils,ipc-zstd
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2 --ipc-compression zstd
 ```
 
