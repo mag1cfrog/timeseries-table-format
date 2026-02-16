@@ -10,6 +10,9 @@ from ._native import (
     TimeseriesTableError,
 )
 
+def enable_notebook_display(*, max_rows: int = 20, max_cols: int = 20, max_cell_chars: int = 100) -> bool: ...
+def disable_notebook_display() -> bool: ...
+
 __all__ = [
     "__version__",
     "TimeseriesTableError",
@@ -20,4 +23,6 @@ __all__ = [
     "DataFusionError",
     "Session",
     "TimeSeriesTable",
+    "enable_notebook_display",
+    "disable_notebook_display",
 ]
