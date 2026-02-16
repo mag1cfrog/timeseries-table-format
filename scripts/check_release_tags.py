@@ -40,6 +40,41 @@ def _cargo_package_name_and_version(cargo_toml: pathlib.Path) -> tuple[str, str]
     return m_name.group(1), m_ver.group(1)
 
 
+def _cargo_package_version_at_rev(cargo_toml_rel: str, rev: str) -> str | None:
+    try:
+        text = _run(["git", "show", f"{rev}:{cargo_toml_rel}"])
+    except Exception:
+        return None
+    m_ver = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', text)
+    if not m_ver:
+        return None
+    return m_ver.group(1)
+
+
+def _released_cargo_tomls_in_head_commit() -> list[pathlib.Path]:
+    """
+    Return Cargo.toml paths for packages that were *released* in HEAD.
+
+    release-plz release commits bump `version = "..."` in crate Cargo.toml files.
+    Only require tags for crates whose version changed in HEAD (not arbitrary Cargo.toml edits).
+    """
+
+    cargo_paths = _changed_cargo_tomls_in_head_commit()
+    if not cargo_paths:
+        return []
+
+    released: list[pathlib.Path] = []
+    for p in cargo_paths:
+        rel = p.relative_to(REPO_ROOT).as_posix()
+        head_ver = _cargo_package_version_at_rev(rel, "HEAD")
+        prev_ver = _cargo_package_version_at_rev(rel, "HEAD^")
+        if head_ver is None:
+            continue
+        if prev_ver != head_ver:
+            released.append(p)
+    return released
+
+
 def _tag_points_at_head(tag: str) -> bool:
     try:
         tag_commit = _run(["git", "rev-list", "-n", "1", tag])
@@ -50,7 +85,7 @@ def _tag_points_at_head(tag: str) -> bool:
 
 
 def main() -> int:
-    cargo_tomls = _changed_cargo_tomls_in_head_commit()
+    cargo_tomls = _released_cargo_tomls_in_head_commit()
     if not cargo_tomls:
         return 0
 
@@ -91,4 +126,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
