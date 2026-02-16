@@ -13,7 +13,7 @@ def test_docs_example_quickstart_runs(tmp_path):
         str(EXAMPLES_DIR / "quickstart_create_append_query.py"),
         run_name="__doc_example__",
     )
-    out = mod["run"](table_root=tmp_path / "table")  # type: ignore[no-any-return]
+    out = mod["run"](table_root=tmp_path / "table")  
     assert isinstance(out, pa.Table)
     assert out.column_names == ["ts", "symbol", "close"]
     assert out.num_rows == 3
@@ -24,7 +24,7 @@ def test_docs_example_join_runs(tmp_path):
         str(EXAMPLES_DIR / "register_and_join_two_tables.py"),
         run_name="__doc_example__",
     )
-    out = mod["run"](base_dir=tmp_path)  # type: ignore[no-any-return]
+    out = mod["run"](base_dir=tmp_path)  
     assert isinstance(out, pa.Table)
     assert out.column_names == ["ts", "symbol", "close", "volume"]
     assert out.num_rows == 2
@@ -35,7 +35,7 @@ def test_docs_example_parameterized_queries_runs():
         str(EXAMPLES_DIR / "parameterized_queries.py"),
         run_name="__doc_example__",
     )
-    outs = mod["run"]()  # type: ignore[no-any-return]
+    outs = mod["run"]()  
     assert isinstance(outs, list)
     assert len(outs) == 2
     assert all(isinstance(t, pa.Table) for t in outs)
