@@ -368,7 +368,7 @@ def test_auto_enable_loads_config_file_from_env(monkeypatch, tmp_path):
                 "max_rows = 5",
                 "max_cols = 7",
                 "max_cell_chars = 9",
-                "align = \"left\"",
+                'align = "left"',
                 "col_max_ch = 20",
                 "",
             ]

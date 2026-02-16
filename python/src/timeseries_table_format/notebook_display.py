@@ -29,6 +29,7 @@ class _NotebookDisplayState:
 
 _STATE = _NotebookDisplayState()
 
+
 @dataclass
 class _NotebookDisplayTuning:
     scroll_y_threshold_rows: int = 15
@@ -511,7 +512,9 @@ def render_arrow_table_html(
     header_cells: list[str] = []
     for idx, (name, type_str) in enumerate(zip(col_names, col_types)):
         name_disp = _ellipsize_middle(name, max_chars=_TUNING.header_display_max_chars)
-        type_disp = _ellipsize_middle(type_str, max_chars=_TUNING.header_display_max_chars)
+        type_disp = _ellipsize_middle(
+            type_str, max_chars=_TUNING.header_display_max_chars
+        )
         title_raw = _ellipsize_middle(
             f"{name} ({type_str})", max_chars=_TUNING.header_title_max_chars
         )
@@ -598,9 +601,7 @@ def render_arrow_table_html(
     if cols_shown == 0:
         empty_style = ' style="padding:10px;"'
         if tall:
-            empty_style = (
-                f' style="padding:10px; --ttf-max-height: {_TUNING.scroll_y_max_height_px}px;"'
-            )
+            empty_style = f' style="padding:10px; --ttf-max-height: {_TUNING.scroll_y_max_height_px}px;"'
         empty = (
             f'<div class="ttf-arrow-preview ttf-align-{align}">{style}'
             f'<div class="{wrap_cls}"{empty_style}>(No columns)</div>{footer}</div>'
