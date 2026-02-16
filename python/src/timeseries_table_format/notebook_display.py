@@ -104,6 +104,11 @@ def _is_numeric_arrow_type(t: pa.DataType) -> bool:
         pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t)
     )
 
+def _column_width_ch(name: str) -> int:
+    # Approximate a sensible column width from the header name length.
+    # Keep it bounded so a single long column name doesn't blow out the layout.
+    return max(6, min(len(name) + 2, 32))
+
 
 def render_arrow_table_html(
     table: pa.Table,
@@ -128,6 +133,7 @@ def render_arrow_table_html(
 
     schema = preview.schema
     col_names = list(preview.column_names)
+    col_widths = [_column_width_ch(n) for n in col_names]
 
     # Convert bounded preview to Python values.
     data = preview.to_pydict()
@@ -183,7 +189,8 @@ def render_arrow_table_html(
 .ttf-arrow-preview table {
   border-collapse: separate;
   border-spacing: 0;
-  width: 100%;
+  table-layout: fixed;
+  width: max-content;
 }
 
 .ttf-arrow-preview th,
@@ -192,6 +199,8 @@ def render_arrow_table_html(
   border-bottom: 1px solid var(--ttf-grid);
   white-space: nowrap;
   vertical-align: top;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ttf-arrow-preview thead th {
@@ -230,11 +239,18 @@ def render_arrow_table_html(
 """.strip()
 
     # Header
+    colgroup = (
+        "<colgroup>"
+        + "".join(f'<col style="width:{w}ch" />' for w in col_widths)
+        + "</colgroup>"
+    )
+
     header_cells: list[str] = []
     for field in schema:
         name_esc = _html.escape(field.name, quote=True)
         type_str = _html.escape(str(field.type), quote=True)
-        header_cells.append(f'<th title="{type_str}">{name_esc}</th>')
+        title = _html.escape(f"{field.name} ({field.type})", quote=True)
+        header_cells.append(f'<th title="{title}">{name_esc}</th>')
     header_html = "<tr>" + "".join(header_cells) + "</tr>"
 
     # Body rows
@@ -270,6 +286,7 @@ def render_arrow_table_html(
     return (
         f'<div class="ttf-arrow-preview">{style}'
         f'<div class="ttf-wrap"><table>'
+        f"{colgroup}"
         f"<thead>{header_html}</thead>"
         f"<tbody>{body_html}</tbody>"
         f"</table></div>"
