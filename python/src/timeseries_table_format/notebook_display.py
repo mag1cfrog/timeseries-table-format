@@ -159,6 +159,10 @@ _COL_MIN_CH_OTHER = 12
 _COL_MAX_CH = 64
 
 
+_HEADER_DISPLAY_MAX_CHARS = 64
+_HEADER_TITLE_MAX_CHARS = 256
+
+
 def _cell_len_cap(value: Any, *, cap: int) -> int:
     # Return a cheap-ish estimate of the displayed content length, capped.
     # Avoid `repr(...)` for nested containers since it can be arbitrarily large.
@@ -172,6 +176,19 @@ def _cell_len_cap(value: Any, *, cap: int) -> int:
     if isinstance(value, (list, tuple, dict, set)):
         return cap
     return min(len(str(value)), cap)
+
+
+def _ellipsize_middle(s: str, *, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    if max_chars <= 1:
+        return "…"
+    # Keep both ends; helps distinguish similar prefixes in nested types.
+    head = (max_chars - 1) // 2
+    tail = max_chars - 1 - head
+    return s[:head] + "…" + s[-tail:]
 
 
 def _column_width_ch(
@@ -422,9 +439,15 @@ def render_arrow_table_html(
 
     header_cells: list[str] = []
     for idx, (name, type_str) in enumerate(zip(col_names, col_types)):
-        name_esc = _html.escape(name, quote=True)
-        type_esc = _html.escape(type_str, quote=True)
-        title = _html.escape(f"{name} ({type_str})", quote=True)
+        name_disp = _ellipsize_middle(name, max_chars=_HEADER_DISPLAY_MAX_CHARS)
+        type_disp = _ellipsize_middle(type_str, max_chars=_HEADER_DISPLAY_MAX_CHARS)
+        title_raw = _ellipsize_middle(
+            f"{name} ({type_str})", max_chars=_HEADER_TITLE_MAX_CHARS
+        )
+
+        name_esc = _html.escape(name_disp, quote=True)
+        type_esc = _html.escape(type_disp, quote=True)
+        title = _html.escape(title_raw, quote=True)
         cls = "ttf-num" if numeric_cols[idx] else ""
         cls_attr = f' class="{cls}"' if cls else ""
         header_cells.append(
