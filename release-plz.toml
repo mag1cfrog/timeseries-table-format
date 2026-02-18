@@ -52,10 +52,15 @@ git_release_enable = true
 # Internal helper crate that exists only so release-plz can attribute `python/**` commits to a
 # workspace package; its commits are included in `timeseries-table-python` via `changelog_include`.
 #
-# Keep it "managed" by release-plz (so `changelog_include` can see it) but never cut releases/tags
-# or bump its version.
+# Keep it "managed" by release-plz so it can contribute commits via `changelog_include`, but never
+# publish/tag/release it independently.
 name = "timeseries-table-python-src"
 release = false
+# Still analyze commits under `python/**` (and make them available via `changelog_include`), but
+# don't create a standalone release PR / tag / release for this internal helper crate.
+git_only = true
+git_tag_name = "timeseries-table-python-v{{ version }}"
+git_tag_enable = false
 publish = false
 semver_check = false
 changelog_update = false
