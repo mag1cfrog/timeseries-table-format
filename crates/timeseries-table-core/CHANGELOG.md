@@ -1,5 +1,13 @@
 # Changelog
 All notable changes to timeseries-table-core will be documented in this file.
+## 0.2.2
+
+
+### Bug Fixes
+
+- Correct workspace root path resolution in ingest_nvda example ([cf3900d](https://github.com/mag1cfrog/timeseries-table-format/commit/cf3900dcb659934825b4b4d28ffda3fe3b06645d))
+
+
 ## 0.2.1
 
 

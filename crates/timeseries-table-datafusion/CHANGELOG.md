@@ -1,5 +1,17 @@
 # Changelog
 All notable changes to timeseries-table-datafusion will be documented in this file.
+## 0.1.2
+
+
+### Bug Fixes
+
+- Update CLI output to use pretty formatting for query results ([cd6b277](https://github.com/mag1cfrog/timeseries-table-format/commit/cd6b27781ca343498e76f4b8a26013643b87a860))
+
+- Add pretty-print helpers for Arrow record batches in CLI output ([184cf7f](https://github.com/mag1cfrog/timeseries-table-format/commit/184cf7f70cc3e17fd7d19025d8e2d58b388fd5e2))
+
+- Add pretty-print helpers for compact formatting of Arrow RecordBatch output ([161fd6c](https://github.com/mag1cfrog/timeseries-table-format/commit/161fd6ceca939dc9428e1412e0e6d81a65adad6a))
+
+
 ## 0.1.1
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-format"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Append-only time-series table format with gap/overlap tracking"
 license = "MIT"
@@ -14,8 +14,8 @@ default = ["datafusion"]
 datafusion = ["dep:timeseries-table-datafusion"]
 
 [dependencies]
-timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.1", optional = true }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.2", optional = true }
 
 [package.metadata.docs.rs]
 all-features = true

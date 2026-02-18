@@ -1,5 +1,13 @@
 # Changelog
 All notable changes to timeseries-table-format will be documented in this file.
+## 0.1.4
+
+
+### Maintenance
+
+- Updated the following local packages: timeseries-table-core, timeseries-table-datafusion ([0000000](https://github.com/mag1cfrog/timeseries-table-format/commit/0000000))
+
+
 ## 0.1.3
 
 

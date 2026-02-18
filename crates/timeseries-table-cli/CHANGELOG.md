@@ -1,5 +1,13 @@
 # Changelog
 All notable changes to timeseries-table-cli will be documented in this file.
+## 0.1.2
+
+
+### Bug Fixes
+
+- Enhance CLI output formatting for float values in query results ([783a27e](https://github.com/mag1cfrog/timeseries-table-format/commit/783a27eebfb1300516b968b77baa21d62e7779b5))
+
+
 ## 0.1.1
 
 
