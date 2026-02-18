@@ -18,7 +18,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve paths relative to the workspace root.
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("..");
+        .join("..")
+        .canonicalize()?;
     let csv_path = workspace_root.join("examples/data/nvda_1h_sample.csv");
     let table_root = workspace_root.join("examples/nvda_table");
     let parquet_path = table_root.join("data/nvda_1h.parquet");
