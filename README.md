@@ -25,7 +25,7 @@
   Built in Rust. Python bindings available on PyPI.
 </p>
 
-> **Early MVP:** APIs and on-disk layouts may change until v0.1.
+> **Early MVP:** APIs and on-disk layouts may change before v1.0.
 
 ---
 
