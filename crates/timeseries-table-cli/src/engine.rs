@@ -6,12 +6,10 @@ use std::{
 };
 
 use arrow::{
+    array::{Array, Float32Array, Float64Array},
     datatypes::DataType,
     error::ArrowError,
-    util::{
-        display::{ArrayFormatter, FormatOptions},
-        pretty::pretty_format_batches,
-    },
+    util::display::{ArrayFormatter, FormatOptions},
 };
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures_util::StreamExt;
@@ -21,6 +19,7 @@ use timeseries_table_core::{
     table::TimeSeriesTable,
 };
 use timeseries_table_datafusion::TsTableProvider;
+use timeseries_table_datafusion::pretty::pretty_format_batches_compact_floats;
 
 use crate::{
     error::{
@@ -158,6 +157,53 @@ fn ensure_csv_supported(schema: &arrow::datatypes::Schema) -> CliResult<()> {
     Ok(())
 }
 
+enum ColumnFormatter<'a> {
+    F32(&'a Float32Array),
+    F64(&'a Float64Array),
+    Other(ArrayFormatter<'a>),
+}
+
+impl ColumnFormatter<'_> {
+    fn format_row_value(&self, idx: usize, null: &str) -> Result<String, ArrowError> {
+        const MAX_DECIMALS: usize = 6;
+
+        match self {
+            ColumnFormatter::F32(array) => {
+                if array.is_null(idx) {
+                    return Ok(null.to_string());
+                }
+                Ok(format_compact_float(array.value(idx) as f64, MAX_DECIMALS))
+            }
+            ColumnFormatter::F64(array) => {
+                if array.is_null(idx) {
+                    return Ok(null.to_string());
+                }
+                Ok(format_compact_float(array.value(idx), MAX_DECIMALS))
+            }
+            ColumnFormatter::Other(formatter) => formatter.value(idx).try_to_string(),
+        }
+    }
+}
+
+fn format_compact_float(value: f64, max_decimals: usize) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+
+    let prec = max_decimals.min(15);
+    let mut s = format!("{value:.prec$}", prec = prec);
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+
+    if s == "-0" { "0".to_string() } else { s }
+}
+
 pub struct DataFusionEngine {
     table_root: PathBuf,
     table_name: String,
@@ -240,7 +286,7 @@ impl QuerySession for DataFusionSession {
             let explain_sql = format!("EXPLAIN {sql}");
             let df = self.ctx.sql(&explain_sql).await.context(DataFusionSnafu)?;
             let batches = df.collect().await.context(DataFusionSnafu)?;
-            let rendered = pretty_format_batches(&batches).context(ArrowSnafu)?;
+            let rendered = pretty_format_batches_compact_floats(&batches).context(ArrowSnafu)?;
             println!("{rendered}");
         }
 
@@ -284,10 +330,37 @@ impl QuerySession for DataFusionSession {
 
             if preview_rows_left > 0 {
                 let options = FormatOptions::default();
-                let formatters = batch
-                    .columns()
+                let schema = batch.schema();
+                let columns = batch.columns();
+
+                let formatters = columns
                     .iter()
-                    .map(|col| ArrayFormatter::try_new(col.as_ref(), &options))
+                    .zip(schema.fields())
+                    .map(|(col, field)| {
+                        let dt = field.data_type();
+                        if matches!(dt, DataType::Float64) {
+                            let array =
+                                col.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                                    ArrowError::CastError(
+                                        "expected Float64Array for Float64".to_string(),
+                                    )
+                                })?;
+                            Ok(ColumnFormatter::F64(array))
+                        } else if matches!(dt, DataType::Float32) {
+                            let array =
+                                col.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                                    ArrowError::CastError(
+                                        "expected Float32Array for Float32".to_string(),
+                                    )
+                                })?;
+                            Ok(ColumnFormatter::F32(array))
+                        } else {
+                            Ok(ColumnFormatter::Other(ArrayFormatter::try_new(
+                                col.as_ref(),
+                                &options,
+                            )?))
+                        }
+                    })
                     .collect::<Result<Vec<_>, ArrowError>>()
                     .context(ArrowSnafu)?;
 
@@ -297,8 +370,7 @@ impl QuerySession for DataFusionSession {
                     for formatter in &formatters {
                         row.push(
                             formatter
-                                .value(row_idx)
-                                .try_to_string()
+                                .format_row_value(row_idx, options.null())
                                 .context(ArrowSnafu)?,
                         );
                     }
