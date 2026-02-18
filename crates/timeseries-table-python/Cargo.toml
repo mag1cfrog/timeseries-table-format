@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-arrow-array = { workspace = true }
+arrow-array = { workspace = true , features = ["ffi"]}
 arrow-ipc = { workspace = true }
 datafusion = { workspace = true }
 
