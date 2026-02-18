@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-python-src"
-version = "0.0.0"
+version = "0.1.2"
 edition = "2024"
 publish = false
 
@@ -9,4 +9,3 @@ path = "_cargo_src/lib.rs"
 
 [lints]
 workspace = true
-

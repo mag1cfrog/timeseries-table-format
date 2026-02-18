@@ -55,9 +55,10 @@ git_release_enable = true
 # Keep it "managed" by release-plz so it can contribute commits via `changelog_include`, but never
 # publish/tag/release it independently.
 name = "timeseries-table-python-src"
-release = false
+release = true
 # Still analyze commits under `python/**` (and make them available via `changelog_include`), but
-# don't create a standalone release PR / tag / release for this internal helper crate.
+# don't publish/tag/release this internal helper crate independently.
+version_group = "timeseries-table-python"
 git_only = true
 git_tag_name = "timeseries-table-python-v{{ version }}"
 git_tag_enable = false
