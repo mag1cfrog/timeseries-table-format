@@ -88,6 +88,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
 
+      - name: Refresh tags after release-plz
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
       - name: Verify tags exist for released packages
         run: python scripts/check_release_tags.py
 
