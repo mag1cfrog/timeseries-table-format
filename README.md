@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/timeseries-table-format)](https://crates.io/crates/timeseries-table-format)
 [![docs.rs](https://img.shields.io/docsrs/timeseries-table-format)](https://docs.rs/timeseries-table-format)
 [![PyPI](https://img.shields.io/pypi/v/timeseries-table-format)](https://pypi.org/project/timeseries-table-format/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python)](https://pypi.org/project/timeseries-table-format/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/timeseries-table-format?logo=python&logoColor=white)](https://pypi.org/project/timeseries-table-format/)
 ![License](https://img.shields.io/badge/license-MIT-informational)
 [![](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml/badge.svg)](https://github.com/mag1cfrog/timeseries-table-format/actions/workflows/ci.yml)
 
