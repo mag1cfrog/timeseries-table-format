@@ -421,10 +421,22 @@ def render_arrow_table_html(
 .ttf-arrow-preview thead th {
   position: sticky;
   top: 0;
-  z-index: 1;
-  background: var(--ttf-head-bg);
+  z-index: 2;
+  /* Make the header visually tinted but fully opaque so scrolled cell text doesn't show through. */
+  background: var(--ttf-bg);
+  background: linear-gradient(var(--ttf-head-bg), var(--ttf-head-bg)), var(--ttf-bg);
   border-bottom: 1px solid var(--ttf-border);
   font-weight: 600;
+}
+
+@supports (background: color-mix(in srgb, white 50%, transparent)) {
+  .ttf-arrow-preview thead th {
+    /* Slight translucency with backdrop blur to avoid readable text bleeding through. */
+    background: linear-gradient(var(--ttf-head-bg), var(--ttf-head-bg)),
+      color-mix(in srgb, var(--ttf-bg) 90%, transparent);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
 }
 
 .ttf-arrow-preview thead th .ttf-colname {
