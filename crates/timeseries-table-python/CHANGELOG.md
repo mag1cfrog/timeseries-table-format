@@ -1,5 +1,20 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.3
+
+
+### Bug Fixes
+
+- Correct formatting and improve readability in benchmark helper function ([9ba3331](https://github.com/mag1cfrog/timeseries-table-format/commit/9ba33318c8b68d1120213fa73b7c7143831b631f))
+
+
+### Features
+
+- Add ipc-zstd feature to enable zstd compression for arrow-ipc ([b47f9cb](https://github.com/mag1cfrog/timeseries-table-format/commit/b47f9cbb87f1101070e74340da58335ede517f3f))
+
+- Add benchmark helper for SQL queries with IPC stream metrics ([e971812](https://github.com/mag1cfrog/timeseries-table-format/commit/e97181254bf30be8f65b0f3d5c5c29f75b706fdc))
+
+
 ## 0.1.2
 
 
