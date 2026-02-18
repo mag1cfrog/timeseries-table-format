@@ -25,6 +25,41 @@
   Built in Rust. Python bindings available on PyPI.
 </p>
 
+> **Early MVP:** APIs and on-disk layouts may change until v0.1.
+
+---
+
+## Why This Exists
+
+Delta Lake and Apache Iceberg are great for general-purpose analytics. But if you're working with **time-series specifically**, a few problems come up repeatedly—coverage ("do I have data for this range?"), gaps ("where are the missing windows?"), and overlap-safe ingestion ("did I already ingest this time window?"). This project bakes those time-series primitives into the table format.
+
+| Problem | Delta/Iceberg | This Project |
+|---------|---------------|--------------|
+| "Do I have data for 2024-01-15 to 2024-03-20?" | Scan metadata or query | coverage_ratio_for_range(...) → instant |
+| "Where are the gaps in my dataset?" | Write custom logic | max_gap_len_for_range(...) → built-in |
+| "Will this append overlap existing data?" | Hope for the best | Automatic overlap detection |
+| Deployment complexity | JVM/Spark ecosystem | Single Rust binary |
+
+**This project is ideal for:**
+- Backtesting systems that need gap-aware data loading
+- Sensor/IoT data pipelines with strict coverage requirements
+- Financial data stores where overlap = disaster
+- Learning how modern table formats work (well-documented internals!)
+
+---
+
+## Key Features
+
+| | |
+|---|---|
+| **ACID-like transactions** | Append-only commit log with optimistic concurrency control—no more corrupted datasets from failed writes |
+| **Time-first layout** | Timestamp column, entity partitioning, and configurable bucket granularity baked into the format |
+| **Coverage tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
+| **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
+| **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
+| **Rust core + Python bindings** | Rust-first core (CLI + libraries) with Python bindings for local workflows |
+| **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
+
 ---
 
 ## Install (Python)
@@ -35,7 +70,9 @@ pip install timeseries-table-format
 
 Python docs: https://mag1cfrog.github.io/timeseries-table-format/
 
-## Python quickstart
+---
+
+## Python Quickstart
 
 **TL;DR:** `Session.sql(...)` returns a `pyarrow.Table`:
 
@@ -139,30 +176,60 @@ with tempfile.TemporaryDirectory() as d:
 
 </details>
 
-> **Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
->
-> The bucket is the time grid used for **coverage** (“do I have data for this range?”) and **overlap checks** (“did I already ingest this time window?”).
->
-> Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00). In v0.1, appending two rows for the same entity in the same bucket is treated as **overlap** and will be rejected.
->
-> Practical rule: choose a bucket that matches the **granularity you expect to be unique per entity**.
-> Hourly bars → `1h`, minute bars → `1m`, etc. If you expect multiple rows per entity within an hour, don’t use `1h` in v0.1.
+---
 
-## Key Features
+## Core Concepts
 
-| | |
-|---|---|
-| **ACID-like transactions** | Append-only commit log with optimistic concurrency control—no more corrupted datasets from failed writes |
-| **Time-first layout** | Timestamp column, entity partitioning, and configurable bucket granularity baked into the format |
-| **Coverage tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
-| **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
-| **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
-| **Rust core + Python bindings** | Rust-first core (CLI + libraries) with Python bindings for local workflows |
-| **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
+Read this once—these terms show up throughout the project.
+
+**Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
+
+The bucket is the time grid used for **coverage** (“do I have data for this range?”) and **overlap checks** (“did I already ingest this time window?”).
+
+Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00). In v0.1, appending two rows for the same entity in the same bucket is treated as **overlap** and will be rejected.
+
+Practical rule: choose a bucket that matches the **granularity you expect to be unique per entity**.
+Hourly bars → `1h`, minute bars → `1m`, etc. If you expect multiple rows per entity within an hour, don’t use `1h` in v0.1.
 
 ---
 
-## Getting Started
+## Walkthrough: NVDA 1h + MA(5)
+
+Fastest way to see the format end-to-end (no external services needed):
+
+1) Ingest sample data (creates `examples/nvda_table/`):
+
+```bash
+cargo run -p timeseries-table-core --example ingest_nvda
+```
+
+2) Query with DataFusion + moving average window:
+
+```bash
+cargo run -p timeseries-table-datafusion --example query_nvda_ma
+```
+
+Example output:
+
+```
++---------------------+--------+------------+
+| ts                  | close  | ma_5       |
++---------------------+--------+------------+
+| 2024-06-01T00:00:00 | 115.22 | 115.22     |
+| 2024-06-01T01:00:00 | 115.55 | 115.385    |
+| 2024-06-01T02:00:00 | 115.51 | 115.426667 |
+| 2024-06-01T03:00:00 | 114.99 | 115.3175   |
+| 2024-06-01T04:00:00 | 114.7  | 115.194    |
++---------------------+--------+------------+
+```
+
+Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
+
+---
+
+## Other Interfaces
+
+Python users: see [Install (Python)](#install-python) and [Python Quickstart](#python-quickstart) above.
 
 ### Command-Line Interface (CLI)
 
@@ -181,10 +248,6 @@ tstable query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
 ```
 
 See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full command reference.
-
-### Python bindings
-
-See the **Install (Python)** and **Python quickstart** sections above (or https://mag1cfrog.github.io/timeseries-table-format/).
 
 ### Rust API
 
@@ -228,67 +291,6 @@ timeseries-table-format = "0.1"
 ```
 
 See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) for SQL query examples.
-
----
-
-### Example Walkthrough: NVDA 1h with MA(5)
-
-Fastest way to see the format end-to-end (no external services needed):
-
-1) Ingest sample data (creates `examples/nvda_table/`):
-
-```bash
-cargo run -p timeseries-table-core --example ingest_nvda
-```
-
-2) Query with DataFusion + moving average window:
-
-```bash
-cargo run -p timeseries-table-datafusion --example query_nvda_ma
-```
-
-Example output:
-
-```
-+---------------------+--------+------------+
-| ts                  | close  | ma_5       |
-+---------------------+--------+------------+
-| 2024-06-01T00:00:00 | 115.22 | 115.22     |
-| 2024-06-01T01:00:00 | 115.55 | 115.385    |
-| 2024-06-01T02:00:00 | 115.51 | 115.426667 |
-| 2024-06-01T03:00:00 | 114.99 | 115.3175   |
-| 2024-06-01T04:00:00 | 114.7  | 115.194    |
-+---------------------+--------+------------+
-```
-
-Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
-
----
-
-<details>
-<summary><strong>Why not use Delta Lake or Iceberg?</strong></summary>
-
-You probably *should* use them for general-purpose analytics.
-
-But if you're working with **time-series specifically**, you might have noticed:
-
-| Problem | Delta/Iceberg | This Project |
-|---------|---------------|--------------|
-| "Do I have data for 2024-01-15 to 2024-03-20?" | Scan metadata or query | coverage_ratio_for_range(...) → instant |
-| "Where are the gaps in my dataset?" | Write custom logic | max_gap_len_for_range(...) → built-in |
-| "Will this append overlap existing data?" | Hope for the best | Automatic overlap detection |
-| Deployment complexity | JVM/Spark ecosystem | Single Rust binary |
-
-**This project is ideal for:**
-- Backtesting systems that need gap-aware data loading
-- Sensor/IoT data pipelines with strict coverage requirements
-- Financial data stores where overlap = disaster
-- Learning how modern table formats work (well-documented internals!)
-
-**Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
-See the bucket size note above.
-
-</details>
 
 ---
 
@@ -361,7 +363,7 @@ A time-series table consists of:
 
 ## Project Status
 
-**Early MVP** — APIs and on-disk layouts may change until v0.1.
+Current status and near-term roadmap:
 
 - [x] Log-based metadata layer with version-guard OCC  
 - [x] Time-series table abstraction + range scans  
