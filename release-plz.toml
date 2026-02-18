@@ -55,10 +55,8 @@ git_release_enable = true
 # Keep it "managed" by release-plz (so `changelog_include` can see it) but never cut releases/tags
 # or bump its version.
 name = "timeseries-table-python-src"
-release = true
+release = false
 publish = false
 semver_check = false
 changelog_update = false
-release_commits = "^$"
-git_tag_enable = false
 git_release_enable = false
