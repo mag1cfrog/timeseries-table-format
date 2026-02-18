@@ -1,5 +1,41 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.3
+
+
+### Bug Fixes
+
+- Remove unnecessary arguments in maturin develop commands in README ([5256c1c](https://github.com/mag1cfrog/timeseries-table-format/commit/5256c1cb41c87a9748cb7a2ace38d2fa5cb0fc4d))
+
+- Disable entity identity extraction for conversion benchmark ([6b2802c](https://github.com/mag1cfrog/timeseries-table-format/commit/6b2802c3f0caa4bad9a221ff13cfd0c1bd767241))
+
+- Improve numpy import handling in benchmark script ([5c740ae](https://github.com/mag1cfrog/timeseries-table-format/commit/5c740ae02c0a1ba384e514df02e7422eced97e71))
+
+- Enhance header transparency in HTML rendering for better visibility ([d1c37ba](https://github.com/mag1cfrog/timeseries-table-format/commit/d1c37baed6bd839418d5459f3ae3fc40cfbc3aec))
+
+- Update package version to 0.1.2 for timeseries-table-python-src ([8d4d028](https://github.com/mag1cfrog/timeseries-table-format/commit/8d4d0283410a7458bfb2c107583fc51a5ccd0513))
+
+- Correct formatting and improve readability in benchmark helper function ([9ba3331](https://github.com/mag1cfrog/timeseries-table-format/commit/9ba33318c8b68d1120213fa73b7c7143831b631f))
+
+
+### Features
+
+- Add benchmark section for SQL conversion via IPC stream in README ([a16fd68](https://github.com/mag1cfrog/timeseries-table-format/commit/a16fd684c111a64ac1b48f354da7e3167cae96fb))
+
+- Add SQL to Arrow IPC micro-benchmarking script ([93cbdd2](https://github.com/mag1cfrog/timeseries-table-format/commit/93cbdd29816b48f7dcbb6c0e0e10d96712a22770))
+
+- Add benchmarking method for SQL queries with IPC compression option ([c7932fe](https://github.com/mag1cfrog/timeseries-table-format/commit/c7932fee1ea46b7cd61cb6a96a7412bc3d4e758b))
+
+- Add ipc-zstd feature to enable zstd compression for arrow-ipc ([b47f9cb](https://github.com/mag1cfrog/timeseries-table-format/commit/b47f9cbb87f1101070e74340da58335ede517f3f))
+
+- Add benchmark helper for SQL queries with IPC stream metrics ([e971812](https://github.com/mag1cfrog/timeseries-table-format/commit/e97181254bf30be8f65b0f3d5c5c29f75b706fdc))
+
+
+### Style
+
+- Improve code formatting and readability in SQL conversion functions ([7d0d158](https://github.com/mag1cfrog/timeseries-table-format/commit/7d0d1580d9a5fa2282f6721e3b906a92d9cb2ef5))
+
+
 ## 0.1.2
 
 

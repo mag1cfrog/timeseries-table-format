@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 default-run = "tstable"
 license = "MIT"
@@ -25,8 +25,8 @@ rayon = "1.11.0"
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
-timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.1" }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.2" }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
@@ -40,7 +40,7 @@ parquet = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.1", features = ["test-counters"] }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2", features = ["test-counters"] }
 
 [lints]
 workspace = true
