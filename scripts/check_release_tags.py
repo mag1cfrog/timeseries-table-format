@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import subprocess
@@ -10,8 +11,9 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def _run(args: list[str]) -> str:
-    return subprocess.check_output(args, cwd=REPO_ROOT, text=True).strip()
+def _run(args: list[str], *, quiet: bool = False) -> str:
+    stderr = subprocess.DEVNULL if quiet else None
+    return subprocess.check_output(args, cwd=REPO_ROOT, text=True, stderr=stderr).strip()
 
 
 def _changed_cargo_tomls_in_head_commit() -> list[pathlib.Path]:
@@ -76,15 +78,26 @@ def _released_cargo_tomls_in_head_commit() -> list[pathlib.Path]:
 
 
 def _tag_points_at_head(tag: str) -> bool:
+    # Avoid noisy "fatal: ambiguous argument ..." output when a tag is missing.
     try:
-        tag_commit = _run(["git", "rev-list", "-n", "1", tag])
+        _run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{}}"], quiet=True)
     except Exception:
         return False
+
+    tag_commit = _run(["git", "rev-list", "-n", "1", tag], quiet=True)
     head = _run(["git", "rev-parse", "HEAD"])
     return tag_commit == head
 
 
 def main() -> int:
+    # release-plz can create/push tags during this workflow run; refresh local tags before checking.
+    # Best-effort: if this fails, the check still runs and will produce actionable output.
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+        try:
+            _run(["git", "fetch", "--force", "--tags", "origin"], quiet=True)
+        except Exception:
+            pass
+
     cargo_tomls = _released_cargo_tomls_in_head_commit()
     if not cargo_tomls:
         return 0
