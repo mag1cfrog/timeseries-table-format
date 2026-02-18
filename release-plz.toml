@@ -47,3 +47,18 @@ changelog_update = true
 changelog_path = "crates/timeseries-table-python/CHANGELOG.md"
 changelog_include = ["timeseries-table-python-src"]
 git_release_enable = true
+
+[[package]]
+# Internal helper crate that exists only so release-plz can attribute `python/**` commits to a
+# workspace package; its commits are included in `timeseries-table-python` via `changelog_include`.
+#
+# Keep it "managed" by release-plz (so `changelog_include` can see it) but never cut releases/tags
+# or bump its version.
+name = "timeseries-table-python-src"
+release = true
+publish = false
+semver_check = false
+changelog_update = false
+release_commits = "^$"
+git_tag_enable = false
+git_release_enable = false
