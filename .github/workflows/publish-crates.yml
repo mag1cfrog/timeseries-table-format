@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       proceed: ${{ steps.decide.outputs.proceed }}
+      leader: ${{ steps.decide.outputs.leader }}
+      current: ${{ steps.decide.outputs.current }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +29,7 @@ jobs:
           set -euo pipefail
           sha="${GITHUB_SHA}"
           current="${GITHUB_REF_NAME}"
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
 
           mapfile -t tags < <(git tag --points-at "${sha}")
           echo "Tags on ${sha}: ${tags[*]:-<none>}"
@@ -47,11 +50,33 @@ jobs:
           done
 
           echo "Leader tag: ${leader:-<none>}"
+          echo "leader=${leader}" >> "$GITHUB_OUTPUT"
           if [[ -n "${leader}" && "${current}" == "${leader}" ]]; then
             echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Publish (crates.io)::Leader tag is '${leader}'. This run will publish all crates tagged on ${sha}."
           else
             echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Publish (crates.io)::Skipping publish for '${current}'. Leader tag for ${sha} is '${leader:-<none>}'."
           fi
+
+          {
+            echo "### Publish (crates.io) gating"
+            echo
+            echo "- Commit: \`${sha}\`"
+            echo "- Current ref: \`${current}\`"
+            if (( ${#tags[@]} )); then
+              echo "- Tags on commit: \`${tags[*]}\`"
+            else
+              echo "- Tags on commit: <none>"
+            fi
+            echo "- Leader tag: \`${leader:-<none>}\`"
+            echo
+            if [[ -n "${leader}" && "${current}" == "${leader}" ]]; then
+              echo "This is the **leader** run, so \`publish (crates.io)\` will execute and publish any missing versions for all crates whose tags point at this commit."
+            else
+              echo "This is **not** the leader run, so \`publish (crates.io)\` is intentionally skipped to avoid duplicate publishes and extra environment approvals."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     name: publish (crates.io)
