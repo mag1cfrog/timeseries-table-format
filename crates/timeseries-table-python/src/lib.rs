@@ -367,10 +367,7 @@ mod _native {
             let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("nope")));
 
             let msg = match SqlExportMode::from_env() {
-                Ok(v) => {
-                    assert!(false, "expected error, got {v:?}");
-                    return;
-                }
+                Ok(v) => unreachable!("expected error, got {v:?}"),
                 Err(e) => e.to_string(),
             };
 
@@ -388,10 +385,7 @@ mod _native {
             init_python();
             let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from_vec(vec![0xFF])));
             let msg = match SqlExportMode::from_env() {
-                Ok(v) => {
-                    assert!(false, "expected error, got {v:?}");
-                    return;
-                }
+                Ok(v) => unreachable!("expected error, got {v:?}"),
                 Err(e) => e.to_string(),
             };
             assert!(msg.contains("valid unicode"));
