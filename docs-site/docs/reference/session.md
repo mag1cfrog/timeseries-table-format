@@ -10,8 +10,9 @@ SQL queries that return `pyarrow.Table`.
 - Arrow C Data Interface (C Stream) when supported (preferred; avoids IPC serialization + large bytes copies)
 - Arrow IPC stream as a fallback
 
-The C Stream exporter currently focuses on the common “flat” Arrow types used in typical SQL queries.
-For nested types (e.g. List/Struct/Map/Union), `auto` mode falls back to IPC, and `c_stream` mode errors.
+The C Stream exporter supports common nested Arrow types like `List`, `Struct`, and `Map`.
+Some edge-case-heavy types (e.g. `Union`, `ListView`) are not enabled yet: `auto` mode falls back to IPC, and
+`c_stream` mode errors.
 
 You can control the behavior via environment variables (set before calling `Session.sql(...)`):
 
