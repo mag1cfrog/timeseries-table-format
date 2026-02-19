@@ -232,7 +232,7 @@ def test_session_sql_auto_falls_back_to_ipc_if_c_stream_read_all_fails(
     assert called["open_stream"] >= 1
 
 
-def test_session_sql_auto_falls_back_to_ipc_if_c_stream_close_fails(
+def test_session_sql_auto_returns_table_if_c_stream_close_fails(
     monkeypatch: pytest.MonkeyPatch,
 ):
     pa_mod = pytest.importorskip("pyarrow")
@@ -252,21 +252,18 @@ def test_session_sql_auto_falls_back_to_ipc_if_c_stream_close_fails(
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
 
-    called = {"open_stream": 0}
-    real_open_stream = pa_ipc.open_stream
+    def _boom(*_args, **_kwargs):
+        raise AssertionError(
+            "IPC fallback should not be used when read_all() succeeded"
+        )
 
-    def _open_stream(*args, **kwargs):
-        called["open_stream"] += 1
-        return real_open_stream(*args, **kwargs)
-
-    monkeypatch.setattr(pa_ipc, "open_stream", _open_stream)
+    monkeypatch.setattr(pa_ipc, "open_stream", _boom)
 
     sess = ttf.Session()
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "auto")
 
     out = sess.sql("select 1 as x")
     assert out["x"].to_pylist() == [1]
-    assert called["open_stream"] >= 1
 
 
 def test_session_sql_auto_falls_back_to_ipc_if_c_stream_import_method_missing(
