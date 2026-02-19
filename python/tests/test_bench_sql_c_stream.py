@@ -16,16 +16,9 @@ def test_bench_sql_c_stream_capsule_roundtrip():
     testing = _testing_module()
 
     sess = ttf.Session()
-    capsule, m = testing._bench_sql_c_stream(sess, "select 1 as x")
+    obj, m = testing._bench_sql_c_stream(sess, "select 1 as x")
 
-    class _Wrapper:
-        def __init__(self, c: object):
-            self._c = c
-
-        def __arrow_c_stream__(self, requested_schema=None) -> object:
-            return self._c
-
-    reader = pa.RecordBatchReader.from_stream(_Wrapper(capsule))
+    reader = pa.RecordBatchReader.from_stream(obj)
     try:
         tbl = reader.read_all()
     finally:
