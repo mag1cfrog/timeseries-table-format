@@ -7,13 +7,21 @@ mod tokio_runner;
 mod _native {
 
     use std::collections::BTreeSet;
+    use std::ffi::CString;
     use std::sync::{Arc, Mutex};
 
+    use arrow_array::ffi::FFI_ArrowSchema;
+    use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+    use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
+
+    use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::error::ArrowError;
+    use datafusion::catalog::stream;
     use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
+    use pyo3::types::PyCapsule;
     use pyo3::{
         Bound, PyErr, PyResult, Python,
         exceptions::{PyImportError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError},
@@ -191,6 +199,94 @@ mod _native {
         ctx: SessionContext,
         tables: Mutex<BTreeSet<String>>,
         catalog_sema: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SqlExportMode {
+        Auto,
+        Ipc,
+        CStream,
+    }
+
+    impl SqlExportMode {
+        fn from_env() -> PyResult<Self> {
+            let v = match std::env::var("TTF_SQL_EXPORT_MODE") {
+                Ok(v) => v.trim().to_ascii_lowercase(),
+                Err(std::env::VarError::NotPresent) => return Ok(Self::Auto),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    return Err(PyValueError::new_err(
+                        "TTF_SQL_EXPORT_MODE must be valid unicode",
+                    ));
+                }
+            };
+
+            match v.as_str() {
+                "" | "auto" => Ok(Self::Auto),
+                "ipc" => Ok(Self::Ipc),
+                "c_stream" | "cstream" | "c-stream" => Ok(Self::CStream),
+                other => Err(PyValueError::new_err(format!(
+                    "invalid TTF_SQL_EXPORT_MODE={other:?}; expected 'auto', 'ipc', or 'c_stream'"
+                ))),
+            }
+        }
+
+        fn is_forced(self) -> bool {
+            matches!(self, Self::Ipc | Self::CStream)
+        }
+    }
+
+    fn can_export_schema_to_c_stream(schema: &SchemaRef) -> bool {
+        FFI_ArrowSchema::try_from(schema.as_ref()).is_ok()
+    }
+
+    fn export_batches_to_c_stream(
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> *mut FFI_ArrowArrayStream {
+        let reader = RecordBatchIterator::new(batches.into_iter().map(Ok::<_, ArrowError>), schema);
+        let stream =
+            FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>);
+        Box::into_raw(Box::new(stream))
+    }
+
+    fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
+        let name = CString::new("arrow_array_stream")
+            .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
+
+        // Capsule now owns `stream` (and therefore the underlying batch reader / buffers).
+        let capsule = PyCapsule::new(py, stream, Some(name))?;
+
+        let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
+            PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
+        })?;
+
+        let rbr = pa_mod.getattr("RecordBatchReader")?;
+        let reader = rbr.getattr("_import_from_c_capsule")?.call1((capsule,))?;
+
+        let table_res = reader.call_method0("read_all");
+        let close_res = reader.call_method0("close");
+
+        match (table_res, close_res) {
+            (Ok(table), Ok(_)) => Ok(table.into()),
+            (Err(e), Ok(_)) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+            (Err(e), Err(_)) => Err(e),
+        }
+    }
+
+    fn ipc_bytes_from_batches(
+        schema: &SchemaRef,
+        batches: &[RecordBatch],
+    ) -> Result<Vec<u8>, ArrowError> {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, schema)?;
+            for batch in batches {
+                w.write(batch)?;
+            }
+            w.finish()?;
+        }
+        Ok(buf)
     }
 
     #[pymethods]
