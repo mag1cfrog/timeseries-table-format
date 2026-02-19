@@ -437,25 +437,32 @@ If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPO
                 match e_read.value(py).call_method1("add_note", (note,)) {
                     Ok(_) => {}
                     Err(err) => {
-                        if !err.is_instance_of::<PyAttributeError>(py) && debug {
-                            let msg = format!(
-                                "Session.sql: failed to attach exception note (close failure was: {e_close}): {err}"
-                            );
-                            if let Ok(warnings) = PyModule::import(py, "warnings") {
-                                let _ = warnings
-                                    .call_method1("warn", (msg, PyRuntimeWarning::type_object(py)));
+                        if debug {
+                            if err.is_instance_of::<PyAttributeError>(py) {
+                                // Python < 3.11: BaseException.add_note isn't available.
+                                let msg = format!(
+                                    "Session.sql: C Stream reader.close() also failed: {e_close}"
+                                );
+                                if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                    let _ = warnings.call_method1(
+                                        "warn",
+                                        (msg, PyRuntimeWarning::type_object(py)),
+                                    );
+                                } else {
+                                    eprintln!("{msg}");
+                                }
                             } else {
-                                eprintln!("{msg}");
-                            }
-                        } else if debug {
-                            let msg = format!(
-                                "Session.sql: C Stream reader.close() also failed: {e_close}"
-                            );
-                            if let Ok(warnings) = PyModule::import(py, "warnings") {
-                                let _ = warnings
-                                    .call_method1("warn", (msg, PyRuntimeWarning::type_object(py)));
-                            } else {
-                                eprintln!("{msg}");
+                                let msg = format!(
+                                    "Session.sql: failed to attach exception note (close failure was: {e_close}): {err}"
+                                );
+                                if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                    let _ = warnings.call_method1(
+                                        "warn",
+                                        (msg, PyRuntimeWarning::type_object(py)),
+                                    );
+                                } else {
+                                    eprintln!("{msg}");
+                                }
                             }
                         }
                     }
