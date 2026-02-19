@@ -1,6 +1,7 @@
 import gc
 import threading
 
+import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pytest
 
@@ -19,6 +20,42 @@ def test_session_sql_ipc_equals_c_stream(monkeypatch: pytest.MonkeyPatch):
     t_cs = sess.sql(q)
 
     assert t_cs.equals(t_ipc)
+
+
+def test_session_sql_empty_result_schema_matches_between_modes(monkeypatch: pytest.MonkeyPatch):
+    sess = ttf.Session()
+    q = "select cast(1 as bigint) as x where false"
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
+    t_ipc = sess.sql(q)
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    t_cs = sess.sql(q)
+
+    assert t_ipc.num_rows == 0
+    assert t_cs.num_rows == 0
+    assert t_cs.schema == t_ipc.schema
+
+
+def test_session_sql_multi_column_types_match_between_modes(monkeypatch: pytest.MonkeyPatch):
+    sess = ttf.Session()
+    q = "select cast(1 as bigint) as a, cast(1.5 as double) as b, cast('x' as varchar) as c"
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
+    t_ipc = sess.sql(q)
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    t_cs = sess.sql(q)
+
+    assert t_cs.equals(t_ipc)
+
+
+def test_session_sql_params_work_in_c_stream_mode(monkeypatch: pytest.MonkeyPatch):
+    sess = ttf.Session()
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+
+    out = sess.sql("select cast($1 as bigint) as x", params=[1])
+    assert out["x"].to_pylist() == [1]
 
 
 def test_session_sql_invalid_export_mode_rejected(monkeypatch: pytest.MonkeyPatch):
@@ -111,15 +148,42 @@ def test_session_sql_auto_falls_back_to_ipc_if_c_stream_import_fails(
     assert called["open_stream"] >= 1
 
 
+def test_session_sql_auto_falls_back_to_ipc_if_c_stream_import_method_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pa_mod = pytest.importorskip("pyarrow")
+
+    class _FakeRecordBatchReader:
+        pass
+
+    monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
+
+    called = {"open_stream": 0}
+    real_open_stream = pa_ipc.open_stream
+
+    def _open_stream(*args, **kwargs):
+        called["open_stream"] += 1
+        return real_open_stream(*args, **kwargs)
+
+    monkeypatch.setattr(pa_ipc, "open_stream", _open_stream)
+
+    sess = ttf.Session()
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "auto")
+
+    out = sess.sql("select 1 as x")
+    assert out["x"].to_pylist() == [1]
+    assert called["open_stream"] >= 1
+
+
 def test_session_sql_ipc_does_not_use_c_stream_import(monkeypatch: pytest.MonkeyPatch):
-    pa = pytest.importorskip("pyarrow")
+    pa_mod = pytest.importorskip("pyarrow")
 
     class _FakeRecordBatchReader:
         @staticmethod
         def _import_from_c_capsule(_capsule: object):
             raise AssertionError("C Stream import should not be called in ipc mode")
 
-    monkeypatch.setattr(pa, "RecordBatchReader", _FakeRecordBatchReader)
+    monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
 
     sess = ttf.Session()
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
@@ -131,14 +195,14 @@ def test_session_sql_ipc_does_not_use_c_stream_import(monkeypatch: pytest.Monkey
 def test_session_sql_c_stream_does_not_fall_back_to_ipc_when_forced(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    pa = pytest.importorskip("pyarrow")
+    pa_mod = pytest.importorskip("pyarrow")
 
     class _FakeRecordBatchReader:
         @staticmethod
         def _import_from_c_capsule(_capsule: object):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(pa, "RecordBatchReader", _FakeRecordBatchReader)
+    monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("IPC fallback should not be used in forced c_stream mode")
@@ -150,3 +214,31 @@ def test_session_sql_c_stream_does_not_fall_back_to_ipc_when_forced(
 
     with pytest.raises(RuntimeError, match="boom"):
         sess.sql("select 1 as x")
+
+
+def test_session_sql_c_stream_missing_import_method_errors_when_forced(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pa_mod = pytest.importorskip("pyarrow")
+
+    class _FakeRecordBatchReader:
+        pass
+
+    monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+
+    sess = ttf.Session()
+    with pytest.raises(AttributeError):
+        sess.sql("select 1 as x")
+
+
+def test_session_sql_returns_pyarrow_table_in_both_modes(monkeypatch: pytest.MonkeyPatch):
+    sess = ttf.Session()
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
+    out = sess.sql("select 1 as x")
+    assert isinstance(out, pa.Table)
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    out = sess.sql("select 1 as x")
+    assert isinstance(out, pa.Table)
