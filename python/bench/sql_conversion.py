@@ -122,7 +122,7 @@ def _summarize_seconds(xs: list[float]) -> dict[str, object]:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        description="Micro-benchmark: SQL -> Arrow IPC -> pyarrow.Table"
+        description="Micro-benchmark: SQL -> (IPC vs Arrow C Stream) -> pyarrow.Table"
     )
     ap.add_argument("--target-ipc-gb", type=float, default=2.0)
     ap.add_argument("--ipc-compression", choices=["none", "zstd"], default="none")
@@ -225,11 +225,20 @@ def main(argv: list[str]) -> int:
                 "results": [],
                 "notes": [
                     "decode_only measures pyarrow.ipc.open_stream(bytes).read_all() time.",
+                    "c_stream_decode_only measures pyarrow.RecordBatchReader._import_from_c_capsule(capsule) + .read_all() + .close() time.",
                     "bench_sql_ipc measures query planning+execution+collect plus IPC encoding on the Rust side.",
+                    "bench_sql_c_stream measures query planning+execution+collect plus Arrow C Stream export on the Rust side.",
                     "session_sql measures end-to-end Session.sql(...) (includes Rust + Python decode).",
                     "Large targets can require high peak RAM (IPC bytes + decoded Table + intermediate buffers).",
                 ],
             }
+
+            def _decode_c_stream(capsule: object) -> pa.Table:
+                reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+                try:
+                    return reader.read_all()
+                finally:
+                    reader.close()
 
             for name, sql in queries:
                 # Warmup: run both paths once to populate OS page cache and DataFusion internal caches.
@@ -247,17 +256,32 @@ def main(argv: list[str]) -> int:
                     del ipc_bytes
                     gc.collect()
 
+                    _t, (capsule, _m) = _timed(lambda: testing._bench_sql_c_stream(sess, sql))
+                    _t, table = _timed(lambda: _decode_c_stream(capsule))
+                    del table
+                    del capsule
+                    gc.collect()
+
                 session_sql_times: list[float] = []
                 bench_sql_ipc_times: list[float] = []
                 decode_only_times: list[float] = []
+                bench_sql_c_stream_times: list[float] = []
+                c_stream_decode_only_times: list[float] = []
                 ipc_bytes_lens: list[int] = []
                 arrow_mem_bytes: list[int] = []
+                c_stream_arrow_mem_bytes: list[int] = []
                 row_counts: list[int] = []
                 batch_counts: list[int] = []
+                c_stream_row_counts: list[int] = []
+                c_stream_batch_counts: list[int] = []
                 rust_total_ms: list[float] = []
                 rust_plan_ms: list[float] = []
                 rust_collect_ms: list[float] = []
                 rust_ipc_encode_ms: list[float] = []
+                rust_c_stream_export_ms: list[float] = []
+                rust_c_stream_total_ms: list[float] = []
+                rust_c_stream_plan_ms: list[float] = []
+                rust_c_stream_collect_ms: list[float] = []
 
                 for _ in range(args.runs):
                     t_sess, table = _timed(lambda: sess.sql(sql))
@@ -292,6 +316,27 @@ def main(argv: list[str]) -> int:
                     del ipc_bytes
                     gc.collect()
 
+                for _ in range(args.runs):
+                    t_bench, (capsule, m) = _timed(
+                        lambda: testing._bench_sql_c_stream(sess, sql)
+                    )
+                    bench_sql_c_stream_times.append(t_bench)
+
+                    t_decode, table = _timed(lambda: _decode_c_stream(capsule))
+                    c_stream_decode_only_times.append(t_decode)
+
+                    c_stream_arrow_mem_bytes.append(int(m["arrow_mem_bytes"]))
+                    c_stream_row_counts.append(int(m["row_count"]))
+                    c_stream_batch_counts.append(int(m["batch_count"]))
+                    rust_c_stream_total_ms.append(float(m["total_ms"]))
+                    rust_c_stream_plan_ms.append(float(m["plan_ms"]))
+                    rust_c_stream_collect_ms.append(float(m["collect_ms"]))
+                    rust_c_stream_export_ms.append(float(m["c_stream_export_ms"]))
+
+                    del table
+                    del capsule
+                    gc.collect()
+
                 out["results"].append(
                     {
                         "name": name,
@@ -299,19 +344,30 @@ def main(argv: list[str]) -> int:
                         "session_sql": _summarize_seconds(session_sql_times),
                         "bench_sql_ipc": _summarize_seconds(bench_sql_ipc_times),
                         "decode_only": _summarize_seconds(decode_only_times),
+                        "bench_sql_c_stream": _summarize_seconds(bench_sql_c_stream_times),
+                        "c_stream_decode_only": _summarize_seconds(c_stream_decode_only_times),
                         "ipc_bytes_len": ipc_bytes_lens,
                         "arrow_mem_bytes": arrow_mem_bytes,
+                        "c_stream_arrow_mem_bytes": c_stream_arrow_mem_bytes,
                         "ipc_to_arrow_ratio": [
                             (b / m) if m else None
                             for b, m in zip(ipc_bytes_lens, arrow_mem_bytes)
                         ],
                         "row_count": row_counts,
                         "batch_count": batch_counts,
+                        "c_stream_row_count": c_stream_row_counts,
+                        "c_stream_batch_count": c_stream_batch_counts,
                         "rust_ms": {
                             "total_ms": rust_total_ms,
                             "plan_ms": rust_plan_ms,
                             "collect_ms": rust_collect_ms,
                             "ipc_encode_ms": rust_ipc_encode_ms,
+                        },
+                        "rust_ms_c_stream": {
+                            "total_ms": rust_c_stream_total_ms,
+                            "plan_ms": rust_c_stream_plan_ms,
+                            "collect_ms": rust_c_stream_collect_ms,
+                            "c_stream_export_ms": rust_c_stream_export_ms,
                         },
                     }
                 )
