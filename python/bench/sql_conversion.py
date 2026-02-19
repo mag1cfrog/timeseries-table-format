@@ -178,10 +178,10 @@ def _print_summary(out: dict[str, object]) -> None:
 
         # Rust-side export breakdown (best-effort).
         try:
-            ipc_encode_ms = _median([float(x) for x in r["rust_ms"]["ipc_encode_ms"]])  # type: ignore[index]
+            ipc_encode_ms = _median([float(x) for x in r["rust_ms"]["ipc_encode_ms"]])
             c_export_ms = _median(
                 [float(x) for x in r["rust_ms_c_stream"]["c_stream_export_ms"]]
-            )  # type: ignore[index]
+            )
             print(
                 f"  rust export median: ipc_encode={ipc_encode_ms:.1f}ms c_stream_export={c_export_ms:.1f}ms",
                 file=sys.stderr,
