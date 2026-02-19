@@ -177,6 +177,11 @@ class _TestingModule(ModuleType):
         *,
         ipc_compression: str = "none",
     ) -> tuple[bytes, dict[str, object]]: ...
+    def _bench_sql_c_stream(
+        self,
+        session: Session,
+        query: str,
+    ) -> tuple[object, dict[str, object]]: ...
 
 # Feature-gated: present only when built with `--features test-utils`.
 _testing: _TestingModule | None
