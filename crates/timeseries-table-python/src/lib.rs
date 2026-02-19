@@ -373,7 +373,25 @@ mod _native {
                 capsule: Some(capsule.into_any().unbind()),
             },
         )?;
-        let reader = rbr.getattr("from_stream")?.call1((wrapper,))?;
+        let from_stream = match rbr.getattr("from_stream") {
+            Ok(v) => v,
+            Err(e) => {
+                if e.is_instance_of::<PyAttributeError>(py) {
+                    let mut msg = "pyarrow.RecordBatchReader.from_stream is required for Arrow C Stream import (this project requires pyarrow>=23.0.0). \
+If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPORT_MODE=ipc to force the IPC fallback."
+                        .to_string();
+                    if let Ok(v) = pa_mod.getattr("__version__") {
+                        if let Ok(s) = v.extract::<String>() {
+                            msg = format!("{msg} (detected pyarrow=={s})");
+                        }
+                    }
+                    return Err(PyImportError::new_err(msg));
+                }
+                return Err(e);
+            }
+        };
+
+        let reader = from_stream.call1((wrapper,))?;
 
         let table_res = reader.call_method0("read_all");
         let close_res = reader.call_method0("close");
