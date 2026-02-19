@@ -9,6 +9,13 @@ import pytest
 import timeseries_table_format as ttf
 
 
+def test_session_sql_default_mode_is_c_stream(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TTF_SQL_EXPORT_MODE", raising=False)
+    sess = ttf.Session()
+    out = sess.sql("select 1 as x")
+    assert out["x"].to_pylist() == [1]
+
+
 def test_session_sql_ipc_equals_c_stream(monkeypatch: pytest.MonkeyPatch):
     sess = ttf.Session()
     # Ensure stable row ordering across executions.
@@ -153,6 +160,36 @@ def test_session_sql_auto_falls_back_to_ipc_if_c_stream_import_fails(
 
     sess = ttf.Session()
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "auto")
+
+    out = sess.sql("select 1 as x")
+    assert out["x"].to_pylist() == [1]
+    assert called["open_stream"] >= 1
+
+
+def test_session_sql_auto_rerun_fallback_env_var_still_falls_back_to_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pa = pytest.importorskip("pyarrow")
+
+    class _FakeRecordBatchReader:
+        @staticmethod
+        def _import_from_c_capsule(_capsule: object):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(pa, "RecordBatchReader", _FakeRecordBatchReader)
+
+    called = {"open_stream": 0}
+    real_open_stream = pa_ipc.open_stream
+
+    def _open_stream(*args, **kwargs):
+        called["open_stream"] += 1
+        return real_open_stream(*args, **kwargs)
+
+    monkeypatch.setattr(pa_ipc, "open_stream", _open_stream)
+
+    sess = ttf.Session()
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "auto")
+    monkeypatch.setenv("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK", "1")
 
     out = sess.sql("select 1 as x")
     assert out["x"].to_pylist() == [1]
