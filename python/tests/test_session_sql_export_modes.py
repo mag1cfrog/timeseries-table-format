@@ -451,7 +451,9 @@ def test_session_sql_returns_pyarrow_table_in_both_modes(
     assert isinstance(out, pa.Table)
 
 
-def test_session_sql_list_roundtrips_via_c_stream(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def test_session_sql_list_roundtrips_via_c_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
     tbl = pa.table({"x": pa.array([[1, 2], [3], None], type=pa.list_(pa.int64()))})
     p = tmp_path / "list.parquet"
     pq.write_table(tbl, p)
@@ -468,9 +470,13 @@ def test_session_sql_list_roundtrips_via_c_stream(monkeypatch: pytest.MonkeyPatc
     assert t_cs.equals(t_ipc)
 
 
-def test_session_sql_struct_roundtrips_via_c_stream(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def test_session_sql_struct_roundtrips_via_c_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
     struct_ty = pa.struct([("a", pa.int64()), ("b", pa.string())])
-    tbl = pa.table({"s": pa.array([{"a": 1, "b": "x"}, {"a": 2, "b": None}, None], type=struct_ty)})
+    tbl = pa.table(
+        {"s": pa.array([{"a": 1, "b": "x"}, {"a": 2, "b": None}, None], type=struct_ty)}
+    )
     p = tmp_path / "struct.parquet"
     pq.write_table(tbl, p)
 
@@ -486,7 +492,9 @@ def test_session_sql_struct_roundtrips_via_c_stream(monkeypatch: pytest.MonkeyPa
     assert t_cs.equals(t_ipc)
 
 
-def test_session_sql_map_roundtrips_via_c_stream(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def test_session_sql_map_roundtrips_via_c_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
     map_ty = pa.map_(pa.string(), pa.int64())
     tbl = pa.table({"m": pa.array([{"k1": 1, "k2": 2}, None, {}], type=map_ty)})
     p = tmp_path / "map.parquet"
