@@ -247,10 +247,13 @@ uv run -p .venv/bin/python maturin develop
 .venv/bin/python -m pytest
 ```
 
-## Benchmark: SQL conversion (IPC bridge)
+## Benchmark: SQL conversion (IPC vs C Stream)
 
-This repo returns SQL results to Python as a `pyarrow.Table` via an in-memory Arrow IPC stream.
-To estimate the IPC encode/decode overhead, run:
+`Session.sql(...)` returns results as a `pyarrow.Table`.
+
+By default, results are exported via the Arrow C Data Interface (C Stream) when supported, and
+fall back to an in-memory Arrow IPC stream otherwise. To compare the two paths and estimate the
+conversion overhead, run:
 
 ```bash
 cd python
@@ -259,6 +262,10 @@ uv run -p .venv/bin/python maturin develop --features test-utils
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2
 ```
 
+Environment variables (useful for debugging and benchmarks):
+- `TTF_SQL_EXPORT_MODE=auto|ipc|c_stream` (default: `auto`)
+- `TTF_SQL_EXPORT_DEBUG=1` to emit a debug warning when `auto` falls back from C Stream → IPC
+
 Optional: benchmark IPC ZSTD compression (requires building with `ipc-zstd`):
 
 ```bash
@@ -266,13 +273,18 @@ uv run -p .venv/bin/python maturin develop --features test-utils,ipc-zstd
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2 --ipc-compression zstd
 ```
 
-The script prints JSON with separate timings for:
+The script can print a human-friendly terminal summary (`--summary`) and/or write a JSON payload
+to a file (`--json path`). It reports separate timings for:
 - end-to-end `Session.sql(...)`
 - Rust-side query+IPC encode (`_native._testing._bench_sql_ipc`)
-- Python-side IPC decode (`pyarrow.ipc.open_stream(...).read_all()`)
+- Rust-side query+C Stream export (`_native._testing._bench_sql_c_stream`)
+- Python-side decode/import
 
 Large targets can require high peak RAM (IPC bytes + decoded Table + intermediate buffers). Start with
 `--target-ipc-gb 2` and scale up to `3` or `6` on a machine with plenty of memory.
+
+If you hit `Disk quota exceeded`, pass `--tmpdir /path/with/more/space` (the bench uses a temporary
+directory and cleans it up on exit).
 
 ## Troubleshooting
 

@@ -3,8 +3,22 @@
 `Session` is a DataFusion-backed SQL session. It supports registering multiple tables and running
 SQL queries that return `pyarrow.Table`.
 
+## SQL result export mode
+
+`Session.sql(...)` exports Arrow results to Python in one of two ways:
+
+- Arrow C Data Interface (C Stream) when supported (preferred; avoids IPC serialization + large bytes copies)
+- Arrow IPC stream as a fallback
+
+You can control the behavior via environment variables (set before calling `Session.sql(...)`):
+
+- `TTF_SQL_EXPORT_MODE=auto|ipc|c_stream` (default: `auto`)
+  - `auto`: try C Stream, fall back to IPC if C Stream export/import fails
+  - `ipc`: force IPC
+  - `c_stream`: force C Stream (no IPC fallback; errors propagate)
+- `TTF_SQL_EXPORT_DEBUG=1` to emit a debug warning when `auto` falls back from C Stream → IPC
+
 ::: timeseries_table_format.Session
     options:
       members: true
       show_source: false
-
