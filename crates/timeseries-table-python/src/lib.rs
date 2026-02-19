@@ -333,6 +333,23 @@ mod _native {
         FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
     }
 
+    #[pyclass]
+    struct ArrowCStreamWrapper {
+        capsule: Py<PyAny>,
+    }
+
+    #[pymethods]
+    impl ArrowCStreamWrapper {
+        #[pyo3(signature = (_requested_schema=None))]
+        fn __arrow_c_stream__(
+            &self,
+            py: Python<'_>,
+            _requested_schema: Option<Py<PyAny>>,
+        ) -> Py<PyAny> {
+            self.capsule.clone_ref(py)
+        }
+    }
+
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
         let name = CString::new("arrow_array_stream")
             .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
@@ -345,9 +362,17 @@ mod _native {
         })?;
 
         let rbr = pa_mod.getattr("RecordBatchReader")?;
-        // Uses PyArrow's Arrow C Data Interface via `RecordBatchReader._import_from_c_capsule`.
-        // This exists in older PyArrow versions too (>=12), and this project requires `pyarrow>=23.0.0`.
-        let reader = rbr.getattr("_import_from_c_capsule")?.call1((capsule,))?;
+        // Prefer the public `RecordBatchReader.from_stream` API (PyCapsule Protocol).
+        // Our capsule is a raw PyCapsule, so we wrap it in an object implementing `__arrow_c_stream__`.
+        //
+        // This avoids relying on PyArrow private methods like `_import_from_c_capsule`.
+        let wrapper = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: capsule.into_any().unbind(),
+            },
+        )?;
+        let reader = rbr.getattr("from_stream")?.call1((wrapper,))?;
 
         let table_res = reader.call_method0("read_all");
         let close_res = reader.call_method0("close");
@@ -1538,7 +1563,7 @@ mod _native {
     /// Python usage:
     ///
     /// - `capsule, m = ttf._native._testing._bench_sql_c_stream(sess, sql)`
-    /// - `reader = pyarrow.RecordBatchReader._import_from_c_capsule(capsule)`
+    /// - `reader = pyarrow.RecordBatchReader.from_stream(_Wrapper(capsule))`
     /// - `table = reader.read_all(); reader.close()`
     ///
     /// Note: the returned capsule must remain alive until `reader.close()` completes.
