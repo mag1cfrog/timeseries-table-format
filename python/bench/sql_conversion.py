@@ -340,15 +340,8 @@ def main(argv: list[str]) -> int:
                 ],
             }
 
-            def _decode_c_stream(capsule: object) -> pa.Table:
-                class _Wrapper:
-                    def __init__(self, c: object):
-                        self._c = c
-
-                    def __arrow_c_stream__(self, requested_schema=None) -> object:
-                        return self._c
-
-                reader = pa.RecordBatchReader.from_stream(_Wrapper(capsule))
+            def _decode_c_stream(obj: object) -> pa.Table:
+                reader = pa.RecordBatchReader.from_stream(obj)
                 try:
                     return reader.read_all()
                 finally:
@@ -378,12 +371,12 @@ def main(argv: list[str]) -> int:
                     del ipc_bytes
                     gc.collect()
 
-                    _t, (capsule, _m) = _timed(
+                    _t, (obj, _m) = _timed(
                         lambda: testing._bench_sql_c_stream(sess, sql)
                     )
-                    _t, table = _timed(lambda: _decode_c_stream(capsule))
+                    _t, table = _timed(lambda: _decode_c_stream(obj))
                     del table
-                    del capsule
+                    del obj
                     gc.collect()
 
                 session_sql_times: list[float] = []
@@ -455,12 +448,12 @@ def main(argv: list[str]) -> int:
                     gc.collect()
 
                 for _ in range(args.runs):
-                    t_bench, (capsule, m) = _timed(
+                    t_bench, (obj, m) = _timed(
                         lambda: testing._bench_sql_c_stream(sess, sql)
                     )
                     bench_sql_c_stream_times.append(t_bench)
 
-                    t_decode, table = _timed(lambda: _decode_c_stream(capsule))
+                    t_decode, table = _timed(lambda: _decode_c_stream(obj))
                     c_stream_decode_only_times.append(t_decode)
 
                     c_stream_arrow_mem_bytes.append(int(m["arrow_mem_bytes"]))
@@ -472,7 +465,7 @@ def main(argv: list[str]) -> int:
                     rust_c_stream_export_ms.append(float(m["c_stream_export_ms"]))
 
                     del table
-                    del capsule
+                    del obj
                     gc.collect()
 
                 out["results"].append(
