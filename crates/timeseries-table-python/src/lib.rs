@@ -14,6 +14,7 @@ mod _native {
     use arrow_array::ffi_stream::FFI_ArrowArrayStream;
     use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 
+    use datafusion::arrow::datatypes::DataType;
     use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::error::ArrowError;
     use datafusion::common::ScalarValue;
@@ -233,7 +234,81 @@ mod _native {
     }
 
     fn can_export_schema_to_c_stream(schema: &SchemaRef) -> bool {
-        FFI_ArrowSchema::try_from(schema.as_ref()).is_ok()
+        fn can_export_data_type(dt: &DataType) -> bool {
+            match dt {
+                DataType::Null
+                | DataType::Boolean
+                | DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Binary
+                | DataType::LargeBinary
+                | DataType::BinaryView
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Utf8View
+                | DataType::FixedSizeBinary(_)
+                | DataType::Decimal32(_, _)
+                | DataType::Decimal64(_, _)
+                | DataType::Decimal128(_, _)
+                | DataType::Decimal256(_, _)
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+                | DataType::Timestamp(_, _)
+                | DataType::Duration(_)
+                | DataType::Interval(_) => true,
+
+                DataType::Dictionary(key, value) => {
+                    matches!(
+                        key.as_ref(),
+                        DataType::Int8
+                            | DataType::Int16
+                            | DataType::Int32
+                            | DataType::Int64
+                            | DataType::UInt8
+                            | DataType::UInt16
+                            | DataType::UInt32
+                            | DataType::UInt64
+                    ) && can_export_data_type(value.as_ref())
+                }
+
+                // Not enabled in v0 C Stream exporter yet (keep auto fallback to IPC).
+                DataType::List(_)
+                | DataType::LargeList(_)
+                | DataType::ListView(_)
+                | DataType::LargeListView(_)
+                | DataType::FixedSizeList(_, _)
+                | DataType::Struct(_)
+                | DataType::Union(_, _)
+                | DataType::Map(_, _)
+                | DataType::RunEndEncoded(_, _) => false,
+            }
+        }
+
+        if !schema
+            .fields()
+            .iter()
+            .all(|f| can_export_data_type(f.data_type()))
+        {
+            return false;
+        }
+
+        // Best-effort sanity check that arrow-rs can represent this schema via the C Data Interface.
+        // (This should always succeed for supported types, but keep it defensive.)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            FFI_ArrowSchema::try_from(schema.as_ref()).is_ok()
+        }))
+        .unwrap_or(false)
     }
 
     fn export_batches_to_c_stream(
