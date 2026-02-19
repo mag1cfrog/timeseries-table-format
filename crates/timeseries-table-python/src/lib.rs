@@ -723,7 +723,11 @@ mod _native {
             if export_mode != SqlExportMode::Ipc {
                 let schema_ok = can_export_schema_to_c_stream(&schema);
                 if schema_ok {
-                    // Clone batches so IPC fallback can reuse the originals without re-running the query.
+                    // `FFI_ArrowArrayStream` must own its schema+batch reader; keep `schema`/`batches`
+                    // available for the IPC fallback path by cloning.
+                    //
+                    // Note: `SchemaRef`/`RecordBatch` are cheap (Arc-backed) clones; this does not
+                    // copy the underlying Arrow buffers.
                     let stream = export_batches_to_c_stream(schema.clone(), batches.clone());
                     match table_from_c_stream(py, stream) {
                         Ok(table) => return Ok(table),
