@@ -12,56 +12,30 @@ At that point I thought: this mental model of an immutable, append-only log must
 
 That question turned into a learn-by-doing project…and eventually into the table format I’m writing about in this post.
 
-## Table formats in 5 minutes (Delta-style mental model)
+## Lakehouse table format 101 (Delta-style, then I map it to my repo)
 
-First, a quick clarification: Parquet is a file format. Delta Lake and Iceberg are table formats.
-A table format is basically a contract that answers:
-- Where is the data stored?
-- What files belong to the table right now?
-- How do writers safely add new data without corrupting readers?
-- How do readers get a consistent snapshot?
+My repo maps almost 1-to-1 onto Delta's mental model - so I'll explain the minimum concepts once, then show exactly where they live in my code and on disk.
 
-The bottom line about table formats is: they work because they treat table state as append-only metadata history + a current snapshot/pointer + a commit protocol.
+Here's what you need to know:
 
-### Delta vs Iceberg
-Delta and Iceberg both use the same core shape: data files + append-only metadata history + snapshots.
+1) **Immutable data files**
+Data lives in immutable files (often Parquet). Appending means writing new files; the table format decides which files are "in" the table.
 
-They differ in the concrete implementation:
-- Delta relies on underlying storage/compute primitives to achieve atomic commits, while Iceberg relies on a catalog.
-- Delta is like maintaining a series of changelogs with occasional checkpoints, while Iceberg is like maintaining a new snapshot for each commit.
+2) **An append-only transaction log**
+Every change is recorded as an append-only sequence of commits ("here's what changed": add/remove files, update table metadata).
 
-## Lakehouse conceptual 101
-Here's what you need to know about lakehouse table formats before we move on. A lakehouse table format usually consists of these major components:
+3) **Versioning + concurrncy control(OCC)**
+Writers commit version N+1 only if they started from the latest version N; if someone else won first, you detect a conflict and retry.
 
-### 1. Immutable data files
-In lakehouses, the data usually lives as immutable files (commonly parquet). Appending data means writing new files; you don't "UPDATE rows in place" like a classic OLTP database.
+4) **A current snapshot for readers (and checkpoints later)**
+Readers need a consistent view: "the table as of the latest committed version". Many systems add checkpoints later so readers don't replay a huge log.
 
-The file format matters for performance, but it's not the point here. The table format's real job is to manage which files are currently valid.
+## Delta concepts -> this repo (quick mapping)
 
-### 2. A transaction log (append-only metadata)
-A lakehouse table format like Delta's core idea is a transaction log: a sequence of commits where each commit says "here's what changed".
-
-Typical actions are:
-- add data files
-- remove data files (tombstones)
-- update table-level metadata (schema/config)
-
-Because commits are append-only, you can always reconstruct the table state at version N by replaying commits.
-
-### 3. Versioning + concurrency control (OCC)
-To support concurrent writers, each commit is versioned. Writers:
-1. read the latest version
-2. prepare "version + 1"
-3. commit only if the world hasn't changed underneath them
-
-If another writer wins first, you don't corrupt the table -- you just detect a conflict and retry based on the new latest state.
-
-### 4. A current snapshot for readers (and checkpoints)
-Readers want a consistent view: "give me the table as of the latest committed version".
-
-Conceptually, a snapshot is just "the table state after applying commits up to version N". Implementations differ in how they find N and how they materialize state efficiently, but the idea is the same.
-
-> NOTE:
-> Replaying a long log can get slow, so systems like Delta often write checkpoints: a compact representation of the current state so readers don't replay from day 1.
-> You can think of checkpoints as "snapshots for performance", not a different source of truth.
-
+  | Concept | Delta mental model | This repo | Where |
+  |---|---|---|---|
+  | Transaction log dir | `_delta_log/` | `_timeseries_log/` | on disk, next to your data|
+  | Commit entries | JSON actions | `Commit` + `LogAction`| Rust structs, serialized to JSON in the log |
+  | Latest version | commit protocol | `CURRENT` file | a single file, just contains the latest version number |
+  | Current snapshot | replay log (+ checkpoints) | `TableState` | in-memory, rebuilt on open |
+  | Writer safety | OCC | OCC(`commit_with_expected_version(...)`) | Rust API — the only commit path |
