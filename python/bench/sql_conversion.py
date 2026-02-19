@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import platform
+import shutil
 import sys
 import tempfile
 import time
@@ -203,9 +204,20 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--no-gc-disable", action="store_true")
     ap.add_argument("--json", type=str, default="")
     ap.add_argument(
+        "--print-json",
+        action="store_true",
+        help="Print the JSON payload to stdout even when --json is set.",
+    )
+    ap.add_argument(
         "--summary",
         action="store_true",
         help="Print a human-friendly summary to stderr (JSON still printed/saved as usual).",
+    )
+    ap.add_argument(
+        "--tmpdir",
+        type=str,
+        default="",
+        help="Directory to place the temporary benchmark dataset (Parquet + table).",
     )
     args = ap.parse_args(argv)
 
@@ -238,7 +250,11 @@ def main(argv: list[str]) -> int:
         gc_was_enabled = False
 
     try:
-        with tempfile.TemporaryDirectory() as d:
+        tmpdir = args.tmpdir.strip() or None
+        if tmpdir is not None:
+            Path(tmpdir).mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(dir=tmpdir) as d:
             base = Path(d)
             table_root = base / "prices_tbl"
             seg_path = table_root / "incoming" / "seg.parquet"
@@ -255,7 +271,20 @@ def main(argv: list[str]) -> int:
                 timezone=None,
             )
 
-            gen_info = _write_parquet_generated(seg_path, spec)
+            try:
+                gen_info = _write_parquet_generated(seg_path, spec)
+            except OSError as e:
+                if e.errno == 122:
+                    usage = shutil.disk_usage(str(base))
+                    raise RuntimeError(
+                        "Disk quota exceeded while generating the benchmark Parquet dataset.\n"
+                        f"tmp_dir={base}\n"
+                        f"free_bytes={usage.free}\n"
+                        f"target_ipc_gb={args.target_ipc_gb}\n"
+                        "Try a smaller --target-ipc-gb, or run with --tmpdir pointing to a filesystem with more space "
+                        "(or set TMPDIR to such a directory)."
+                    ) from e
+                raise
             tbl.append_parquet(str(seg_path), copy_if_outside=False)
 
             sess = ttf.Session()
@@ -476,6 +505,8 @@ def main(argv: list[str]) -> int:
                 _print_summary(out)
             if args.json:
                 Path(args.json).write_text(payload, encoding="utf-8")
+                if args.print_json:
+                    print(payload)
             else:
                 print(payload)
             return 0
