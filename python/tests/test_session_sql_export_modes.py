@@ -1,7 +1,9 @@
+import decimal
 import gc
 import threading
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 import pytest
@@ -143,7 +145,7 @@ def test_session_sql_auto_falls_back_to_ipc_if_c_stream_import_fails(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             raise RuntimeError("boom")
 
     # Patch the module attribute (patching the underlying Cython type is not reliable / reversible).
@@ -173,7 +175,7 @@ def test_session_sql_auto_rerun_fallback_env_var_still_falls_back_to_ipc(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(pa, "RecordBatchReader", _FakeRecordBatchReader)
@@ -210,7 +212,7 @@ def test_session_sql_auto_falls_back_to_ipc_if_c_stream_read_all_fails(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             return _FakeReader()
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -247,7 +249,7 @@ def test_session_sql_auto_returns_table_if_c_stream_close_fails(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             return _FakeReader()
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -298,7 +300,7 @@ def test_session_sql_ipc_does_not_use_c_stream_import(monkeypatch: pytest.Monkey
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             raise AssertionError("C Stream import should not be called in ipc mode")
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -317,7 +319,7 @@ def test_session_sql_auto_raises_if_both_c_stream_and_ipc_decode_fail(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             raise RuntimeError("c stream import boom")
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -341,7 +343,7 @@ def test_session_sql_c_stream_does_not_fall_back_to_ipc_when_forced(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -372,7 +374,7 @@ def test_session_sql_c_stream_propagates_reader_read_all_failures_when_forced(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             return _FakeReader()
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -403,7 +405,7 @@ def test_session_sql_c_stream_read_all_and_close_both_fail_adds_note(
 
     class _FakeRecordBatchReader:
         @staticmethod
-        def _import_from_c_capsule(_capsule: object):
+        def from_stream(_data: object, schema: object | None = None):
             return _FakeReader()
 
     monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
@@ -544,3 +546,117 @@ def test_session_sql_map_roundtrips_via_c_stream(
     t_cs = sess.sql("select m from t")
 
     assert t_cs.equals(t_ipc)
+
+
+def test_session_sql_dictionary_encoded_column_matches_between_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    tbl = pa.table(
+        {
+            "k": pa.array(
+                ["a", "b", "a", None, "c"],
+                type=pa.dictionary(pa.int8(), pa.string()),
+            )
+        }
+    )
+    p = tmp_path / "dict.parquet"
+    pq.write_table(tbl, p, use_dictionary=True)
+
+    sess = ttf.Session()
+    sess.register_parquet("t", str(p))
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
+    t_ipc = sess.sql("select k from t")
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    t_cs = sess.sql("select k from t")
+
+    assert pa.types.is_dictionary(t_ipc.schema.field("k").type)
+    assert t_cs.schema == t_ipc.schema
+    assert t_cs.equals(t_ipc)
+
+
+def test_session_sql_timestamp_tz_and_decimal_match_between_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    tbl = pa.table(
+        {
+            "ts_tz": pa.array([0, 1, None], type=pa.timestamp("us", tz="UTC")),
+            "dec": pa.array(
+                [decimal.Decimal("1.23"), decimal.Decimal("-4.56"), None],
+                type=pa.decimal128(10, 2),
+            ),
+        }
+    )
+    p = tmp_path / "ts_decimal.parquet"
+    pq.write_table(tbl, p)
+
+    sess = ttf.Session()
+    sess.register_parquet("t", str(p))
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
+    t_ipc = sess.sql("select ts_tz, dec from t")
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    t_cs = sess.sql("select ts_tz, dec from t")
+
+    assert t_cs.schema == t_ipc.schema
+    assert t_cs.equals(t_ipc)
+
+
+def test_session_sql_largeish_result_matches_between_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    n = 200_000
+    base = pa.array(range(n), type=pa.int64())
+    add = getattr(pc, "add")
+    multiply = getattr(pc, "multiply")
+    subtract = getattr(pc, "subtract")
+    tbl = pa.table(
+        {
+            "a": base,
+            "b": add(base, 1),
+            "c": multiply(base, 2),
+            "d": subtract(base, 3),
+        }
+    )
+    p = tmp_path / "largeish.parquet"
+    pq.write_table(tbl, p, row_group_size=50_000)
+
+    sess = ttf.Session()
+    sess.register_parquet("t", str(p))
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
+    t_ipc = sess.sql("select a, b, c, d from t")
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    t_cs = sess.sql("select a, b, c, d from t")
+
+    assert t_cs.schema == t_ipc.schema
+    assert t_cs.num_rows == n
+    assert t_cs.equals(t_ipc)
+
+
+def test_session_sql_c_stream_largeish_does_not_call_ipc_decode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    n = 50_000
+    base = pa.array(range(n), type=pa.int64())
+    add = getattr(pc, "add")
+    tbl = pa.table({"a": base, "b": add(base, 1)})
+    p = tmp_path / "no_ipc.parquet"
+    pq.write_table(tbl, p, row_group_size=10_000)
+
+    sess = ttf.Session()
+    sess.register_parquet("t", str(p))
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError(
+            "pyarrow.ipc.open_stream should not be called in c_stream mode"
+        )
+
+    monkeypatch.setattr(pa_ipc, "open_stream", _boom)
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+
+    out = sess.sql("select a, b from t")
+    assert out.num_rows == n

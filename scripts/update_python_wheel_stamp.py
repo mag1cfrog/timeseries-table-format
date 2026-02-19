@@ -25,7 +25,15 @@ def _git_tracked_file_blobs() -> list[tuple[str, str]]:
     # from git's line-ending conversion (core.autocrlf).
     try:
         out = subprocess.check_output(
-            ["git", "-C", str(REPO_ROOT), "ls-files", "-s", "-z", *WHEEL_INPUT_PREFIXES],
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "ls-files",
+                "-s",
+                "-z",
+                *WHEEL_INPUT_PREFIXES,
+            ],
             stderr=subprocess.DEVNULL,
         )
     except Exception:

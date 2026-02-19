@@ -331,7 +331,7 @@ def main(argv: list[str]) -> int:
                 "results": [],
                 "notes": [
                     "decode_only measures pyarrow.ipc.open_stream(bytes).read_all() time.",
-                    "c_stream_decode_only measures pyarrow.RecordBatchReader._import_from_c_capsule(capsule) + .read_all() + .close() time.",
+                    "c_stream_decode_only measures pyarrow.RecordBatchReader.from_stream(obj_with___arrow_c_stream__) + .read_all() + .close() time.",
                     "bench_sql_ipc measures query planning+execution+collect plus IPC encoding on the Rust side.",
                     "bench_sql_c_stream measures query planning+execution+collect plus Arrow C Stream export on the Rust side.",
                     "session_sql measures end-to-end Session.sql(...) using current export mode (usually 'auto').",
@@ -341,7 +341,14 @@ def main(argv: list[str]) -> int:
             }
 
             def _decode_c_stream(capsule: object) -> pa.Table:
-                reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+                class _Wrapper:
+                    def __init__(self, c: object):
+                        self._c = c
+
+                    def __arrow_c_stream__(self, requested_schema=None) -> object:
+                        return self._c
+
+                reader = pa.RecordBatchReader.from_stream(_Wrapper(capsule))
                 try:
                     return reader.read_all()
                 finally:
