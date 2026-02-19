@@ -3,6 +3,7 @@ import threading
 
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
+import pyarrow.parquet as pq
 import pytest
 
 import timeseries_table_format as ttf
@@ -412,3 +413,42 @@ def test_session_sql_returns_pyarrow_table_in_both_modes(
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
     out = sess.sql("select 1 as x")
     assert isinstance(out, pa.Table)
+
+
+def test_session_sql_forced_c_stream_errors_on_unsupported_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # v0 C Stream exporter intentionally does not support nested types like List/Struct/Map/Union.
+    tbl = pa.table(
+        {
+            "x": pa.array([[1, 2], [3], None], type=pa.list_(pa.int64())),
+        }
+    )
+    p = tmp_path / "nested.parquet"
+    pq.write_table(tbl, p)
+
+    sess = ttf.Session()
+    sess.register_parquet("t", str(p))
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+    with pytest.raises(RuntimeError, match="schema cannot be exported via Arrow C Stream"):
+        sess.sql("select x from t")
+
+
+def test_session_sql_auto_falls_back_to_ipc_for_unsupported_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    tbl = pa.table(
+        {
+            "x": pa.array([[1, 2], [3], None], type=pa.list_(pa.int64())),
+        }
+    )
+    p = tmp_path / "nested.parquet"
+    pq.write_table(tbl, p)
+
+    sess = ttf.Session()
+    sess.register_parquet("t", str(p))
+
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "auto")
+    out = sess.sql("select x from t")
+    assert out.equals(tbl.select(["x"]))
