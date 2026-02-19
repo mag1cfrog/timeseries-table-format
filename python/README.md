@@ -263,8 +263,9 @@ uv run -p .venv/bin/python maturin develop --features test-utils
 ```
 
 Environment variables (useful for debugging and benchmarks):
-- `TTF_SQL_EXPORT_MODE=auto|ipc|c_stream` (default: `auto`)
+- `TTF_SQL_EXPORT_MODE=auto|ipc|c_stream` (default: `c_stream`)
 - `TTF_SQL_EXPORT_DEBUG=1` to emit a debug warning when `auto` falls back from C Stream → IPC
+- `TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK=1` to re-run the SQL query on C Stream failure in `auto` mode (avoids cloning batches on the hot path, but may change results for non-deterministic queries)
 
 Optional: benchmark IPC ZSTD compression (requires building with `ipc-zstd`):
 
