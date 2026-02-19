@@ -22,8 +22,10 @@ mod _native {
 
     use pyo3::types::PyCapsule;
     use pyo3::{
-        Bound, PyErr, PyResult, Python,
-        exceptions::{PyImportError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError},
+        Bound, PyErr, PyResult, PyTypeInfo, Python,
+        exceptions::{
+            PyImportError, PyKeyError, PyRuntimeError, PyRuntimeWarning, PyTypeError, PyValueError,
+        },
         prelude::*,
         pyclass, pymethods,
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
@@ -735,9 +737,20 @@ mod _native {
                             }
 
                             if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
-                                eprintln!(
+                                // Debug-only signal for why auto mode fell back to IPC.
+                                // Prefer a Python warning (plays nicely with the Python ecosystem),
+                                // but fall back to stderr if warnings cannot be emitted.
+                                let msg = format!(
                                     "Session.sql: C Stream path failed, falling back to IPC: {e}"
                                 );
+                                if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                    let _ = warnings.call_method1(
+                                        "warn",
+                                        (msg, PyRuntimeWarning::type_object(py)),
+                                    );
+                                } else {
+                                    eprintln!("{msg}");
+                                }
                             }
                         }
                     }
