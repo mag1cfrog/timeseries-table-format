@@ -745,19 +745,18 @@ mod _native {
                 }
             };
 
-            let ctx = self.ctx.clone();
-            let sema = Arc::clone(&self.catalog_sema);
-
-            let collect_sql = |query: String,
-                               params: Option<QueryParams>|
-             -> PyResult<(SchemaRef, Vec<RecordBatch>)> {
-                let ctx = ctx.clone();
-                let sema = Arc::clone(&sema);
-
+            fn collect_sql<'py>(
+                py: Python<'py>,
+                rt: &tokio::runtime::Runtime,
+                ctx: SessionContext,
+                sema: Arc<tokio::sync::Semaphore>,
+                query: String,
+                params: Option<QueryParams>,
+            ) -> PyResult<(SchemaRef, Vec<RecordBatch>)> {
                 // Release GIL while planning/executing + collecting.
                 tokio_runner::run_blocking_map_err(
                     py,
-                    self.rt.as_ref(),
+                    rt,
                     async move {
                         let _permit = sema
                             .acquire_owned()
@@ -784,10 +783,20 @@ mod _native {
                         SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
                     },
                 )
-            };
+            }
 
-            let (schema, batches): (SchemaRef, Vec<RecordBatch>) =
-                collect_sql(query.clone(), params.clone())?;
+            let rt = Arc::clone(&self.rt);
+            let ctx = self.ctx.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+
+            let (schema, batches): (SchemaRef, Vec<RecordBatch>) = collect_sql(
+                py,
+                rt.as_ref(),
+                ctx.clone(),
+                Arc::clone(&sema),
+                query.clone(),
+                params.clone(),
+            )?;
 
             let schema_ok = can_export_schema_to_c_stream(&schema);
 
@@ -827,8 +836,14 @@ mod _native {
                                         }
                                     }
 
-                                    let (schema, batches) =
-                                        collect_sql(query.clone(), params.clone())?;
+                                    let (schema, batches) = collect_sql(
+                                        py,
+                                        rt.as_ref(),
+                                        ctx.clone(),
+                                        Arc::clone(&sema),
+                                        query.clone(),
+                                        params.clone(),
+                                    )?;
 
                                     // IPC fallback path (still release GIL for encoding).
                                     let ipc_bytes: Vec<u8> = py
