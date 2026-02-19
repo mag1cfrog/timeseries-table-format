@@ -237,6 +237,19 @@ uv pip install -p python/.venv/bin/python -e python --group dev
 python/.venv/bin/python -m pytest
 ```
 
+Type checking (ty):
+
+```bash
+uvx ty check --project python
+```
+
+Alternative (uses the `python/` dev environment):
+
+```bash
+cd python
+uv run ty check
+```
+
 Alternative: build with `maturin` directly:
 
 ```bash
