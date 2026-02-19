@@ -151,11 +151,6 @@ def _fmt_seconds(s: float) -> str:
     return f"{s:.3f}s"
 
 
-def _fmt_pct(p: float) -> str:
-    sign = "+" if p >= 0 else "-"
-    return f"{sign}{abs(p):.1f}%"
-
-
 def _print_summary(out: dict[str, object]) -> None:
     print("SQL conversion benchmark summary", file=sys.stderr)
     print(
@@ -169,10 +164,12 @@ def _print_summary(out: dict[str, object]) -> None:
         ipc = float(r["session_sql_ipc"]["median_s"])
         cs = float(r["session_sql_c_stream"]["median_s"])
         delta = ipc - cs
-        pct = (delta / ipc * 100.0) if ipc else float("nan")
+        pct_abs = (abs(delta) / ipc * 100.0) if ipc else float("nan")
+        relation = "faster" if delta >= 0 else "slower"
+        time_word = "saved" if delta >= 0 else "overhead"
 
         print(
-            f"- {name}: session_sql median ipc={_fmt_seconds(ipc)} c_stream={_fmt_seconds(cs)} ({_fmt_pct(pct)} faster, {_fmt_seconds(delta)} saved)",
+            f"- {name}: session_sql median ipc={_fmt_seconds(ipc)} c_stream={_fmt_seconds(cs)} ({pct_abs:.1f}% {relation}, {_fmt_seconds(abs(delta))} {time_word})",
             file=sys.stderr,
         )
 
