@@ -62,9 +62,21 @@ mod _native {
         Runtime(&'static str),
     }
 
+    #[derive(Clone)]
     enum QueryParams {
         Positional(Vec<ScalarValue>),
         Named(Vec<(String, ScalarValue)>),
+    }
+
+    fn env_var_truthy(name: &str) -> bool {
+        match std::env::var_os(name) {
+            None => false,
+            Some(v) => {
+                let s = v.to_string_lossy();
+                let s = s.trim().to_ascii_lowercase();
+                !(s.is_empty() || s == "0" || s == "false" || s == "no" || s == "off")
+            }
+        }
     }
 
     fn py_any_to_scalar_value(v: &Bound<'_, pyo3::types::PyAny>) -> PyResult<ScalarValue> {
@@ -215,7 +227,7 @@ mod _native {
         fn from_env() -> PyResult<Self> {
             let v = match std::env::var("TTF_SQL_EXPORT_MODE") {
                 Ok(v) => v.trim().to_ascii_lowercase(),
-                Err(std::env::VarError::NotPresent) => return Ok(Self::Auto),
+                Err(std::env::VarError::NotPresent) => return Ok(Self::CStream),
                 Err(std::env::VarError::NotUnicode(_)) => {
                     return Err(PyValueError::new_err(
                         "TTF_SQL_EXPORT_MODE must be valid unicode",
@@ -286,7 +298,9 @@ mod _native {
                 DataType::List(child)
                 | DataType::LargeList(child)
                 | DataType::FixedSizeList(child, _) => can_export_data_type(child.data_type()),
-                DataType::Struct(fields) => fields.iter().all(|f| can_export_data_type(f.data_type())),
+                DataType::Struct(fields) => {
+                    fields.iter().all(|f| can_export_data_type(f.data_type()))
+                }
                 DataType::Map(field, _) => can_export_data_type(field.data_type()),
 
                 // Keep these as separate milestones / avoid edge-case-heavy types for now.
@@ -400,136 +414,6 @@ mod _native {
             w.finish()?;
         }
         Ok(buf)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::SqlExportMode;
-        use pyo3::Python;
-        use std::ffi::OsString;
-        use std::sync::{Mutex, MutexGuard, Once, OnceLock};
-
-        fn init_python() {
-            static ONCE: Once = Once::new();
-            ONCE.call_once(Python::initialize);
-        }
-
-        fn env_lock() -> &'static Mutex<()> {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            LOCK.get_or_init(|| Mutex::new(()))
-        }
-
-        struct EnvGuard {
-            _lock: MutexGuard<'static, ()>,
-            key: &'static str,
-            old: Option<OsString>,
-        }
-
-        impl EnvGuard {
-            fn set(key: &'static str, value: Option<OsString>) -> Self {
-                let lock = match env_lock().lock() {
-                    Ok(g) => g,
-                    Err(e) => e.into_inner(),
-                };
-                let old = std::env::var_os(key);
-                match value {
-                    None => unsafe { std::env::remove_var(key) },
-                    Some(v) => unsafe { std::env::set_var(key, v) },
-                }
-                Self {
-                    _lock: lock,
-                    key,
-                    old,
-                }
-            }
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match self.old.take() {
-                    None => unsafe { std::env::remove_var(self.key) },
-                    Some(v) => unsafe { std::env::set_var(self.key, v) },
-                }
-            }
-        }
-
-        #[test]
-        fn sql_export_mode_defaults_to_auto_when_unset() {
-            init_python();
-            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", None);
-            assert!(matches!(SqlExportMode::from_env(), Ok(SqlExportMode::Auto)));
-        }
-
-        #[test]
-        fn sql_export_mode_trims_and_is_case_insensitive() {
-            init_python();
-
-            {
-                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("  IPC  ")));
-                assert!(matches!(SqlExportMode::from_env(), Ok(SqlExportMode::Ipc)));
-            }
-
-            {
-                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("C-STREAM")));
-                assert!(matches!(
-                    SqlExportMode::from_env(),
-                    Ok(SqlExportMode::CStream)
-                ));
-            }
-        }
-
-        #[test]
-        fn sql_export_mode_rejects_invalid_values() {
-            init_python();
-            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("nope")));
-
-            let msg = match SqlExportMode::from_env() {
-                Ok(v) => unreachable!("expected error, got {v:?}"),
-                Err(e) => e.to_string(),
-            };
-
-            assert!(msg.contains("TTF_SQL_EXPORT_MODE"));
-            assert!(msg.contains("auto"));
-            assert!(msg.contains("ipc"));
-            assert!(msg.contains("c_stream"));
-        }
-
-        #[test]
-        #[cfg(unix)]
-        fn sql_export_mode_rejects_non_unicode() {
-            use std::os::unix::ffi::OsStringExt;
-
-            init_python();
-            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from_vec(vec![0xFF])));
-            let msg = match SqlExportMode::from_env() {
-                Ok(v) => unreachable!("expected error, got {v:?}"),
-                Err(e) => e.to_string(),
-            };
-            assert!(msg.contains("valid unicode"));
-        }
-
-        #[test]
-        fn c_stream_schema_support_rejects_union() {
-            use datafusion::arrow::datatypes::{DataType, Field, Schema, UnionFields, UnionMode};
-            use std::sync::Arc;
-
-            let uf = UnionFields::try_new(
-                vec![1, 3],
-                vec![
-                    Field::new("a", DataType::Int64, true),
-                    Field::new("b", DataType::Utf8, true),
-                ],
-            )
-            .unwrap();
-
-            let schema = Arc::new(Schema::new(vec![Field::new(
-                "u",
-                DataType::Union(uf, UnionMode::Dense),
-                true,
-            )]));
-
-            assert!(!super::can_export_schema_to_c_stream(&schema));
-        }
     }
 
     #[pymethods]
@@ -813,6 +697,7 @@ mod _native {
             }
 
             let export_mode = SqlExportMode::from_env()?;
+            let auto_rerun_fallback = env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK");
 
             let params = match params {
                 None => None,
@@ -825,8 +710,13 @@ mod _native {
             let ctx = self.ctx.clone();
             let sema = Arc::clone(&self.catalog_sema);
 
-            // Release GIL while planning/executing + collecting.
-            let (schema, batches): (SchemaRef, Vec<RecordBatch>) =
+            let collect_sql = |query: String,
+                               params: Option<QueryParams>|
+             -> PyResult<(SchemaRef, Vec<RecordBatch>)> {
+                let ctx = ctx.clone();
+                let sema = Arc::clone(&sema);
+
+                // Release GIL while planning/executing + collecting.
                 tokio_runner::run_blocking_map_err(
                     py,
                     self.rt.as_ref(),
@@ -855,47 +745,96 @@ mod _native {
                         SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
                         SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
                     },
-                )?;
+                )
+            };
 
-            // Try C Stream first unless forced IPC.
-            if export_mode != SqlExportMode::Ipc {
-                let schema_ok = can_export_schema_to_c_stream(&schema);
-                if schema_ok {
-                    // `FFI_ArrowArrayStream` must own its schema+batch reader; keep `schema`/`batches`
-                    // available for the IPC fallback path by cloning.
-                    //
-                    // Note: `SchemaRef`/`RecordBatch` are cheap (Arc-backed) clones; this does not
-                    // copy the underlying Arrow buffers.
-                    let stream = export_batches_to_c_stream(schema.clone(), batches.clone());
-                    match table_from_c_stream(py, stream) {
-                        Ok(table) => return Ok(table),
-                        Err(e) => {
-                            if export_mode == SqlExportMode::CStream {
-                                return Err(e);
+            let (schema, batches): (SchemaRef, Vec<RecordBatch>) =
+                collect_sql(query.clone(), params.clone())?;
+
+            let schema_ok = can_export_schema_to_c_stream(&schema);
+
+            // Fast paths: forced mode doesn't need to preserve data for IPC fallback.
+            match export_mode {
+                SqlExportMode::Ipc => {}
+                SqlExportMode::CStream => {
+                    if !schema_ok {
+                        return Err(PyRuntimeError::new_err(
+                            "Session.sql: schema cannot be exported via Arrow C Stream (unsupported type)",
+                        ));
+                    }
+
+                    let stream = export_batches_to_c_stream(schema, batches);
+                    return table_from_c_stream(py, stream);
+                }
+                SqlExportMode::Auto => {
+                    if schema_ok {
+                        if auto_rerun_fallback {
+                            // Avoid cloning on the hot path. If C Stream import fails, re-run the
+                            // query for the IPC fallback path (may change results for non-deterministic queries).
+                            let stream = export_batches_to_c_stream(schema, batches);
+                            match table_from_c_stream(py, stream) {
+                                Ok(table) => return Ok(table),
+                                Err(e) => {
+                                    if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                                        let msg = format!(
+                                            "Session.sql: C Stream path failed, re-running query for IPC fallback: {e}"
+                                        );
+                                        if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                            let _ = warnings.call_method1(
+                                                "warn",
+                                                (msg, PyRuntimeWarning::type_object(py)),
+                                            );
+                                        } else {
+                                            eprintln!("{msg}");
+                                        }
+                                    }
+
+                                    let (schema, batches) =
+                                        collect_sql(query.clone(), params.clone())?;
+
+                                    // IPC fallback path (still release GIL for encoding).
+                                    let ipc_bytes: Vec<u8> = py
+                                        .detach(move || ipc_bytes_from_batches(&schema, &batches))
+                                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+                                    let ipc_mod =
+                                        PyModule::import(py, "pyarrow.ipc").map_err(|e| {
+                                            PyImportError::new_err(format!(
+                                                "pyarrow is required for Session.sql(...): {e}"
+                                            ))
+                                        })?;
+
+                                    let b = PyBytes::new(py, &ipc_bytes);
+                                    let reader = ipc_mod.getattr("open_stream")?.call1((b,))?;
+                                    let table = reader.call_method0("read_all")?;
+
+                                    return Ok(table.into());
+                                }
                             }
-
-                            if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
-                                // Debug-only signal for why auto mode fell back to IPC.
-                                // Prefer a Python warning (plays nicely with the Python ecosystem),
-                                // but fall back to stderr if warnings cannot be emitted.
-                                let msg = format!(
-                                    "Session.sql: C Stream path failed, falling back to IPC: {e}"
-                                );
-                                if let Ok(warnings) = PyModule::import(py, "warnings") {
-                                    let _ = warnings.call_method1(
-                                        "warn",
-                                        (msg, PyRuntimeWarning::type_object(py)),
-                                    );
-                                } else {
-                                    eprintln!("{msg}");
+                        } else {
+                            // Preserve data for the IPC fallback path by cloning (Arc-backed; no buffer copies).
+                            let stream =
+                                export_batches_to_c_stream(schema.clone(), batches.clone());
+                            match table_from_c_stream(py, stream) {
+                                Ok(table) => return Ok(table),
+                                Err(e) => {
+                                    if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                                        let msg = format!(
+                                            "Session.sql: C Stream path failed, falling back to IPC: {e}"
+                                        );
+                                        if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                            let _ = warnings.call_method1(
+                                                "warn",
+                                                (msg, PyRuntimeWarning::type_object(py)),
+                                            );
+                                        } else {
+                                            eprintln!("{msg}");
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                } else if export_mode == SqlExportMode::CStream {
-                    return Err(PyRuntimeError::new_err(
-                        "Session.sql: schema cannot be exported via Arrow C Stream (unsupported type)",
-                    ));
                 }
             }
 
@@ -1734,5 +1673,176 @@ mod _native {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SqlExportMode;
+        use pyo3::Python;
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, Once, OnceLock};
+
+        fn init_python() {
+            static ONCE: Once = Once::new();
+            ONCE.call_once(Python::initialize);
+        }
+
+        fn env_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
+        struct EnvGuard {
+            _lock: MutexGuard<'static, ()>,
+            key: &'static str,
+            old: Option<OsString>,
+        }
+
+        impl EnvGuard {
+            fn set(key: &'static str, value: Option<OsString>) -> Self {
+                let lock = match env_lock().lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                let old = std::env::var_os(key);
+                match value {
+                    None => unsafe { std::env::remove_var(key) },
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                }
+                Self {
+                    _lock: lock,
+                    key,
+                    old,
+                }
+            }
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.old.take() {
+                    None => unsafe { std::env::remove_var(self.key) },
+                    Some(v) => unsafe { std::env::set_var(self.key, v) },
+                }
+            }
+        }
+
+        #[test]
+        fn sql_export_mode_defaults_to_c_stream_when_unset() {
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", None);
+            assert!(matches!(
+                SqlExportMode::from_env(),
+                Ok(SqlExportMode::CStream)
+            ));
+        }
+
+        #[test]
+        fn sql_export_mode_trims_and_is_case_insensitive() {
+            init_python();
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("  IPC  ")));
+                assert!(matches!(SqlExportMode::from_env(), Ok(SqlExportMode::Ipc)));
+            }
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("C-STREAM")));
+                assert!(matches!(
+                    SqlExportMode::from_env(),
+                    Ok(SqlExportMode::CStream)
+                ));
+            }
+        }
+
+        #[test]
+        fn sql_export_mode_rejects_invalid_values() {
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("nope")));
+
+            let msg = match SqlExportMode::from_env() {
+                Ok(v) => unreachable!("expected error, got {v:?}"),
+                Err(e) => e.to_string(),
+            };
+
+            assert!(msg.contains("TTF_SQL_EXPORT_MODE"));
+            assert!(msg.contains("auto"));
+            assert!(msg.contains("ipc"));
+            assert!(msg.contains("c_stream"));
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn sql_export_mode_rejects_non_unicode() {
+            use std::os::unix::ffi::OsStringExt;
+
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from_vec(vec![0xFF])));
+            let msg = match SqlExportMode::from_env() {
+                Ok(v) => unreachable!("expected error, got {v:?}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains("valid unicode"));
+        }
+
+        #[test]
+        fn c_stream_schema_support_rejects_union() {
+            use datafusion::arrow::datatypes::{DataType, Field, Schema, UnionFields, UnionMode};
+            use std::sync::Arc;
+
+            let uf = UnionFields::try_new(
+                vec![1, 3],
+                vec![
+                    Field::new("a", DataType::Int64, true),
+                    Field::new("b", DataType::Utf8, true),
+                ],
+            )
+            .unwrap();
+
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "u",
+                DataType::Union(uf, UnionMode::Dense),
+                true,
+            )]));
+
+            assert!(!super::can_export_schema_to_c_stream(&schema));
+        }
+
+        #[test]
+        fn env_var_truthy_parses_common_values() {
+            init_python();
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK", None);
+                assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("0")),
+                );
+                assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("false")),
+                );
+                assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("1")),
+                );
+                assert!(super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("yes")),
+                );
+                assert!(super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+        }
     }
 }
