@@ -16,7 +16,6 @@ mod _native {
 
     use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::error::ArrowError;
-    use datafusion::catalog::stream;
     use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
@@ -228,10 +227,6 @@ mod _native {
                     "invalid TTF_SQL_EXPORT_MODE={other:?}; expected 'auto', 'ipc', or 'c_stream'"
                 ))),
             }
-        }
-
-        fn is_forced(self) -> bool {
-            matches!(self, Self::Ipc | Self::CStream)
         }
     }
 
@@ -565,7 +560,7 @@ mod _native {
         ) -> PyResult<Py<PyAny>> {
             enum SqlError {
                 DataFusion(DFError),
-                Arrow(ArrowError),
+
                 Runtime(&'static str),
             }
 
@@ -610,7 +605,6 @@ mod _native {
                     },
                     move |py, err| match err {
                         SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
-                        SqlError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
                         SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
                     },
                 )?;
@@ -1255,7 +1249,7 @@ mod _native {
                     .map_err(BenchSqlIpcError::DataFusion)?;
                 let plan_ms = t_plan.elapsed().as_secs_f64() * 1000.0;
 
-                let schema = df.schema().as_arrow().clone();
+                let schema: SchemaRef = df.schema().as_arrow().clone().into();
 
                 let t_collect = Instant::now();
                 let batches = df.collect().await.map_err(BenchSqlIpcError::DataFusion)?;
@@ -1324,6 +1318,116 @@ mod _native {
         Ok((b, metrics))
     }
 
+    /// Benchmark helper: run a SQL query and return an Arrow C Stream capsule plus Rust-side timing
+    /// and sizing metrics.
+    ///
+    /// Python usage:
+    ///
+    /// - `capsule, m = ttf._native._testing._bench_sql_c_stream(sess, sql)`
+    /// - `reader = pyarrow.RecordBatchReader._import_from_c_capsule(capsule)`
+    /// - `table = reader.read_all(); reader.close()`
+    ///
+    /// Note: the returned capsule must remain alive until `reader.close()` completes.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _bench_sql_c_stream<'py>(
+        py: Python<'py>,
+        session: PyRef<'_, Session>,
+        query: String,
+    ) -> PyResult<(Bound<'py, PyCapsule>, Bound<'py, PyDict>)> {
+        use std::time::Instant;
+
+        enum BenchSqlCStreamError {
+            DataFusion(DFError),
+            Runtime(&'static str),
+        }
+
+        let rt = Arc::clone(&session.rt);
+        let ctx = session.ctx.clone();
+        let sema = Arc::clone(&session.catalog_sema);
+        let query = query.to_string();
+
+        struct BenchResult {
+            stream: FFI_ArrowArrayStream,
+            plan_ms: f64,
+            collect_ms: f64,
+            c_stream_export_ms: f64,
+            total_ms: f64,
+            arrow_mem_bytes: usize,
+            row_count: usize,
+            batch_count: usize,
+        }
+
+        let result: BenchResult = tokio_runner::run_blocking_map_err(
+            py,
+            rt.as_ref(),
+            async move {
+                let t_total = Instant::now();
+
+                let _permit = sema.acquire_owned().await.map_err(|_| {
+                    BenchSqlCStreamError::Runtime("Session catalog semaphore closed")
+                })?;
+
+                let t_plan = Instant::now();
+                let df = ctx
+                    .sql(&query)
+                    .await
+                    .map_err(BenchSqlCStreamError::DataFusion)?;
+                let plan_ms = t_plan.elapsed().as_secs_f64() * 1000.0;
+
+                let schema: SchemaRef = df.schema().as_arrow().clone().into();
+
+                let t_collect = Instant::now();
+                let batches = df
+                    .collect()
+                    .await
+                    .map_err(BenchSqlCStreamError::DataFusion)?;
+                let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
+
+                let arrow_mem_bytes: usize =
+                    batches.iter().map(|b| b.get_array_memory_size()).sum();
+                let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+                let batch_count = batches.len();
+
+                let t_export = Instant::now();
+                let stream = export_batches_to_c_stream(schema, batches);
+                let c_stream_export_ms = t_export.elapsed().as_secs_f64() * 1000.0;
+
+                let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+                Ok::<BenchResult, BenchSqlCStreamError>(BenchResult {
+                    stream,
+                    plan_ms,
+                    collect_ms,
+                    c_stream_export_ms,
+                    total_ms,
+                    arrow_mem_bytes,
+                    row_count,
+                    batch_count,
+                })
+            },
+            move |py, err| match err {
+                BenchSqlCStreamError::DataFusion(e) => datafusion_error_to_py(py, e),
+                BenchSqlCStreamError::Runtime(msg) => PyRuntimeError::new_err(msg),
+            },
+        )?;
+
+        let name = CString::new("arrow_array_stream")
+            .map_err(|_| PyValueError::new_err("invalid capsule name"))?;
+        let capsule = PyCapsule::new(py, result.stream, Some(name))?;
+
+        let metrics = PyDict::new(py);
+        metrics.set_item("arrow_mem_bytes", result.arrow_mem_bytes)?;
+        metrics.set_item("row_count", result.row_count)?;
+        metrics.set_item("batch_count", result.batch_count)?;
+        metrics.set_item("plan_ms", result.plan_ms)?;
+        metrics.set_item("collect_ms", result.collect_ms)?;
+        metrics.set_item("c_stream_export_ms", result.c_stream_export_ms)?;
+        metrics.set_item("total_ms", result.total_ms)?;
+
+        Ok((capsule, metrics))
+    }
+
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -1361,6 +1465,7 @@ mod _native {
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_session_table_exists, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_ipc, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_c_stream, py)?)?;
             m.add("_testing", &testing)?;
             m.add_submodule(&testing)?;
         }
