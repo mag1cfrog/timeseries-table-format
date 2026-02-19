@@ -354,8 +354,23 @@ mod _native {
 
         match (table_res, close_res) {
             (Ok(table), Ok(_)) => Ok(table.into()),
+            (Ok(table), Err(e_close)) => {
+                // If the table was successfully read, treat a close() failure as non-fatal.
+                // Falling back to IPC in auto mode would be wasteful (we already have the data).
+                if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                    let msg = format!(
+                        "Session.sql: C Stream reader.close() failed after successful read_all(): {e_close}"
+                    );
+                    if let Ok(warnings) = PyModule::import(py, "warnings") {
+                        let _ =
+                            warnings.call_method1("warn", (msg, PyRuntimeWarning::type_object(py)));
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                }
+                Ok(table.into())
+            }
             (Err(e), Ok(_)) => Err(e),
-            (Ok(_), Err(e)) => Err(e),
             (Err(e_read), Err(e_close)) => {
                 // Preserve the primary failure (`read_all`) but do not silently discard a
                 // cleanup failure.
