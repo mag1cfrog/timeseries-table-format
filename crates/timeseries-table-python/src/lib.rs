@@ -789,13 +789,19 @@ mod _native {
             let ctx = self.ctx.clone();
             let sema = Arc::clone(&self.catalog_sema);
 
+            // Only needed if `auto_rerun_fallback` triggers. Keep a copy of the inputs so we can
+            // re-run without requiring `query`/`params` to be cloned on every call.
+            let mut rerun_args: Option<(String, Option<QueryParams>)> =
+                (export_mode == SqlExportMode::Auto && auto_rerun_fallback)
+                    .then(|| (query.clone(), params.clone()));
+
             let (schema, batches): (SchemaRef, Vec<RecordBatch>) = collect_sql(
                 py,
                 rt.as_ref(),
                 ctx.clone(),
                 Arc::clone(&sema),
-                query.clone(),
-                params.clone(),
+                query,
+                params,
             )?;
 
             let schema_ok = can_export_schema_to_c_stream(&schema);
@@ -836,13 +842,18 @@ mod _native {
                                         }
                                     }
 
+                                    let (query, params) = rerun_args.take().unwrap_or_else(|| {
+                                        unreachable!(
+                                            "rerun_args must be present when auto_rerun_fallback is enabled"
+                                        )
+                                    });
                                     let (schema, batches) = collect_sql(
                                         py,
                                         rt.as_ref(),
                                         ctx.clone(),
                                         Arc::clone(&sema),
-                                        query.clone(),
-                                        params.clone(),
+                                        query,
+                                        params,
                                     )?;
 
                                     // IPC fallback path (still release GIL for encoding).
