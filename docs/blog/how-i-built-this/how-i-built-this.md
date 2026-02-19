@@ -14,7 +14,7 @@ That question turned into a learn-by-doing project…and eventually into the tab
 
 ## Lakehouse table format 101 (Delta-style, then I map it to my repo)
 
-My repo maps almost 1-to-1 onto Delta's mental model - so I'll explain the minimum concepts once, then show exactly where they live in my code and on disk.
+My repo maps almost 1-to-1 onto Delta's mental model -- so I'll explain the minimum concepts once, then show exactly where they live in my code and on disk.
 
 Here's what you need to know:
 
@@ -24,7 +24,7 @@ Data lives in immutable files (often Parquet). Appending means writing new files
 2) **An append-only transaction log**
 Every change is recorded as an append-only sequence of commits ("here's what changed": add/remove files, update table metadata).
 
-3) **Versioning + concurrncy control(OCC)**
+3) **Versioning + concurrency control (OCC)**
 Writers commit version N+1 only if they started from the latest version N; if someone else won first, you detect a conflict and retry.
 
 4) **A current snapshot for readers (and checkpoints later)**
@@ -32,10 +32,10 @@ Readers need a consistent view: "the table as of the latest committed version". 
 
 ## Delta concepts -> this repo (quick mapping)
 
-  | Concept | Delta mental model | This repo | Where |
-  |---|---|---|---|
-  | Transaction log dir | `_delta_log/` | `_timeseries_log/` | on disk, next to your data|
-  | Commit entries | JSON actions | `Commit` + `LogAction`| Rust structs, serialized to JSON in the log |
-  | Latest version | commit protocol | `CURRENT` file | a single file, just contains the latest version number |
-  | Current snapshot | replay log (+ checkpoints) | `TableState` | in-memory, rebuilt on open |
-  | Writer safety | OCC | OCC(`commit_with_expected_version(...)`) | Rust API — the only commit path |
+| Concept | Delta mental model | This repo | Where |
+|---|---|---|---|
+| Transaction log dir | `_delta_log/` | `_timeseries_log/` | On disk, next to your data|
+| Commit entries | JSON actions | `Commit` + `LogAction`| Rust structs, serialized to JSON in the log |
+| Latest version | commit protocol | `CURRENT` file | A single file, just contains the latest version number |
+| Current snapshot | replay log (+ checkpoints) | `TableState` | In-memory, rebuilt on open |
+| Writer safety | OCC | OCC(`commit_with_expected_version(...)`) | Rust API — the only commit path |
