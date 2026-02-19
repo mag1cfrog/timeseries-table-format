@@ -355,6 +355,42 @@ def test_session_sql_c_stream_propagates_reader_read_all_failures_when_forced(
         sess.sql("select 1 as x")
 
 
+def test_session_sql_c_stream_read_all_and_close_both_fail_adds_note(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pa_mod = pytest.importorskip("pyarrow")
+
+    class _FakeReader:
+        def read_all(self):
+            raise RuntimeError("read_all boom")
+
+        def close(self):
+            raise RuntimeError("close boom")
+
+    class _FakeRecordBatchReader:
+        @staticmethod
+        def _import_from_c_capsule(_capsule: object):
+            return _FakeReader()
+
+    monkeypatch.setattr(pa_mod, "RecordBatchReader", _FakeRecordBatchReader)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("IPC fallback should not be used in forced c_stream mode")
+
+    monkeypatch.setattr(pa_ipc, "open_stream", _boom)
+
+    sess = ttf.Session()
+    monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
+
+    with pytest.raises(RuntimeError, match="read_all boom") as excinfo:
+        sess.sql("select 1 as x")
+
+    # Python 3.11+ has `BaseException.__notes__` for exception notes.
+    notes = getattr(excinfo.value, "__notes__", None)
+    if notes is not None:
+        assert any("close boom" in str(n) for n in notes)
+
+
 def test_session_sql_export_mode_switches_per_call(monkeypatch: pytest.MonkeyPatch):
     sess = ttf.Session()
 
@@ -431,7 +467,9 @@ def test_session_sql_forced_c_stream_errors_on_unsupported_schema(
     sess.register_parquet("t", str(p))
 
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
-    with pytest.raises(RuntimeError, match="schema cannot be exported via Arrow C Stream"):
+    with pytest.raises(
+        RuntimeError, match="schema cannot be exported via Arrow C Stream"
+    ):
         sess.sql("select x from t")
 
 
