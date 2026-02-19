@@ -319,12 +319,9 @@ mod _native {
             return false;
         }
 
-        // Best-effort sanity check that arrow-rs can represent this schema via the C Data Interface.
-        // (This should always succeed for supported types, but keep it defensive.)
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            FFI_ArrowSchema::try_from(schema.as_ref()).is_ok()
-        }))
-        .unwrap_or(false)
+        // Sanity check that arrow-rs can represent this schema via the C Data Interface.
+        // This should succeed for supported types.
+        FFI_ArrowSchema::try_from(schema.as_ref()).is_ok()
     }
 
     fn export_batches_to_c_stream(
