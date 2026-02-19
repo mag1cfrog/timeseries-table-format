@@ -25,7 +25,8 @@ mod _native {
     use pyo3::{
         Bound, PyErr, PyResult, PyTypeInfo, Python,
         exceptions::{
-            PyImportError, PyKeyError, PyRuntimeError, PyRuntimeWarning, PyTypeError, PyValueError,
+            PyAttributeError, PyImportError, PyKeyError, PyRuntimeError, PyRuntimeWarning,
+            PyTypeError, PyValueError,
         },
         prelude::*,
         pyclass, pymethods,
@@ -343,7 +344,45 @@ mod _native {
             (Ok(table), Ok(_)) => Ok(table.into()),
             (Err(e), Ok(_)) => Err(e),
             (Ok(_), Err(e)) => Err(e),
-            (Err(e), Err(_)) => Err(e),
+            (Err(e_read), Err(e_close)) => {
+                // Preserve the primary failure (`read_all`) but do not silently discard a
+                // cleanup failure.
+                //
+                // Prefer `BaseException.add_note` (Python 3.11+) so it shows up in the
+                // traceback without changing the exception type. If it's unavailable,
+                // only emit a debug warning when requested.
+                let note = format!("Additionally, RecordBatchReader.close() failed: {e_close}");
+                match e_read.value(py).call_method1("add_note", (note,)) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if !err.is_instance_of::<PyAttributeError>(py)
+                            && std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some()
+                        {
+                            let msg = format!(
+                                "Session.sql: failed to attach exception note (close failure was: {e_close}): {err}"
+                            );
+                            if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                let _ = warnings
+                                    .call_method1("warn", (msg, PyRuntimeWarning::type_object(py)));
+                            } else {
+                                eprintln!("{msg}");
+                            }
+                        } else if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                            let msg = format!(
+                                "Session.sql: C Stream reader.close() also failed: {e_close}"
+                            );
+                            if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                let _ = warnings
+                                    .call_method1("warn", (msg, PyRuntimeWarning::type_object(py)));
+                            } else {
+                                eprintln!("{msg}");
+                            }
+                        }
+                    }
+                }
+
+                Err(e_read)
+            }
         }
     }
 
