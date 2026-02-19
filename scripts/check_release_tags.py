@@ -13,7 +13,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def _run(args: list[str], *, quiet: bool = False) -> str:
     stderr = subprocess.DEVNULL if quiet else None
-    return subprocess.check_output(args, cwd=REPO_ROOT, text=True, stderr=stderr).strip()
+    return subprocess.check_output(
+        args, cwd=REPO_ROOT, text=True, stderr=stderr
+    ).strip()
 
 
 def _changed_cargo_tomls_in_head_commit() -> list[pathlib.Path]:
@@ -80,7 +82,9 @@ def _released_cargo_tomls_in_head_commit() -> list[pathlib.Path]:
 def _tag_points_at_head(tag: str) -> bool:
     # Avoid noisy "fatal: ambiguous argument ..." output when a tag is missing.
     try:
-        _run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{}}"], quiet=True)
+        _run(
+            ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{}}"], quiet=True
+        )
     except Exception:
         return False
 
@@ -133,7 +137,9 @@ def main() -> int:
             sys.stderr.write(f"  - {t}\n")
         sys.stderr.write("\n")
 
-    sys.stderr.write("This usually indicates a release commit was merged but tag creation did not happen.\n")
+    sys.stderr.write(
+        "This usually indicates a release commit was merged but tag creation did not happen.\n"
+    )
     return 1
 
 

@@ -7,16 +7,27 @@ mod tokio_runner;
 mod _native {
 
     use std::collections::BTreeSet;
+    use std::ffi::CString;
     use std::sync::{Arc, Mutex};
 
+    use arrow_array::ffi::FFI_ArrowSchema;
+    use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+    use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
+
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::error::ArrowError;
     use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
+    use pyo3::types::PyCapsule;
     use pyo3::{
-        Bound, PyErr, PyResult, Python,
-        exceptions::{PyImportError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError},
+        Bound, PyErr, PyResult, PyTypeInfo, Python,
+        exceptions::{
+            PyAttributeError, PyImportError, PyKeyError, PyNotImplementedError, PyRuntimeError,
+            PyRuntimeWarning, PyTypeError, PyValueError,
+        },
         prelude::*,
         pyclass, pymethods,
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
@@ -51,9 +62,26 @@ mod _native {
         Runtime(&'static str),
     }
 
+    #[derive(Clone)]
     enum QueryParams {
         Positional(Vec<ScalarValue>),
         Named(Vec<(String, ScalarValue)>),
+    }
+
+    fn env_var_truthy(name: &str) -> bool {
+        match std::env::var_os(name) {
+            None => false,
+            Some(v) => {
+                // Treat non-unicode environment values as falsy. This avoids surprising behavior
+                // where `to_string_lossy()` would replace invalid bytes with � and then interpret
+                // the value as truthy.
+                let Some(s) = v.to_str() else {
+                    return false;
+                };
+                let s = s.trim().to_ascii_lowercase();
+                !(s.is_empty() || s == "0" || s == "false" || s == "no" || s == "off")
+            }
+        }
     }
 
     fn py_any_to_scalar_value(v: &Bound<'_, pyo3::types::PyAny>) -> PyResult<ScalarValue> {
@@ -191,6 +219,273 @@ mod _native {
         ctx: SessionContext,
         tables: Mutex<BTreeSet<String>>,
         catalog_sema: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SqlExportMode {
+        Auto,
+        Ipc,
+        CStream,
+    }
+
+    impl SqlExportMode {
+        fn from_env() -> PyResult<Self> {
+            let v = match std::env::var("TTF_SQL_EXPORT_MODE") {
+                Ok(v) => v.trim().to_ascii_lowercase(),
+                Err(std::env::VarError::NotPresent) => return Ok(Self::CStream),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    return Err(PyValueError::new_err(
+                        "TTF_SQL_EXPORT_MODE must be valid unicode",
+                    ));
+                }
+            };
+
+            match v.as_str() {
+                "" | "auto" => Ok(Self::Auto),
+                "ipc" => Ok(Self::Ipc),
+                "c_stream" | "cstream" | "c-stream" => Ok(Self::CStream),
+                other => Err(PyValueError::new_err(format!(
+                    "invalid TTF_SQL_EXPORT_MODE={other:?}; expected 'auto', 'ipc', or 'c_stream'"
+                ))),
+            }
+        }
+    }
+
+    fn can_export_schema_to_c_stream(schema: &SchemaRef) -> bool {
+        fn can_export_data_type(dt: &DataType) -> bool {
+            match dt {
+                DataType::Null
+                | DataType::Boolean
+                | DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Binary
+                | DataType::LargeBinary
+                | DataType::BinaryView
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Utf8View
+                | DataType::FixedSizeBinary(_)
+                | DataType::Decimal32(_, _)
+                | DataType::Decimal64(_, _)
+                | DataType::Decimal128(_, _)
+                | DataType::Decimal256(_, _)
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+                | DataType::Timestamp(_, _)
+                | DataType::Duration(_)
+                | DataType::Interval(_) => true,
+
+                DataType::Dictionary(key, value) => {
+                    matches!(
+                        key.as_ref(),
+                        DataType::Int8
+                            | DataType::Int16
+                            | DataType::Int32
+                            | DataType::Int64
+                            | DataType::UInt8
+                            | DataType::UInt16
+                            | DataType::UInt32
+                            | DataType::UInt64
+                    ) && can_export_data_type(value.as_ref())
+                }
+
+                DataType::List(child)
+                | DataType::LargeList(child)
+                | DataType::FixedSizeList(child, _) => can_export_data_type(child.data_type()),
+                DataType::Struct(fields) => {
+                    fields.iter().all(|f| can_export_data_type(f.data_type()))
+                }
+                DataType::Map(field, _) => can_export_data_type(field.data_type()),
+
+                // Keep these as separate milestones / avoid edge-case-heavy types for now.
+                DataType::Union(_, _)
+                | DataType::RunEndEncoded(_, _)
+                | DataType::ListView(_)
+                | DataType::LargeListView(_) => false,
+            }
+        }
+
+        if !schema
+            .fields()
+            .iter()
+            .all(|f| can_export_data_type(f.data_type()))
+        {
+            return false;
+        }
+
+        // Sanity check that arrow-rs can represent this schema via the C Data Interface.
+        // This should succeed for supported types.
+        FFI_ArrowSchema::try_from(schema.as_ref()).is_ok()
+    }
+
+    fn export_batches_to_c_stream(
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> FFI_ArrowArrayStream {
+        let reader = RecordBatchIterator::new(batches.into_iter().map(Ok::<_, ArrowError>), schema);
+
+        FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
+    }
+
+    #[pyclass]
+    struct ArrowCStreamWrapper {
+        capsule: Option<Py<PyAny>>,
+    }
+
+    #[pymethods]
+    impl ArrowCStreamWrapper {
+        #[pyo3(signature = (_requested_schema=None))]
+        fn __arrow_c_stream__(
+            mut slf: PyRefMut<'_, Self>,
+            _requested_schema: Option<Py<PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
+            if _requested_schema.is_some() {
+                return Err(PyNotImplementedError::new_err(
+                    "__arrow_c_stream__ schema negotiation is not supported",
+                ));
+            }
+            slf.capsule.take().ok_or_else(|| {
+                PyRuntimeError::new_err("__arrow_c_stream__ may only be called once per object")
+            })
+        }
+    }
+
+    fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
+        let name = CString::new("arrow_array_stream")
+            .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
+
+        // Capsule now owns `stream` (and therefore the underlying batch reader / buffers).
+        let capsule = PyCapsule::new(py, stream, Some(name))?;
+
+        let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
+            PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
+        })?;
+
+        let rbr = pa_mod.getattr("RecordBatchReader")?;
+        // Prefer the public `RecordBatchReader.from_stream` API (PyCapsule Protocol).
+        // Our capsule is a raw PyCapsule, so we wrap it in an object implementing `__arrow_c_stream__`.
+        //
+        // This avoids relying on PyArrow private methods like `_import_from_c_capsule`.
+        let wrapper = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: Some(capsule.into_any().unbind()),
+            },
+        )?;
+        let from_stream = match rbr.getattr("from_stream") {
+            Ok(v) => v,
+            Err(e) => {
+                if e.is_instance_of::<PyAttributeError>(py) {
+                    let mut msg = "pyarrow.RecordBatchReader.from_stream is required for Arrow C Stream import. \
+This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installation (or set TTF_SQL_EXPORT_MODE=ipc to force the IPC fallback)."
+                        .to_string();
+                    if let Ok(v) = pa_mod.getattr("__version__")
+                        && let Ok(s) = v.extract::<String>()
+                    {
+                        msg = format!("{msg} (detected pyarrow=={s})");
+                    }
+                    return Err(PyImportError::new_err(msg));
+                }
+                return Err(e);
+            }
+        };
+
+        let reader = from_stream.call1((wrapper,))?;
+
+        let table_res = reader.call_method0("read_all");
+        let close_res = reader.call_method0("close");
+        let debug = std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some();
+
+        match (table_res, close_res) {
+            (Ok(table), Ok(_)) => Ok(table.into()),
+            (Ok(table), Err(e_close)) => {
+                // If the table was successfully read, treat a close() failure as non-fatal.
+                // Falling back to IPC in auto mode would be wasteful (we already have the data).
+                if debug {
+                    let msg = format!(
+                        "Session.sql: C Stream reader.close() failed after successful read_all(): {e_close}"
+                    );
+                    if let Ok(warnings) = PyModule::import(py, "warnings") {
+                        let _ =
+                            warnings.call_method1("warn", (msg, PyRuntimeWarning::type_object(py)));
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                }
+                Ok(table.into())
+            }
+            (Err(e), Ok(_)) => Err(e),
+            (Err(e_read), Err(e_close)) => {
+                // Preserve the primary failure (`read_all`) but do not silently discard a
+                // cleanup failure.
+                //
+                // Prefer `BaseException.add_note` (Python 3.11+) so it shows up in the
+                // traceback without changing the exception type. If it's unavailable,
+                // only emit a debug warning when requested.
+                let note = format!("Additionally, RecordBatchReader.close() failed: {e_close}");
+                match e_read.value(py).call_method1("add_note", (note,)) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if debug {
+                            if err.is_instance_of::<PyAttributeError>(py) {
+                                // Python < 3.11: BaseException.add_note isn't available.
+                                let msg = format!(
+                                    "Session.sql: C Stream reader.close() also failed: {e_close}"
+                                );
+                                if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                    let _ = warnings.call_method1(
+                                        "warn",
+                                        (msg, PyRuntimeWarning::type_object(py)),
+                                    );
+                                } else {
+                                    eprintln!("{msg}");
+                                }
+                            } else {
+                                let msg = format!(
+                                    "Session.sql: failed to attach exception note (close failure was: {e_close}): {err}"
+                                );
+                                if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                    let _ = warnings.call_method1(
+                                        "warn",
+                                        (msg, PyRuntimeWarning::type_object(py)),
+                                    );
+                                } else {
+                                    eprintln!("{msg}");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Err(e_read)
+            }
+        }
+    }
+
+    fn ipc_bytes_from_batches(
+        schema: &SchemaRef,
+        batches: &[RecordBatch],
+    ) -> Result<Vec<u8>, ArrowError> {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, schema)?;
+            for batch in batches {
+                w.write(batch)?;
+            }
+            w.finish()?;
+        }
+        Ok(buf)
     }
 
     #[pymethods]
@@ -469,9 +764,12 @@ mod _native {
         ) -> PyResult<Py<PyAny>> {
             enum SqlError {
                 DataFusion(DFError),
-                Arrow(ArrowError),
+
                 Runtime(&'static str),
             }
+
+            let export_mode = SqlExportMode::from_env()?;
+            let auto_rerun_fallback = env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK");
 
             let params = match params {
                 None => None,
@@ -481,51 +779,168 @@ mod _native {
                 }
             };
 
+            fn collect_sql<'py>(
+                py: Python<'py>,
+                rt: &tokio::runtime::Runtime,
+                ctx: SessionContext,
+                sema: Arc<tokio::sync::Semaphore>,
+                query: String,
+                params: Option<QueryParams>,
+            ) -> PyResult<(SchemaRef, Vec<RecordBatch>)> {
+                // Release GIL while planning/executing + collecting.
+                tokio_runner::run_blocking_map_err(
+                    py,
+                    rt,
+                    async move {
+                        let _permit = sema
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| SqlError::Runtime("Session catalog semaphore closed"))?;
+
+                        let mut df = ctx.sql(&query).await.map_err(SqlError::DataFusion)?;
+
+                        if let Some(p) = params {
+                            df = match p {
+                                QueryParams::Positional(v) => df.with_param_values(v),
+                                QueryParams::Named(v) => df.with_param_values(v),
+                            }
+                            .map_err(SqlError::DataFusion)?;
+                        }
+
+                        let schema = df.schema().as_arrow().clone();
+                        let batches = df.collect().await.map_err(SqlError::DataFusion)?;
+
+                        Ok::<(SchemaRef, Vec<RecordBatch>), SqlError>((schema.into(), batches))
+                    },
+                    move |py, err| match err {
+                        SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
+                        SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                    },
+                )
+            }
+
+            let rt = Arc::clone(&self.rt);
             let ctx = self.ctx.clone();
             let sema = Arc::clone(&self.catalog_sema);
 
-            let ipc_bytes: Vec<u8> = tokio_runner::run_blocking_map_err(
+            // Only needed if `auto_rerun_fallback` triggers. Keep a copy of the inputs so we can
+            // re-run without requiring `query`/`params` to be cloned on every call.
+            let mut rerun_args: Option<(String, Option<QueryParams>)> =
+                (export_mode == SqlExportMode::Auto && auto_rerun_fallback)
+                    .then(|| (query.clone(), params.clone()));
+
+            let (schema, batches): (SchemaRef, Vec<RecordBatch>) = collect_sql(
                 py,
-                self.rt.as_ref(),
-                async move {
-                    let _permit = sema
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| SqlError::Runtime("Session catalog semaphore closed"))?;
-
-                    let mut df = ctx.sql(&query).await.map_err(SqlError::DataFusion)?;
-
-                    if let Some(p) = params {
-                        df = match p {
-                            QueryParams::Positional(v) => df.with_param_values(v),
-                            QueryParams::Named(v) => df.with_param_values(v),
-                        }
-                        .map_err(SqlError::DataFusion)?;
-                    }
-
-                    let schema = df.schema().as_arrow().clone();
-                    let batches = df.collect().await.map_err(SqlError::DataFusion)?;
-
-                    let mut buf: Vec<u8> = Vec::new();
-                    {
-                        let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema)
-                            .map_err(SqlError::Arrow)?;
-                        for batch in &batches {
-                            w.write(batch).map_err(SqlError::Arrow)?;
-                        }
-                        w.finish().map_err(SqlError::Arrow)?;
-                    }
-
-                    Ok::<Vec<u8>, SqlError>(buf)
-                },
-                move |py, err| match err {
-                    SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
-                    SqlError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
-                    SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
-                },
+                rt.as_ref(),
+                ctx.clone(),
+                Arc::clone(&sema),
+                query,
+                params,
             )?;
 
-            // Back on the GIL: construct pyarrow.Table from IPC stream bytes.
+            let schema_ok = can_export_schema_to_c_stream(&schema);
+
+            // Fast paths: forced mode doesn't need to preserve data for IPC fallback.
+            match export_mode {
+                SqlExportMode::Ipc => {}
+                SqlExportMode::CStream => {
+                    if !schema_ok {
+                        return Err(PyRuntimeError::new_err(
+                            "Session.sql: schema cannot be exported via Arrow C Stream (unsupported type)",
+                        ));
+                    }
+
+                    let stream = export_batches_to_c_stream(schema, batches);
+                    return table_from_c_stream(py, stream);
+                }
+                SqlExportMode::Auto => {
+                    if schema_ok {
+                        if auto_rerun_fallback {
+                            // Avoid cloning on the hot path. If C Stream import fails, re-run the
+                            // query for the IPC fallback path (may change results for non-deterministic queries).
+                            let stream = export_batches_to_c_stream(schema, batches);
+                            match table_from_c_stream(py, stream) {
+                                Ok(table) => return Ok(table),
+                                Err(e) => {
+                                    if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                                        let msg = format!(
+                                            "Session.sql: C Stream path failed, re-running query for IPC fallback: {e}"
+                                        );
+                                        if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                            let _ = warnings.call_method1(
+                                                "warn",
+                                                (msg, PyRuntimeWarning::type_object(py)),
+                                            );
+                                        } else {
+                                            eprintln!("{msg}");
+                                        }
+                                    }
+
+                                    let (query, params) = rerun_args.take().unwrap_or_else(|| {
+                                        unreachable!(
+                                            "rerun_args must be present when auto_rerun_fallback is enabled"
+                                        )
+                                    });
+                                    let (schema, batches) = collect_sql(
+                                        py,
+                                        rt.as_ref(),
+                                        ctx.clone(),
+                                        Arc::clone(&sema),
+                                        query,
+                                        params,
+                                    )?;
+
+                                    // IPC fallback path (still release GIL for encoding).
+                                    let ipc_bytes: Vec<u8> = py
+                                        .detach(move || ipc_bytes_from_batches(&schema, &batches))
+                                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+                                    let ipc_mod =
+                                        PyModule::import(py, "pyarrow.ipc").map_err(|e| {
+                                            PyImportError::new_err(format!(
+                                                "pyarrow is required for Session.sql(...): {e}"
+                                            ))
+                                        })?;
+
+                                    let b = PyBytes::new(py, &ipc_bytes);
+                                    let reader = ipc_mod.getattr("open_stream")?.call1((b,))?;
+                                    let table = reader.call_method0("read_all")?;
+
+                                    return Ok(table.into());
+                                }
+                            }
+                        } else {
+                            // Preserve data for the IPC fallback path by cloning (Arc-backed; no buffer copies).
+                            let stream =
+                                export_batches_to_c_stream(schema.clone(), batches.clone());
+                            match table_from_c_stream(py, stream) {
+                                Ok(table) => return Ok(table),
+                                Err(e) => {
+                                    if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                                        let msg = format!(
+                                            "Session.sql: C Stream path failed, falling back to IPC: {e}"
+                                        );
+                                        if let Ok(warnings) = PyModule::import(py, "warnings") {
+                                            let _ = warnings.call_method1(
+                                                "warn",
+                                                (msg, PyRuntimeWarning::type_object(py)),
+                                            );
+                                        } else {
+                                            eprintln!("{msg}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // IPC fallback path (still release GIL for encoding).
+            let ipc_bytes: Vec<u8> = py
+                .detach(move || ipc_bytes_from_batches(&schema, &batches))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
             let ipc_mod = PyModule::import(py, "pyarrow.ipc").map_err(|e| {
                 PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
             })?;
@@ -1134,7 +1549,7 @@ mod _native {
                     .map_err(BenchSqlIpcError::DataFusion)?;
                 let plan_ms = t_plan.elapsed().as_secs_f64() * 1000.0;
 
-                let schema = df.schema().as_arrow().clone();
+                let schema: SchemaRef = df.schema().as_arrow().clone().into();
 
                 let t_collect = Instant::now();
                 let batches = df.collect().await.map_err(BenchSqlIpcError::DataFusion)?;
@@ -1203,6 +1618,123 @@ mod _native {
         Ok((b, metrics))
     }
 
+    /// Benchmark helper: run a SQL query and return an Arrow C Stream capsule plus Rust-side timing
+    /// and sizing metrics.
+    ///
+    /// Python usage:
+    ///
+    /// - `obj, m = ttf._native._testing._bench_sql_c_stream(sess, sql)`
+    /// - `reader = pyarrow.RecordBatchReader.from_stream(obj)`
+    /// - `table = reader.read_all(); reader.close()`
+    ///
+    /// Note: the returned object must remain alive until `reader.close()` completes.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _bench_sql_c_stream<'py>(
+        py: Python<'py>,
+        session: PyRef<'_, Session>,
+        query: String,
+    ) -> PyResult<(Py<ArrowCStreamWrapper>, Bound<'py, PyDict>)> {
+        use std::time::Instant;
+
+        enum BenchSqlCStreamError {
+            DataFusion(DFError),
+            Runtime(&'static str),
+        }
+
+        let rt = Arc::clone(&session.rt);
+        let ctx = session.ctx.clone();
+        let sema = Arc::clone(&session.catalog_sema);
+        let query = query.to_string();
+
+        struct BenchResult {
+            stream: FFI_ArrowArrayStream,
+            plan_ms: f64,
+            collect_ms: f64,
+            c_stream_export_ms: f64,
+            total_ms: f64,
+            arrow_mem_bytes: usize,
+            row_count: usize,
+            batch_count: usize,
+        }
+
+        let result: BenchResult = tokio_runner::run_blocking_map_err(
+            py,
+            rt.as_ref(),
+            async move {
+                let t_total = Instant::now();
+
+                let _permit = sema.acquire_owned().await.map_err(|_| {
+                    BenchSqlCStreamError::Runtime("Session catalog semaphore closed")
+                })?;
+
+                let t_plan = Instant::now();
+                let df = ctx
+                    .sql(&query)
+                    .await
+                    .map_err(BenchSqlCStreamError::DataFusion)?;
+                let plan_ms = t_plan.elapsed().as_secs_f64() * 1000.0;
+
+                let schema: SchemaRef = df.schema().as_arrow().clone().into();
+
+                let t_collect = Instant::now();
+                let batches = df
+                    .collect()
+                    .await
+                    .map_err(BenchSqlCStreamError::DataFusion)?;
+                let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
+
+                let arrow_mem_bytes: usize =
+                    batches.iter().map(|b| b.get_array_memory_size()).sum();
+                let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+                let batch_count = batches.len();
+
+                let t_export = Instant::now();
+                let stream = export_batches_to_c_stream(schema, batches);
+                let c_stream_export_ms = t_export.elapsed().as_secs_f64() * 1000.0;
+
+                let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+                Ok::<BenchResult, BenchSqlCStreamError>(BenchResult {
+                    stream,
+                    plan_ms,
+                    collect_ms,
+                    c_stream_export_ms,
+                    total_ms,
+                    arrow_mem_bytes,
+                    row_count,
+                    batch_count,
+                })
+            },
+            move |py, err| match err {
+                BenchSqlCStreamError::DataFusion(e) => datafusion_error_to_py(py, e),
+                BenchSqlCStreamError::Runtime(msg) => PyRuntimeError::new_err(msg),
+            },
+        )?;
+
+        let name = CString::new("arrow_array_stream")
+            .map_err(|_| PyValueError::new_err("invalid capsule name"))?;
+        let capsule = PyCapsule::new(py, result.stream, Some(name))?;
+
+        let wrapper = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: Some(capsule.into_any().unbind()),
+            },
+        )?;
+
+        let metrics = PyDict::new(py);
+        metrics.set_item("arrow_mem_bytes", result.arrow_mem_bytes)?;
+        metrics.set_item("row_count", result.row_count)?;
+        metrics.set_item("batch_count", result.batch_count)?;
+        metrics.set_item("plan_ms", result.plan_ms)?;
+        metrics.set_item("collect_ms", result.collect_ms)?;
+        metrics.set_item("c_stream_export_ms", result.c_stream_export_ms)?;
+        metrics.set_item("total_ms", result.total_ms)?;
+
+        Ok((wrapper, metrics))
+    }
+
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -1240,10 +1772,260 @@ mod _native {
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_session_table_exists, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_ipc, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_c_stream, py)?)?;
             m.add("_testing", &testing)?;
             m.add_submodule(&testing)?;
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SqlExportMode;
+        use pyo3::Py;
+        use pyo3::Python;
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, Once, OnceLock};
+
+        fn init_python() {
+            static ONCE: Once = Once::new();
+            ONCE.call_once(Python::initialize);
+        }
+
+        fn env_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
+        struct EnvGuard {
+            _lock: MutexGuard<'static, ()>,
+            key: &'static str,
+            old: Option<OsString>,
+        }
+
+        impl EnvGuard {
+            fn set(key: &'static str, value: Option<OsString>) -> Self {
+                let lock = match env_lock().lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                let old = std::env::var_os(key);
+                match value {
+                    None => unsafe { std::env::remove_var(key) },
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                }
+                Self {
+                    _lock: lock,
+                    key,
+                    old,
+                }
+            }
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.old.take() {
+                    None => unsafe { std::env::remove_var(self.key) },
+                    Some(v) => unsafe { std::env::set_var(self.key, v) },
+                }
+            }
+        }
+
+        #[test]
+        fn sql_export_mode_defaults_to_c_stream_when_unset() {
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", None);
+            assert!(matches!(
+                SqlExportMode::from_env(),
+                Ok(SqlExportMode::CStream)
+            ));
+        }
+
+        #[test]
+        fn sql_export_mode_trims_and_is_case_insensitive() {
+            init_python();
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("  IPC  ")));
+                assert!(matches!(SqlExportMode::from_env(), Ok(SqlExportMode::Ipc)));
+            }
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("C-STREAM")));
+                assert!(matches!(
+                    SqlExportMode::from_env(),
+                    Ok(SqlExportMode::CStream)
+                ));
+            }
+        }
+
+        #[test]
+        fn sql_export_mode_rejects_invalid_values() {
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("nope")));
+
+            let msg = match SqlExportMode::from_env() {
+                Ok(v) => unreachable!("expected error, got {v:?}"),
+                Err(e) => e.to_string(),
+            };
+
+            assert!(msg.contains("TTF_SQL_EXPORT_MODE"));
+            assert!(msg.contains("auto"));
+            assert!(msg.contains("ipc"));
+            assert!(msg.contains("c_stream"));
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn sql_export_mode_rejects_non_unicode() {
+            use std::os::unix::ffi::OsStringExt;
+
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from_vec(vec![0xFF])));
+            let msg = match SqlExportMode::from_env() {
+                Ok(v) => unreachable!("expected error, got {v:?}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains("valid unicode"));
+        }
+
+        #[test]
+        fn c_stream_schema_support_rejects_union() {
+            use datafusion::arrow::datatypes::{DataType, Field, Schema, UnionFields, UnionMode};
+            use std::sync::Arc;
+
+            let uf = UnionFields::try_new(
+                vec![1, 3],
+                vec![
+                    Field::new("a", DataType::Int64, true),
+                    Field::new("b", DataType::Utf8, true),
+                ],
+            )
+            .unwrap();
+
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "u",
+                DataType::Union(uf, UnionMode::Dense),
+                true,
+            )]));
+
+            assert!(!super::can_export_schema_to_c_stream(&schema));
+        }
+
+        #[test]
+        fn env_var_truthy_parses_common_values() {
+            init_python();
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK", None);
+                assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("0")),
+                );
+                assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("false")),
+                );
+                assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("1")),
+                );
+                assert!(super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+            {
+                let _g = EnvGuard::set(
+                    "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                    Some(OsString::from("yes")),
+                );
+                assert!(super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+            }
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn env_var_truthy_treats_non_unicode_as_falsy() {
+            use std::os::unix::ffi::OsStringExt;
+
+            init_python();
+            let _g = EnvGuard::set(
+                "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                Some(OsString::from_vec(vec![0xFF])),
+            );
+            assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
+        }
+
+        #[test]
+        fn arrow_c_stream_wrapper_is_single_use() {
+            use pyo3::types::PyAnyMethods;
+            use pyo3::types::PyCapsule;
+            use std::ffi::CString;
+
+            init_python();
+            let ok = Python::try_attach(|py| {
+                let name = CString::new("arrow_array_stream").unwrap();
+                let capsule = PyCapsule::new(py, 123usize, Some(name)).unwrap();
+
+                let wrapper = Py::new(
+                    py,
+                    super::ArrowCStreamWrapper {
+                        capsule: Some(capsule.into_any().unbind()),
+                    },
+                )
+                .unwrap();
+
+                let wrapper = wrapper.bind(py);
+                wrapper.call_method0("__arrow_c_stream__").unwrap();
+
+                let err = wrapper.call_method0("__arrow_c_stream__").unwrap_err();
+                let msg = err.to_string();
+                assert!(msg.contains("only be called once"));
+            });
+            assert!(ok.is_some());
+        }
+
+        #[test]
+        fn arrow_c_stream_wrapper_rejects_requested_schema_without_consuming() {
+            use pyo3::types::PyAnyMethods;
+            use pyo3::types::PyCapsule;
+            use pyo3::types::PyDict;
+            use std::ffi::CString;
+
+            init_python();
+            let ok = Python::try_attach(|py| {
+                let name = CString::new("arrow_array_stream").unwrap();
+                let capsule = PyCapsule::new(py, 123usize, Some(name)).unwrap();
+
+                let wrapper = Py::new(
+                    py,
+                    super::ArrowCStreamWrapper {
+                        capsule: Some(capsule.into_any().unbind()),
+                    },
+                )
+                .unwrap();
+
+                let wrapper = wrapper.bind(py);
+
+                // Passing any non-None object as `requested_schema` should raise NotImplementedError
+                // and must not consume the capsule.
+                let err = wrapper
+                    .call_method1("__arrow_c_stream__", (PyDict::new(py),))
+                    .unwrap_err();
+                assert!(err.is_instance_of::<pyo3::exceptions::PyNotImplementedError>(py));
+
+                // The capsule should still be available after the NotImplementedError.
+                wrapper.call_method0("__arrow_c_stream__").unwrap();
+            });
+            assert!(ok.is_some());
+        }
     }
 }
