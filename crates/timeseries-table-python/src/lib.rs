@@ -239,9 +239,8 @@ mod _native {
         batches: Vec<RecordBatch>,
     ) -> FFI_ArrowArrayStream {
         let reader = RecordBatchIterator::new(batches.into_iter().map(Ok::<_, ArrowError>), schema);
-        let stream =
-            FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>);
-        stream
+
+        FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
     }
 
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
