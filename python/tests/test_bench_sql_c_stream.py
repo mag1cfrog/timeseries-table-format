@@ -34,4 +34,3 @@ def test_bench_sql_c_stream_capsule_roundtrip():
     assert "collect_ms" in m
     assert "c_stream_export_ms" in m
     assert "total_ms" in m
-

@@ -172,14 +172,16 @@ def _print_summary(out: dict[str, object]) -> None:
         pct = (delta / ipc * 100.0) if ipc else float("nan")
 
         print(
-            f"- {name}: session_sql median ipc={_fmt_seconds(ipc)} c_stream={_fmt_seconds(cs)} ({_fmt_pct(pct)} faster, { _fmt_seconds(delta) } saved)",
+            f"- {name}: session_sql median ipc={_fmt_seconds(ipc)} c_stream={_fmt_seconds(cs)} ({_fmt_pct(pct)} faster, {_fmt_seconds(delta)} saved)",
             file=sys.stderr,
         )
 
         # Rust-side export breakdown (best-effort).
         try:
             ipc_encode_ms = _median([float(x) for x in r["rust_ms"]["ipc_encode_ms"]])  # type: ignore[index]
-            c_export_ms = _median([float(x) for x in r["rust_ms_c_stream"]["c_stream_export_ms"]])  # type: ignore[index]
+            c_export_ms = _median(
+                [float(x) for x in r["rust_ms_c_stream"]["c_stream_export_ms"]]
+            )  # type: ignore[index]
             print(
                 f"  rust export median: ipc_encode={ipc_encode_ms:.1f}ms c_stream_export={c_export_ms:.1f}ms",
                 file=sys.stderr,
@@ -366,7 +368,9 @@ def main(argv: list[str]) -> int:
                     del ipc_bytes
                     gc.collect()
 
-                    _t, (capsule, _m) = _timed(lambda: testing._bench_sql_c_stream(sess, sql))
+                    _t, (capsule, _m) = _timed(
+                        lambda: testing._bench_sql_c_stream(sess, sql)
+                    )
                     _t, table = _timed(lambda: _decode_c_stream(capsule))
                     del table
                     del capsule
@@ -472,8 +476,12 @@ def main(argv: list[str]) -> int:
                         ),
                         "bench_sql_ipc": _summarize_seconds(bench_sql_ipc_times),
                         "decode_only": _summarize_seconds(decode_only_times),
-                        "bench_sql_c_stream": _summarize_seconds(bench_sql_c_stream_times),
-                        "c_stream_decode_only": _summarize_seconds(c_stream_decode_only_times),
+                        "bench_sql_c_stream": _summarize_seconds(
+                            bench_sql_c_stream_times
+                        ),
+                        "c_stream_decode_only": _summarize_seconds(
+                            c_stream_decode_only_times
+                        ),
                         "ipc_bytes_len": ipc_bytes_lens,
                         "arrow_mem_bytes": arrow_mem_bytes,
                         "c_stream_arrow_mem_bytes": c_stream_arrow_mem_bytes,

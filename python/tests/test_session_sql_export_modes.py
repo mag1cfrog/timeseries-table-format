@@ -22,7 +22,9 @@ def test_session_sql_ipc_equals_c_stream(monkeypatch: pytest.MonkeyPatch):
     assert t_cs.equals(t_ipc)
 
 
-def test_session_sql_empty_result_schema_matches_between_modes(monkeypatch: pytest.MonkeyPatch):
+def test_session_sql_empty_result_schema_matches_between_modes(
+    monkeypatch: pytest.MonkeyPatch,
+):
     sess = ttf.Session()
     q = "select cast(1 as bigint) as x where false"
 
@@ -37,7 +39,9 @@ def test_session_sql_empty_result_schema_matches_between_modes(monkeypatch: pyte
     assert t_cs.schema == t_ipc.schema
 
 
-def test_session_sql_multi_column_types_match_between_modes(monkeypatch: pytest.MonkeyPatch):
+def test_session_sql_multi_column_types_match_between_modes(
+    monkeypatch: pytest.MonkeyPatch,
+):
     sess = ttf.Session()
     q = "select cast(1 as bigint) as a, cast(1.5 as double) as b, cast('x' as varchar) as c"
 
@@ -69,7 +73,9 @@ def test_session_sql_c_stream_does_not_call_ipc_decode(monkeypatch: pytest.Monke
     sess = ttf.Session()
 
     def _boom(*_args, **_kwargs):
-        raise AssertionError("pyarrow.ipc.open_stream should not be called in c_stream mode")
+        raise AssertionError(
+            "pyarrow.ipc.open_stream should not be called in c_stream mode"
+        )
 
     monkeypatch.setattr(pa_ipc, "open_stream", _boom)
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
@@ -78,7 +84,9 @@ def test_session_sql_c_stream_does_not_call_ipc_decode(monkeypatch: pytest.Monke
     assert out["x"].to_pylist() == [1]
 
 
-def test_session_sql_c_stream_repeated_calls_do_not_crash(monkeypatch: pytest.MonkeyPatch):
+def test_session_sql_c_stream_repeated_calls_do_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+):
     sess = ttf.Session()
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
 
@@ -89,7 +97,9 @@ def test_session_sql_c_stream_repeated_calls_do_not_crash(monkeypatch: pytest.Mo
         gc.collect()
 
 
-def test_session_sql_c_stream_concurrent_calls_do_not_crash(monkeypatch: pytest.MonkeyPatch):
+def test_session_sql_c_stream_concurrent_calls_do_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+):
     sess = ttf.Session()
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
 
@@ -364,7 +374,9 @@ def test_session_sql_export_mode_switches_per_call(monkeypatch: pytest.MonkeyPat
 
     # C Stream call should not use IPC decode.
     def _boom(*_args, **_kwargs):
-        raise AssertionError("pyarrow.ipc.open_stream should not be called in c_stream mode")
+        raise AssertionError(
+            "pyarrow.ipc.open_stream should not be called in c_stream mode"
+        )
 
     monkeypatch.setattr(pa_ipc, "open_stream", _boom)
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
@@ -388,7 +400,9 @@ def test_session_sql_c_stream_missing_import_method_errors_when_forced(
         sess.sql("select 1 as x")
 
 
-def test_session_sql_returns_pyarrow_table_in_both_modes(monkeypatch: pytest.MonkeyPatch):
+def test_session_sql_returns_pyarrow_table_in_both_modes(
+    monkeypatch: pytest.MonkeyPatch,
+):
     sess = ttf.Session()
 
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "ipc")
