@@ -10,6 +10,7 @@ import platform
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -120,6 +121,22 @@ def _summarize_seconds(xs: list[float]) -> dict[str, object]:
     return {"min_s": xs_sorted[0], "median_s": mid, "runs_s": xs}
 
 
+@contextmanager
+def _temp_env_var(key: str, value: str | None):
+    old = os.environ.get(key)
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         description="Micro-benchmark: SQL -> (IPC vs Arrow C Stream) -> pyarrow.Table"
@@ -228,7 +245,8 @@ def main(argv: list[str]) -> int:
                     "c_stream_decode_only measures pyarrow.RecordBatchReader._import_from_c_capsule(capsule) + .read_all() + .close() time.",
                     "bench_sql_ipc measures query planning+execution+collect plus IPC encoding on the Rust side.",
                     "bench_sql_c_stream measures query planning+execution+collect plus Arrow C Stream export on the Rust side.",
-                    "session_sql measures end-to-end Session.sql(...) (includes Rust + Python decode).",
+                    "session_sql measures end-to-end Session.sql(...) using current export mode (usually 'auto').",
+                    "session_sql_ipc / session_sql_c_stream measure end-to-end Session.sql(...) under forced modes.",
                     "Large targets can require high peak RAM (IPC bytes + decoded Table + intermediate buffers).",
                 ],
             }
@@ -240,10 +258,18 @@ def main(argv: list[str]) -> int:
                 finally:
                     reader.close()
 
+            def _session_sql_forced(mode: str, sql: str) -> pa.Table:
+                with _temp_env_var("TTF_SQL_EXPORT_MODE", mode):
+                    return sess.sql(sql)
+
             for name, sql in queries:
                 # Warmup: run both paths once to populate OS page cache and DataFusion internal caches.
                 for _ in range(args.warmups):
                     _t, table = _timed(lambda: sess.sql(sql))
+                    del table
+                    _t, table = _timed(lambda: _session_sql_forced("ipc", sql))
+                    del table
+                    _t, table = _timed(lambda: _session_sql_forced("c_stream", sql))
                     del table
 
                     _t, (ipc_bytes, _m) = _timed(
@@ -263,6 +289,8 @@ def main(argv: list[str]) -> int:
                     gc.collect()
 
                 session_sql_times: list[float] = []
+                session_sql_ipc_times: list[float] = []
+                session_sql_c_stream_times: list[float] = []
                 bench_sql_ipc_times: list[float] = []
                 decode_only_times: list[float] = []
                 bench_sql_c_stream_times: list[float] = []
@@ -282,6 +310,18 @@ def main(argv: list[str]) -> int:
                 rust_c_stream_total_ms: list[float] = []
                 rust_c_stream_plan_ms: list[float] = []
                 rust_c_stream_collect_ms: list[float] = []
+
+                for _ in range(args.runs):
+                    t_sess, table = _timed(lambda: _session_sql_forced("ipc", sql))
+                    session_sql_ipc_times.append(t_sess)
+                    del table
+                    gc.collect()
+
+                for _ in range(args.runs):
+                    t_sess, table = _timed(lambda: _session_sql_forced("c_stream", sql))
+                    session_sql_c_stream_times.append(t_sess)
+                    del table
+                    gc.collect()
 
                 for _ in range(args.runs):
                     t_sess, table = _timed(lambda: sess.sql(sql))
@@ -342,6 +382,10 @@ def main(argv: list[str]) -> int:
                         "name": name,
                         "sql": sql,
                         "session_sql": _summarize_seconds(session_sql_times),
+                        "session_sql_ipc": _summarize_seconds(session_sql_ipc_times),
+                        "session_sql_c_stream": _summarize_seconds(
+                            session_sql_c_stream_times
+                        ),
                         "bench_sql_ipc": _summarize_seconds(bench_sql_ipc_times),
                         "decode_only": _summarize_seconds(decode_only_times),
                         "bench_sql_c_stream": _summarize_seconds(bench_sql_c_stream_times),
