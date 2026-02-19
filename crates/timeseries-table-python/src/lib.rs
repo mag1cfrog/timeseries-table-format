@@ -72,7 +72,12 @@ mod _native {
         match std::env::var_os(name) {
             None => false,
             Some(v) => {
-                let s = v.to_string_lossy();
+                // Treat non-unicode environment values as falsy. This avoids surprising behavior
+                // where `to_string_lossy()` would replace invalid bytes with � and then interpret
+                // the value as truthy.
+                let Some(s) = v.to_str() else {
+                    return false;
+                };
                 let s = s.trim().to_ascii_lowercase();
                 !(s.is_empty() || s == "0" || s == "false" || s == "no" || s == "off")
             }
@@ -1933,6 +1938,19 @@ If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPO
                 );
                 assert!(super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
             }
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn env_var_truthy_treats_non_unicode_as_falsy() {
+            use std::os::unix::ffi::OsStringExt;
+
+            init_python();
+            let _g = EnvGuard::set(
+                "TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK",
+                Some(OsString::from_vec(vec![0xFF])),
+            );
+            assert!(!super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
         }
 
         #[test]
