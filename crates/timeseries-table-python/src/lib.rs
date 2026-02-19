@@ -390,11 +390,10 @@ mod _native {
                     let mut msg = "pyarrow.RecordBatchReader.from_stream is required for Arrow C Stream import (this project requires pyarrow>=23.0.0). \
 If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPORT_MODE=ipc to force the IPC fallback."
                         .to_string();
-                    if let Ok(v) = pa_mod.getattr("__version__") {
-                        if let Ok(s) = v.extract::<String>() {
+                    if let Ok(v) = pa_mod.getattr("__version__")
+                        && let Ok(s) = v.extract::<String>() {
                             msg = format!("{msg} (detected pyarrow=={s})");
                         }
-                    }
                     return Err(PyImportError::new_err(msg));
                 }
                 return Err(e);
