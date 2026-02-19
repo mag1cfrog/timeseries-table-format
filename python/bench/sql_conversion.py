@@ -137,6 +137,56 @@ def _temp_env_var(key: str, value: str | None):
             os.environ[key] = old
 
 
+def _median(xs: list[float]) -> float:
+    xs_sorted = sorted(xs)
+    return xs_sorted[len(xs_sorted) // 2]
+
+
+def _fmt_seconds(s: float) -> str:
+    if s < 1e-3:
+        return f"{s * 1e6:.0f}µs"
+    if s < 1.0:
+        return f"{s * 1e3:.1f}ms"
+    return f"{s:.3f}s"
+
+
+def _fmt_pct(p: float) -> str:
+    sign = "+" if p >= 0 else "-"
+    return f"{sign}{abs(p):.1f}%"
+
+
+def _print_summary(out: dict[str, object]) -> None:
+    print("SQL conversion benchmark summary", file=sys.stderr)
+    print(
+        f"pyarrow={out['env']['pyarrow_version']} ttf={out['env']['ttf_version']} runs={out['params']['runs']} warmups={out['params']['warmups']}",  # type: ignore[index]
+        file=sys.stderr,
+    )
+
+    for r in out["results"]:  # type: ignore[index]
+        name = r["name"]
+
+        ipc = float(r["session_sql_ipc"]["median_s"])
+        cs = float(r["session_sql_c_stream"]["median_s"])
+        delta = ipc - cs
+        pct = (delta / ipc * 100.0) if ipc else float("nan")
+
+        print(
+            f"- {name}: session_sql median ipc={_fmt_seconds(ipc)} c_stream={_fmt_seconds(cs)} ({_fmt_pct(pct)} faster, { _fmt_seconds(delta) } saved)",
+            file=sys.stderr,
+        )
+
+        # Rust-side export breakdown (best-effort).
+        try:
+            ipc_encode_ms = _median([float(x) for x in r["rust_ms"]["ipc_encode_ms"]])  # type: ignore[index]
+            c_export_ms = _median([float(x) for x in r["rust_ms_c_stream"]["c_stream_export_ms"]])  # type: ignore[index]
+            print(
+                f"  rust export median: ipc_encode={ipc_encode_ms:.1f}ms c_stream_export={c_export_ms:.1f}ms",
+                file=sys.stderr,
+            )
+        except Exception:
+            pass
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         description="Micro-benchmark: SQL -> (IPC vs Arrow C Stream) -> pyarrow.Table"
@@ -152,6 +202,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--medium-ipc-mb", type=int, default=64)
     ap.add_argument("--no-gc-disable", action="store_true")
     ap.add_argument("--json", type=str, default="")
+    ap.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print a human-friendly summary to stderr (JSON still printed/saved as usual).",
+    )
     args = ap.parse_args(argv)
 
     if args.target_ipc_gb <= 0:
@@ -417,6 +472,8 @@ def main(argv: list[str]) -> int:
                 )
 
             payload = json.dumps(out, indent=2, sort_keys=False)
+            if args.summary:
+                _print_summary(out)
             if args.json:
                 Path(args.json).write_text(payload, encoding="utf-8")
             else:
