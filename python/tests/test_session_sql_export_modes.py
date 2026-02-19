@@ -469,7 +469,7 @@ def test_session_sql_c_stream_missing_import_method_errors_when_forced(
     monkeypatch.setenv("TTF_SQL_EXPORT_MODE", "c_stream")
 
     sess = ttf.Session()
-    with pytest.raises(AttributeError):
+    with pytest.raises(ImportError, match=r"RecordBatchReader\.from_stream"):
         sess.sql("select 1 as x")
 
 
