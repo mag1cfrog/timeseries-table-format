@@ -335,18 +335,19 @@ mod _native {
 
     #[pyclass]
     struct ArrowCStreamWrapper {
-        capsule: Py<PyAny>,
+        capsule: Option<Py<PyAny>>,
     }
 
     #[pymethods]
     impl ArrowCStreamWrapper {
         #[pyo3(signature = (_requested_schema=None))]
         fn __arrow_c_stream__(
-            &self,
-            py: Python<'_>,
+            mut slf: PyRefMut<'_, Self>,
             _requested_schema: Option<Py<PyAny>>,
-        ) -> Py<PyAny> {
-            self.capsule.clone_ref(py)
+        ) -> PyResult<Py<PyAny>> {
+            slf.capsule.take().ok_or_else(|| {
+                PyRuntimeError::new_err("__arrow_c_stream__ may only be called once per object")
+            })
         }
     }
 
@@ -369,7 +370,7 @@ mod _native {
         let wrapper = Py::new(
             py,
             ArrowCStreamWrapper {
-                capsule: capsule.into_any().unbind(),
+                capsule: Some(capsule.into_any().unbind()),
             },
         )?;
         let reader = rbr.getattr("from_stream")?.call1((wrapper,))?;
@@ -1715,6 +1716,7 @@ mod _native {
     #[cfg(test)]
     mod tests {
         use super::SqlExportMode;
+        use pyo3::Py;
         use pyo3::Python;
         use std::ffi::OsString;
         use std::sync::{Mutex, MutexGuard, Once, OnceLock};
@@ -1880,6 +1882,35 @@ mod _native {
                 );
                 assert!(super::env_var_truthy("TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK"));
             }
+        }
+
+        #[test]
+        fn arrow_c_stream_wrapper_is_single_use() {
+            use pyo3::types::PyAnyMethods;
+            use pyo3::types::PyCapsule;
+            use std::ffi::CString;
+
+            init_python();
+            let ok = Python::try_attach(|py| {
+                let name = CString::new("arrow_array_stream").unwrap();
+                let capsule = PyCapsule::new(py, 123usize, Some(name)).unwrap();
+
+                let wrapper = Py::new(
+                    py,
+                    super::ArrowCStreamWrapper {
+                        capsule: Some(capsule.into_any().unbind()),
+                    },
+                )
+                .unwrap();
+
+                let wrapper = wrapper.bind(py);
+                wrapper.call_method0("__arrow_c_stream__").unwrap();
+
+                let err = wrapper.call_method0("__arrow_c_stream__").unwrap_err();
+                let msg = err.to_string();
+                assert!(msg.contains("only be called once"));
+            });
+            assert!(ok.is_some());
         }
     }
 }
