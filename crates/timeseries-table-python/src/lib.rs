@@ -257,6 +257,8 @@ mod _native {
         })?;
 
         let rbr = pa_mod.getattr("RecordBatchReader")?;
+        // Uses PyArrow's Arrow C Data Interface via `RecordBatchReader._import_from_c_capsule`.
+        // This exists in older PyArrow versions too (>=12), and this project requires `pyarrow>=23.0.0`.
         let reader = rbr.getattr("_import_from_c_capsule")?.call1((capsule,))?;
 
         let table_res = reader.call_method0("read_all");
