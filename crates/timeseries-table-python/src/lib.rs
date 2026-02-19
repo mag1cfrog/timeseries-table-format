@@ -25,8 +25,8 @@ mod _native {
     use pyo3::{
         Bound, PyErr, PyResult, PyTypeInfo, Python,
         exceptions::{
-            PyAttributeError, PyImportError, PyKeyError, PyRuntimeError, PyRuntimeWarning,
-            PyTypeError, PyValueError,
+            PyAttributeError, PyImportError, PyKeyError, PyNotImplementedError, PyRuntimeError,
+            PyRuntimeWarning, PyTypeError, PyValueError,
         },
         prelude::*,
         pyclass, pymethods,
@@ -350,6 +350,11 @@ mod _native {
             mut slf: PyRefMut<'_, Self>,
             _requested_schema: Option<Py<PyAny>>,
         ) -> PyResult<Py<PyAny>> {
+            if _requested_schema.is_some() {
+                return Err(PyNotImplementedError::new_err(
+                    "__arrow_c_stream__ schema negotiation is not supported",
+                ));
+            }
             slf.capsule.take().ok_or_else(|| {
                 PyRuntimeError::new_err("__arrow_c_stream__ may only be called once per object")
             })
@@ -1978,6 +1983,41 @@ If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPO
                 let err = wrapper.call_method0("__arrow_c_stream__").unwrap_err();
                 let msg = err.to_string();
                 assert!(msg.contains("only be called once"));
+            });
+            assert!(ok.is_some());
+        }
+
+        #[test]
+        fn arrow_c_stream_wrapper_rejects_requested_schema_without_consuming() {
+            use pyo3::types::PyAnyMethods;
+            use pyo3::types::PyCapsule;
+            use pyo3::types::PyDict;
+            use std::ffi::CString;
+
+            init_python();
+            let ok = Python::try_attach(|py| {
+                let name = CString::new("arrow_array_stream").unwrap();
+                let capsule = PyCapsule::new(py, 123usize, Some(name)).unwrap();
+
+                let wrapper = Py::new(
+                    py,
+                    super::ArrowCStreamWrapper {
+                        capsule: Some(capsule.into_any().unbind()),
+                    },
+                )
+                .unwrap();
+
+                let wrapper = wrapper.bind(py);
+
+                // Passing any non-None object as `requested_schema` should raise NotImplementedError
+                // and must not consume the capsule.
+                let err = wrapper
+                    .call_method1("__arrow_c_stream__", (PyDict::new(py),))
+                    .unwrap_err();
+                assert!(err.is_instance_of::<pyo3::exceptions::PyNotImplementedError>(py));
+
+                // The capsule should still be available after the NotImplementedError.
+                wrapper.call_method0("__arrow_c_stream__").unwrap();
             });
             assert!(ok.is_some());
         }
