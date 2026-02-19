@@ -284,6 +284,119 @@ mod _native {
         Ok(buf)
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::SqlExportMode;
+        use pyo3::Python;
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, Once, OnceLock};
+
+        fn init_python() {
+            static ONCE: Once = Once::new();
+            ONCE.call_once(Python::initialize);
+        }
+
+        fn env_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
+        struct EnvGuard {
+            _lock: MutexGuard<'static, ()>,
+            key: &'static str,
+            old: Option<OsString>,
+        }
+
+        impl EnvGuard {
+            fn set(key: &'static str, value: Option<OsString>) -> Self {
+                let lock = match env_lock().lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                let old = std::env::var_os(key);
+                match value {
+                    None => unsafe { std::env::remove_var(key) },
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                }
+                Self {
+                    _lock: lock,
+                    key,
+                    old,
+                }
+            }
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.old.take() {
+                    None => unsafe { std::env::remove_var(self.key) },
+                    Some(v) => unsafe { std::env::set_var(self.key, v) },
+                }
+            }
+        }
+
+        #[test]
+        fn sql_export_mode_defaults_to_auto_when_unset() {
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", None);
+            assert!(matches!(SqlExportMode::from_env(), Ok(SqlExportMode::Auto)));
+        }
+
+        #[test]
+        fn sql_export_mode_trims_and_is_case_insensitive() {
+            init_python();
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("  IPC  ")));
+                assert!(matches!(SqlExportMode::from_env(), Ok(SqlExportMode::Ipc)));
+            }
+
+            {
+                let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("C-STREAM")));
+                assert!(matches!(
+                    SqlExportMode::from_env(),
+                    Ok(SqlExportMode::CStream)
+                ));
+            }
+        }
+
+        #[test]
+        fn sql_export_mode_rejects_invalid_values() {
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from("nope")));
+
+            let msg = match SqlExportMode::from_env() {
+                Ok(v) => {
+                    assert!(false, "expected error, got {v:?}");
+                    return;
+                }
+                Err(e) => e.to_string(),
+            };
+
+            assert!(msg.contains("TTF_SQL_EXPORT_MODE"));
+            assert!(msg.contains("auto"));
+            assert!(msg.contains("ipc"));
+            assert!(msg.contains("c_stream"));
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn sql_export_mode_rejects_non_unicode() {
+            use std::os::unix::ffi::OsStringExt;
+
+            init_python();
+            let _g = EnvGuard::set("TTF_SQL_EXPORT_MODE", Some(OsString::from_vec(vec![0xFF])));
+            let msg = match SqlExportMode::from_env() {
+                Ok(v) => {
+                    assert!(false, "expected error, got {v:?}");
+                    return;
+                }
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains("valid unicode"));
+        }
+    }
+
     #[pymethods]
     impl Session {
         #[new]
