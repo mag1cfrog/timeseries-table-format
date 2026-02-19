@@ -283,16 +283,17 @@ mod _native {
                     ) && can_export_data_type(value.as_ref())
                 }
 
-                // Not enabled in v0 C Stream exporter yet (keep auto fallback to IPC).
-                DataType::List(_)
-                | DataType::LargeList(_)
+                DataType::List(child)
+                | DataType::LargeList(child)
+                | DataType::FixedSizeList(child, _) => can_export_data_type(child.data_type()),
+                DataType::Struct(fields) => fields.iter().all(|f| can_export_data_type(f.data_type())),
+                DataType::Map(field, _) => can_export_data_type(field.data_type()),
+
+                // Keep these as separate milestones / avoid edge-case-heavy types for now.
+                DataType::Union(_, _)
+                | DataType::RunEndEncoded(_, _)
                 | DataType::ListView(_)
-                | DataType::LargeListView(_)
-                | DataType::FixedSizeList(_, _)
-                | DataType::Struct(_)
-                | DataType::Union(_, _)
-                | DataType::Map(_, _)
-                | DataType::RunEndEncoded(_, _) => false,
+                | DataType::LargeListView(_) => false,
             }
         }
 
@@ -505,6 +506,29 @@ mod _native {
                 Err(e) => e.to_string(),
             };
             assert!(msg.contains("valid unicode"));
+        }
+
+        #[test]
+        fn c_stream_schema_support_rejects_union() {
+            use datafusion::arrow::datatypes::{DataType, Field, Schema, UnionFields, UnionMode};
+            use std::sync::Arc;
+
+            let uf = UnionFields::try_new(
+                vec![1, 3],
+                vec![
+                    Field::new("a", DataType::Int64, true),
+                    Field::new("b", DataType::Utf8, true),
+                ],
+            )
+            .unwrap();
+
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "u",
+                DataType::Union(uf, UnionMode::Dense),
+                true,
+            )]));
+
+            assert!(!super::can_export_schema_to_c_stream(&schema));
         }
     }
 
