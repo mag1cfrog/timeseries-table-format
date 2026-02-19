@@ -242,11 +242,11 @@ mod _native {
     fn export_batches_to_c_stream(
         schema: SchemaRef,
         batches: Vec<RecordBatch>,
-    ) -> *mut FFI_ArrowArrayStream {
+    ) -> FFI_ArrowArrayStream {
         let reader = RecordBatchIterator::new(batches.into_iter().map(Ok::<_, ArrowError>), schema);
         let stream =
             FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>);
-        Box::into_raw(Box::new(stream))
+        stream
     }
 
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
@@ -569,6 +569,8 @@ mod _native {
                 Runtime(&'static str),
             }
 
+            let export_mode = SqlExportMode::from_env()?;
+
             let params = match params {
                 None => None,
                 Some(obj) => {
@@ -580,48 +582,71 @@ mod _native {
             let ctx = self.ctx.clone();
             let sema = Arc::clone(&self.catalog_sema);
 
-            let ipc_bytes: Vec<u8> = tokio_runner::run_blocking_map_err(
-                py,
-                self.rt.as_ref(),
-                async move {
-                    let _permit = sema
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| SqlError::Runtime("Session catalog semaphore closed"))?;
+            // Release GIL while planning/executing + collecting.
+            let (schema, batches): (SchemaRef, Vec<RecordBatch>) =
+                tokio_runner::run_blocking_map_err(
+                    py,
+                    self.rt.as_ref(),
+                    async move {
+                        let _permit = sema
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| SqlError::Runtime("Session catalog semaphore closed"))?;
 
-                    let mut df = ctx.sql(&query).await.map_err(SqlError::DataFusion)?;
+                        let mut df = ctx.sql(&query).await.map_err(SqlError::DataFusion)?;
 
-                    if let Some(p) = params {
-                        df = match p {
-                            QueryParams::Positional(v) => df.with_param_values(v),
-                            QueryParams::Named(v) => df.with_param_values(v),
+                        if let Some(p) = params {
+                            df = match p {
+                                QueryParams::Positional(v) => df.with_param_values(v),
+                                QueryParams::Named(v) => df.with_param_values(v),
+                            }
+                            .map_err(SqlError::DataFusion)?;
                         }
-                        .map_err(SqlError::DataFusion)?;
-                    }
 
-                    let schema = df.schema().as_arrow().clone();
-                    let batches = df.collect().await.map_err(SqlError::DataFusion)?;
+                        let schema = df.schema().as_arrow().clone();
+                        let batches = df.collect().await.map_err(SqlError::DataFusion)?;
 
-                    let mut buf: Vec<u8> = Vec::new();
-                    {
-                        let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema)
-                            .map_err(SqlError::Arrow)?;
-                        for batch in &batches {
-                            w.write(batch).map_err(SqlError::Arrow)?;
+                        Ok::<(SchemaRef, Vec<RecordBatch>), SqlError>((schema.into(), batches))
+                    },
+                    move |py, err| match err {
+                        SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
+                        SqlError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
+                        SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                    },
+                )?;
+
+            // Try C Stream first unless forced IPC.
+            if export_mode != SqlExportMode::Ipc {
+                let schema_ok = can_export_schema_to_c_stream(&schema);
+                if schema_ok {
+                    // Clone batches so IPC fallback can reuse the originals without re-running the query.
+                    let stream = export_batches_to_c_stream(schema.clone(), batches.clone());
+                    match table_from_c_stream(py, stream) {
+                        Ok(table) => return Ok(table),
+                        Err(e) => {
+                            if export_mode == SqlExportMode::CStream {
+                                return Err(e);
+                            }
+
+                            if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                                eprintln!(
+                                    "Session.sql: C Stream path failed, falling back to IPC: {e}"
+                                );
+                            }
                         }
-                        w.finish().map_err(SqlError::Arrow)?;
                     }
+                } else if export_mode == SqlExportMode::CStream {
+                    return Err(PyRuntimeError::new_err(
+                        "Session.sql: schema cannot be exported via Arrow C Stream (unsupported type)",
+                    ));
+                }
+            }
 
-                    Ok::<Vec<u8>, SqlError>(buf)
-                },
-                move |py, err| match err {
-                    SqlError::DataFusion(e) => datafusion_error_to_py(py, e),
-                    SqlError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
-                    SqlError::Runtime(msg) => PyRuntimeError::new_err(msg),
-                },
-            )?;
+            // IPC fallback path (still release GIL for encoding).
+            let ipc_bytes: Vec<u8> = py
+                .detach(move || ipc_bytes_from_batches(&schema, &batches))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            // Back on the GIL: construct pyarrow.Table from IPC stream bytes.
             let ipc_mod = PyModule::import(py, "pyarrow.ipc").map_err(|e| {
                 PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
             })?;
