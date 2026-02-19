@@ -405,13 +405,14 @@ If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPO
 
         let table_res = reader.call_method0("read_all");
         let close_res = reader.call_method0("close");
+        let debug = std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some();
 
         match (table_res, close_res) {
             (Ok(table), Ok(_)) => Ok(table.into()),
             (Ok(table), Err(e_close)) => {
                 // If the table was successfully read, treat a close() failure as non-fatal.
                 // Falling back to IPC in auto mode would be wasteful (we already have the data).
-                if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                if debug {
                     let msg = format!(
                         "Session.sql: C Stream reader.close() failed after successful read_all(): {e_close}"
                     );
@@ -436,9 +437,7 @@ If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPO
                 match e_read.value(py).call_method1("add_note", (note,)) {
                     Ok(_) => {}
                     Err(err) => {
-                        if !err.is_instance_of::<PyAttributeError>(py)
-                            && std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some()
-                        {
+                        if !err.is_instance_of::<PyAttributeError>(py) && debug {
                             let msg = format!(
                                 "Session.sql: failed to attach exception note (close failure was: {e_close}): {err}"
                             );
@@ -448,7 +447,7 @@ If you are using an older pyarrow, upgrade it (pyarrow>=15), or set TTF_SQL_EXPO
                             } else {
                                 eprintln!("{msg}");
                             }
-                        } else if std::env::var_os("TTF_SQL_EXPORT_DEBUG").is_some() {
+                        } else if debug {
                             let msg = format!(
                                 "Session.sql: C Stream reader.close() also failed: {e_close}"
                             );
