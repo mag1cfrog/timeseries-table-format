@@ -1589,18 +1589,18 @@ mod _native {
     ///
     /// Python usage:
     ///
-    /// - `capsule, m = ttf._native._testing._bench_sql_c_stream(sess, sql)`
-    /// - `reader = pyarrow.RecordBatchReader.from_stream(_Wrapper(capsule))`
+    /// - `obj, m = ttf._native._testing._bench_sql_c_stream(sess, sql)`
+    /// - `reader = pyarrow.RecordBatchReader.from_stream(obj)`
     /// - `table = reader.read_all(); reader.close()`
     ///
-    /// Note: the returned capsule must remain alive until `reader.close()` completes.
+    /// Note: the returned object must remain alive until `reader.close()` completes.
     #[cfg(feature = "test-utils")]
     #[pyfunction]
     fn _bench_sql_c_stream<'py>(
         py: Python<'py>,
         session: PyRef<'_, Session>,
         query: String,
-    ) -> PyResult<(Bound<'py, PyCapsule>, Bound<'py, PyDict>)> {
+    ) -> PyResult<(Py<ArrowCStreamWrapper>, Bound<'py, PyDict>)> {
         use std::time::Instant;
 
         enum BenchSqlCStreamError {
@@ -1682,6 +1682,13 @@ mod _native {
             .map_err(|_| PyValueError::new_err("invalid capsule name"))?;
         let capsule = PyCapsule::new(py, result.stream, Some(name))?;
 
+        let wrapper = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: Some(capsule.into_any().unbind()),
+            },
+        )?;
+
         let metrics = PyDict::new(py);
         metrics.set_item("arrow_mem_bytes", result.arrow_mem_bytes)?;
         metrics.set_item("row_count", result.row_count)?;
@@ -1691,7 +1698,7 @@ mod _native {
         metrics.set_item("c_stream_export_ms", result.c_stream_export_ms)?;
         metrics.set_item("total_ms", result.total_ms)?;
 
-        Ok((capsule, metrics))
+        Ok((wrapper, metrics))
     }
 
     #[pymodule_init]
