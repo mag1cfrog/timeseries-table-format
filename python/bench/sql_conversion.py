@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import gc
 import importlib
 import json
@@ -273,11 +274,16 @@ def main(argv: list[str]) -> int:
             try:
                 gen_info = _write_parquet_generated(seg_path, spec)
             except OSError as e:
-                if e.errno == 122:
+                # EDQUOT is not consistent across platforms (e.g. Linux: 122, macOS: 69).
+                # Also handle ENOSPC for "no space left on device".
+                quota_errnos = {getattr(errno, "EDQUOT", None)}
+                space_errnos = {getattr(errno, "ENOSPC", None)}
+                if e.errno in (quota_errnos | space_errnos):
                     usage = shutil.disk_usage(str(base))
                     raise RuntimeError(
-                        "Disk quota exceeded while generating the benchmark Parquet dataset.\n"
+                        "Disk space/quota exceeded while generating the benchmark Parquet dataset.\n"
                         f"tmp_dir={base}\n"
+                        f"oserror_errno={e.errno}\n"
                         f"free_bytes={usage.free}\n"
                         f"target_ipc_gb={args.target_ipc_gb}\n"
                         "Try a smaller --target-ipc-gb, or run with --tmpdir pointing to a filesystem with more space "
