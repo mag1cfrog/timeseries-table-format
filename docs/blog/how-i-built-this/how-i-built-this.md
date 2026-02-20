@@ -262,6 +262,8 @@ Under the table root, `_coverage/` stores small sidecar files:
 
 The table snapshot is basically the union of segment coverages so far.
 
+ ![Overlap-safe append: current coverage vs incoming segment](./coverage-explain.png)
+
 ### How append uses coverage (end-to-end)
 
 When you append a Parquet file, the flow becomes:
