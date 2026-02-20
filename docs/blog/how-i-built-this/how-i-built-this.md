@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory() as d:
 
 ### Step 2) The artifact: a real `AddSegment` action
 
-A new data file becomes part of the table only after it's logged. Here's what that looks like:
+A new data file becomes part of the table only after it's logged.
 
 An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseries_log/0000000002.json):
 
@@ -121,25 +121,94 @@ If you squint, you can already see the reader-side wins:
 - ts_min/ts_max enable coarse pruning (skip files that can't match a time filter).
 - the log entry is human-inspectable and replayable.
 
-### Step 3) Query the table with SQL
+## Try it yourself: 60 seconds to a join (Python)
 
-Now we register the table in a SQL session and query it like a normal table:
+Here's why this matters: `Session` isn't just "a query wrapper for one table". It's a single SQL session where you can register multiple tables and run real joins across them.
 
-```python
-sess = ttf.Session()
-sess.register_tstable("prices", str(root))
-
-out = sess.sql("""
-select ts, symbol, close
-from prices
-where ts >= '2024-06-01T00:00:00Z'
-  and ts <  '2024-06-02T00:00:00Z'
-order by ts
-""")
-
-print(out)  # pyarrow.Table
+```bash
+pip install timeseries-table-format
 ```
 
+```python
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+import timeseries_table_format as ttf
+
+
+with tempfile.TemporaryDirectory() as d:
+    base = Path(d)
+
+    # None = no timezone normalization (use timestamps as stored in Parquet)
+    timezone = None
+
+    prices_root = base / "prices_tbl"
+    prices = ttf.TimeSeriesTable.create(
+        table_root=str(prices_root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=timezone,
+    )
+    prices_seg = base / "prices.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array(
+                    ["2024-06-01T00:00:00Z", "2024-06-01T01:00:00Z"],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                "symbol": pa.array(["NVDA", "NVDA"]),
+                "close": pa.array([10.0, 11.0]),
+            }
+        ),
+        str(prices_seg),
+    )
+    prices.append_parquet(str(prices_seg))
+
+    volumes_root = base / "volumes_tbl"
+    volumes = ttf.TimeSeriesTable.create(
+        table_root=str(volumes_root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=timezone,
+    )
+    volumes_seg = base / "volumes.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array(
+                    ["2024-06-01T00:00:00Z", "2024-06-01T01:00:00Z"],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                "symbol": pa.array(["NVDA", "NVDA"]),
+                "volume": pa.array([100, 120]),
+            }
+        ),
+        str(volumes_seg),
+    )
+    volumes.append_parquet(str(volumes_seg))
+
+    sess = ttf.Session()
+    sess.register_tstable("prices", str(prices_root))
+    sess.register_tstable("volumes", str(volumes_root))
+
+    out = sess.sql("""
+    select p.ts as ts, p.symbol as symbol, p.close as close, v.volume as volume
+    from prices p
+    join volumes v
+      on p.ts = v.ts and p.symbol = v.symbol
+    order by ts
+    """)
+
+    print(out)  # pyarrow.Table
+```
 > The mental model on reads:
 >
 > - "current snapshot" = whatever version CURRENT points to
