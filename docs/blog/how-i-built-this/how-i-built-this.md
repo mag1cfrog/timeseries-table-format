@@ -12,7 +12,11 @@ The project is called `timeseries-table-format` -- a Rust library (with Python b
 
 ## The moment it clicked
 
-While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log". Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era; when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time. Once that clicked, the question became unavoidable: if the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data? That question turned into a learn-by-doing project...and eventually into the table format I'm writing about in this post.
+While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log". 
+
+Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era; when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time. 
+
+Once that clicked, the question became unavoidable: if the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data? That question turned into a learn-by-doing project...and eventually into the table format I'm writing about in this post.
 
 ## Lakehouse table format 101 (Delta-style, then I map it to my repo)
 
