@@ -1,4 +1,4 @@
-# I built a lakehouse table format from scratch, and here's how I did it
+# I built a Delta-style table format in Rust for time-series appends -- here's how it works (and why it's faster)
 
 Once you internalize "append-only log + snapshots," a lot of modern data systems start looking like the same idea in different clothes.
 
