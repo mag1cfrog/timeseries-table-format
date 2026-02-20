@@ -6,17 +6,19 @@ That's the rabbit hole that led me to build a small Delta-style table format in 
 
 This post is the 10-minute tour of how it works.
 
+If you've ever managed a pipeline that appends daily Parquet files and wished the plumbing was simpler, this might resonate.
+
 If you're mostly here for the performance results, scroll to **Benchmarks** -- I won't make you wait to the end.
 
-The project is called `timeseries-table-format` -- a Rust library (with Python bindings) that implements a minimal Delta-style table format optimized for time-series append workloads.
+The project is called `timeseries-table-format` -- a Rust library with freshly-shipped Python bindings, implementing a minimal Delta-style table format optimized for time-series append workloads. Everything below works with just `pip install`.
 
 ## The moment it clicked
 
-While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log". 
+While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log".
 
-Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era; when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time. 
+Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era; when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time.
 
-Once that clicked, the question became unavoidable: if the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data? That question turned into a learn-by-doing project...and eventually into the table format I'm writing about in this post.
+Once that clicked, the question became unavoidable: if the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data? That question turned into a learn-by-doing project... and eventually into the table format I'm writing about in this post.
 
 ## Lakehouse table format 101 (Delta-style, then I map it to my repo)
 
@@ -212,6 +214,10 @@ with tempfile.TemporaryDirectory() as d:
     print(out)  # in Jupyter, use just `out` for a rich HTML table
 ```
 
+Two tables, one SQL join, pure Python -- no Rust toolchain, no Spark cluster.
+
+That join worked because the same log + snapshot design extends naturally to multiple tables in one session. But there's one more piece that makes this format specifically useful for time-series work: coverage tracking.
+
 ## Why this isn't just Delta-in-Rust: coverage tracking
 
 Remember this field from the `AddSegment` JSON earlier?
@@ -226,7 +232,7 @@ Time-series users keep asking questions like:
 - "Where are the gaps?"
 - "Did I already ingest this time window, or am I about to overlap/duplicate data?"
 
-Coverage is my answer to that.
+Coverage is how I solved it -- and it bought me two things I didn't expect to get for free.
 
 Two concrete wins:
 
@@ -241,7 +247,7 @@ If you created a table with `bucket="1h"`, coverage is just "which 1-hour slots 
 
 Under the table root, `_coverage/` stores small sidecar files:
 
-- `_coverage/segments/<id>.roar` - coverage for a segment
+- `_coverage/segments/<id>.roar` - coverage for a segment (compressed roaring bitmaps -- fast set operations on bucket IDs)
 - `_coverage/table/<ver>-<id>.roar` - a snapshot coverage for the whole table at a log version
 
 The table snapshot is basically the union of segment coverages so far.
@@ -260,13 +266,15 @@ When you append a Parquet file, the flow becomes:
     - write the new table snapshot sidecar
     - commit the log update (same Delta-style OCC as before)
 
+The first time I saw the overlap check catch a duplicate ingest during testing, I knew this was the right abstraction -- it was doing exactly the kind of silent data corruption prevention that I'd always had to bolt on manually in other pipelines.
+
 That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
 
 **"Why not just use Delta or Iceberg?"** Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
 
 ## Benchmarks
 
-Big performance claims are cheap -- so here are the numbers.
+Anyone can claim "faster." Here's what the numbers actually look like.
 
 I ran the same workload across ClickHouse, Delta Lake + Spark, PostgreSQL, and TimescaleDB using the NYC TLC FHVHV trip dataset (April-June 2024, ~73M rows). The test I care most about is "daily append": 90 day-sized files appended one after another, like a real ETL pipeline.
 
@@ -284,7 +292,7 @@ The query story holds up too: on time-range scans it's ~2.5x faster than ClickHo
 
 ## Limitations / non-goals (v0)
 
-This is intentionally a narrow v0 - I made explicit tradeoffs to ship something sharp (and measurable) rather than a general-purpose table format:
+I intentionally scoped this as a narrow v0. Every feature I left out was a deliberate choice to keep the core sharp and measurable:
 
 - Local filesystem tables (no S3/GCS/Azure object store yet)
 - No compaction / merge (overlap is rejected; no upsert semantics)
