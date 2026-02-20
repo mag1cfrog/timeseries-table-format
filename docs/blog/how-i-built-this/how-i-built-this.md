@@ -26,16 +26,16 @@ My repo maps almost 1-to-1 onto Delta's mental model -- so I'll explain the mini
 
 Here's what you need to know:
 
-1) **Immutable data files**
+1) **Immutable data files**:
 Data lives in immutable files (often Parquet). Appending means writing new files; the table format decides which files are "in" the table.
 
-2) **An append-only transaction log**
+2) **An append-only transaction log**:
 Every change is recorded as an append-only sequence of commits ("here's what changed": add/remove files, update table metadata).
 
-3) **Versioning + concurrency control (OCC)**
+3) **Versioning + concurrency control (OCC)**:
 Writers commit version N+1 only if they started from the latest version N; if someone else won first, you detect a conflict and retry.
 
-4) **A current snapshot for readers (and checkpoints later)**
+4) **A current snapshot for readers (and checkpoints later)**:
 Readers need a consistent view: "the table as of the latest committed version". Many systems add checkpoints later so readers don't replay a huge log.
 
 ### Delta concepts -> this repo (quick mapping)
