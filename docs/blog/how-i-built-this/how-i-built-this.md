@@ -149,8 +149,6 @@ pip install timeseries-table-format
 ```
 
 ```python
-from __future__ import annotations
-
 from datetime import datetime, timezone
 import tempfile
 from pathlib import Path
@@ -300,8 +298,8 @@ On daily appends, this format is ~3.3x faster than ClickHouse, ~4.3x faster than
 
 The query story holds up too: on time-range scans it's ~2.5x faster than ClickHouse and ~80x faster than PostgreSQL here. (Aggregations are also competitive with ClickHouse: within ~3% in this benchmark.)
 
-Full methodology + reproduction steps:
-https://github.com/mag1cfrog/timeseries-table-format/blob/main/docs/benchmarks/README.md
+[full benchmark methodology](https://github.com/mag1cfrog/timeseries-table-format/blob/main/docs/benchmarks/README.md)
+
 (Also in the repo under `docs/benchmarks/README.md`.)
 
 ## Limitations / non-goals (v0)
@@ -319,6 +317,6 @@ This is intentionally a narrow v0 - I made explicit tradeoffs to ship something 
 The quickest "does it feel nice?" path is the Python quickstart earlier in this post ("Try it yourself: 60 seconds to a join (Python)").
 
 Everything -- code, benchmarks, docs -- lives here:
-https://github.com/mag1cfrog/timeseries-table-format
+[timeseries-table-format on GitHub](https://github.com/mag1cfrog/timeseries-table-format)
 
 If this post was useful, a star helps -- and if you have workload ideas or strong opinions on v1 priorities (compaction, object storage, schema evolution), open an issue.
