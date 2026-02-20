@@ -48,19 +48,7 @@ Readers need a consistent view: "the table as of the latest committed version". 
 
 Here's the whole lifecycle in one picture:
 
-```text
-incoming Parquet files
-        |
-        v
-append_parquet()
-        |
-        +--> data/                     (immutable data files)
-        +--> _timeseries_log/*.json    (append-only commits)
-        +--> _timeseries_log/CURRENT   (latest version pointer)
-        |
-        v
-open() -> replay log -> TableState snapshot -> query
-```
+![Lifecycle diagram](./lifecycle-diagram.png)
 
 
 ## Walkthrough: watch one append turn into a queryable table
@@ -262,7 +250,7 @@ Under the table root, `_coverage/` stores small sidecar files:
 
 The table snapshot is basically the union of segment coverages so far.
 
- ![Overlap-safe append: current coverage vs incoming segment](./coverage-explain.png)
+![Overlap-safe append: current coverage vs incoming segment](./coverage-explain.png)
 
 ### How append uses coverage (end-to-end)
 
