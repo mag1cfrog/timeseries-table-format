@@ -216,6 +216,7 @@ with tempfile.TemporaryDirectory() as d:
 
 Two tables, one SQL join, pure Python -- no Rust toolchain, no Spark cluster.
 
+
 That join worked because the same log + snapshot design extends naturally to multiple tables in one session. But there's one more piece that makes this format specifically useful for time-series work: coverage tracking.
 
 ## Why this isn't just Delta-in-Rust: coverage tracking
