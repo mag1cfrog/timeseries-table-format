@@ -213,3 +213,51 @@ with tempfile.TemporaryDirectory() as d:
 >
 > - "current snapshot" = whatever version CURRENT points to
 > - reader rebuilds table state by replaying commits up to that version
+
+## Why this isn't just Delta-in-Rust: coverage tracking
+
+Remember this field from the `AddSegment` JSON earlier?
+
+```json
+"coverage_path": "_coverage/segments/segcov-ca3cea172cc538ce04756e34beaea4a4.roar"
+```
+
+Time-series users keep asking questions like:
+
+- "Do I have full coverage for this time range?"
+- "Where are the gaps?"
+- "Did I already ingest this time window, or am I about to overlap/duplicate data?"
+
+Coverage is my answer to that.
+
+Two concrete wins:
+
+- Gap/coverage questions become metadata reads, not Parquet rescans.
+- Overlap-safe ingestion becomes the default, not "best-effort".
+
+### What "coverage" means (in one sentence)
+
+If you created a table with `bucket="1h"`, coverage is just "which 1-hour slots have data".
+
+### What `_coverage/` stores
+
+Under the table root, `_coverage/` stores small sidecar files:
+
+- `_coverage/segments/<id>.roar` - coverage for a segment
+- `_coverage/table/<ver>-<id>.roar` - a snapshot coverage for the whole table at a log version
+
+The table snapshot is basically the union of segment coverages so far.
+
+### How append uses coverage (end-to-end)
+
+When you append a Parquet file, the flow becomes:
+1. Map the segment's timestamps into bucket IDs (based on your `bucket`, like `1h`).
+2. Load the current table coverage snapshot (or empty for the first append).
+3. Check overlap: `segment_coverage & table_coverage`.
+4. If overlap is non-empty, reject the append (this surfaces as `CoverageOverlapError` in Python).
+5. Otherwise:
+    - write the segment coverage sidecar (coverage_path)
+    - write the new table snapshot sidecar
+    - commit the log update (same Delta-style OCC as before)
+
+That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
