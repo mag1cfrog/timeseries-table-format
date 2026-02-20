@@ -270,7 +270,7 @@ The first time I saw the overlap check catch a duplicate ingest during testing, 
 
 That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
 
-**"Why not just use Delta or Iceberg?"** Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
+**"Why not just use Delta or Iceberg?"**: Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
 
 ## Benchmarks
 
