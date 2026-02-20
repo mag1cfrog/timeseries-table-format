@@ -32,6 +32,16 @@ Writers commit version N+1 only if they started from the latest version N; if so
 4) **A current snapshot for readers (and checkpoints later)**
 Readers need a consistent view: "the table as of the latest committed version". Many systems add checkpoints later so readers don't replay a huge log.
 
+### Delta concepts -> this repo (quick mapping)
+
+| Concept | Delta mental model | This repo | Where |
+|---|---|---|---|
+| Transaction log dir | `_delta_log/` | `_timeseries_log/` | On disk, next to your data |
+| Commit entries | JSON actions | `Commit` + `LogAction` | Rust structs, serialized to JSON in the log |
+| Latest version | commit protocol | `CURRENT` file | A single file, just contains the latest version number |
+| Current snapshot | replay log (+ checkpoints) | `TableState` | In-memory, rebuilt on open |
+| Writer safety | OCC | OCC(`commit_with_expected_version(...)`) | Rust API - the only commit path |
+
 Here's the whole lifecycle in one picture:
 
 ```text
@@ -48,15 +58,6 @@ append_parquet()
 open() -> replay log -> TableState snapshot -> query
 ```
 
-## Delta concepts -> this repo (quick mapping)
-
-| Concept | Delta mental model | This repo | Where |
-|---|---|---|---|
-| Transaction log dir | `_delta_log/` | `_timeseries_log/` | On disk, next to your data |
-| Commit entries | JSON actions | `Commit` + `LogAction` | Rust structs, serialized to JSON in the log |
-| Latest version | commit protocol | `CURRENT` file | A single file, just contains the latest version number |
-| Current snapshot | replay log (+ checkpoints) | `TableState` | In-memory, rebuilt on open |
-| Writer safety | OCC | OCC(`commit_with_expected_version(...)`) | Rust API - the only commit path |
 
 ## Walkthrough: watch one append turn into a queryable table
 
@@ -126,10 +127,13 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
   }
 }
 ```
+Notice the `coverage_path` -- we'll come back to that.
 
 If you squint, you can already see the reader-side wins:
 - ts_min/ts_max enable coarse pruning (skip files that can't match a time filter).
 - the log entry is human-inspectable and replayable.
+
+So far we've looked at one table, one append. But the more interesting question is: can you register multiple tables and query across them? That's what `Session` is for.
 
 ## Try it yourself: 60 seconds to a join (Python)
 
@@ -219,10 +223,6 @@ with tempfile.TemporaryDirectory() as d:
 
     print(out)  # pyarrow.Table
 ```
-> The mental model on reads:
->
-> - "current snapshot" = whatever version CURRENT points to
-> - reader rebuilds table state by replaying commits up to that version
 
 ## Why this isn't just Delta-in-Rust: coverage tracking
 
@@ -272,7 +272,7 @@ When you append a Parquet file, the flow becomes:
 
 That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
 
-That overlap check is also what you'd catch in Python as `CoverageOverlapError` on append. But instead of detouring into more code here, let's go straight to what this design buys you in practice: throughput.
+**"Why not just use Delta or Iceberg?"** Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
 
 ## Benchmarks
 
