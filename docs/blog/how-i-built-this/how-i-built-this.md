@@ -70,6 +70,7 @@ We just talked about "immutable files + an append-only log + versioning + a curr
 ### Step 1) Create a table, append one Parquet file
 
 ```python
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 
@@ -92,7 +93,7 @@ with tempfile.TemporaryDirectory() as d:
     pq.write_table(
         pa.table(
             {
-                "ts": pa.array(["2024-06-01T00:00:00Z"], type=pa.timestamp("us", tz="UTC")),
+                "ts": pa.array([datetime(2024, 6, 1, tzinfo=timezone.utc)], type=pa.timestamp("us", tz="UTC")),
                 "symbol": pa.array(["NVDA"]),
                 "close": pa.array([10.0]),
             }
@@ -150,6 +151,7 @@ pip install timeseries-table-format
 ```python
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import tempfile
 from pathlib import Path
 
@@ -163,7 +165,7 @@ with tempfile.TemporaryDirectory() as d:
     base = Path(d)
 
     # None = no timezone normalization (use timestamps as stored in Parquet)
-    timezone = None
+    tz_config = None
 
     prices_root = base / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
@@ -171,14 +173,14 @@ with tempfile.TemporaryDirectory() as d:
         time_column="ts",
         bucket="1h",
         entity_columns=["symbol"],
-        timezone=timezone,
+        timezone=tz_config,
     )
     prices_seg = base / "prices.parquet"
     pq.write_table(
         pa.table(
             {
                 "ts": pa.array(
-                    ["2024-06-01T00:00:00Z", "2024-06-01T01:00:00Z"],
+                    [datetime(2024, 6, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, 1, tzinfo=timezone.utc)],
                     type=pa.timestamp("us", tz="UTC"),
                 ),
                 "symbol": pa.array(["NVDA", "NVDA"]),
@@ -195,14 +197,14 @@ with tempfile.TemporaryDirectory() as d:
         time_column="ts",
         bucket="1h",
         entity_columns=["symbol"],
-        timezone=timezone,
+        timezone=tz_config,
     )
     volumes_seg = base / "volumes.parquet"
     pq.write_table(
         pa.table(
             {
                 "ts": pa.array(
-                    ["2024-06-01T00:00:00Z", "2024-06-01T01:00:00Z"],
+                    [datetime(2024, 6, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, 1, tzinfo=timezone.utc)],
                     type=pa.timestamp("us", tz="UTC"),
                 ),
                 "symbol": pa.array(["NVDA", "NVDA"]),
@@ -225,7 +227,7 @@ with tempfile.TemporaryDirectory() as d:
     order by ts
     """)
 
-    print(out)  # pyarrow.Table
+    print(out)  # in Jupyter, use just `out` for a rich HTML table
 ```
 
 ## Why this isn't just Delta-in-Rust: coverage tracking
