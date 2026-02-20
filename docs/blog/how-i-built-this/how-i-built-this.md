@@ -1,6 +1,10 @@
 # I built a lakehouse table format from scratch, and here's how I did it
 
-I tried to build a small Delta-style table format in Rust, tuned for time-series appends. It's faster than Postgres / Delta + Spark / ClickHouse on append throughput (5x/4x/3x in our benchmark). Here's why and how it works, in 10 minutes.
+Once you internalize "append-only log + snapshots," a lot of modern data systems start looking like the same idea in different clothes.
+
+That's the rabbit hole that led me to build a small Delta-style table format in Rust, tuned for time-series appends. In our benchmark it beats Postgres / Delta + Spark / ClickHouse on append throughput (5x/4x/3x).
+
+This post is the 10-minute tour of how it works.
 
 If you're mostly here for the performance results, scroll to **Benchmarks** -- I won't make you wait to the end.
 
@@ -290,7 +294,7 @@ Full methodology + reproduction steps:
 https://github.com/mag1cfrog/timeseries-table-format/blob/main/docs/benchmarks/README.md
 (Also in the repo under `docs/benchmarks/README.md`.)
 
-## Limitations / non--goals (v0)
+## Limitations / non-goals (v0)
 
 This is intentionally a narrow v0 - I made explicit tradeoffs to ship something sharp (and measurable) rather than a general-purpose table format:
 
