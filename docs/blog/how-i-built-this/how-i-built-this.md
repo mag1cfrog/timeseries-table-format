@@ -2,21 +2,17 @@
 
 Once you internalize "append-only log + snapshots," a lot of modern data systems start looking like the same idea in different clothes.
 
-That's the rabbit hole that led me to build a small Delta-style table format in Rust, tuned for time-series appends. In our benchmark it beats Postgres / Delta + Spark / ClickHouse on append throughput (5x/4x/3x).
+That's the rabbit hole that led me to build a small Delta-style table format in Rust, tuned for time-series appends. In our benchmark it beats Postgres / Delta + Spark / ClickHouse on append throughput (~3-6x).
 
 This post is the 10-minute tour of how it works.
 
 If you're mostly here for the performance results, scroll to **Benchmarks** -- I won't make you wait to the end.
 
+The project is called `timeseries-table-format` -- a Rust library (with Python bindings) that implements a minimal Delta-style table format optimized for time-series append workloads.
+
 ## The moment it clicked
 
-While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log".
-
-Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era. When I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time.
-
-At that point I thought: this mental model of an immutable, append-only log must be really powerful. If the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data?
-
-That question turned into a learn-by-doing project...and eventually into the table format I'm writing about in this post.
+While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log". Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era; when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time. Once that clicked, the question became unavoidable: if the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data? That question turned into a learn-by-doing project...and eventually into the table format I'm writing about in this post.
 
 ## Lakehouse table format 101 (Delta-style, then I map it to my repo)
 
@@ -36,6 +32,22 @@ Writers commit version N+1 only if they started from the latest version N; if so
 4) **A current snapshot for readers (and checkpoints later)**
 Readers need a consistent view: "the table as of the latest committed version". Many systems add checkpoints later so readers don't replay a huge log.
 
+Here's the whole lifecycle in one picture:
+
+```text
+incoming Parquet files
+        |
+        v
+append_parquet()
+        |
+        +--> data/                     (immutable data files)
+        +--> _timeseries_log/*.json    (append-only commits)
+        +--> _timeseries_log/CURRENT   (latest version pointer)
+        |
+        v
+open() -> replay log -> TableState snapshot -> query
+```
+
 ## Delta concepts -> this repo (quick mapping)
 
 | Concept | Delta mental model | This repo | Where |
@@ -53,9 +65,6 @@ We just talked about "immutable files + an append-only log + versioning + a curr
 ### Step 1) Create a table, append one Parquet file
 
 ```python
-from __future__ import annotations
-
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 
@@ -66,7 +75,6 @@ import timeseries_table_format as ttf
 
 with tempfile.TemporaryDirectory() as d:
     root = Path(d) / "prices_tbl"
-
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
         time_column="ts",
@@ -75,23 +83,19 @@ with tempfile.TemporaryDirectory() as d:
         timezone=None,
     )
 
-    t0 = datetime(2024, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
-    ts_us = [int((t0 + timedelta(hours=i)).timestamp() * 1_000_000) for i in (0, 1, 2)]
-
     incoming = Path(d) / "incoming.parquet"
     pq.write_table(
         pa.table(
             {
-                "ts": pa.array(ts_us, type=pa.timestamp("us")),
-                "symbol": pa.array(["NVDA", "NVDA", "NVDA"], type=pa.string()),
-                "close": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
+                "ts": pa.array(["2024-06-01T00:00:00Z"], type=pa.timestamp("us", tz="UTC")),
+                "symbol": pa.array(["NVDA"]),
+                "close": pa.array([10.0]),
             }
         ),
         str(incoming),
     )
 
-    v2 = tbl.append_parquet(str(incoming))
-    print("new version:", v2)
+    print("new version:", tbl.append_parquet(str(incoming)))
 ```
 
 > What landed on disk (conceptually):
@@ -270,7 +274,7 @@ That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the c
 
 That overlap check is also what you'd catch in Python as `CoverageOverlapError` on append. But instead of detouring into more code here, let's go straight to what this design buys you in practice: throughput.
 
-## Benchmarks (the "5x/4x/3x" part)
+## Benchmarks
 
 Big performance claims are cheap -- so here are the numbers.
 
