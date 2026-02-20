@@ -2,21 +2,21 @@
 
 Once you internalize "append-only log + snapshots," a lot of modern data systems start looking like the same idea in different clothes.
 
-That's the rabbit hole that led me to build a small Delta-style table format in Rust, tuned for time-series appends. In our benchmark it beats Postgres / Delta + Spark / ClickHouse on append throughput (~3-6x).
+That's the rabbit hole that led me to build a small Delta-style table format in Rust, tuned for time-series appends. In my benchmark it beats Postgres / Delta + Spark / ClickHouse on append throughput (~3-6x).
 
 This post is the 10-minute tour of how it works.
 
-If you've ever managed a pipeline that appends daily Parquet files and wished the plumbing was simpler, this might resonate.
+If you've ever managed a pipeline that appends daily Parquet files and wished the plumbing was simpler, this might be your kind of rabbit hole too.
 
 If you're mostly here for the performance results, scroll to **Benchmarks** -- I won't make you wait to the end.
 
-The project is called `timeseries-table-format` -- a Rust library with freshly-shipped Python bindings, implementing a minimal Delta-style table format optimized for time-series append workloads. Everything below works with just `pip install`.
+The project is called `timeseries-table-format` -- a Rust library with Python bindings, implementing a minimal Delta-style table format optimized for time-series append workloads. Everything below works with just `pip install`.
 
 ## The moment it clicked
 
 While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log".
 
-Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era; when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time.
+Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era -- when I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time.
 
 Once that clicked, the question became unavoidable: if the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data? That question turned into a learn-by-doing project... and eventually into the table format I'm writing about in this post.
 
@@ -128,7 +128,7 @@ So far we've looked at one table, one append. But the more interesting question 
 
 ## Try it yourself: 60 seconds to a join (Python)
 
-Here's why this matters: `Session` isn't just "a query wrapper for one table". It's a single SQL session where you can register multiple tables and run real joins across them.
+Here's why this matters: `Session` isn't just "a query wrapper for one table". It's a single SQL session backed by [Apache DataFusion](https://datafusion.apache.org/) where you can register multiple tables and run real joins across them.
 
 ```bash
 pip install timeseries-table-format
@@ -234,8 +234,6 @@ Time-series users keep asking questions like:
 
 Coverage is how I solved it -- and it bought me two things I didn't expect to get for free.
 
-Two concrete wins:
-
 - Gap/coverage questions become metadata reads, not Parquet rescans.
 - Overlap-safe ingestion becomes the default, not "best-effort".
 
@@ -270,7 +268,7 @@ The first time I saw the overlap check catch a duplicate ingest during testing, 
 
 That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
 
-**"Why not just use Delta or Iceberg?"**: Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
+**"Why not just use Delta or Iceberg?"** Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
 
 ## Benchmarks
 
@@ -305,6 +303,6 @@ I intentionally scoped this as a narrow v0. Every feature I left out was a delib
 The quickest "does it feel nice?" path is the Python quickstart earlier in this post ("Try it yourself: 60 seconds to a join (Python)").
 
 Everything -- code, benchmarks, docs -- lives here:
-[timeseries-table-format on GitHub](https://github.com/mag1cfrog/timeseries-table-format)
+[timeseries-table-format on GitHub](https://github.com/mag1cfrog/timeseries-table-format) - [PyPI](https://pypi.org/project/timeseries-table-format/)
 
 If this post was useful, a star helps -- and if you have workload ideas or strong opinions on v1 priorities (compaction, object storage, schema evolution), open an issue.
