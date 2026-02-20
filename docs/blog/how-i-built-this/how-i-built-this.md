@@ -2,15 +2,17 @@
 
 I tried to build a small Delta-style table format in Rust, tuned for time-series appends. It's faster than Postgres / Delta + Spark / ClickHouse on append throughput (5x/4x/3x in our benchmark). Here's why and how it works, in 10 minutes.
 
+If you're mostly here for the performance results, scroll to **Benchmarks** -- I won't make you wait to the end.
+
 ## The moment it clicked
 
 While I was learning Kafka (docs + blogs + YouTube tutorials), one theme kept coming up: the more useful way to think about Kafka isn't "a message queue", but "an immutable append-only log".
 
 Around the same time, I was reading about how big data stacks evolved from Hadoop + Hive to the lakehouse era. When I dug into table formats like Delta Lake and Iceberg, I noticed the same pattern again: an append-only history of metadata that describes table state over time.
 
-At that point I thought: this mental model of an immutable, append-only log must be really powerful. If the core idea is just “log + snapshots + a bit of concurrency control,” how hard would it be to build a small version myself - and tune it specifically for time-series data?
+At that point I thought: this mental model of an immutable, append-only log must be really powerful. If the core idea is just "log + snapshots + a bit of concurrency control", how hard would it be to build a small version myself - and tune it specifically for time-series data?
 
-That question turned into a learn-by-doing project…and eventually into the table format I’m writing about in this post.
+That question turned into a learn-by-doing project...and eventually into the table format I'm writing about in this post.
 
 ## Lakehouse table format 101 (Delta-style, then I map it to my repo)
 
@@ -71,7 +73,7 @@ with tempfile.TemporaryDirectory() as d:
 
     t0 = datetime(2024, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
     ts_us = [int((t0 + timedelta(hours=i)).timestamp() * 1_000_000) for i in (0, 1, 2)]
-    
+
     incoming = Path(d) / "incoming.parquet"
     pq.write_table(
         pa.table(
@@ -261,3 +263,37 @@ When you append a Parquet file, the flow becomes:
     - commit the log update (same Delta-style OCC as before)
 
 That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
+
+
+## Benchmarks (the "5x/4x/3x" part)
+
+Big performance claims are cheap -- so here are the numbers.
+
+I ran the same workload across ClickHouse, Delta Lake + Spark, PostgreSQL, and TimescaleDB using the NYC TLC FHVHV trip dataset (April-June 2024, ~73M rows). The test I care most about is "daily append": 90 day-sized files appended one after another, like a real ETL pipeline.
+
+Headline results (lower is better):
+
+| System | Daily Append (mean) | Time-Range Scan |
+|---|---:|---:|
+| **timeseries-table** | **335 ms** | **545 ms** |
+| ClickHouse | 1,114 ms | 1.4 s |
+| Delta + Spark | 1,454 ms | 964 ms |
+| PostgreSQL | 1,829 ms | 43.6 s |
+| TimescaleDB | 3,197 ms | 43.9 s |
+
+On daily appends, this format is ~3.3x faster than ClickHouse, ~4.3x faster than Delta + Spark, and ~5.5x faster than PostgreSQL in this setup.
+
+The query story holds up too: on time-range scans it's ~2.5x faster than ClickHouse and ~80x faster than PostgreSQL here. (Aggregations are also competitive with ClickHouse: within ~3% in this benchmark.)
+
+Full methodology + reproduction steps:
+https://github.com/mag1cfrog/timeseries-table-format/blob/main/docs/benchmarks/README.md
+(Also in the repo under `docs/benchmarks/README.md`.)
+
+## Try it / feedback
+
+The quickest "does it feel nice?" path is the Python quickstart earlier in this post ("Try it yourself: 60 seconds to a join (Python)").
+
+Everything -- code, benchmarks, docs -- lives here:
+https://github.com/mag1cfrog/timeseries-table-format
+
+If this post was useful, a star helps -- and if you have workload ideas or strong opinions on v1 priorities (compaction, object storage, schema evolution), open an issue.
