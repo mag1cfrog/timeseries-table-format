@@ -288,13 +288,7 @@ I ran the same workload across ClickHouse, Delta Lake + Spark, PostgreSQL, and T
 
 Headline results (lower is better):
 
-| System | Daily Append (mean) | Time-Range Scan |
-|---|---:|---:|
-| **timeseries-table** | **335 ms** | **545 ms** |
-| ClickHouse | 1,114 ms | 1.4 s |
-| Delta + Spark | 1,454 ms | 964 ms |
-| PostgreSQL | 1,829 ms | 43.6 s |
-| TimescaleDB | 3,197 ms | 43.9 s |
+![Benchmark results (73M rows NYC taxi dataset; lower is better)](./benchmark-chart-light.png)
 
 On daily appends, this format is ~3.3x faster than ClickHouse, ~4.3x faster than Delta + Spark, and ~5.5x faster than PostgreSQL in this setup.
 
