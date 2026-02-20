@@ -264,6 +264,7 @@ When you append a Parquet file, the flow becomes:
 
 That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
 
+That overlap check is also what you'd catch in Python as `CoverageOverlapError` on append. But instead of detouring into more code here, let's go straight to what this design buys you in practice: throughput.
 
 ## Benchmarks (the "5x/4x/3x" part)
 
@@ -288,6 +289,16 @@ The query story holds up too: on time-range scans it's ~2.5x faster than ClickHo
 Full methodology + reproduction steps:
 https://github.com/mag1cfrog/timeseries-table-format/blob/main/docs/benchmarks/README.md
 (Also in the repo under `docs/benchmarks/README.md`.)
+
+## Limitations / non--goals (v0)
+
+This is intentionally a narrow v0 - I made explicit tradeoffs to ship something sharp (and measurable) rather than a general-purpose table format:
+
+- Local filesystem tables (no S3/GCS/Azure object store yet)
+- No compaction / merge (overlap is rejected; no upsert semantics)
+- No schema evolution story yet
+- No distributed coordinator (single-writer OCC at the log level; conflicts surface as errors you retry)
+- Reader side is "replay the log" (no checkpointing yet)
 
 ## Try it / feedback
 
