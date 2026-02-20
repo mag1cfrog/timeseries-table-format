@@ -378,6 +378,7 @@ Current status and near-term roadmap:
 
 ## Further Reading
 
+- [How I built this: design decisions, coverage tracking, and benchmark walkthrough](docs/blog/how-i-built-this/how-i-built-this.md)
 - [Benchmark methodology & results](docs/benchmarks/README.md)
 - [Python docs](https://mag1cfrog.github.io/timeseries-table-format/)
 - [CLI reference](crates/timeseries-table-cli/README.md)
