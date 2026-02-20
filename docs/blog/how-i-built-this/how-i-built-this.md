@@ -57,7 +57,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import timeseries_table_format as ttf
-    
+
 with tempfile.TemporaryDirectory() as d:
     root = Path(d) / "prices_tbl"
 
@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory() as d:
 >
 > - prices_tbl/_timeseries_log/CURRENT
 > - prices_tbl/_timeseries_log/0000000001.json (table metadata commit)
-> - prices_tbl/data/<somefile>.parquet (if the input file was outside the table root and had to be copied in)
+> - prices_tbl/data/incoming.parquet (if the input file was outside the table root and had to be copied in)
 > - prices_tbl/_timeseries_log/0000000002.json (append commit)
 > - prices_tbl/_timeseries_log/CURRENT now points to version 2
 
