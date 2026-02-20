@@ -216,6 +216,8 @@ with tempfile.TemporaryDirectory() as d:
 
 Two tables, one SQL join, pure Python -- no Rust toolchain, no Spark cluster.
 
+If you’re wondering how this pure-Python script executes SQL so quickly without a heavy JVM or cluster, it’s because Python is just the steering wheel here. Under the hood, the engine is written in Rust and powered by Apache DataFusion. You get the ergonomics of Python, but the multi-threaded performance of a compiled language.
+
 That join worked because the same log + snapshot design extends naturally to multiple tables in one session. But there's one more piece that makes this format specifically useful for time-series work: coverage tracking.
 
 ## Why this isn't just Delta-in-Rust: coverage tracking
