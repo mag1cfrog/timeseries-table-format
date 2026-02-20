@@ -94,6 +94,8 @@ with tempfile.TemporaryDirectory() as d:
 > - prices_tbl/_timeseries_log/0000000002.json (append commit)
 > - prices_tbl/_timeseries_log/CURRENT now points to version 2
 
+![On-disk layout after one append](./directory-tree.png)
+
 ### Step 2) The artifact: a real `AddSegment` action
 
 A new data file becomes part of the table only after it's logged.
