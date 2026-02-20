@@ -38,13 +38,7 @@ Readers need a consistent view: "the table as of the latest committed version". 
 
 ### Delta concepts -> this repo (quick mapping)
 
-| Concept | Delta mental model | This repo | Where |
-|---|---|---|---|
-| Transaction log dir | `_delta_log/` | `_timeseries_log/` | On disk, next to your data |
-| Commit entries | JSON actions | `Commit` + `LogAction` | Rust structs, serialized to JSON in the log |
-| Latest version | commit protocol | `CURRENT` file | A single file, just contains the latest version number |
-| Current snapshot | replay log (+ checkpoints) | `TableState` | In-memory, rebuilt on open |
-| Writer safety | OCC | OCC(`commit_with_expected_version(...)`) | Rust API - the only commit path |
+![Mapping table](./mapping-table.png)
 
 Here's the whole lifecycle in one picture:
 
