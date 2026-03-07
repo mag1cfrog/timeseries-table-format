@@ -158,4 +158,16 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn propogates_midstream_error() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1,2])?;
+
+        let source = stream::iter(vec![])
+    }
 }
