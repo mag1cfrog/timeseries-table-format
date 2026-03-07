@@ -75,3 +75,87 @@ impl Drop for SqlStreamRecordBatchReader {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use arrow_array::{ArrayRef, Int32Array, RecordBatch};
+    use datafusion::{
+        arrow::datatypes::{DataType, Field, Schema, SchemaRef},
+        error::DataFusionError,
+        execution::SendableRecordBatchStream,
+        physical_plan::stream::RecordBatchStreamAdapter,
+    };
+    use futures_util::stream;
+
+    use crate::sql_stream_reader::SqlStreamRecordBatchReader;
+
+    fn make_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]))
+    }
+
+    fn make_batch(
+        schema: &SchemaRef,
+        values: &[i32],
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        let array: ArrayRef = Arc::new(Int32Array::from(values.to_vec()));
+        Ok(RecordBatch::try_new(schema.clone(), vec![array])?)
+    }
+
+    fn batch_values(batch: &RecordBatch) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+        let Some(array) = batch.column(0).as_any().downcast_ref::<Int32Array>() else {
+            return Err(std::io::Error::other("expected Int32Array").into());
+        };
+        Ok(array.values().to_vec())
+    }
+
+    fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        predicate()
+    }
+
+    #[test]
+    fn yields_all_batches_in_order() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch1 = make_batch(&schema, &[1, 2])?;
+        let batch2 = make_batch(&schema, &[3, 4])?;
+
+        let source = stream::iter(vec![Ok(batch1.clone()), Ok(batch2.clone())]);
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema.clone(), stream);
+
+        let first = match reader.next() {
+            Some(Ok(batch)) => batch,
+            Some(Err(err)) => return Err(Box::new(err)),
+            None => return Err(std::io::Error::other("expected first batch").into()),
+        };
+        let second = match reader.next() {
+            Some(Ok(batch)) => batch,
+            Some(Err(err)) => return Err(Box::new(err)),
+            None => return Err(std::io::Error::other("expected second batch").into()),
+        };
+
+        assert_eq!(batch_values(&first)?, vec![1, 2]);
+        assert_eq!(batch_values(&second)?, vec![3, 4]);
+        assert!(reader.next().is_none());
+        assert!(reader.next().is_none());
+
+        Ok(())
+    }
+}
