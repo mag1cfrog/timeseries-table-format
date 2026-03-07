@@ -111,9 +111,10 @@ impl Drop for SqlStreamRecordBatchReader {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         pin::Pin,
-        sync::Arc,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        sync::{Arc, mpsc as std_mpsc},
         task::{Context, Poll},
         time::{Duration, Instant},
     };
@@ -161,6 +162,66 @@ mod tests {
         predicate()
     }
 
+    struct ScriptedStream {
+        schema: SchemaRef,
+        items: VecDeque<DFResult<RecordBatch>>,
+        poll_count: Arc<AtomicUsize>,
+        poll_signal: Option<std_mpsc::Sender<usize>>,
+        dropped: Option<Arc<AtomicBool>>,
+    }
+
+    impl ScriptedStream {
+        fn new(
+            schema: SchemaRef,
+            items: VecDeque<DFResult<RecordBatch>>,
+            poll_count: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                schema,
+                items,
+                poll_count,
+                poll_signal: None,
+                dropped: None,
+            }
+        }
+
+        fn with_poll_signal(mut self, poll_signal: std_mpsc::Sender<usize>) -> Self {
+            self.poll_signal = Some(poll_signal);
+            self
+        }
+
+        fn with_dropped_flag(mut self, dropped: Arc<AtomicBool>) -> Self {
+            self.dropped = Some(dropped);
+            self
+        }
+    }
+
+    impl Stream for ScriptedStream {
+        type Item = DFResult<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let poll_index = self.poll_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(signal) = &self.poll_signal {
+                let _ = signal.send(poll_index);
+            }
+            Poll::Ready(self.items.pop_front())
+        }
+    }
+
+    impl RecordBatchStream for ScriptedStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+    }
+
+    impl Drop for ScriptedStream {
+        fn drop(&mut self) {
+            if let Some(dropped) = &self.dropped {
+                dropped.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     #[test]
     fn yields_all_batches_in_order() -> Result<(), Box<dyn std::error::Error>> {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -197,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn propogates_midstream_error() -> Result<(), Box<dyn std::error::Error>> {
+    fn propagates_midstream_error() -> Result<(), Box<dyn std::error::Error>> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -230,6 +291,53 @@ mod tests {
         };
 
         assert!(err.to_string().contains("boom"));
+        assert!(reader.next().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn producer_stops_polling_after_first_error() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch1 = make_batch(&schema, &[1])?;
+        let batch2 = make_batch(&schema, &[2])?;
+        let poll_count = Arc::new(AtomicUsize::new(0));
+
+        let stream = Box::pin(ScriptedStream::new(
+            schema.clone(),
+            VecDeque::from([
+                Ok(batch1),
+                Err(DataFusionError::Execution("boom".to_string())),
+                Ok(batch2),
+            ]),
+            poll_count.clone(),
+        )) as SendableRecordBatchStream;
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        match reader.next() {
+            Some(Ok(_)) => {}
+            Some(Err(err)) => return Err(Box::new(err)),
+            None => return Err(std::io::Error::other("expected first batch").into()),
+        }
+
+        match reader.next() {
+            Some(Err(err)) => assert!(err.to_string().contains("boom")),
+            Some(Ok(_)) => {
+                return Err(std::io::Error::other("expected terminal stream error").into());
+            }
+            None => return Err(std::io::Error::other("expected stream error").into()),
+        }
+
+        assert!(wait_until(Duration::from_millis(100), || {
+            poll_count.load(Ordering::SeqCst) >= 2
+        }));
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(poll_count.load(Ordering::SeqCst), 2);
         assert!(reader.next().is_none());
 
         Ok(())
@@ -283,36 +391,6 @@ mod tests {
 
     #[test]
     fn bounded_channel_applies_backpressure() -> Result<(), Box<dyn std::error::Error>> {
-        struct CountingStream {
-            schema: SchemaRef,
-            batch: RecordBatch,
-            remaining: usize,
-            produced: Arc<AtomicUsize>,
-        }
-
-        impl Stream for CountingStream {
-            type Item = DFResult<RecordBatch>;
-
-            fn poll_next(
-                mut self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> Poll<Option<Self::Item>> {
-                if self.remaining == 0 {
-                    return Poll::Ready(None);
-                }
-
-                self.remaining -= 1;
-                self.produced.fetch_add(1, Ordering::SeqCst);
-                Poll::Ready(Some(Ok(self.batch.clone())))
-            }
-        }
-
-        impl RecordBatchStream for CountingStream {
-            fn schema(&self) -> SchemaRef {
-                self.schema.clone()
-            }
-        }
-
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -320,21 +398,22 @@ mod tests {
         let schema = make_schema();
         let batch = make_batch(&schema, &[1])?;
         let produced = Arc::new(AtomicUsize::new(0));
+        let (poll_tx, poll_rx) = std_mpsc::channel();
 
-        let stream = Box::pin(CountingStream {
-            schema: schema.clone(),
-            batch,
-            remaining: 3,
-            produced: produced.clone(),
-        }) as SendableRecordBatchStream;
+        let stream = Box::pin(
+            ScriptedStream::new(
+                schema.clone(),
+                VecDeque::from([Ok(batch.clone()), Ok(batch.clone()), Ok(batch)]),
+                produced.clone(),
+            )
+            .with_poll_signal(poll_tx),
+        ) as SendableRecordBatchStream;
 
         let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
 
-        assert!(wait_until(Duration::from_secs(1), || {
-            produced.load(Ordering::SeqCst) >= 1
-        }));
-
-        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
+        assert!(poll_rx.recv_timeout(Duration::from_millis(100)).is_err());
         assert_eq!(produced.load(Ordering::SeqCst), 2);
 
         match reader.next() {
@@ -343,9 +422,104 @@ mod tests {
             None => return Err(std::io::Error::other("expected first batch").into()),
         }
 
-        assert!(wait_until(Duration::from_secs(1), || {
-            produced.load(Ordering::SeqCst) >= 2
-        }));
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 3);
+        assert_eq!(produced.load(Ordering::SeqCst), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn drop_aborts_producer_blocked_on_full_channel() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1])?;
+        let poll_count = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (poll_tx, poll_rx) = std_mpsc::channel();
+
+        let stream = Box::pin(
+            ScriptedStream::new(
+                schema.clone(),
+                VecDeque::from([Ok(batch.clone()), Ok(batch.clone()), Ok(batch)]),
+                poll_count,
+            )
+            .with_poll_signal(poll_tx)
+            .with_dropped_flag(dropped.clone()),
+        ) as SendableRecordBatchStream;
+
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
+        assert!(poll_rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        drop(reader);
+
+        assert!(wait_until(Duration::from_secs(1), || dropped.load(Ordering::SeqCst)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_stream_returns_none_immediately() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let stream = Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            stream::iter(Vec::<DFResult<RecordBatch>>::new()),
+        )) as SendableRecordBatchStream;
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        assert!(reader.next().is_none());
+        assert!(reader.next().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn drop_after_partial_consumption_aborts_producer() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1])?;
+        let poll_count = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (poll_tx, poll_rx) = std_mpsc::channel();
+
+        let stream = Box::pin(
+            ScriptedStream::new(
+                schema.clone(),
+                VecDeque::from([
+                    Ok(batch.clone()),
+                    Ok(batch.clone()),
+                    Ok(batch.clone()),
+                    Ok(batch),
+                ]),
+                poll_count,
+            )
+            .with_poll_signal(poll_tx)
+            .with_dropped_flag(dropped.clone()),
+        ) as SendableRecordBatchStream;
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
+        assert!(matches!(reader.next(), Some(Ok(_))));
+        assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 3);
+
+        drop(reader);
+
+        assert!(wait_until(Duration::from_secs(1), || dropped.load(Ordering::SeqCst)));
 
         Ok(())
     }
