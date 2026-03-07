@@ -325,4 +325,37 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn next_works_inside_tokio_multithread_runtime() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1, 2])?;
+
+        let source = stream::iter(vec![Ok(batch)]);
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
+
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        let out = rt.block_on(async move {
+            tokio::spawn(async move {
+                let mut reader = reader;
+                reader.next()
+            })
+            .await
+        });
+
+        let item = out.expect("task should not panic");
+        match item {
+            Some(Ok(batch)) => assert_eq!(batch_values(&batch)?, vec![1, 2]),
+            Some(Err(err)) => return Err(Box::new(err)),
+            None => return Err(std::io::Error::other("expected one batch").into()),
+        }
+
+        Ok(())
+    }
 }
