@@ -69,6 +69,12 @@ impl SqlStreamRecordBatchReader {
             Err(_) => self.rx.blocking_recv(),
         }
     }
+
+    fn abort_producer(&mut self) {
+        if let Some(handle) = self.producer_task.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl Iterator for SqlStreamRecordBatchReader {
@@ -83,6 +89,7 @@ impl Iterator for SqlStreamRecordBatchReader {
             Some(Ok(batch)) => Some(Ok(batch)),
             Some(Err(err)) => {
                 self.finished = true;
+                self.abort_producer();
                 Some(Err(err))
             }
             None => {
@@ -101,9 +108,7 @@ impl RecordBatchReader for SqlStreamRecordBatchReader {
 
 impl Drop for SqlStreamRecordBatchReader {
     fn drop(&mut self) {
-        if let Some(handle) = self.producer_task.take() {
-            handle.abort();
-        }
+        self.abort_producer();
     }
 }
 
@@ -588,6 +593,53 @@ mod tests {
                 return Err(std::io::Error::other("expected an error item").into());
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn current_thread_runtime_error_aborts_producer_immediately()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let producer_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let consumer_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1, 2])?;
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        let stream = Box::pin(
+            ScriptedStream::new(
+                schema.clone(),
+                VecDeque::from([Ok(batch)]),
+                Arc::new(AtomicUsize::new(0)),
+            )
+            .with_dropped_flag(dropped.clone()),
+        ) as SendableRecordBatchStream;
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&producer_rt, stream);
+
+        let item = consumer_rt.block_on(async move { reader.next() });
+
+        match item {
+            Some(Err(err)) => {
+                assert!(
+                    err.to_string()
+                        .contains("cannot block inside a Tokio current-thread runtime")
+                );
+            }
+            Some(Ok(_)) => {
+                return Err(std::io::Error::other("expected runtime-context error").into());
+            }
+            None => {
+                return Err(std::io::Error::other("expected an error item").into());
+            }
+        }
+
+        assert!(wait_until(Duration::from_secs(1), || dropped.load(Ordering::SeqCst)));
 
         Ok(())
     }
