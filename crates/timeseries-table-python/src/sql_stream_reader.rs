@@ -3,7 +3,7 @@ use datafusion::{
     arrow::{datatypes::SchemaRef, error::ArrowError},
     execution::SendableRecordBatchStream,
 };
-use futures_util::{StreamExt, io};
+use futures_util::StreamExt;
 use tokio::{
     runtime::{Handle, Runtime, RuntimeFlavor},
     sync::mpsc,
@@ -55,14 +55,16 @@ impl SqlStreamRecordBatchReader {
                     let rx = &mut self.rx;
                     tokio::task::block_in_place(|| rx.blocking_recv())
                 }
-                RuntimeFlavor::CurrentThread => {
-                    Some(Err(ArrowError::ExternalError(Box::new(io::Error::other(
+                RuntimeFlavor::CurrentThread => Some(Err(ArrowError::ExternalError(Box::new(
+                    std::io::Error::other(
                         "SqlStreamRecordBatchReader cannot block inside a Tokio current-thread runtime",
-                    )))))
-                }
-                _ => Some(Err(ArrowError::ExternalError(Box::new(io::Error::other(
-                    "unsupported Tokio runtime flavor for SqlStreamRecordBatchReader",
-                ))))),
+                    ),
+                )))),
+                _ => Some(Err(ArrowError::ExternalError(Box::new(
+                    std::io::Error::other(
+                        "unsupported Tokio runtime flavor for SqlStreamRecordBatchReader",
+                    ),
+                )))),
             },
             Err(_) => self.rx.blocking_recv(),
         }
