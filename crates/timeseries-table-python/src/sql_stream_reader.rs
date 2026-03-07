@@ -3,8 +3,12 @@ use datafusion::{
     arrow::{datatypes::SchemaRef, error::ArrowError},
     execution::SendableRecordBatchStream,
 };
-use futures_util::StreamExt;
-use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
+use futures_util::{StreamExt, io};
+use tokio::{
+    runtime::{Handle, Runtime, RuntimeFlavor},
+    sync::mpsc,
+    task::JoinHandle,
+};
 
 pub(crate) struct SqlStreamRecordBatchReader {
     schema: SchemaRef,
@@ -46,6 +50,26 @@ impl SqlStreamRecordBatchReader {
             finished: false,
         }
     }
+
+    fn recv_next(&mut self) -> Option<Result<RecordBatch, ArrowError>> {
+        match Handle::try_current() {
+            Ok(handle) => match handle.runtime_flavor() {
+                RuntimeFlavor::MultiThread => {
+                    let rx = &mut self.rx;
+                    tokio::task::block_in_place(|| handle.block_on(rx.recv()))
+                }
+                RuntimeFlavor::CurrentThread => {
+                    Some(Err(ArrowError::ExternalError(Box::new(io::Error::other(
+                        "SqlStreamRecordBatchReader cannot block inside a Tokio current-thread runtime",
+                    )))))
+                }
+                _ => Some(Err(ArrowError::ExternalError(Box::new(io::Error::other(
+                    "unsupported Tokio runtime flavor for SqlStreamRecordBatchReader",
+                ))))),
+            },
+            Err(_) => self.rx.blocking_recv(),
+        }
+    }
 }
 
 impl Iterator for SqlStreamRecordBatchReader {
@@ -56,7 +80,7 @@ impl Iterator for SqlStreamRecordBatchReader {
             return None;
         }
 
-        match self.rx.blocking_recv() {
+        match self.recv_next() {
             Some(Ok(batch)) => Some(Ok(batch)),
             Some(Err(err)) => {
                 self.finished = true;
