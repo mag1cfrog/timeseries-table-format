@@ -568,7 +568,12 @@ mod tests {
             .await
         });
 
-        let item = out.expect("task should not panic");
+        let item = match out {
+            Ok(item) => item,
+            Err(err) => {
+                return Err(std::io::Error::other(format!("task should not panic: {err}")).into());
+            }
+        };
         match item {
             Some(Ok(batch)) => assert_eq!(batch_values(&batch)?, vec![1, 2]),
             Some(Err(err)) => return Err(Box::new(err)),
