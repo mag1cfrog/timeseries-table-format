@@ -19,11 +19,8 @@ pub(crate) struct SqlStreamRecordBatchReader {
 
 impl SqlStreamRecordBatchReader {
     /// Spawn a producer task that drains the async stream into a bounded channel.
-    pub(crate) fn spawn(
-        rt: &Runtime,
-        schema: SchemaRef,
-        mut stream: SendableRecordBatchStream,
-    ) -> Self {
+    pub(crate) fn spawn(rt: &Runtime, mut stream: SendableRecordBatchStream) -> Self {
+        let schema = stream.schema();
         let (tx, rx) = mpsc::channel(1);
 
         let producer_task = rt.spawn(async move {
@@ -236,7 +233,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema.clone(), stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         let first = match reader.next() {
             Some(Ok(batch)) => batch,
@@ -274,7 +271,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         match reader.next() {
             Some(Ok(_)) => {}
@@ -317,7 +314,7 @@ mod tests {
             poll_count.clone(),
         )) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         match reader.next() {
             Some(Ok(_)) => {}
@@ -382,7 +379,7 @@ mod tests {
             dropped: dropped.clone(),
         }) as SendableRecordBatchStream;
 
-        let reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
         drop(reader);
 
         assert!(wait_until(Duration::from_secs(1), || dropped.load(Ordering::SeqCst)));
@@ -409,7 +406,7 @@ mod tests {
             .with_poll_signal(poll_tx),
         ) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
@@ -450,7 +447,7 @@ mod tests {
             .with_dropped_flag(dropped.clone()),
         ) as SendableRecordBatchStream;
 
-        let reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
@@ -475,7 +472,7 @@ mod tests {
             stream::iter(Vec::<DFResult<RecordBatch>>::new()),
         )) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         assert!(reader.next().is_none());
         assert!(reader.next().is_none());
@@ -510,7 +507,7 @@ mod tests {
             .with_dropped_flag(dropped.clone()),
         ) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
@@ -537,7 +534,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         let out = rt.block_on(async move {
             tokio::spawn(async move {
@@ -571,7 +568,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
 
         let item = rt.block_on(async move { reader.next() });
 
