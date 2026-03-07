@@ -24,9 +24,17 @@ impl SqlStreamRecordBatchReader {
 
         let producer_task = rt.spawn(async move {
             while let Some(item) = stream.next().await {
-                let next_batch = item.map_err(ArrowError::from);
-                if tx.send(next_batch).await.is_err() {
-                    return;
+                match item {
+                    Ok(batch) => {
+                        if tx.send(Ok(batch)).await.is_err() {
+                            return;
+                        }
+                    }
+
+                    Err(err) => {
+                        let _ = tx.send(Err(ArrowError::from(err))).await;
+                        return;
+                    }
                 }
             }
         });
