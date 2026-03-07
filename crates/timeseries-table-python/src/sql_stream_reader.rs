@@ -382,4 +382,40 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn next_returns_error_inside_tokio_current_thread_runtime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1, 2])?;
+
+        let source = stream::iter(vec![Ok(batch)]);
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        let item = rt.block_on(async move { reader.next() });
+
+        match item {
+            Some(Err(err)) => {
+                assert!(
+                    err.to_string()
+                        .contains("cannot block inside a Tokio current-thread runtime")
+                );
+            }
+            Some(Ok(_)) => {
+                return Err(std::io::Error::other("expected runtime-context error").into());
+            }
+            None => {
+                return Err(std::io::Error::other("expected an error item").into());
+            }
+        }
+
+        Ok(())
+    }
 }
