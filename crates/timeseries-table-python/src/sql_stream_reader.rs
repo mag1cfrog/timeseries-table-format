@@ -79,18 +79,23 @@ impl Drop for SqlStreamRecordBatchReader {
 #[cfg(test)]
 mod tests {
     use std::{
+        pin::Pin,
         sync::Arc,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        task::{Context, Poll},
         time::{Duration, Instant},
     };
 
     use arrow_array::{ArrayRef, Int32Array, RecordBatch};
     use datafusion::{
         arrow::datatypes::{DataType, Field, Schema, SchemaRef},
+        common::Result as DFResult,
         error::DataFusionError,
-        execution::SendableRecordBatchStream,
-        physical_plan::stream::RecordBatchStreamAdapter,
+        physical_plan::{
+            RecordBatchStream, SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
+        },
     };
-    use futures_util::stream;
+    use futures_util::{Stream, stream};
 
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;
 
@@ -166,8 +171,150 @@ mod tests {
             .build()?;
 
         let schema = make_schema();
-        let batch = make_batch(&schema, &[1,2])?;
+        let batch = make_batch(&schema, &[1, 2])?;
 
-        let source = stream::iter(vec![])
+        let source = stream::iter(vec![
+            Ok(batch),
+            Err(DataFusionError::Execution("boom".to_string())),
+        ]);
+
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        match reader.next() {
+            Some(Ok(_)) => {}
+            Some(Err(err)) => return Err(Box::new(err)),
+            None => return Err(std::io::Error::other("expected first batch").into()),
+        }
+
+        let err = match reader.next() {
+            Some(Err(err)) => err,
+            Some(Ok(_)) => {
+                return Err(std::io::Error::other("expected stream error, got batch").into());
+            }
+            None => return Err(std::io::Error::other("expected stream error").into()),
+        };
+
+        assert!(err.to_string().contains("boom"));
+        assert!(reader.next().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn drop_aborts_producer_task() -> Result<(), Box<dyn std::error::Error>> {
+        struct PendingStream {
+            schema: SchemaRef,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Stream for PendingStream {
+            type Item = DFResult<RecordBatch>;
+
+            fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                Poll::Pending
+            }
+        }
+
+        impl RecordBatchStream for PendingStream {
+            fn schema(&self) -> SchemaRef {
+                self.schema.clone()
+            }
+        }
+
+        impl Drop for PendingStream {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        let stream = Box::pin(PendingStream {
+            schema: schema.clone(),
+            dropped: dropped.clone(),
+        }) as SendableRecordBatchStream;
+
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+        drop(reader);
+
+        assert!(wait_until(Duration::from_secs(1), || dropped.load(Ordering::SeqCst)));
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_channel_applies_backpressure() -> Result<(), Box<dyn std::error::Error>> {
+        struct CountingStream {
+            schema: SchemaRef,
+            batch: RecordBatch,
+            remaining: usize,
+            produced: Arc<AtomicUsize>,
+        }
+
+        impl Stream for CountingStream {
+            type Item = DFResult<RecordBatch>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.remaining == 0 {
+                    return Poll::Ready(None);
+                }
+
+                self.remaining -= 1;
+                self.produced.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(Ok(self.batch.clone())))
+            }
+        }
+
+        impl RecordBatchStream for CountingStream {
+            fn schema(&self) -> SchemaRef {
+                self.schema.clone()
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1])?;
+        let produced = Arc::new(AtomicUsize::new(0));
+
+        let stream = Box::pin(CountingStream {
+            schema: schema.clone(),
+            batch,
+            remaining: 3,
+            produced: produced.clone(),
+        }) as SendableRecordBatchStream;
+
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, schema, stream);
+
+        assert!(wait_until(Duration::from_secs(1), || {
+            produced.load(Ordering::SeqCst) >= 1
+        }));
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(produced.load(Ordering::SeqCst), 2);
+
+        match reader.next() {
+            Some(Ok(_)) => {}
+            Some(Err(err)) => return Err(Box::new(err)),
+            None => return Err(std::io::Error::other("expected first batch").into()),
+        }
+
+        assert!(wait_until(Duration::from_secs(1), || {
+            produced.load(Ordering::SeqCst) >= 2
+        }));
+
+        Ok(())
     }
 }
