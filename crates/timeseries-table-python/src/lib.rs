@@ -1,6 +1,7 @@
 //! Python bindings for timeseries-table-format (v0 skeleton).
 mod error_map;
 mod exceptions;
+#[allow(dead_code)]
 mod sql_stream_reader;
 mod tokio_runner;
 
