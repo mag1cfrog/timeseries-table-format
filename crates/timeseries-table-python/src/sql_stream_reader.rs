@@ -19,7 +19,24 @@ pub(crate) struct SqlStreamRecordBatchReader {
 
 impl SqlStreamRecordBatchReader {
     /// Spawn a producer task that drains the async stream into a bounded channel.
-    pub(crate) fn spawn(rt: &Runtime, mut stream: SendableRecordBatchStream) -> Self {
+    pub(crate) fn spawn(
+        rt: &Runtime,
+        mut stream: SendableRecordBatchStream,
+    ) -> Result<Self, ArrowError> {
+        match rt.handle().runtime_flavor() {
+            RuntimeFlavor::MultiThread => {}
+            RuntimeFlavor::CurrentThread => {
+                return Err(ArrowError::ExternalError(Box::new(std::io::Error::other(
+                    "SqlStreamRecordBatchReader requires a Tokio multi-thread runtime",
+                ))));
+            }
+            _ => {
+                return Err(ArrowError::ExternalError(Box::new(std::io::Error::other(
+                    "unsupported Tokio runtime flavor for SqlStreamRecordBatchReader",
+                ))));
+            }
+        }
+
         let schema = stream.schema();
         let (tx, rx) = mpsc::channel(1);
 
@@ -40,12 +57,12 @@ impl SqlStreamRecordBatchReader {
             }
         });
 
-        Self {
+        Ok(Self {
             schema,
             rx,
             producer_task: Some(producer_task),
             finished: false,
-        }
+        })
     }
 
     fn recv_next(&mut self) -> Option<Result<RecordBatch, ArrowError>> {
@@ -240,7 +257,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         let first = match reader.next() {
             Some(Ok(batch)) => batch,
@@ -278,7 +295,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         match reader.next() {
             Some(Ok(_)) => {}
@@ -321,7 +338,7 @@ mod tests {
             poll_count.clone(),
         )) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         match reader.next() {
             Some(Ok(_)) => {}
@@ -386,7 +403,7 @@ mod tests {
             dropped: dropped.clone(),
         }) as SendableRecordBatchStream;
 
-        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
         drop(reader);
 
         assert!(wait_until(Duration::from_secs(1), || dropped.load(Ordering::SeqCst)));
@@ -413,7 +430,7 @@ mod tests {
             .with_poll_signal(poll_tx),
         ) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
@@ -454,7 +471,7 @@ mod tests {
             .with_dropped_flag(dropped.clone()),
         ) as SendableRecordBatchStream;
 
-        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
@@ -479,7 +496,7 @@ mod tests {
             stream::iter(Vec::<DFResult<RecordBatch>>::new()),
         )) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         assert!(reader.next().is_none());
         assert!(reader.next().is_none());
@@ -514,7 +531,7 @@ mod tests {
             .with_dropped_flag(dropped.clone()),
         ) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 1);
         assert_eq!(poll_rx.recv_timeout(Duration::from_secs(1))?, 2);
@@ -541,7 +558,7 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let reader = SqlStreamRecordBatchReader::spawn(&rt, stream)?;
 
         let out = rt.block_on(async move {
             tokio::spawn(async move {
@@ -564,7 +581,10 @@ mod tests {
     #[test]
     fn next_returns_error_inside_tokio_current_thread_runtime()
     -> Result<(), Box<dyn std::error::Error>> {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let producer_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let consumer_rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
 
@@ -575,9 +595,9 @@ mod tests {
         let stream: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema.clone(), source));
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&producer_rt, stream)?;
 
-        let item = rt.block_on(async move { reader.next() });
+        let item = consumer_rt.block_on(async move { reader.next() });
 
         match item {
             Some(Err(err)) => {
@@ -593,6 +613,36 @@ mod tests {
                 return Err(std::io::Error::other("expected an error item").into());
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_rejects_current_thread_runtime() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let schema = make_schema();
+        let batch = make_batch(&schema, &[1, 2])?;
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream::iter(vec![Ok(batch)]),
+        ));
+
+        let err = match SqlStreamRecordBatchReader::spawn(&rt, stream) {
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "expected current-thread runtime construction error",
+                )
+                .into());
+            }
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("requires a Tokio multi-thread runtime")
+        );
 
         Ok(())
     }
@@ -620,7 +670,7 @@ mod tests {
             .with_dropped_flag(dropped.clone()),
         ) as SendableRecordBatchStream;
 
-        let mut reader = SqlStreamRecordBatchReader::spawn(&producer_rt, stream);
+        let mut reader = SqlStreamRecordBatchReader::spawn(&producer_rt, stream)?;
 
         let item = consumer_rt.block_on(async move { reader.next() });
 
