@@ -70,7 +70,7 @@ impl SqlStreamRecordBatchReader {
             Ok(handle) => match handle.runtime_flavor() {
                 RuntimeFlavor::MultiThread => {
                     let rx = &mut self.rx;
-                    tokio::task::block_in_place(|| rx.blocking_recv())
+                    tokio::task::block_in_place(|| handle.block_on(rx.recv()))
                 }
                 RuntimeFlavor::CurrentThread => Some(Err(ArrowError::ExternalError(Box::new(
                     std::io::Error::other(

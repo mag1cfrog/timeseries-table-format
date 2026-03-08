@@ -82,6 +82,29 @@ class Session:
         """
         ...
 
+    def sql_reader(
+        self,
+        query: str,
+        *,
+        params: object | None = None,
+    ) -> pyarrow.RecordBatchReader:
+        """Run a SQL query and return a streaming `pyarrow.RecordBatchReader`.
+
+        Parameters
+        ----------
+        query:
+            SQL query string.
+        params:
+            Optional query parameter values for DataFusion SQL placeholders.
+
+        Notes
+        -----
+        Unlike `Session.sql(...)`, this does not materialize the full result eagerly.
+        Iterate batches incrementally or call `reader.read_all()` if you want a
+        `pyarrow.Table`.
+        """
+        ...
+
     def tables(self) -> list[str]:
         """Return the list of currently registered table names (sorted)."""
         ...
@@ -170,6 +193,16 @@ class _TestingModule(ModuleType):
     def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
     def _test_sleep_without_gil(self, millis: int) -> None: ...
     def _test_session_table_exists(self, session: Session, name: str) -> bool: ...
+    def _test_sql_reader_unsupported_schema(self) -> None: ...
+    def _test_sql_reader_midstream_error(self) -> pyarrow.RecordBatchReader: ...
+    def _test_sql_reader_pending_after_first_batch(self) -> pyarrow.RecordBatchReader: ...
+    def _test_sql_reader_delayed_batches(
+        self,
+        *,
+        batch_count: int,
+        rows_per_batch: int,
+        delay_millis: int,
+    ) -> pyarrow.RecordBatchReader: ...
     def _bench_sql_ipc(
         self,
         session: Session,

@@ -13,7 +13,7 @@ pyo3 = { version = "0.28" }
 
 futures-util = { workspace = true }
 
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
 timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2" }
 timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.2" }
