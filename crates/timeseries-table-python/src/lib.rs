@@ -386,7 +386,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
                     if let Ok(v) = pa_mod.getattr("__version__")
                         && let Ok(s) = v.extract::<String>()
                     {
-                        msg = format!("{msg} (detected pyarrow=={s}");
+                        msg = format!("{msg} (detected pyarrow=={s})");
                     }
                     return Err(PyImportError::new_err(msg));
                 }
@@ -972,6 +972,45 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
             Ok(table.into())
         }
 
+        /// Run a SQL query and return a streaming `pyarrow.RecordBatchReader`.
+        ///
+        /// This method runs synchronously from Python, but uses an internal Tokio runtime and
+        /// releases the GIL while planning the query and starting the stream.
+        ///
+        /// Parameters
+        /// ----------
+        /// query:
+        ///     SQL query string.
+        /// params:
+        ///     Optional query parameter values for DataFusion SQL placeholders:
+        ///
+        ///     - Positional: pass a list/tuple to bind `$1`, `$2`, ...
+        ///       Example: `sess.sql_reader("select * from t where x = $1", params=[1])`
+        ///     - Named: pass a dict to bind `$name` placeholders (keys may optionally start with `$`).
+        ///       Example: `sess.sql_reader("select * from t where x = $a", params={"a": 1})`
+        ///
+        ///     Supported Python value types: `None`, `bool`, `int` (i64 range), `float`, `str`, `bytes`.
+        ///
+        /// Notes
+        /// -----
+        /// Unlike `Session.sql(...)`, this does not materialize the full result eagerly.
+        /// Iterate batches incrementally or call `reader.read_all()` if you want a
+        /// `pyarrow.Table`.
+        ///
+        /// DataFusion infers placeholder types from context when possible (e.g. in `WHERE` clauses).
+        /// If you use placeholders in a `SELECT` projection without type context, you may need an
+        /// explicit cast, e.g. `SELECT CAST($1 AS BIGINT) AS x`.
+        ///
+        /// Raises
+        /// ------
+        /// ImportError:
+        ///     If `pyarrow` cannot be imported.
+        /// DataFusionError:
+        ///     If the SQL fails to plan or execute.
+        /// RuntimeError:
+        ///     If the result schema cannot be exported via Arrow C Stream.
+        /// TypeError, ValueError:
+        ///     If `params` has an invalid shape or contains unsupported value types.
         #[pyo3(signature = (query, *, params=None))]
         fn sql_reader(
             &self,
