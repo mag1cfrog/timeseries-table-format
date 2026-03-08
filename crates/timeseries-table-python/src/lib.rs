@@ -1602,6 +1602,179 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         )
     }
 
+    /// Test-only helper: raise the same unsupported-schema error used by `Session.sql_reader(...)`.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_sql_reader_unsupported_schema(py: Python<'_>) -> PyResult<()> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, UnionFields, UnionMode};
+
+        let uf = UnionFields::try_new(
+            vec![1, 3],
+            vec![
+                Field::new("a", DataType::Int64, true),
+                Field::new("b", DataType::Utf8, true),
+            ],
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "u",
+            DataType::Union(uf, UnionMode::Dense),
+            true,
+        )]));
+
+        if !can_export_schema_to_c_stream(&schema) {
+            return Err(PyRuntimeError::new_err(
+                "Session.sql_reader: schema cannot be exported via Arrow C Stream (unsupported type). \
+Cast unsupported columns to supported Arrow types, or use Session.sql(...) to materialize a pyarrow.Table instead.",
+            ));
+        }
+
+        let _ = py;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn test_reader_from_stream(
+        py: Python<'_>,
+        stream: SendableRecordBatchStream,
+    ) -> PyResult<Py<PyAny>> {
+        let rt = tokio_runner::global_runtime()?;
+        let stream = export_stream_to_c_stream(rt.as_ref(), stream)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        record_batch_reader_from_c_stream(py, stream)
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn make_test_i64_batch(
+        schema: &SchemaRef,
+        start: i64,
+        len: usize,
+    ) -> Result<RecordBatch, ArrowError> {
+        use arrow_array::Int64Array;
+
+        let values: Vec<i64> = (start..start + len as i64).collect();
+        let array = Arc::new(Int64Array::from(values));
+        RecordBatch::try_new(schema.clone(), vec![array])
+    }
+
+    /// Test-only helper: return a reader that yields one batch, then raises a mid-stream error.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_sql_reader_midstream_error(py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use futures_util::stream;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = make_test_i64_batch(&schema, 1, 2)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let source = stream::iter(vec![
+            Ok(batch),
+            Err(DFError::Execution("mid-stream boom".to_string())),
+        ]);
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(schema, source));
+
+        test_reader_from_stream(py, stream)
+    }
+
+    /// Test-only helper: return a reader that yields one batch, then never produces another
+    /// batch unless the reader is closed and the producer task is aborted.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_sql_reader_pending_after_first_batch(py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::physical_plan::RecordBatchStream;
+        use futures_util::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct PendingAfterFirstBatchStream {
+            schema: SchemaRef,
+            first_batch: Option<RecordBatch>,
+        }
+
+        impl Stream for PendingAfterFirstBatchStream {
+            type Item = Result<RecordBatch, DFError>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if let Some(batch) = self.first_batch.take() {
+                    Poll::Ready(Some(Ok(batch)))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        impl RecordBatchStream for PendingAfterFirstBatchStream {
+            fn schema(&self) -> SchemaRef {
+                self.schema.clone()
+            }
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = make_test_i64_batch(&schema, 1, 2)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let stream: SendableRecordBatchStream = Box::pin(PendingAfterFirstBatchStream {
+            schema,
+            first_batch: Some(batch),
+        });
+
+        test_reader_from_stream(py, stream)
+    }
+
+    /// Test-only helper: return a reader that yields `batch_count` delayed batches of
+    /// sequential `Int64` values. Used to test time-to-first-batch behavior.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    #[pyo3(signature = (*, batch_count, rows_per_batch, delay_millis))]
+    fn _test_sql_reader_delayed_batches(
+        py: Python<'_>,
+        batch_count: usize,
+        rows_per_batch: usize,
+        delay_millis: u64,
+    ) -> PyResult<Py<PyAny>> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use futures_util::{StreamExt, stream};
+        use std::time::Duration;
+
+        if batch_count == 0 {
+            return Err(PyValueError::new_err("batch_count must be >= 1"));
+        }
+        if rows_per_batch == 0 {
+            return Err(PyValueError::new_err("rows_per_batch must be >= 1"));
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let schema_for_stream = schema.clone();
+        let source = stream::iter(0..batch_count).then(move |batch_index| {
+            let schema = schema_for_stream.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(delay_millis)).await;
+                make_test_i64_batch(
+                    &schema,
+                    (batch_index * rows_per_batch) as i64,
+                    rows_per_batch,
+                )
+                .map_err(|e| DFError::Execution(e.to_string()))
+            }
+        });
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(schema, source));
+
+        test_reader_from_stream(py, stream)
+    }
+
     /// Benchmark helper: run a SQL query and return Arrow IPC stream bytes plus Rust-side timing
     /// and sizing metrics.
     ///
@@ -1903,6 +2076,22 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_session_table_exists, py)?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(
+                _test_sql_reader_unsupported_schema,
+                py
+            )?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(
+                _test_sql_reader_midstream_error,
+                py
+            )?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(
+                _test_sql_reader_pending_after_first_batch,
+                py
+            )?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(
+                _test_sql_reader_delayed_batches,
+                py
+            )?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_ipc, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_bench_sql_c_stream, py)?)?;
             m.add("_testing", &testing)?;
