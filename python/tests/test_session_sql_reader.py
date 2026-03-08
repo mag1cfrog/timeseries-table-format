@@ -493,13 +493,16 @@ def test_session_sql_reader_close_after_partial_consumption_is_terminal():
         rows_per_batch=2,
         delay_millis=0,
     )
-    first_batch = next(reader)
-    assert first_batch.num_rows == 2
+    try:
+        first_batch = next(reader)
+        assert first_batch.num_rows == 2
 
-    reader.close()
+        reader.close()
 
-    with pytest.raises(pa.ArrowInvalid, match="closed"):
-        next(reader)
+        with pytest.raises(pa.ArrowInvalid, match="closed"):
+            next(reader)
+    finally:
+        reader.close()
 
 
 def test_session_sql_reader_close_after_read_all_does_not_hang():
