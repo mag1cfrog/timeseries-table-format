@@ -27,6 +27,17 @@ out = ttf.Session().sql("select 1 as x")
 print(type(out))  # pyarrow.Table
 ```
 
+## Development: build and test locally
+
+To run the Python test suite against the local editable Rust extension, build the extension into
+the repo virtualenv first, then run `pytest` with the same interpreter.
+
+```bash
+cd python
+uv run -p .venv/bin/python maturin develop --features test-utils
+uv run --no-sync -C build-args="--features test-utils" pytest -q
+```
+
 ## Return type and interop
 
 `Session.sql(...)` returns a `pyarrow.Table`.
