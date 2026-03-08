@@ -268,11 +268,12 @@ def _print_summary(out: dict[str, object]) -> None:
                 reduction_pct = (
                     (table_med - stream_med) / table_med * 100.0 if table_med else 0.0
                 )
+                relation = "lower" if reduction_pct >= 0 else "higher"
                 print(
                     "  isolated peak RSS: "
                     f"sql_reader={_fmt_optional_bytes(process_stream_iso_rss)} "
                     f"vs session_sql materialize_then_process={_fmt_optional_bytes(process_table_iso_rss)} "
-                    f"({reduction_pct:.1f}% lower)",
+                    f"({abs(reduction_pct):.1f}% {relation})",
                     file=sys.stderr,
                 )
 
