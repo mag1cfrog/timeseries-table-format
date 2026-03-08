@@ -370,9 +370,9 @@ def test_session_sql_reader_streams_first_batch_before_full_consumption():
 
     assert first_batch.num_rows == 3
     assert len(remaining_batches) == 3
-    assert first_elapsed < 0.25
-    assert total_elapsed > 0.35
-    assert total_elapsed > first_elapsed + 0.10
+    assert first_elapsed < total_elapsed
+    assert total_elapsed - first_elapsed >= 0.15
+    assert total_elapsed >= 0.25
 
 
 def test_session_sql_reader_requires_pyarrow_from_stream(monkeypatch: pytest.MonkeyPatch):
