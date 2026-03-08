@@ -82,6 +82,29 @@ class Session:
         """
         ...
 
+    def sql_reader(
+        self,
+        query: str,
+        *,
+        params: object | None = None,
+    ) -> pyarrow.RecordBatchReader:
+        """Run a SQL query and return a streaming `pyarrow.RecordBatchReader`.
+
+        Parameters
+        ----------
+        query:
+            SQL query string.
+        params:
+            Optional query parameter values for DataFusion SQL placeholders.
+
+        Notes
+        -----
+        Unlike `Session.sql(...)`, this does not materialize the full result eagerly.
+        Iterate batches incrementally or call `reader.read_all()` if you want a
+        `pyarrow.Table`.
+        """
+        ...
+
     def tables(self) -> list[str]:
         """Return the list of currently registered table names (sorted)."""
         ...
