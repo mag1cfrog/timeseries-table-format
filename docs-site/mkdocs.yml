@@ -43,6 +43,7 @@ nav:
       - Create, append, query: tutorials/create_append_query.md
       - Register + join: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md
+      - Real-world workflow: tutorials/real_world_workflow.md
   - Concepts:
       - When to use this: concepts/when_to_use_this.md
       - Buckets + overlap: concepts/bucketing_and_overlap.md
