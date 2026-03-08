@@ -1,5 +1,25 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.4
+
+
+### Features
+
+- Add cancellable SQL stream RecordBatchReader bridge ([6a43c05](https://github.com/mag1cfrog/timeseries-table-format/commit/6a43c059d36cd4b2004b0c317d646f207b51535f))
+
+- Add streaming Session.sql_reader API ([1d115e2](https://github.com/mag1cfrog/timeseries-table-format/commit/1d115e27ee41043552f85f8c118a0cc49d6e9445))
+
+
+### Testing
+
+- Add streaming SQL reader coverage ([84be901](https://github.com/mag1cfrog/timeseries-table-format/commit/84be901a813a7249f576969137d4d61bfe83af9e))
+
+
+### Bench
+
+- Add streaming SQL benchmarks ([8d2cef1](https://github.com/mag1cfrog/timeseries-table-format/commit/8d2cef1f6fbcca22b8a5b29cb2cc270f63eff813))
+
+
 ## 0.1.3
 
 
