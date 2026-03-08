@@ -356,6 +356,7 @@ mod _native {
     fn record_batch_reader_from_c_stream(
         py: Python<'_>,
         stream: FFI_ArrowArrayStream,
+        api_name: &str,
     ) -> PyResult<Py<PyAny>> {
         let name = CString::new("arrow_array_stream")
             .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
@@ -364,7 +365,7 @@ mod _native {
 
         let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
             PyImportError::new_err(format!(
-                "pyarrow is required for Session.sql_reader(...): {e}"
+                "pyarrow is required for Session.{api_name}(...): {e}"
             ))
         })?;
 
@@ -380,8 +381,10 @@ mod _native {
             Ok(v) => v,
             Err(e) => {
                 if e.is_instance_of::<PyAttributeError>(py) {
-                    let mut msg = "pyarrow.RecordBatchReader.from_stream is required for Session.sql_reader(...). \
-This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installation.".to_string();
+                    let mut msg = format!(
+                        "pyarrow.RecordBatchReader.from_stream is required for Session.{api_name}(...). \
+This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installation."
+                    );
 
                     if let Ok(v) = pa_mod.getattr("__version__")
                         && let Ok(s) = v.extract::<String>()
@@ -420,7 +423,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
     }
 
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
-        let reader = record_batch_reader_from_c_stream(py, stream)?;
+        let reader = record_batch_reader_from_c_stream(py, stream, "sql")?;
         let reader = reader.bind(py);
 
         let table_res = reader.call_method0("read_all");
@@ -1081,7 +1084,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 },
             )?;
 
-            record_batch_reader_from_c_stream(py, stream)
+            record_batch_reader_from_c_stream(py, stream, "sql_reader")
         }
 
         /// Return the list of currently registered table names (sorted).
@@ -1642,7 +1645,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         let rt = tokio_runner::global_runtime()?;
         let stream = export_stream_to_c_stream(rt.as_ref(), stream)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        record_batch_reader_from_c_stream(py, stream)
+        record_batch_reader_from_c_stream(py, stream, "_test_sql_reader")
     }
 
     #[cfg(feature = "test-utils")]
