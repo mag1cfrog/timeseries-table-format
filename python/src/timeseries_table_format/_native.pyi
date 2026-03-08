@@ -10,8 +10,11 @@ class ConflictError(TimeseriesTableError): ...
 
 class CoverageOverlapError(TimeseriesTableError):
     segment_path: str
+    """Path to the Parquet segment that triggered the overlap."""
     overlap_count: int
+    """Number of (entity, bucket) pairs that already have coverage."""
     example_bucket: int | None
+    """One example bucket (epoch microseconds) that overlapped, for debugging."""
 
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
