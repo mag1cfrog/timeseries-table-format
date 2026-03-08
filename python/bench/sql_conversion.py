@@ -8,7 +8,9 @@ import importlib
 import json
 import os
 import platform
+import resource
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -187,10 +189,350 @@ def _print_summary(out: dict[str, object]) -> None:
         except Exception:
             pass
 
+    for r in out.get("streaming_results", []):  # type: ignore[assignment]
+        name = r["name"]
+
+        first_batch_s = float(r["sql_reader_iter"]["time_to_first_batch_s"]["median_s"])
+        iter_total_s = float(r["sql_reader_iter"]["total_iter_s"]["median_s"])
+        read_all_s = float(r["sql_reader_read_all"]["total_s"]["median_s"])
+        session_sql_s = float(r["session_sql_table"]["total_s"]["median_s"])
+
+        print(
+            f"- {name}: sql_reader first_batch={_fmt_seconds(first_batch_s)} iterate_all={_fmt_seconds(iter_total_s)} read_all={_fmt_seconds(read_all_s)} session_sql={_fmt_seconds(session_sql_s)}",
+            file=sys.stderr,
+        )
+
+        row_counts = [int(x) for x in r["sql_reader_iter"]["row_count"]]
+        batch_counts = [int(x) for x in r["sql_reader_iter"]["batch_count"]]
+        if row_counts and batch_counts:
+            median_rows = sorted(row_counts)[len(row_counts) // 2]
+            median_batches = sorted(batch_counts)[len(batch_counts) // 2]
+            throughput = median_rows / iter_total_s if iter_total_s > 0 else float("nan")
+            print(
+                f"  median rows={median_rows} batches={median_batches} throughput={throughput:,.0f} rows/s",
+                file=sys.stderr,
+            )
+
+        iter_rss = r["sql_reader_iter"].get("peak_rss_bytes")
+        read_all_rss = r["sql_reader_read_all"].get("peak_rss_bytes")
+        table_rss = r["session_sql_table"].get("peak_rss_bytes")
+        if iter_rss or read_all_rss or table_rss:
+            print(
+                "  peak RSS (best-effort): "
+                f"iter={_fmt_optional_bytes(iter_rss)} "
+                f"sql_reader.read_all={_fmt_optional_bytes(read_all_rss)} "
+                f"session_sql={_fmt_optional_bytes(table_rss)}",
+                file=sys.stderr,
+            )
+
+        process_stream_s = float(
+            r["sql_reader_process_as_you_go"]["total_s"]["median_s"]
+        )
+        process_table_s = float(
+            r["session_sql_process_after_materialize"]["total_s"]["median_s"]
+        )
+        process_first_batch_s = float(
+            r["sql_reader_process_as_you_go"]["time_to_first_batch_s"]["median_s"]
+        )
+        table_process_first_batch_s = float(
+            r["session_sql_process_after_materialize"]["time_to_first_batch_s"][
+                "median_s"
+            ]
+        )
+
+        print(
+            "  process-as-you-go: "
+            f"sql_reader first_batch={_fmt_seconds(process_first_batch_s)} total={_fmt_seconds(process_stream_s)} "
+            f"vs session_sql materialize_then_process first_batch={_fmt_seconds(table_process_first_batch_s)} total={_fmt_seconds(process_table_s)}",
+            file=sys.stderr,
+        )
+
+        process_stream_iso_rss = r["sql_reader_process_as_you_go"].get(
+            "isolated_peak_rss_bytes"
+        )
+        process_table_iso_rss = r["session_sql_process_after_materialize"].get(
+            "isolated_peak_rss_bytes"
+        )
+        if isinstance(process_stream_iso_rss, list) and isinstance(
+            process_table_iso_rss, list
+        ):
+            stream_vals = [int(x) for x in process_stream_iso_rss if x is not None]
+            table_vals = [int(x) for x in process_table_iso_rss if x is not None]
+            if stream_vals and table_vals:
+                stream_med = sorted(stream_vals)[len(stream_vals) // 2]
+                table_med = sorted(table_vals)[len(table_vals) // 2]
+                reduction_pct = (
+                    (table_med - stream_med) / table_med * 100.0 if table_med else 0.0
+                )
+                print(
+                    "  isolated peak RSS: "
+                    f"sql_reader={_fmt_optional_bytes(process_stream_iso_rss)} "
+                    f"vs session_sql materialize_then_process={_fmt_optional_bytes(process_table_iso_rss)} "
+                    f"({reduction_pct:.1f}% lower)",
+                    file=sys.stderr,
+                )
+
+
+def _try_peak_rss_bytes() -> int | None:
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return None
+
+    if rss <= 0:
+        return None
+
+    if sys.platform == "darwin":
+        return int(rss)
+    return int(rss) * 1024
+
+
+def _fmt_optional_bytes(xs: object) -> str:
+    if not isinstance(xs, list) or not xs:
+        return "n/a"
+
+    vals = [int(x) for x in xs if x is not None]
+    if not vals:
+        return "n/a"
+
+    b = sorted(vals)[len(vals) // 2]
+    mib = b / (1024**2)
+    if mib < 1024:
+        return f"{mib:.1f} MiB"
+    return f"{mib / 1024:.2f} GiB"
+
+
+def _read_proc_rss_bytes(pid: int) -> int | None:
+    status = Path(f"/proc/{pid}/status")
+    try:
+        text = status.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+    for line in text.splitlines():
+        if line.startswith("VmRSS:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1]) * 1024
+                except ValueError:
+                    return None
+    return None
+
+
+def _bench_sql_reader_iter(sess: ttf.Session, sql: str) -> dict[str, int | float | None]:
+    t0 = _now()
+    reader = sess.sql_reader(sql)
+    first_batch_rows = 0
+    row_count = 0
+    batch_count = 0
+
+    try:
+        try:
+            first_batch = next(reader)
+        except StopIteration:
+            t_first = _now()
+        else:
+            t_first = _now()
+            first_batch_rows = first_batch.num_rows
+            row_count += first_batch_rows
+            batch_count += 1
+
+            for batch in reader:
+                row_count += batch.num_rows
+                batch_count += 1
+
+        t_done = _now()
+    finally:
+        reader.close()
+
+    return {
+        "time_to_first_batch_s": t_first - t0,
+        "total_iter_s": t_done - t0,
+        "post_first_batch_s": t_done - t_first,
+        "row_count": row_count,
+        "batch_count": batch_count,
+        "first_batch_rows": first_batch_rows,
+        "peak_rss_bytes": _try_peak_rss_bytes(),
+    }
+
+
+def _bench_sql_reader_read_all(sess: ttf.Session, sql: str) -> dict[str, int | float | None]:
+    t0 = _now()
+    reader = sess.sql_reader(sql)
+    try:
+        table = reader.read_all()
+    finally:
+        reader.close()
+    t1 = _now()
+
+    return {
+        "total_s": t1 - t0,
+        "row_count": table.num_rows,
+        "batch_count": len(table.to_batches()),
+        "peak_rss_bytes": _try_peak_rss_bytes(),
+    }
+
+
+def _bench_session_sql_table(sess: ttf.Session, sql: str) -> dict[str, int | float | None]:
+    t0 = _now()
+    table = sess.sql(sql)
+    t1 = _now()
+
+    return {
+        "total_s": t1 - t0,
+        "row_count": table.num_rows,
+        "batch_count": len(table.to_batches()),
+        "peak_rss_bytes": _try_peak_rss_bytes(),
+    }
+
+
+def _bench_sql_reader_process_as_you_go(
+    sess: ttf.Session, sql: str
+) -> dict[str, int | float | None]:
+    t0 = _now()
+    reader = sess.sql_reader(sql)
+    row_count = 0
+    batch_count = 0
+    first_batch_rows = 0
+    first_batch_s: float | None = None
+
+    try:
+        for batch in reader:
+            if first_batch_s is None:
+                first_batch_s = _now() - t0
+                first_batch_rows = batch.num_rows
+            row_count += batch.num_rows
+            batch_count += 1
+    finally:
+        reader.close()
+
+    t1 = _now()
+
+    if first_batch_s is None:
+        first_batch_s = t1 - t0
+
+    return {
+        "time_to_first_batch_s": first_batch_s,
+        "total_s": t1 - t0,
+        "post_first_batch_s": (t1 - t0) - first_batch_s,
+        "row_count": row_count,
+        "batch_count": batch_count,
+        "first_batch_rows": first_batch_rows,
+        "peak_rss_bytes": _try_peak_rss_bytes(),
+    }
+
+
+def _bench_session_sql_process_after_materialize(
+    sess: ttf.Session, sql: str
+) -> dict[str, int | float | None]:
+    t0 = _now()
+    table = sess.sql(sql)
+    t_materialized = _now()
+
+    row_count = 0
+    batch_count = 0
+    first_batch_rows = 0
+    first_batch_s: float | None = None
+
+    for batch in table.to_batches():
+        if first_batch_s is None:
+            first_batch_s = t_materialized - t0
+            first_batch_rows = batch.num_rows
+        row_count += batch.num_rows
+        batch_count += 1
+
+    t1 = _now()
+
+    if first_batch_s is None:
+        first_batch_s = t1 - t0
+
+    return {
+        "time_to_first_batch_s": first_batch_s,
+        "materialize_s": t_materialized - t0,
+        "total_s": t1 - t0,
+        "post_first_batch_s": (t1 - t0) - first_batch_s,
+        "row_count": row_count,
+        "batch_count": batch_count,
+        "first_batch_rows": first_batch_rows,
+        "peak_rss_bytes": _try_peak_rss_bytes(),
+    }
+
+
+def _run_isolated_worker(
+    mode: str,
+    table_root: Path,
+    sql: str,
+) -> dict[str, int | float | None]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--worker-mode",
+        mode,
+        "--worker-table-root",
+        str(table_root),
+        "--worker-query",
+        sql,
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    sampled_peak_rss: int | None = None
+    while True:
+        rss = _read_proc_rss_bytes(proc.pid)
+        if rss is not None:
+            if sampled_peak_rss is None or rss > sampled_peak_rss:
+                sampled_peak_rss = rss
+
+        if proc.poll() is not None:
+            break
+
+        time.sleep(0.01)
+
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Isolated benchmark worker failed.\n"
+            f"mode={mode}\n"
+            f"returncode={proc.returncode}\n"
+            f"stdout={stdout}\n"
+            f"stderr={stderr}"
+        )
+
+    metrics = json.loads(stdout)
+    metrics["isolated_peak_rss_bytes"] = sampled_peak_rss
+    return metrics
+
+
+def _run_worker_mode(mode: str, table_root: str, sql: str) -> int:
+    sess = ttf.Session()
+    sess.register_tstable("prices", table_root)
+
+    if mode == "sql_reader_process_as_you_go":
+        out = _bench_sql_reader_process_as_you_go(sess, sql)
+    elif mode == "session_sql_process_after_materialize":
+        out = _bench_session_sql_process_after_materialize(sess, sql)
+    else:
+        raise SystemExit(f"unsupported --worker-mode: {mode}")
+
+    print(json.dumps(out))
+    return 0
+
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        description="Micro-benchmark: SQL -> (IPC vs Arrow C Stream) -> pyarrow.Table"
+        description=(
+            "Micro-benchmark: Session.sql(...) table materialization and "
+            "optional Session.sql_reader(...) streaming metrics"
+        )
     )
     ap.add_argument("--target-ipc-gb", type=float, default=2.0)
     ap.add_argument("--ipc-compression", choices=["none", "zstd"], default="none")
@@ -201,6 +543,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--warmups", type=int, default=1)
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--medium-ipc-mb", type=int, default=64)
+    ap.add_argument(
+        "--include-streaming",
+        action="store_true",
+        help=(
+            "Also benchmark Session.sql_reader(...) time-to-first-batch, full "
+            "batch iteration throughput, and .read_all() parity."
+        ),
+    )
     ap.add_argument("--no-gc-disable", action="store_true")
     ap.add_argument("--json", type=str, default="")
     ap.add_argument(
@@ -219,7 +569,17 @@ def main(argv: list[str]) -> int:
         default="",
         help="Directory to place the temporary benchmark dataset (Parquet + table).",
     )
+    ap.add_argument("--worker-mode", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--worker-table-root", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--worker-query", default="", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+
+    if args.worker_mode:
+        if not args.worker_table_root:
+            raise SystemExit("--worker-table-root is required with --worker-mode")
+        if not args.worker_query:
+            raise SystemExit("--worker-query is required with --worker-mode")
+        return _run_worker_mode(args.worker_mode, args.worker_table_root, args.worker_query)
 
     if args.target_ipc_gb <= 0:
         raise SystemExit("--target-ipc-gb must be > 0")
@@ -329,6 +689,7 @@ def main(argv: list[str]) -> int:
                 },
                 "dataset": gen_info,
                 "results": [],
+                "streaming_results": [],
                 "notes": [
                     "decode_only measures pyarrow.ipc.open_stream(bytes).read_all() time.",
                     "c_stream_decode_only measures pyarrow.RecordBatchReader.from_stream(obj_with___arrow_c_stream__) + .read_all() + .close() time.",
@@ -340,6 +701,17 @@ def main(argv: list[str]) -> int:
                 ],
             }
 
+            if args.include_streaming:
+                out["streaming_notes"] = [
+                    "sql_reader_iter measures Session.sql_reader(...) through first batch and then incremental batch iteration with minimal per-batch work (row counting).",
+                    "sql_reader_process_as_you_go measures the intended streaming workload: consume batches incrementally and do minimal per-batch work without calling .read_all().",
+                    "session_sql_process_after_materialize measures the comparable non-streaming workload: Session.sql(...) materializes a Table first, then Python processes the resulting batches.",
+                    "sql_reader_read_all measures Session.sql_reader(...).read_all() end-to-end.",
+                    "session_sql_table measures the existing Session.sql(...) -> pyarrow.Table path for comparison.",
+                    "isolated_peak_rss_bytes runs the process-as-you-go modes in fresh child processes and samples /proc/<pid>/status VmRSS for a per-mode peak RSS estimate.",
+                    "peak_rss_bytes is best-effort process ru_maxrss captured after each run; it is cumulative over the benchmark process lifetime.",
+                ]
+
             def _decode_c_stream(obj: object) -> pa.Table:
                 reader = pa.RecordBatchReader.from_stream(obj)
                 try:
@@ -350,6 +722,11 @@ def main(argv: list[str]) -> int:
             def _session_sql_forced(mode: str, sql: str) -> pa.Table:
                 with _temp_env_var("TTF_SQL_EXPORT_MODE", mode):
                     return sess.sql(sql)
+
+            streaming_queries = [
+                ("large_all_scan", "select * from prices"),
+                ("large_all_order_by_ts", "select * from prices order by ts"),
+            ]
 
             for name, sql in queries:
                 # Warmup: run both paths once to populate OS page cache and DataFusion internal caches.
@@ -510,6 +887,255 @@ def main(argv: list[str]) -> int:
                         },
                     }
                 )
+
+            if args.include_streaming:
+                for name, sql in streaming_queries:
+                    for _ in range(args.warmups):
+                        warm = _bench_sql_reader_iter(sess, sql)
+                        del warm
+                        gc.collect()
+
+                        warm = _bench_sql_reader_read_all(sess, sql)
+                        del warm
+                        gc.collect()
+
+                        warm = _bench_session_sql_table(sess, sql)
+                        del warm
+                        gc.collect()
+
+                    sql_reader_first_batch_times: list[float] = []
+                    sql_reader_total_iter_times: list[float] = []
+                    sql_reader_post_first_batch_times: list[float] = []
+                    sql_reader_row_counts: list[int] = []
+                    sql_reader_batch_counts: list[int] = []
+                    sql_reader_first_batch_rows: list[int] = []
+                    sql_reader_peak_rss_bytes: list[int | None] = []
+
+                    sql_reader_read_all_times: list[float] = []
+                    sql_reader_read_all_row_counts: list[int] = []
+                    sql_reader_read_all_batch_counts: list[int] = []
+                    sql_reader_read_all_peak_rss_bytes: list[int | None] = []
+
+                    session_sql_table_times: list[float] = []
+                    session_sql_table_row_counts: list[int] = []
+                    session_sql_table_batch_counts: list[int] = []
+                    session_sql_table_peak_rss_bytes: list[int | None] = []
+
+                    sql_reader_process_times: list[float] = []
+                    sql_reader_process_first_batch_times: list[float] = []
+                    sql_reader_process_post_first_batch_times: list[float] = []
+                    sql_reader_process_row_counts: list[int] = []
+                    sql_reader_process_batch_counts: list[int] = []
+                    sql_reader_process_first_batch_rows: list[int] = []
+                    sql_reader_process_peak_rss_bytes: list[int | None] = []
+                    sql_reader_process_isolated_peak_rss_bytes: list[int | None] = []
+
+                    session_sql_process_times: list[float] = []
+                    session_sql_process_materialize_times: list[float] = []
+                    session_sql_process_first_batch_times: list[float] = []
+                    session_sql_process_post_first_batch_times: list[float] = []
+                    session_sql_process_row_counts: list[int] = []
+                    session_sql_process_batch_counts: list[int] = []
+                    session_sql_process_first_batch_rows: list[int] = []
+                    session_sql_process_peak_rss_bytes: list[int | None] = []
+                    session_sql_process_isolated_peak_rss_bytes: list[int | None] = []
+
+                    for _ in range(args.runs):
+                        iter_metrics = _bench_sql_reader_iter(sess, sql)
+                        sql_reader_first_batch_times.append(
+                            float(iter_metrics["time_to_first_batch_s"])
+                        )
+                        sql_reader_total_iter_times.append(
+                            float(iter_metrics["total_iter_s"])
+                        )
+                        sql_reader_post_first_batch_times.append(
+                            float(iter_metrics["post_first_batch_s"])
+                        )
+                        sql_reader_row_counts.append(int(iter_metrics["row_count"]))
+                        sql_reader_batch_counts.append(int(iter_metrics["batch_count"]))
+                        sql_reader_first_batch_rows.append(
+                            int(iter_metrics["first_batch_rows"])
+                        )
+                        sql_reader_peak_rss_bytes.append(
+                            iter_metrics["peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                        read_all_metrics = _bench_sql_reader_read_all(sess, sql)
+                        sql_reader_read_all_times.append(
+                            float(read_all_metrics["total_s"])
+                        )
+                        sql_reader_read_all_row_counts.append(
+                            int(read_all_metrics["row_count"])
+                        )
+                        sql_reader_read_all_batch_counts.append(
+                            int(read_all_metrics["batch_count"])
+                        )
+                        sql_reader_read_all_peak_rss_bytes.append(
+                            read_all_metrics["peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                        table_metrics = _bench_session_sql_table(sess, sql)
+                        session_sql_table_times.append(float(table_metrics["total_s"]))
+                        session_sql_table_row_counts.append(
+                            int(table_metrics["row_count"])
+                        )
+                        session_sql_table_batch_counts.append(
+                            int(table_metrics["batch_count"])
+                        )
+                        session_sql_table_peak_rss_bytes.append(
+                            table_metrics["peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                        process_stream_metrics = _bench_sql_reader_process_as_you_go(
+                            sess, sql
+                        )
+                        sql_reader_process_times.append(
+                            float(process_stream_metrics["total_s"])
+                        )
+                        sql_reader_process_first_batch_times.append(
+                            float(process_stream_metrics["time_to_first_batch_s"])
+                        )
+                        sql_reader_process_post_first_batch_times.append(
+                            float(process_stream_metrics["post_first_batch_s"])
+                        )
+                        sql_reader_process_row_counts.append(
+                            int(process_stream_metrics["row_count"])
+                        )
+                        sql_reader_process_batch_counts.append(
+                            int(process_stream_metrics["batch_count"])
+                        )
+                        sql_reader_process_first_batch_rows.append(
+                            int(process_stream_metrics["first_batch_rows"])
+                        )
+                        sql_reader_process_peak_rss_bytes.append(
+                            process_stream_metrics["peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                        process_table_metrics = (
+                            _bench_session_sql_process_after_materialize(sess, sql)
+                        )
+                        session_sql_process_times.append(
+                            float(process_table_metrics["total_s"])
+                        )
+                        session_sql_process_materialize_times.append(
+                            float(process_table_metrics["materialize_s"])
+                        )
+                        session_sql_process_first_batch_times.append(
+                            float(process_table_metrics["time_to_first_batch_s"])
+                        )
+                        session_sql_process_post_first_batch_times.append(
+                            float(process_table_metrics["post_first_batch_s"])
+                        )
+                        session_sql_process_row_counts.append(
+                            int(process_table_metrics["row_count"])
+                        )
+                        session_sql_process_batch_counts.append(
+                            int(process_table_metrics["batch_count"])
+                        )
+                        session_sql_process_first_batch_rows.append(
+                            int(process_table_metrics["first_batch_rows"])
+                        )
+                        session_sql_process_peak_rss_bytes.append(
+                            process_table_metrics["peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                        isolated_stream_metrics = _run_isolated_worker(
+                            "sql_reader_process_as_you_go",
+                            table_root,
+                            sql,
+                        )
+                        sql_reader_process_isolated_peak_rss_bytes.append(
+                            isolated_stream_metrics["isolated_peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                        isolated_table_metrics = _run_isolated_worker(
+                            "session_sql_process_after_materialize",
+                            table_root,
+                            sql,
+                        )
+                        session_sql_process_isolated_peak_rss_bytes.append(
+                            isolated_table_metrics["isolated_peak_rss_bytes"]  # type: ignore[arg-type]
+                        )
+                        gc.collect()
+
+                    out["streaming_results"].append(
+                        {
+                            "name": name,
+                            "sql": sql,
+                            "sql_reader_iter": {
+                                "time_to_first_batch_s": _summarize_seconds(
+                                    sql_reader_first_batch_times
+                                ),
+                                "total_iter_s": _summarize_seconds(
+                                    sql_reader_total_iter_times
+                                ),
+                                "post_first_batch_s": _summarize_seconds(
+                                    sql_reader_post_first_batch_times
+                                ),
+                                "row_count": sql_reader_row_counts,
+                                "batch_count": sql_reader_batch_counts,
+                                "first_batch_rows": sql_reader_first_batch_rows,
+                                "peak_rss_bytes": sql_reader_peak_rss_bytes,
+                            },
+                            "sql_reader_read_all": {
+                                "total_s": _summarize_seconds(
+                                    sql_reader_read_all_times
+                                ),
+                                "row_count": sql_reader_read_all_row_counts,
+                                "batch_count": sql_reader_read_all_batch_counts,
+                                "peak_rss_bytes": sql_reader_read_all_peak_rss_bytes,
+                            },
+                            "session_sql_table": {
+                                "total_s": _summarize_seconds(
+                                    session_sql_table_times
+                                ),
+                                "row_count": session_sql_table_row_counts,
+                                "batch_count": session_sql_table_batch_counts,
+                                "peak_rss_bytes": session_sql_table_peak_rss_bytes,
+                            },
+                            "sql_reader_process_as_you_go": {
+                                "time_to_first_batch_s": _summarize_seconds(
+                                    sql_reader_process_first_batch_times
+                                ),
+                                "total_s": _summarize_seconds(
+                                    sql_reader_process_times
+                                ),
+                                "post_first_batch_s": _summarize_seconds(
+                                    sql_reader_process_post_first_batch_times
+                                ),
+                                "row_count": sql_reader_process_row_counts,
+                                "batch_count": sql_reader_process_batch_counts,
+                                "first_batch_rows": sql_reader_process_first_batch_rows,
+                                "peak_rss_bytes": sql_reader_process_peak_rss_bytes,
+                                "isolated_peak_rss_bytes": sql_reader_process_isolated_peak_rss_bytes,
+                            },
+                            "session_sql_process_after_materialize": {
+                                "time_to_first_batch_s": _summarize_seconds(
+                                    session_sql_process_first_batch_times
+                                ),
+                                "materialize_s": _summarize_seconds(
+                                    session_sql_process_materialize_times
+                                ),
+                                "total_s": _summarize_seconds(
+                                    session_sql_process_times
+                                ),
+                                "post_first_batch_s": _summarize_seconds(
+                                    session_sql_process_post_first_batch_times
+                                ),
+                                "row_count": session_sql_process_row_counts,
+                                "batch_count": session_sql_process_batch_counts,
+                                "first_batch_rows": session_sql_process_first_batch_rows,
+                                "peak_rss_bytes": session_sql_process_peak_rss_bytes,
+                                "isolated_peak_rss_bytes": session_sql_process_isolated_peak_rss_bytes,
+                            },
+                        }
+                    )
 
             payload = json.dumps(out, indent=2, sort_keys=False)
             if args.summary:
