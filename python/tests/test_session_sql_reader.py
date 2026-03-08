@@ -164,6 +164,16 @@ def test_session_sql_reader_close_is_idempotent():
     reader.close()
 
 
+def test_session_sql_reader_read_all_after_close_raises_clear_error():
+    sess = ttf.Session()
+
+    reader = sess.sql_reader("select * from range(10)")
+    reader.close()
+
+    with pytest.raises(pa.ArrowInvalid, match="closed"):
+        reader.read_all()
+
+
 def test_session_sql_reader_rejects_invalid_params_shape():
     sess = ttf.Session()
 
@@ -174,7 +184,9 @@ def test_session_sql_reader_rejects_invalid_params_shape():
 def test_session_sql_reader_rejects_unsupported_schema():
     testing = _testing_module()
 
-    with pytest.raises(RuntimeError, match=r"schema cannot be exported via Arrow C Stream"):
+    with pytest.raises(
+        RuntimeError, match=r"schema cannot be exported via Arrow C Stream"
+    ):
         testing._test_sql_reader_unsupported_schema()
 
 
@@ -188,6 +200,22 @@ def test_session_sql_reader_midstream_error_surfaces_during_iteration():
 
         with pytest.raises(Exception, match="mid-stream boom"):
             next(reader)
+    finally:
+        reader.close()
+
+
+def test_session_sql_reader_close_after_midstream_error_does_not_hang():
+    testing = _testing_module()
+
+    reader = testing._test_sql_reader_midstream_error()
+    try:
+        first_batch = next(reader)
+        assert first_batch["x"].to_pylist() == [1, 2]
+
+        with pytest.raises(Exception, match="mid-stream boom"):
+            next(reader)
+
+        reader.close()
     finally:
         reader.close()
 
@@ -209,6 +237,60 @@ def test_session_sql_reader_concurrent_readers_do_not_crash():
             errors.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10.0)
+
+    assert all(not thread.is_alive() for thread in threads), "thread hung"
+    assert not errors, errors[0]
+
+
+def test_session_sql_reader_mixed_concurrent_consumption_patterns():
+    sess = ttf.Session()
+    errors: list[Exception] = []
+
+    def iterate_worker() -> None:
+        try:
+            reader = sess.sql_reader("select * from range(10000)")
+            try:
+                total_rows = sum(batch.num_rows for batch in reader)
+            finally:
+                reader.close()
+            assert total_rows == 10000
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def read_all_worker() -> None:
+        try:
+            reader = sess.sql_reader("select * from range(10000)")
+            try:
+                table = reader.read_all()
+            finally:
+                reader.close()
+            assert table.num_rows == 10000
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def early_close_worker() -> None:
+        try:
+            reader = sess.sql_reader("select * from range(10000)")
+            try:
+                first_batch = next(reader)
+                assert first_batch.num_rows > 0
+                reader.close()
+                with pytest.raises(pa.ArrowInvalid, match="closed"):
+                    next(reader)
+            finally:
+                reader.close()
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=iterate_worker),
+        threading.Thread(target=read_all_worker),
+        threading.Thread(target=early_close_worker),
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -266,6 +348,22 @@ def test_session_sql_reader_large_multi_batch_result():
     assert sum(batch.num_rows for batch in batches) == 500000
 
 
+def test_session_sql_reader_exhaustion_is_terminal_and_close_still_works():
+    sess = ttf.Session()
+
+    reader = sess.sql_reader("select * from range(10000)")
+    try:
+        total_rows = sum(batch.num_rows for batch in reader)
+        assert total_rows == 10000
+
+        with pytest.raises(StopIteration):
+            next(reader)
+
+        reader.close()
+    finally:
+        reader.close()
+
+
 def test_session_sql_reader_supported_parquet_types(tmp_path):
     path = tmp_path / "supported.parquet"
     _write_supported_types_parquet(str(path))
@@ -282,14 +380,19 @@ def test_session_sql_reader_supported_parquet_types(tmp_path):
         reader.close()
 
     assert table.schema.field("dec").type == pa.decimal128(10, 2)
-    assert pa.types.is_binary(table.schema.field("payload").type) or pa.types.is_binary_view(
+    assert pa.types.is_binary(
         table.schema.field("payload").type
-    )
+    ) or pa.types.is_binary_view(table.schema.field("payload").type)
     assert table.schema.field("ts").type == pa.timestamp("us")
     assert table.schema.field("d").type == pa.date32()
     assert table.schema.field("tags").type == pa.list_(pa.int64())
-    assert table.schema.field("meta").type == pa.struct([("a", pa.int64()), ("b", pa.string())])
-    assert table["dec"].to_pylist() == [decimal.Decimal("1.23"), decimal.Decimal("4.56")]
+    assert table.schema.field("meta").type == pa.struct(
+        [("a", pa.int64()), ("b", pa.string())]
+    )
+    assert table["dec"].to_pylist() == [
+        decimal.Decimal("1.23"),
+        decimal.Decimal("4.56"),
+    ]
     assert table["tags"].to_pylist() == [[1, 2], [3]]
     assert table["meta"].to_pylist() == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
 
@@ -350,6 +453,13 @@ def test_session_sql_reader_registered_tstable_and_join(tmp_path):
     assert table["exchange"].to_pylist() == ["NASDAQ", "NASDAQ"]
 
 
+def test_session_sql_reader_query_failure_raises_immediately():
+    sess = ttf.Session()
+
+    with pytest.raises(ttf.DataFusionError, match="definitely_missing_table"):
+        sess.sql_reader("select * from definitely_missing_table")
+
+
 def test_session_sql_reader_streams_first_batch_before_full_consumption():
     testing = _testing_module()
 
@@ -375,7 +485,51 @@ def test_session_sql_reader_streams_first_batch_before_full_consumption():
     assert total_elapsed >= 0.25
 
 
-def test_session_sql_reader_requires_pyarrow_from_stream(monkeypatch: pytest.MonkeyPatch):
+def test_session_sql_reader_close_after_partial_consumption_is_terminal():
+    testing = _testing_module()
+
+    reader = testing._test_sql_reader_delayed_batches(
+        batch_count=3,
+        rows_per_batch=2,
+        delay_millis=0,
+    )
+    try:
+        first_batch = next(reader)
+        assert first_batch.num_rows == 2
+
+        reader.close()
+
+        with pytest.raises(pa.ArrowInvalid, match="closed"):
+            next(reader)
+    finally:
+        reader.close()
+
+
+def test_session_sql_reader_close_after_read_all_does_not_hang():
+    sess = ttf.Session()
+
+    reader = sess.sql_reader("select * from range(10000)")
+    try:
+        table = reader.read_all()
+        assert table.num_rows == 10000
+        reader.close()
+    finally:
+        reader.close()
+
+
+def test_session_sql_reader_rejects_unsupported_param_value_type():
+    class UnsupportedValue:
+        pass
+
+    sess = ttf.Session()
+
+    with pytest.raises(TypeError, match="params values must be one of"):
+        sess.sql_reader("select $1", params=[UnsupportedValue()])
+
+
+def test_session_sql_reader_requires_pyarrow_from_stream(
+    monkeypatch: pytest.MonkeyPatch,
+):
     pa_mod = pytest.importorskip("pyarrow")
 
     class _FakeRecordBatchReader:
