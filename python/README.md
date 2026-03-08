@@ -271,7 +271,7 @@ uv run -p .venv/bin/python maturin develop
 .venv/bin/python -m pytest
 ```
 
-## Benchmark: SQL conversion (IPC vs C Stream)
+## Benchmark: SQL conversion and streaming SQL
 
 `Session.sql(...)` returns results as a `pyarrow.Table`.
 
@@ -284,6 +284,15 @@ cd python
 uv pip install -p .venv/bin/python numpy
 uv run -p .venv/bin/python maturin develop --features test-utils
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2
+```
+
+To also benchmark the streaming SQL API (`Session.sql_reader(...)`), include the streaming mode:
+
+```bash
+cd python
+uv pip install -p .venv/bin/python numpy
+uv run -p .venv/bin/python maturin develop --features test-utils
+.venv/bin/python bench/sql_conversion.py --target-ipc-gb 2 --include-streaming --summary
 ```
 
 Environment variables (useful for debugging and benchmarks):
@@ -304,6 +313,29 @@ to a file (`--json path`). It reports separate timings for:
 - Rust-side query+IPC encode (`_native._testing._bench_sql_ipc`)
 - Rust-side query+C Stream export (`_native._testing._bench_sql_c_stream`)
 - Python-side decode/import
+
+With `--include-streaming`, it also reports:
+- time to first batch for `Session.sql_reader(...)`
+- total incremental iteration time and batch counts
+- process-as-you-go comparison:
+  `Session.sql_reader(...)` batch iteration vs `Session.sql(...)` materialize-then-process
+- `Session.sql_reader(...).read_all()` vs `Session.sql(...)` parity
+- best-effort process peak RSS (`ru_maxrss`) after each run
+- isolated child-process peak RSS for the process-as-you-go comparison
+  (sampled from Linux `/proc/<pid>/status`)
+
+### Sample streaming benchmark results
+
+One local Linux run over a generated dataset of about 10.5M rows:
+
+| Query | Metric | `Session.sql_reader(...)` | `Session.sql(...)` materialize-then-process | Improvement |
+|---|---|---:|---:|---:|
+| `select * from prices` | First batch available | `370.7ms` | `2.312s` | `84.0%` earlier |
+| `select * from prices` | Peak RSS | `2.30 GiB` | `3.60 GiB` | `36.1%` lower |
+| `select * from prices order by ts` | First batch available | `2.489s` | `13.182s` | `81.1%` earlier |
+| `select * from prices order by ts` | Peak RSS | `3.66 GiB` | `4.84 GiB` | `24.4%` lower |
+
+`sql_reader(...).read_all()` stayed in the same general performance range as `Session.sql(...)`.
 
 Large targets can require high peak RAM (IPC bytes + decoded Table + intermediate buffers). Start with
 `--target-ipc-gb 2` and scale up to `3` or `6` on a machine with plenty of memory.

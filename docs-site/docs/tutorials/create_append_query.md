@@ -7,7 +7,7 @@
 **What you’ll learn:**
 - How a table root is created and stays self-contained on disk
 - How appends work (and what overlap detection is protecting you from)
-- How `Session` queries registered tables and returns Arrow
+- How `Session` queries registered tables and returns a `pyarrow.Table`
 
 !!! tip "Mental model"
     - `TimeSeriesTable` manages the on-disk table and appends.
@@ -34,6 +34,11 @@ The full example below is the exact code used in docs (kept in sync with the rep
 
 `TimeSeriesTable.create(...)` initializes a table root directory and writes initial metadata.
 
+!!! note "`entity_columns` explained"
+    `entity_columns=["symbol"]` tells the table that coverage is tracked **per symbol independently**.
+    That means AAPL at 10:00 and NVDA at 10:00 are considered separate coverage — appending data
+    for one symbol never blocks appends for a different symbol in the same time window.
+
 ### Append a Parquet segment
 
 `append_parquet(...)` adds the Parquet file as a new segment.
@@ -41,11 +46,23 @@ The full example below is the exact code used in docs (kept in sync with the rep
 By default, if the Parquet file is outside the table root, it is copied under the table root
 before being committed (so the table is self-contained on disk).
 
+!!! warning "What happens if you run this twice?"
+    If you run the example a second time against the same table root, `append_parquet(...)` will
+    raise `CoverageOverlapError`. That's intentional — the table already has coverage for those
+    hour buckets, so it refuses to re-ingest the same window. This is the overlap detection
+    working as designed.
+
+    To reset for experimentation, delete the table root directory and start fresh.
+
 ### Query with SQL
 
 `Session` is a DataFusion-backed SQL session. You register a table under a name and then query it.
 
 `Session.sql(...)` returns a `pyarrow.Table`.
+
+!!! tip "Streaming large results"
+    For large result sets, `Session.sql_reader(...)` returns a streaming `pyarrow.RecordBatchReader`
+    instead of materializing the full result into memory. See [Reference: Session](../reference/session.md).
 
 !!! tip "Notebook display"
     In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results display as a bounded HTML preview by default (the return type is still a real `pyarrow.Table`).

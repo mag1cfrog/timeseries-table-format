@@ -9,8 +9,8 @@ If `pip install` tries to compile from source, you’ll need a Rust toolchain. S
 
 ## What doesn’t v0 support?
 
-v0 focuses on local filesystem tables. It does not (yet) include S3/object storage backends,
-compaction, schema evolution, or upserts/merges.
+v0 (the current initial version) focuses on local filesystem tables. It does not (yet) include
+S3/object storage backends, compaction, schema evolution, or upserts/merges.
 
 ## What is a “table root”?
 
@@ -36,3 +36,53 @@ table is self-contained on disk.
 
 Not in v0. Tables are append-only, and the library does not provide in-place updates/deletes or
 merge/upsert semantics.
+
+## What SQL syntax does DataFusion support?
+
+DataFusion supports most ANSI SQL: `SELECT`, `WHERE`, `GROUP BY`, `ORDER BY`, `JOIN`, window
+functions (`OVER (PARTITION BY ... ORDER BY ...)`), and timestamp functions like `date_trunc` and
+`date_bin`. For the full reference, see the
+[DataFusion SQL documentation](https://datafusion.apache.org/user-guide/sql/index.html).
+
+## How do I see what's already in my table?
+
+Open the table, create a `Session`, register it, and run a quick summary query:
+
+```python
+import timeseries_table_format as ttf
+
+tbl = ttf.TimeSeriesTable.open("./my_table")
+sess = ttf.Session()
+sess.register_tstable("t", tbl.root())
+print(sess.sql("SELECT min(ts), max(ts), count(*) FROM t"))
+```
+
+## What's the difference between `register_tstable` and `register_parquet`?
+
+`register_tstable` opens a managed table root (created by `TimeSeriesTable.create`) and registers
+all its committed segments. `register_parquet` registers a plain Parquet file or directory
+directly, with no segment tracking or overlap metadata. Both are queryable with the same
+`Session.sql(...)` API.
+
+## What is `timezone` in `TimeSeriesTable.create`?
+
+`timezone` is an optional IANA timezone name (e.g. `"America/New_York"`, `"UTC"`) used when
+bucketing timestamps. If your data uses timezone-aware timestamps and you want bucket boundaries
+aligned to wall-clock hours or days in a specific timezone, pass that timezone here.
+
+For UTC or timezone-naive timestamps, leave it as `None` (the default).
+
+## What happens if I accidentally delete files inside the table root?
+
+The table root is the source of truth for what data is in the table. Deleting or modifying files
+inside it manually can leave the table in an inconsistent state:
+
+- Deleting a file under `data/` that is referenced by the transaction log will cause query errors
+  the next time that segment is scanned.
+- Deleting or corrupting files under `_timeseries_log/` may prevent the table from opening at all
+  (`StorageError` on `TimeSeriesTable.open(...)`).
+- Deleting files under `_coverage/` may allow overlapping data to be re-appended (the overlap
+  guard won't see previous coverage).
+
+In all cases, the safest recovery is to treat the table root as corrupted and rebuild it by
+re-appending your original source files into a fresh table. There is no repair tool in v0.

@@ -241,6 +241,41 @@ system,test,file,rows,bytes,elapsed_ms,cpu_limit,mem_limit,notes
 
 ---
 
+## Python Streaming SQL Microbenchmark
+
+The repository also includes a Python-side microbenchmark for SQL result conversion and streaming
+at [`python/bench/sql_conversion.py`](../../python/bench/sql_conversion.py).
+This benchmark is separate from the cross-system results above: it focuses on the Python API and
+compares `Session.sql_reader(...)` against `Session.sql(...)`.
+
+Example local command:
+
+```bash
+cd python
+.venv/bin/python bench/sql_conversion.py \
+  --target-ipc-gb 2 \
+  --warmups 1 \
+  --runs 3 \
+  --include-streaming \
+  --summary \
+  --tmpdir /path/with/space \
+  --json /path/with/space/sql_streaming_bench_2g.json
+```
+
+Sample local results on a generated dataset of about 10.5M rows:
+
+| Query | Metric | `Session.sql_reader(...)` | `Session.sql(...)` materialize-then-process | Improvement |
+|---|---|---:|---:|---:|
+| `select * from prices` | First batch available | `370.7ms` | `2.312s` | `84.0%` earlier |
+| `select * from prices` | Peak RSS | `2.30 GiB` | `3.60 GiB` | `36.1%` lower |
+| `select * from prices order by ts` | First batch available | `2.489s` | `13.182s` | `81.1%` earlier |
+| `select * from prices order by ts` | Peak RSS | `3.66 GiB` | `4.84 GiB` | `24.4%` lower |
+
+In this local run, `sql_reader(...)` made the first batch available much earlier and reduced peak
+RSS for process-as-you-go workloads.
+
+---
+
 ## Chart Generation
 
 To regenerate the benchmark chart for the README:

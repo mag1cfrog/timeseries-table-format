@@ -1,11 +1,19 @@
 # Concept: buckets and overlap detection
 
-`bucket="1h"` (or `"5m"`, `"1d"`, etc.) defines the time grid used for overlap detection.
+`bucket="1h"` (or `"5m"`, `"1d"`, etc.) defines the **time granularity at which coverage is
+tracked per entity**. When you append a segment, the table checks which bucket windows are
+covered for each entity in that segment, and rejects the append if any of those windows are
+already occupied.
 
-It does **not** resample your data. Instead, it affects how the table decides whether a new segment
-overlaps existing coverage.
+With `bucket="1h"`, each entity (e.g. `"NVDA"`) can appear in the 10:00–11:00 window at most
+once across all appended segments. A second append that covers that same window for the same
+entity raises `CoverageOverlapError`.
 
-Example: with `bucket="1h"`, timestamps `10:05` and `10:55` fall into the same bucket window
+!!! note "Buckets do not resample your data"
+    Changing `bucket` does not reshuffle or aggregate your rows. It only affects how the table
+    decides whether two segments conflict. Your underlying data is stored as-is.
+
+**Example:** with `bucket="1h"`, timestamps `10:05` and `10:55` fall into the same bucket window
 (10:00–11:00). In v0, appending two rows for the same entity in the same bucket is treated as
 overlap and will be rejected.
 
