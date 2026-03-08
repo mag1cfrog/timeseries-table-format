@@ -21,8 +21,10 @@ mod _native {
     use datafusion::arrow::error::ArrowError;
     use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
+    use datafusion::execution::SendableRecordBatchStream;
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
+    use pyo3::PyAny;
     use pyo3::types::PyCapsule;
     use pyo3::{
         Bound, PyErr, PyResult, PyTypeInfo, Python,
@@ -38,6 +40,7 @@ mod _native {
     use timeseries_table_datafusion::TsTableProvider;
 
     use crate::error_map::datafusion_error_to_py;
+    use crate::sql_stream_reader::SqlStreamRecordBatchReader;
     use crate::{
         exceptions::{
             ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
@@ -340,6 +343,59 @@ mod _native {
         FFI_ArrowArrayStream::new(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
     }
 
+    fn export_stream_to_c_stream(
+        rt: &tokio::runtime::Runtime,
+        stream: SendableRecordBatchStream,
+    ) -> Result<FFI_ArrowArrayStream, ArrowError> {
+        let reader = SqlStreamRecordBatchReader::spawn(rt, stream)?;
+        Ok(FFI_ArrowArrayStream::new(
+            Box::new(reader) as Box<dyn RecordBatchReader + Send>
+        ))
+    }
+
+    fn record_batch_reader_from_c_stream(
+        py: Python<'_>,
+        stream: FFI_ArrowArrayStream,
+    ) -> PyResult<Py<PyAny>> {
+        let name = CString::new("arrow_array_stream")
+            .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
+
+        let capsule = PyCapsule::new(py, stream, Some(name))?;
+
+        let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
+            PyImportError::new_err(format!(
+                "pyarrow is required for Session.sql_reader(...): {e}"
+            ))
+        })?;
+
+        let rbr = pa_mod.getattr("RecordBatchReader")?;
+        let wrapper = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: Some(capsule.into_any().unbind()),
+            },
+        )?;
+
+        let from_stream = match rbr.getattr("from_stream") {
+            Ok(v) => v,
+            Err(e) => {
+                if e.is_instance_of::<PyAttributeError>(py) {
+                    let mut msg = "pyarrow.RecordBatchReader.from_stream is required for Session.sql_reader(...). \
+This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installation.".to_string();
+
+                    if let Ok(v) = pa_mod.getattr("__version__")
+                        && let Ok(s) = v.extract::<String>()
+                    {
+                        msg = format!("{msg} (detected pyarrow=={s}");
+                    }
+                    return Err(PyImportError::new_err(msg));
+                }
+                return Err(e);
+            }
+        };
+
+        Ok(from_stream.call1((wrapper,))?.into())
+    }
     #[pyclass]
     struct ArrowCStreamWrapper {
         capsule: Option<Py<PyAny>>,
@@ -364,46 +420,8 @@ mod _native {
     }
 
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
-        let name = CString::new("arrow_array_stream")
-            .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
-
-        // Capsule now owns `stream` (and therefore the underlying batch reader / buffers).
-        let capsule = PyCapsule::new(py, stream, Some(name))?;
-
-        let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
-            PyImportError::new_err(format!("pyarrow is required for Session.sql(...): {e}"))
-        })?;
-
-        let rbr = pa_mod.getattr("RecordBatchReader")?;
-        // Prefer the public `RecordBatchReader.from_stream` API (PyCapsule Protocol).
-        // Our capsule is a raw PyCapsule, so we wrap it in an object implementing `__arrow_c_stream__`.
-        //
-        // This avoids relying on PyArrow private methods like `_import_from_c_capsule`.
-        let wrapper = Py::new(
-            py,
-            ArrowCStreamWrapper {
-                capsule: Some(capsule.into_any().unbind()),
-            },
-        )?;
-        let from_stream = match rbr.getattr("from_stream") {
-            Ok(v) => v,
-            Err(e) => {
-                if e.is_instance_of::<PyAttributeError>(py) {
-                    let mut msg = "pyarrow.RecordBatchReader.from_stream is required for Arrow C Stream import. \
-This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installation (or set TTF_SQL_EXPORT_MODE=ipc to force the IPC fallback)."
-                        .to_string();
-                    if let Ok(v) = pa_mod.getattr("__version__")
-                        && let Ok(s) = v.extract::<String>()
-                    {
-                        msg = format!("{msg} (detected pyarrow=={s})");
-                    }
-                    return Err(PyImportError::new_err(msg));
-                }
-                return Err(e);
-            }
-        };
-
-        let reader = from_stream.call1((wrapper,))?;
+        let reader = record_batch_reader_from_c_stream(py, stream)?;
+        let reader = reader.bind(py);
 
         let table_res = reader.call_method0("read_all");
         let close_res = reader.call_method0("close");
@@ -952,6 +970,79 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
             let table = reader.call_method0("read_all")?;
 
             Ok(table.into())
+        }
+
+        #[pyo3(signature = (query, *, params=None))]
+        fn sql_reader(
+            &self,
+            py: Python<'_>,
+            query: String,
+            params: Option<Py<PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
+            enum SqlReaderError {
+                DataFusion(DFError),
+                Arrow(ArrowError),
+                UnsupportedSchema,
+                Runtime(&'static str),
+            }
+
+            let params = match params {
+                None => None,
+                Some(obj) => {
+                    let bound = obj.bind(py);
+                    Some(parse_query_params(bound)?)
+                }
+            };
+
+            let rt = Arc::clone(&self.rt);
+            let rt_for_stream = Arc::clone(&self.rt);
+            let ctx = self.ctx.clone();
+            let sema = Arc::clone(&self.catalog_sema);
+
+            let stream = tokio_runner::run_blocking_map_err(
+                py,
+                rt.as_ref(),
+                async move {
+                    let _permit = sema
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| SqlReaderError::Runtime("Session catalog semaphore closed"))?;
+
+                    let mut df = ctx.sql(&query).await.map_err(SqlReaderError::DataFusion)?;
+
+                    if let Some(p) = params {
+                        df = match p {
+                            QueryParams::Positional(v) => df.with_param_values(v),
+                            QueryParams::Named(v) => df.with_param_values(v),
+                        }
+                        .map_err(SqlReaderError::DataFusion)?;
+                    }
+
+                    let schema: SchemaRef = df.schema().as_arrow().clone().into();
+                    if !can_export_schema_to_c_stream(&schema) {
+                        return Err(SqlReaderError::UnsupportedSchema);
+                    }
+
+                    let stream = df
+                        .execute_stream()
+                        .await
+                        .map_err(SqlReaderError::DataFusion)?;
+
+                    export_stream_to_c_stream(rt_for_stream.as_ref(), stream)
+                        .map_err(SqlReaderError::Arrow)
+                },
+                move |py, err| match err {
+                    SqlReaderError::DataFusion(e) => datafusion_error_to_py(py, e),
+                    SqlReaderError::Arrow(e) => PyRuntimeError::new_err(e.to_string()),
+                    SqlReaderError::UnsupportedSchema => PyRuntimeError::new_err(
+                        "Session.sql_reader: schema cannot be exported via Arrow C Stream (unsupported type). \
+Cast unsupported columns to supported Arrow types, or use Session.sql(...) to materialize a pyarrow.Table instead.",
+                    ),
+                    SqlReaderError::Runtime(msg) => PyRuntimeError::new_err(msg),
+                },
+            )?;
+
+            record_batch_reader_from_c_stream(py, stream)
         }
 
         /// Return the list of currently registered table names (sorted).
