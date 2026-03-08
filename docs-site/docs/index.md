@@ -1,10 +1,10 @@
 # timeseries-table-format (Python)
 
-`timeseries-table-format` helps you manage **local, append-only time-series tables** stored as Parquet
-segments on disk.
+`timeseries-table-format` helps you manage **local, append-only time-series tables** on disk.
+You append new data files over time and query across all of them with SQL, getting results back as
+a Python table object. It also prevents you from accidentally loading the same time window twice.
 
-You append new segments (with **overlap detection**) and query one or many tables using **SQL
-(DataFusion)**, getting results back as a `pyarrow.Table`.
+!!! tip "New here? Start with the [Key concepts](#key-concepts-quick-reference) table below, then jump into the [Quickstart](#quickstart-create-append-query)."
 
 ## A quick example of what this solves
 

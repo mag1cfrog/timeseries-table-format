@@ -71,3 +71,18 @@ bucketing timestamps. If your data uses timezone-aware timestamps and you want b
 aligned to wall-clock hours or days in a specific timezone, pass that timezone here.
 
 For UTC or timezone-naive timestamps, leave it as `None` (the default).
+
+## What happens if I accidentally delete files inside the table root?
+
+The table root is the source of truth for what data is in the table. Deleting or modifying files
+inside it manually can leave the table in an inconsistent state:
+
+- Deleting a file under `data/` that is referenced by the transaction log will cause query errors
+  the next time that segment is scanned.
+- Deleting or corrupting files under `_timeseries_log/` may prevent the table from opening at all
+  (`StorageError` on `TimeSeriesTable.open(...)`).
+- Deleting files under `_coverage/` may allow overlapping data to be re-appended (the overlap
+  guard won't see previous coverage).
+
+In all cases, the safest recovery is to treat the table root as corrupted and rebuild it by
+re-appending your original source files into a fresh table. There is no repair tool in v0.

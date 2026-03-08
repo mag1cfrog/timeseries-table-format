@@ -52,5 +52,6 @@ nav:
       - Session: reference/session.md
       - TimeSeriesTable: reference/timeseries_table.md
       - Exceptions: reference/exceptions.md
+  - Performance: performance.md
   - Troubleshooting: troubleshooting.md
   - FAQ: faq.md
