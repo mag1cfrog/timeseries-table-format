@@ -8,7 +8,6 @@ import importlib
 import json
 import os
 import platform
-import resource
 import shutil
 import subprocess
 import sys
@@ -23,6 +22,11 @@ import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 
 import timeseries_table_format as ttf
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows
+    resource = None
 
 
 def _require_testing_module():
@@ -274,6 +278,9 @@ def _print_summary(out: dict[str, object]) -> None:
 
 
 def _try_peak_rss_bytes() -> int | None:
+    if resource is None:
+        return None
+
     try:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     except Exception:
