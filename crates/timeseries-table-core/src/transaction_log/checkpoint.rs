@@ -220,9 +220,9 @@ mod tests {
         tmp: &TempDir,
         checkpoint: &TableStateCheckpointV1,
     ) -> TestResult {
-        let checkpoint_abs = tmp
-            .path()
-            .join(layout::table_state_checkpoint_rel_path(checkpoint.table_version));
+        let checkpoint_abs = tmp.path().join(layout::table_state_checkpoint_rel_path(
+            checkpoint.table_version,
+        ));
         if let Some(parent) = checkpoint_abs.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -240,8 +240,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_latest_table_state_checkpoint_ignores_newer_checkpoint_than_anchor()
-    -> TestResult {
+    async fn load_latest_table_state_checkpoint_ignores_newer_checkpoint_than_anchor() -> TestResult
+    {
         let (tmp, store) = create_test_log_store();
         let meta = sample_table_meta();
         let seg1 = sample_segment("seg1", 0);
@@ -261,6 +261,56 @@ mod tests {
 
         let loaded = store.load_latest_table_state_checkpoint(1).await?;
         assert!(loaded.is_none(), "newer checkpoint should be ignored");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_latest_table_state_checkpoint_returns_none_when_latest_missing() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+
+        let loaded = store.load_latest_table_state_checkpoint(5).await?;
+        assert!(loaded.is_none(), "missing LATEST should mean no checkpoint");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_latest_table_state_checkpoint_fails_when_latest_is_empty() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let latest_abs = tmp
+            .path()
+            .join(layout::table_state_checkpoint_latest_rel_path());
+        if let Some(parent) = latest_abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&latest_abs, b" \n\t").await?;
+
+        let err = store
+            .load_latest_table_state_checkpoint(1)
+            .await
+            .expect_err("expected empty latest pointer to fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_latest_table_state_checkpoint_fails_when_latest_points_to_zero() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let latest_abs = tmp
+            .path()
+            .join(layout::table_state_checkpoint_latest_rel_path());
+        if let Some(parent) = latest_abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&latest_abs, b"0\n").await?;
+
+        let err = store
+            .load_latest_table_state_checkpoint(1)
+            .await
+            .expect_err("expected invalid version 0 to fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
 
         Ok(())
     }
@@ -302,6 +352,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_latest_table_state_checkpoint_fails_on_unsupported_format_version() -> TestResult
+    {
+        let (tmp, store) = create_test_log_store();
+        let checkpoint = TableStateCheckpointV1 {
+            checkpoint_format_version: TABLE_STATE_CHECKPOINT_FORMAT_VERSION + 1,
+            table_version: 4,
+            table_meta: sample_table_meta(),
+            live_segments: vec![],
+            table_coverage: None,
+        };
+        write_checkpoint_files(&tmp, &checkpoint).await?;
+
+        let err = store
+            .load_latest_table_state_checkpoint(4)
+            .await
+            .expect_err("expected unsupported checkpoint format to fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_latest_table_state_checkpoint_fails_on_payload_version_mismatch() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let checkpoint_abs = tmp.path().join(layout::table_state_checkpoint_rel_path(4));
+        if let Some(parent) = checkpoint_abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let checkpoint = TableStateCheckpointV1 {
+            checkpoint_format_version: TABLE_STATE_CHECKPOINT_FORMAT_VERSION,
+            table_version: 5,
+            table_meta: sample_table_meta(),
+            live_segments: vec![],
+            table_coverage: None,
+        };
+        tokio::fs::write(&checkpoint_abs, serde_json::to_vec(&checkpoint)?).await?;
+
+        let latest_abs = tmp
+            .path()
+            .join(layout::table_state_checkpoint_latest_rel_path());
+        if let Some(parent) = latest_abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&latest_abs, b"4\n").await?;
+
+        let err = store
+            .load_latest_table_state_checkpoint(4)
+            .await
+            .expect_err("expected file/payload version mismatch to fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_latest_table_state_checkpoint_fails_on_duplicate_segment_ids() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let seg = sample_segment("dup", 0);
+
+        let checkpoint = TableStateCheckpointV1 {
+            checkpoint_format_version: TABLE_STATE_CHECKPOINT_FORMAT_VERSION,
+            table_version: 6,
+            table_meta: sample_table_meta(),
+            live_segments: vec![seg.clone(), seg],
+            table_coverage: None,
+        };
+        write_checkpoint_files(&tmp, &checkpoint).await?;
+
+        let err = store
+            .load_latest_table_state_checkpoint(6)
+            .await
+            .expect_err("expected duplicate segment ids to fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_latest_table_state_checkpoint_fails_on_coverage_version_newer_than_checkpoint()
+    -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let checkpoint = TableStateCheckpointV1 {
+            checkpoint_format_version: TABLE_STATE_CHECKPOINT_FORMAT_VERSION,
+            table_version: 8,
+            table_meta: sample_table_meta(),
+            live_segments: vec![],
+            table_coverage: Some(TableCoveragePointerCheckpointV1 {
+                bucket_spec: TimeBucket::Minutes(1),
+                coverage_path: "_coverage/table/9-tblcov.roar".to_string(),
+                version: 9,
+            }),
+        };
+        write_checkpoint_files(&tmp, &checkpoint).await?;
+
+        let err = store
+            .load_latest_table_state_checkpoint(8)
+            .await
+            .expect_err("expected impossible coverage pointer version to fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn load_latest_table_state_checkpoint_fails_when_latest_is_invalid() -> TestResult {
         let (tmp, store) = create_test_log_store();
         let latest_abs = tmp
@@ -322,8 +477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_latest_table_state_checkpoint_fails_when_checkpoint_file_missing()
-    -> TestResult {
+    async fn load_latest_table_state_checkpoint_fails_when_checkpoint_file_missing() -> TestResult {
         let (tmp, store) = create_test_log_store();
         let latest_abs = tmp
             .path()
@@ -364,6 +518,42 @@ mod tests {
             .await
             .expect_err("expected corrupt checkpoint payload");
         assert!(matches!(err, CommitError::CorruptState { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_uses_exact_checkpoint_without_replaying_any_commits() -> TestResult
+    {
+        let (tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+        let seg1 = sample_segment("seg1", 0);
+
+        let v1 = store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+        let v2 = store
+            .commit_with_expected_version(v1, vec![LogAction::AddSegment(seg1.clone())])
+            .await?;
+
+        let checkpoint = TableStateCheckpointV1 {
+            checkpoint_format_version: TABLE_STATE_CHECKPOINT_FORMAT_VERSION,
+            table_version: v2,
+            table_meta: meta.clone(),
+            live_segments: vec![seg1.clone()],
+            table_coverage: None,
+        };
+        write_checkpoint_files(&tmp, &checkpoint).await?;
+
+        // If rebuild tries to replay even the anchored version, this corruption will break it.
+        let current_commit_abs = tmp.path().join(layout::commit_rel_path(v2));
+        tokio::fs::write(&current_commit_abs, b"not-json").await?;
+
+        let state = store.rebuild_table_state().await?;
+        assert_eq!(state.version, v2);
+        assert_eq!(state.table_meta, meta);
+        assert_eq!(state.segments.len(), 1);
+        assert!(state.segments.contains_key(&seg1.segment_id));
 
         Ok(())
     }

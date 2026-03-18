@@ -245,6 +245,7 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
@@ -252,6 +253,7 @@ mod tests {
         TimeIndexSpec, TransactionLogStore,
     };
     use chrono::TimeZone;
+    use serde_json::json;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -279,6 +281,35 @@ mod tests {
             format_version: 1,
             entity_identity: None,
         }
+    }
+
+    fn sample_table_meta_with_schema(extra_col: &str) -> TableMeta {
+        let schema = LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: crate::metadata::logical_schema::LogicalTimestampUnit::Micros,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: extra_col.to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: true,
+            },
+        ])
+        .expect("valid logical schema");
+
+        TableMeta::new_time_series_with_schema(
+            TimeIndexSpec {
+                timestamp_column: "ts".to_string(),
+                entity_columns: vec!["symbol".to_string()],
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+            schema,
+        )
     }
 
     fn sample_segment(id: &str) -> SegmentMeta {
@@ -311,6 +342,44 @@ mod tests {
             file_size: None,
             coverage_path: None,
         }
+    }
+
+    async fn write_checkpoint_json(
+        tmp: &TempDir,
+        version: u64,
+        table_meta: &TableMeta,
+        live_segments: &[SegmentMeta],
+        table_coverage: Option<&TableCoveragePointer>,
+    ) -> TestResult {
+        let checkpoint_abs = tmp
+            .path()
+            .join(layout::table_state_checkpoint_rel_path(version));
+        if let Some(parent) = checkpoint_abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let payload = json!({
+            "checkpoint_format_version": 1,
+            "table_version": version,
+            "table_meta": table_meta,
+            "live_segments": live_segments,
+            "table_coverage": table_coverage.map(|ptr| json!({
+                "bucket_spec": ptr.bucket_spec,
+                "coverage_path": ptr.coverage_path,
+                "version": ptr.version,
+            })),
+        });
+        tokio::fs::write(&checkpoint_abs, serde_json::to_vec(&payload)?).await?;
+
+        let latest_abs = tmp
+            .path()
+            .join(layout::table_state_checkpoint_latest_rel_path());
+        if let Some(parent) = latest_abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&latest_abs, format!("{version}\n")).await?;
+
+        Ok(())
     }
 
     #[test]
@@ -457,6 +526,97 @@ mod tests {
             },
             other => panic!("expected storage error, got {other:?}"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_checkpoint_tail_remove_segment() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+        let seg1 = sample_segment("seg1");
+        let seg2 = sample_segment("seg2");
+
+        let v1 = store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+        let v2 = store
+            .commit_with_expected_version(
+                v1,
+                vec![
+                    LogAction::AddSegment(seg1.clone()),
+                    LogAction::AddSegment(seg2.clone()),
+                ],
+            )
+            .await?;
+        let v3 = store
+            .commit_with_expected_version(
+                v2,
+                vec![LogAction::RemoveSegment {
+                    segment_id: seg1.segment_id.clone(),
+                }],
+            )
+            .await?;
+
+        write_checkpoint_json(&tmp, v2, &meta, &[seg1.clone(), seg2.clone()], None).await?;
+
+        let state = store.rebuild_table_state().await?;
+        assert_eq!(state.version, v3);
+        assert!(state.segments.contains_key(&seg2.segment_id));
+        assert!(!state.segments.contains_key(&seg1.segment_id));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_checkpoint_tail_update_table_meta() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let meta_v1 = sample_table_meta_with_schema("price");
+        let meta_v2 = sample_table_meta_with_schema("close");
+
+        let v1 = store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta_v1.clone())])
+            .await?;
+        let v2 = store
+            .commit_with_expected_version(v1, vec![LogAction::UpdateTableMeta(meta_v2.clone())])
+            .await?;
+
+        write_checkpoint_json(&tmp, v1, &meta_v1, &[], None).await?;
+
+        let state = store.rebuild_table_state().await?;
+        assert_eq!(state.version, v2);
+        assert_eq!(state.table_meta, meta_v2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_checkpoint_tail_corrupt_commit_fails() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+        let seg1 = sample_segment("seg1");
+        let seg2 = sample_segment("seg2");
+
+        let v1 = store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+        let v2 = store
+            .commit_with_expected_version(v1, vec![LogAction::AddSegment(seg1.clone())])
+            .await?;
+        let v3 = store
+            .commit_with_expected_version(v2, vec![LogAction::AddSegment(seg2)])
+            .await?;
+
+        write_checkpoint_json(&tmp, v2, &meta, &[seg1], None).await?;
+
+        let tail_commit_path = tmp.path().join(layout::commit_rel_path(v3));
+        tokio::fs::write(&tail_commit_path, b"not-json").await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("corrupt tail commit should still fail");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+
         Ok(())
     }
 }
