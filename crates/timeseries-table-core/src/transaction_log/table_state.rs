@@ -72,13 +72,74 @@ impl TableState {
     }
 }
 
+fn apply_action_to_materialized_state(
+    table_meta: &mut Option<TableMeta>,
+    segments: &mut HashMap<SegmentId, SegmentMeta>,
+    table_coverage: &mut Option<TableCoveragePointer>,
+    version: u64,
+    action: LogAction,
+) {
+    match action {
+        LogAction::AddSegment(meta) => {
+            segments.insert(meta.segment_id.clone(), meta);
+        }
+        LogAction::RemoveSegment { segment_id } => {
+            segments.remove(&segment_id);
+        }
+        LogAction::UpdateTableMeta(delta) => *table_meta = Some(delta),
+        LogAction::UpdateTableCoverage {
+            bucket_spec,
+            coverage_path,
+        } => {
+            *table_coverage = Some(TableCoveragePointer {
+                bucket_spec,
+                coverage_path,
+                version,
+            });
+        }
+    }
+}
+
 impl TransactionLogStore {
-    /// Rebuild the current TableState by replaying all commits up to CURRENT.
+    async fn replay_commits_into_state(
+        &self,
+        start_version: u64,
+        end_version: u64,
+        table_meta: &mut Option<TableMeta>,
+        segments: &mut HashMap<SegmentId, SegmentMeta>,
+        table_coverage: &mut Option<TableCoveragePointer>,
+    ) -> Result<(), CommitError> {
+        if start_version > end_version {
+            return Ok(());
+        }
+
+        for v in start_version..=end_version {
+            let commit = self.load_commit(v).await?;
+
+            if commit.version != v {
+                return CorruptStateSnafu {
+                    msg: format!(
+                        "Commit version mismatch: expected {v}, found {} in payload",
+                        commit.version
+                    ),
+                }
+                .fail();
+            }
+
+            for action in commit.actions {
+                apply_action_to_materialized_state(table_meta, segments, table_coverage, v, action)
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild the current TableState by loading the latest checkpoint, if any,
+    /// and replaying only after commits up to CURRENT.
     ///
     /// v0.1 behavior:
     /// - If CURRENT == 0 (no commits), this returns CommitError::CorruptState.
     /// - The first commit must include at least one UpdateTableMeta action
-    ///   to bootstrap TableMeta; the last UpdateTableMeta wins.
+    ///   to bootstrap TableMeta unless a checkpoint already carries it.
     pub async fn rebuild_table_state(&self) -> Result<TableState, CommitError> {
         #[cfg(feature = "test-counters")]
         REBUILD_TABLE_STATE_COUNT.with(|c| c.set(c.get() + 1));
@@ -93,55 +154,83 @@ impl TransactionLogStore {
             .fail();
         }
 
-        let mut table_meta: Option<TableMeta> = None;
-        let mut segments: HashMap<SegmentId, SegmentMeta> = HashMap::new();
+        // let mut table_meta: Option<TableMeta> = None;
+        // let mut segments: HashMap<SegmentId, SegmentMeta> = HashMap::new();
 
-        let mut table_coverage: Option<TableCoveragePointer> = None;
+        // let mut table_coverage: Option<TableCoveragePointer> = None;
 
-        // Replay all commits from 1..=current_version in order
-        for v in 1..=current_version {
-            let commit = self.load_commit(v).await?;
+        // // Replay all commits from 1..=current_version in order
+        // for v in 1..=current_version {
+        //     let commit = self.load_commit(v).await?;
 
-            // Defensive: file name version should match payload
-            if commit.version != v {
-                return CorruptStateSnafu {
-                    msg: format!(
-                        "Commit version mismatch: expected {v}, found {} in payload",
-                        commit.version
-                    ),
-                }
-                .fail();
-            }
+        //     // Defensive: file name version should match payload
+        //     if commit.version != v {
+        //         return CorruptStateSnafu {
+        //             msg: format!(
+        //                 "Commit version mismatch: expected {v}, found {} in payload",
+        //                 commit.version
+        //             ),
+        //         }
+        //         .fail();
+        //     }
 
-            for action in commit.actions {
-                match action {
-                    LogAction::AddSegment(meta) => {
-                        // Insert or replace the segment; latest info wins.
-                        segments.insert(meta.segment_id.clone(), meta);
-                    }
-                    LogAction::RemoveSegment { segment_id } => {
-                        segments.remove(&segment_id);
-                    }
-                    LogAction::UpdateTableMeta(delta) => {
-                        // v0.1: full replacement of TableMeta
-                        table_meta = Some(delta);
-                    }
-                    LogAction::UpdateTableCoverage {
-                        bucket_spec,
-                        coverage_path,
-                    } => {
-                        table_coverage = Some(TableCoveragePointer {
-                            bucket_spec,
-                            coverage_path,
-                            version: v,
-                        })
-                    }
-                }
-            }
-        }
+        //     for action in commit.actions {
+        //         match action {
+        //             LogAction::AddSegment(meta) => {
+        //                 // Insert or replace the segment; latest info wins.
+        //                 segments.insert(meta.segment_id.clone(), meta);
+        //             }
+        //             LogAction::RemoveSegment { segment_id } => {
+        //                 segments.remove(&segment_id);
+        //             }
+        //             LogAction::UpdateTableMeta(delta) => {
+        //                 // v0.1: full replacement of TableMeta
+        //                 table_meta = Some(delta);
+        //             }
+        //             LogAction::UpdateTableCoverage {
+        //                 bucket_spec,
+        //                 coverage_path,
+        //             } => {
+        //                 table_coverage = Some(TableCoveragePointer {
+        //                     bucket_spec,
+        //                     coverage_path,
+        //                     version: v,
+        //                 })
+        //             }
+        //         }
+        //     }
+        // }
+
+        let seed = self
+            .load_latest_table_state_checkpoint(current_version)
+            .await?;
+
+        let (start_version, mut table_meta, mut segments, mut table_coverage) = match seed {
+            Some(state) if state.version == current_version => return Ok(state),
+            Some(state) => (
+                state.version.checked_add(1).context(CorruptStateSnafu {
+                    msg: "checkpoint version overflow".to_string(),
+                })?,
+                Some(state.table_meta),
+                state.segments,
+                state.table_coverage,
+            ),
+            None => (1, None, HashMap::new(), None),
+        };
+
+        self.replay_commits_into_state(
+            start_version,
+            current_version,
+            &mut table_meta,
+            &mut segments,
+            &mut table_coverage,
+        )
+        .await?;
 
         let table_meta = table_meta.context(CorruptStateSnafu {
-            msg: format!("No TableMeta found in commits up to version {current_version}",),
+            msg: format!(
+                "No TableMeta found in checkpoint/commits up to version {current_version}",
+            ),
         })?;
 
         Ok(TableState {
