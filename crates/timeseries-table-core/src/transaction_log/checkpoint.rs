@@ -149,9 +149,7 @@ impl TransactionLogStore {
         };
 
         if version > current_version {
-            return CorruptStateSnafu {
-                msg: format!("latest checkpoint version {version} is newer than CURRENT version {current_version}")
-            }.fail();
+            return Ok(None);
         }
 
         self.load_table_state_checkpoint(version).await.map(Some)
