@@ -63,6 +63,7 @@
 //! does not know about query engines; it only provides the persisted metadata
 //! and an API for committing changes safely.
 pub mod actions;
+mod checkpoint;
 pub mod log_store;
 pub mod segments;
 pub mod table_state;
