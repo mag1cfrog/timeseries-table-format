@@ -489,7 +489,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_missing_time_column_errors() -> TestResult {
+    async fn append_parquet_segment_missing_time_column_errors() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -500,7 +500,7 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let err = table
-            .append_parquet_segment_with_id(SegmentId("seg-no-ts".to_string()), rel, "ts")
+            .append_parquet_segment(rel, "ts")
             .await
             .expect_err("expected missing time column");
 
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_updates_state_and_log() -> TestResult {
+    async fn append_parquet_segment_updates_state_and_log() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -543,9 +543,7 @@ mod tests {
             }],
         )?;
 
-        let new_version = table
-            .append_parquet_segment_with_id(SegmentId("seg-1".to_string()), rel_path, "ts")
-            .await?;
+        let new_version = table.append_parquet_segment(rel_path, "ts").await?;
 
         assert_eq!(new_version, 2);
         assert_eq!(table.state.version, 2);
@@ -586,9 +584,7 @@ mod tests {
             }],
         )?;
 
-        let version = table
-            .append_parquet_segment_with_id(SegmentId("seg-entity-a".to_string()), rel_path, "ts")
-            .await?;
+        let version = table.append_parquet_segment(rel_path, "ts").await?;
         assert_eq!(version, 2);
 
         let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
@@ -637,13 +633,7 @@ mod tests {
             }],
         )?;
 
-        table
-            .append_parquet_segment_with_id(
-                SegmentId("seg-entity-a-1".to_string()),
-                rel_path1,
-                "ts",
-            )
-            .await?;
+        table.append_parquet_segment(rel_path1, "ts").await?;
 
         let rel_path2 = "data/seg-entity-a-2.parquet";
         let abs_path2 = tmp.path().join(rel_path2);
@@ -658,13 +648,7 @@ mod tests {
             }],
         )?;
 
-        let version = table
-            .append_parquet_segment_with_id(
-                SegmentId("seg-entity-a-2".to_string()),
-                rel_path2,
-                "ts",
-            )
-            .await?;
+        let version = table.append_parquet_segment(rel_path2, "ts").await?;
         assert_eq!(version, 3);
 
         let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
@@ -705,9 +689,7 @@ mod tests {
                 price: 10.0,
             }],
         )?;
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-entity-a".to_string()), rel_path1, "ts")
-            .await?;
+        table.append_parquet_segment(rel_path1, "ts").await?;
 
         let rel_path2 = "data/seg-entity-b.parquet";
         let abs_path2 = tmp.path().join(rel_path2);
@@ -723,7 +705,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment_with_id(SegmentId("seg-entity-b".to_string()), rel_path2, "ts")
+            .append_parquet_segment(rel_path2, "ts")
             .await
             .expect_err("expected entity identity mismatch");
 
@@ -747,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_adopts_schema_when_missing() -> TestResult {
+    async fn append_parquet_segment_adopts_schema_when_missing() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -780,9 +762,7 @@ mod tests {
             }],
         )?;
 
-        let new_version = table
-            .append_parquet_segment_with_id(SegmentId("seg-adopt".to_string()), rel_path, "ts")
-            .await?;
+        let new_version = table.append_parquet_segment(rel_path, "ts").await?;
 
         assert_eq!(new_version, 2);
         let schema = table
@@ -805,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_rejects_schema_mismatch() -> TestResult {
+    async fn append_parquet_segment_rejects_schema_mismatch() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -825,7 +805,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment_with_id(SegmentId("seg-bad".to_string()), rel_path, "ts")
+            .append_parquet_segment(rel_path, "ts")
             .await
             .expect_err("expected schema mismatch");
 
@@ -1350,7 +1330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_conflict_returns_error() -> TestResult {
+    async fn append_parquet_segment_conflict_returns_error() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1377,7 +1357,7 @@ mod tests {
             .expect("external commit succeeds");
 
         let err = table
-            .append_parquet_segment_with_id(SegmentId("seg-conflict".to_string()), rel_path, "ts")
+            .append_parquet_segment(rel_path, "ts")
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -1429,16 +1409,14 @@ mod tests {
             }],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
-            .await?;
+        table.append_parquet_segment(rel1, "ts").await?;
 
         // Simulate legacy/bad state: drop coverage_path on the existing segment.
         let seg = table.state.segments.get_mut(rel1).expect("segment present");
         seg.coverage_path = None;
 
         let err = table
-            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .append_parquet_segment(rel2, "ts")
             .await
             .expect_err("append should fail when existing segment lacks coverage");
 
@@ -1485,16 +1463,12 @@ mod tests {
             }],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
-            .await?;
+        table.append_parquet_segment(rel1, "ts").await?;
 
         // Simulate missing snapshot pointer while segments exist.
         table.state.table_coverage = None;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
-            .await?;
+        table.append_parquet_segment(rel2, "ts").await?;
 
         // Snapshot pointer should be restored after a successful append.
         let ptr = table
@@ -1548,9 +1522,7 @@ mod tests {
             }],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel1, "ts")
-            .await?;
+        table.append_parquet_segment(rel1, "ts").await?;
 
         // Tamper snapshot pointer to a mismatching bucket spec.
         let bad_bucket = TimeBucket::Hours(1);
@@ -1567,7 +1539,7 @@ mod tests {
         });
 
         let err = table
-            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel2, "ts")
+            .append_parquet_segment(rel2, "ts")
             .await
             .expect_err("append should fail when snapshot bucket mismatches index");
 
