@@ -107,7 +107,6 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
 ```json
 {
   "AddSegment": {
-    "segment_id": "seg-f0573298681657796623719468bf1133",
     "path": "data/nvda_1h.parquet",
     "format": "parquet",
     "ts_min": "2024-06-01T00:00:00Z",
@@ -118,7 +117,7 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
   }
 }
 ```
-Notice the `coverage_path` -- we'll come back to that.
+The canonical table-relative `path` is the segment identity. Notice the `coverage_path` -- we'll come back to that.
 
 If you squint, you can already see the reader-side wins:
 - ts_min/ts_max enable coarse pruning (skip files that can't match a time filter).
