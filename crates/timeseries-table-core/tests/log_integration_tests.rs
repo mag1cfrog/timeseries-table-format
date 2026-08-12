@@ -153,8 +153,8 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
 
     assert_eq!(state.version, 2);
     assert_eq!(state.segments.len(), 2);
-    assert!(state.segments.contains_key(&seg1.segment_id));
-    assert!(state.segments.contains_key(&seg2.segment_id));
+    assert!(state.segments.contains_key(&seg1.path));
+    assert!(state.segments.contains_key(&seg2.path));
 
     // Verify table_meta.kind is TableKind::TimeSeries
     match state.table_meta.kind() {
@@ -242,8 +242,8 @@ async fn remove_segment_removes_from_state() -> TestResult {
     let state = store.rebuild_table_state().await?;
     assert_eq!(state.version, v2);
     assert_eq!(state.segments.len(), 1);
-    assert!(state.segments.contains_key(&seg1.segment_id));
-    assert!(!state.segments.contains_key(&seg2.segment_id));
+    assert!(state.segments.contains_key(&seg1.path));
+    assert!(!state.segments.contains_key(&seg2.path));
 
     Ok(())
 }
@@ -655,7 +655,7 @@ async fn remove_nonexistent_segment_is_noop() -> TestResult {
     // Should succeed, original segment still there
     let state = store.rebuild_table_state().await?;
     assert_eq!(state.segments.len(), 1);
-    assert!(state.segments.contains_key(&seg.segment_id));
+    assert!(state.segments.contains_key(&seg.path));
 
     Ok(())
 }
@@ -803,7 +803,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
 
     let rebuilt_seg = state
         .segments
-        .get(&seg.segment_id)
+        .get(&seg.path)
         .expect("segment present after rebuild");
     assert_eq!(
         rebuilt_seg.coverage_path.as_deref(),

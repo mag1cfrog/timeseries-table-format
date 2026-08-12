@@ -205,13 +205,13 @@ pub type SegmentMetaResult<T> = Result<T, SegmentMetaError>;
 
 /// Deterministic ordering for segments by time.
 ///
-/// Ordering is by `ts_min`, then `ts_max`, and finally `segment_id` as a stable
+/// Ordering is by `ts_min`, then `ts_max`, and finally `path` as a stable
 /// tie-breaker.
 pub(crate) fn cmp_segment_meta_by_time(a: &SegmentMeta, b: &SegmentMeta) -> std::cmp::Ordering {
     a.ts_min
         .cmp(&b.ts_min)
         .then_with(|| a.ts_max.cmp(&b.ts_max))
-        .then_with(|| a.segment_id.0.cmp(&b.segment_id.0))
+        .then_with(|| a.path.cmp(&b.path))
 }
 
 #[cfg(test)]
@@ -266,12 +266,15 @@ mod tests {
     }
 
     #[test]
-    fn ordering_uses_segment_id_as_final_tie_breaker() {
+    fn ordering_uses_path_as_final_tie_breaker() {
         let mut v = vec![seg("b", 10, 20), seg("a", 10, 20), seg("c", 10, 20)];
 
         v.sort_unstable_by(cmp_segment_meta_by_time);
 
-        let ids: Vec<String> = v.into_iter().map(|s| s.segment_id.0).collect();
-        assert_eq!(ids, vec!["a", "b", "c"]);
+        let paths: Vec<String> = v.into_iter().map(|s| s.path).collect();
+        assert_eq!(
+            paths,
+            vec!["data/a.parquet", "data/b.parquet", "data/c.parquet"]
+        );
     }
 }

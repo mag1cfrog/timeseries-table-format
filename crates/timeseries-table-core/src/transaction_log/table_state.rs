@@ -53,8 +53,8 @@ pub struct TableState {
     pub version: u64,
     /// Table-level metadata reconstructed from the log.
     pub table_meta: TableMeta,
-    /// Current live segments keyed by SegmentId.
-    pub segments: HashMap<SegmentId, SegmentMeta>,
+    /// Current live segments keyed by canonical table-relative path.
+    pub segments: HashMap<String, SegmentMeta>,
 
     /// Optional pointer to the latest table coverage metadata.
     pub table_coverage: Option<TableCoveragePointer>,
@@ -63,7 +63,7 @@ pub struct TableState {
 impl TableState {
     /// Return live segments sorted deterministically by time.
     ///
-    /// Ordering is by `ts_min`, then `ts_max`, and finally `segment_id` as a
+    /// Ordering is by `ts_min`, then `ts_max`, and finally `path` as a
     /// stable tie-breaker.
     pub fn segments_sorted_by_time(&self) -> Vec<&SegmentMeta> {
         let mut v: Vec<&SegmentMeta> = self.segments.values().collect();
@@ -94,7 +94,7 @@ impl TransactionLogStore {
         }
 
         let mut table_meta: Option<TableMeta> = None;
-        let mut segments: HashMap<SegmentId, SegmentMeta> = HashMap::new();
+        let mut segments: HashMap<String, SegmentMeta> = HashMap::new();
 
         let mut table_coverage: Option<TableCoveragePointer> = None;
 
@@ -116,16 +116,16 @@ impl TransactionLogStore {
             for action in commit.actions {
                 match action {
                     LogAction::AddSegment(meta) => {
-                        if segments.values().any(|segment| segment.path == meta.path) {
+                        if segments.contains_key(&meta.path) {
                             return CorruptStateSnafu {
                                 msg: format!("Duplicate live segment path: {}", meta.path),
                             }
                             .fail();
                         }
-                        segments.insert(meta.segment_id.clone(), meta);
+                        segments.insert(meta.path.clone(), meta);
                     }
                     LogAction::RemoveSegment { path } => {
-                        segments.retain(|_, segment| segment.path != path);
+                        segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
                         // v0.1: full replacement of TableMeta
@@ -237,10 +237,10 @@ mod tests {
         let seg_d = segment_with_ts("d", 5, 7);
         let seg_b = segment_with_ts("b", 10, 20);
 
-        segments.insert(seg_c.segment_id.clone(), seg_c);
-        segments.insert(seg_a.segment_id.clone(), seg_a);
-        segments.insert(seg_d.segment_id.clone(), seg_d);
-        segments.insert(seg_b.segment_id.clone(), seg_b);
+        segments.insert(seg_c.path.clone(), seg_c);
+        segments.insert(seg_a.path.clone(), seg_a);
+        segments.insert(seg_d.path.clone(), seg_d);
+        segments.insert(seg_b.path.clone(), seg_b);
 
         let state = TableState {
             version: 3,
@@ -297,8 +297,8 @@ mod tests {
         let state = store.rebuild_table_state().await?;
         assert_eq!(state.version, v3);
         assert_eq!(state.table_meta, meta);
-        assert!(state.segments.contains_key(&seg2.segment_id));
-        assert!(!state.segments.contains_key(&seg1.segment_id));
+        assert!(state.segments.contains_key(&seg2.path));
+        assert!(!state.segments.contains_key(&seg1.path));
         Ok(())
     }
 

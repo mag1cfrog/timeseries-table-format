@@ -739,10 +739,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
@@ -780,10 +777,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 0, 5);
@@ -815,10 +809,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 2, 0);
@@ -852,10 +843,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);

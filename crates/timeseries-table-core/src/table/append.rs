@@ -68,12 +68,7 @@ impl TimeSeriesTable {
             .await
             .context(StorageSnafu)?;
 
-        if self
-            .state
-            .segments
-            .values()
-            .any(|segment| segment.path == normalized)
-        {
+        if self.state.segments.contains_key(&normalized) {
             return DuplicateSegmentPathSnafu { path: normalized }.fail();
         }
 
@@ -353,7 +348,7 @@ impl TimeSeriesTable {
 
         self.state
             .segments
-            .insert(segment_meta.segment_id.clone(), segment_meta);
+            .insert(segment_meta.path.clone(), segment_meta);
 
         // Also update the snapshot pointer in state.
         self.state.table_coverage = Some(TableCoveragePointer {
@@ -554,11 +549,7 @@ mod tests {
 
         assert_eq!(new_version, 2);
         assert_eq!(table.state.version, 2);
-        let seg = table
-            .state
-            .segments
-            .get(&SegmentId("seg-1".to_string()))
-            .expect("segment present");
+        let seg = table.state.segments.get(rel_path).expect("segment present");
         assert_eq!(seg.path, rel_path);
         assert_eq!(seg.row_count, 1);
         assert_eq!(seg.ts_min.timestamp_millis(), 1_000);
@@ -571,12 +562,7 @@ mod tests {
         assert_eq!(current.trim(), "2");
 
         let reopened = TimeSeriesTable::open(location).await?;
-        assert!(
-            reopened
-                .state
-                .segments
-                .contains_key(&SegmentId("seg-1".to_string()))
-        );
+        assert!(reopened.state.segments.contains_key(rel_path));
         Ok(())
     }
 
@@ -974,16 +960,10 @@ mod tests {
         let expected_id1 = segment_id_v1(rel1, &data1);
         let expected_id2 = segment_id_v1(rel2, &data2);
 
-        let seg1 = table
-            .state
-            .segments
-            .get(&expected_id1)
-            .expect("segment 1 present");
-        let seg2 = table
-            .state
-            .segments
-            .get(&expected_id2)
-            .expect("segment 2 present");
+        let seg1 = table.state.segments.get(rel1).expect("segment 1 present");
+        let seg2 = table.state.segments.get(rel2).expect("segment 2 present");
+        assert_eq!(seg1.segment_id, expected_id1);
+        assert_eq!(seg2.segment_id, expected_id2);
         assert!(seg1.coverage_path.is_some());
         assert!(seg2.coverage_path.is_some());
 
@@ -1268,7 +1248,7 @@ mod tests {
         let mut state = table.state.clone();
         state.table_coverage = None;
 
-        let seg_id = state
+        let segment_path = state
             .segments
             .keys()
             .next()
@@ -1276,7 +1256,7 @@ mod tests {
             .clone();
         state
             .segments
-            .get_mut(&seg_id)
+            .get_mut(&segment_path)
             .expect("segment present")
             .coverage_path = None;
 
@@ -1454,11 +1434,7 @@ mod tests {
             .await?;
 
         // Simulate legacy/bad state: drop coverage_path on the existing segment.
-        let seg = table
-            .state
-            .segments
-            .get_mut(&SegmentId("seg-a".to_string()))
-            .expect("segment present");
+        let seg = table.state.segments.get_mut(rel1).expect("segment present");
         seg.coverage_path = None;
 
         let err = table

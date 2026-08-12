@@ -58,11 +58,8 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
 
     let latest = stale.load_latest_state().await?;
     assert_eq!(latest.version, 2);
-    assert!(latest.segments.contains_key(&seg.segment_id));
-    let latest_seg = latest
-        .segments
-        .get(&seg.segment_id)
-        .expect("segment present");
+    assert!(latest.segments.contains_key(&seg.path));
+    let latest_seg = latest.segments.get(&seg.path).expect("segment present");
     assert_eq!(latest_seg.ts_min, seg.ts_min);
     assert_eq!(latest_seg.ts_max, seg.ts_max);
     assert!(latest.table_coverage.is_none());
