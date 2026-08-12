@@ -49,6 +49,15 @@ pub enum TableError {
         kind: TableKind,
     },
 
+    /// Attempting to create a table with an unsupported metadata format version.
+    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
+    UnsupportedFormatVersion {
+        /// Format version supported by this writer.
+        expected: u32,
+        /// Format version supplied by the caller.
+        found: u32,
+    },
+
     /// Attempt to create a table where commits already exist (idempotency guard for create).
     #[snafu(display("Table already exists; current transaction log version is {current_version}"))]
     AlreadyExists {

@@ -28,9 +28,11 @@ use snafu::prelude::*;
 
 use crate::table::error::{
     AlreadyExistsSnafu, EmptyTableSnafu, NotTimeSeriesSnafu, TransactionLogSnafu,
+    UnsupportedFormatVersionSnafu,
 };
 
 use crate::{
+    metadata::table_metadata::TABLE_FORMAT_VERSION,
     storage::TableLocation,
     transaction_log::{
         LogAction, TableKind, TableMeta, TableState, TimeIndexSpec, TransactionLogStore,
@@ -149,6 +151,7 @@ impl TimeSeriesTable {
     /// Create a new time-series table at the given location.
     ///
     /// This:
+    /// - Requires `table_meta.format_version` to match [`TABLE_FORMAT_VERSION`],
     /// - Requires `table_meta.kind` to be `TableKind::TimeSeries`,
     /// - Verifies that there are no existing commits (version must be 0),
     /// - Writes an initial commit with `UpdateTableMeta(table_meta.clone())`,
@@ -157,6 +160,14 @@ impl TimeSeriesTable {
         location: TableLocation,
         table_meta: TableMeta,
     ) -> Result<Self, TableError> {
+        if table_meta.format_version() != TABLE_FORMAT_VERSION {
+            return UnsupportedFormatVersionSnafu {
+                expected: TABLE_FORMAT_VERSION,
+                found: table_meta.format_version(),
+            }
+            .fail();
+        }
+
         // 1) Extract the time index spec from the provided metadata
         // and ensure this is actually a time-series table.
         let index = match &table_meta.kind {
@@ -284,6 +295,31 @@ mod tests {
         let current_path = root.join(layout::current_rel_path());
         let current_contents = tokio::fs::read_to_string(&current_path).await?;
         assert_eq!(current_contents.trim(), "1");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_rejects_unsupported_format_without_writing_log() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+            let mut meta = make_basic_table_meta();
+            meta.format_version = found;
+
+            let err = TimeSeriesTable::create(location.clone(), meta)
+                .await
+                .expect_err("unsupported format version should be rejected");
+            assert!(matches!(
+                err,
+                TableError::UnsupportedFormatVersion {
+                    expected: TABLE_FORMAT_VERSION,
+                    found: actual,
+                } if actual == found
+            ));
+            assert!(!tmp.path().join(layout::log_rel_dir()).exists());
+        }
 
         Ok(())
     }
