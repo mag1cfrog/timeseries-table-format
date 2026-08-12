@@ -27,6 +27,7 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
+              - 'rust-toolchain.toml'
               - '**/build.rs'
 
   detect-python-changes:
@@ -56,6 +57,7 @@ jobs:
               - 'crates/timeseries-table-python/python-src.stamp'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'rust-toolchain.toml'
       - name: Check for skip label
         id: skip
         env:
@@ -123,6 +125,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
+      RUSTFLAGS: "-C debuginfo=0"
       CLIPPY_CONF_DIR: ${{ github.workspace }}
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
@@ -134,8 +137,9 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
           components: rustfmt, clippy
+          cache: false
+          rustflags: ""
 
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
@@ -187,6 +191,8 @@ jobs:
         working-directory: python
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
@@ -204,8 +210,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
 
       - name: Configure PyO3 env
         shell: bash

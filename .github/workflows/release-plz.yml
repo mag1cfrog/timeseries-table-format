@@ -15,9 +15,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
-      # release-plz operates in temp worktrees; share build artifacts across them.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_ONLY
       RUSTC_WRAPPER: sccache
@@ -35,8 +34,11 @@ jobs:
           fetch-tags: true
           persist-credentials: true
           token: ${{ steps.generate-token.outputs.token }}
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@v2
         with:
@@ -67,6 +69,7 @@ jobs:
         with:
           command: release
         env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
 
       - name: Refresh tags after release-plz
@@ -93,9 +96,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
-      # release-plz operates in temp worktrees; share build artifacts across them.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_ONLY
       RUSTC_WRAPPER: sccache
@@ -116,8 +118,11 @@ jobs:
           fetch-tags: true
           persist-credentials: true
           token: ${{ steps.generate-token.outputs.token }}
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@v2
         with:
@@ -148,6 +153,7 @@ jobs:
         with:
           command: release-pr
         env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
       - name: sccache stats
         if: ${{ always() }}

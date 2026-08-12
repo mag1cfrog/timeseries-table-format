@@ -11,6 +11,7 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "**/build.rs"
       - "python/.python-version"
       - "python/pyproject.toml"
@@ -41,6 +42,7 @@ jobs:
               - '.cargo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'rust-toolchain.toml'
               - 'crates/**/Cargo.toml'
               - '**/build.rs'
               - 'python/.python-version'
@@ -52,6 +54,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
+      RUSTFLAGS: "-C debuginfo=0"
       CLIPPY_CONF_DIR: ${{ github.workspace }}
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
@@ -63,7 +66,8 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          cache: false
+          rustflags: ""
 
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2

@@ -30,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'ci:skip-python') }}
     env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
@@ -47,8 +49,11 @@ jobs:
             docs-site/requirements.txt
             python/pyproject.toml
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
 
       - name: Configure PyO3 env
         shell: bash

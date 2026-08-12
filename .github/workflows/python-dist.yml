@@ -116,7 +116,10 @@ jobs:
       - name: Verify python wheel stamp
         run: python scripts/update_python_wheel_stamp.py --check
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
 
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2

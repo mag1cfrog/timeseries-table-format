@@ -94,22 +94,22 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
-      CARGO_NET_RETRY: "10"
-      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_ONLY
       RUSTC_WRAPPER: sccache
-      # Keep target artifacts stable across steps.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -172,7 +172,10 @@ jobs:
       - name: Publish crates (skip already-published versions)
         shell: bash
         env:
+          CARGO_NET_RETRY: "10"
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           set -euo pipefail
           ua="mag1cfrog/timeseries-table-format publish-crates (GitHub Actions)"
