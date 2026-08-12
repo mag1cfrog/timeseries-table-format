@@ -182,6 +182,7 @@ jobs:
           sccache: ${{ startsWith(matrix.os, 'ubuntu') }}
           args: >-
             ${{ inputs.maturin-args }}
+            --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
             -i ${{ startsWith(matrix.os, 'ubuntu') && format('python{0}', matrix.python-version) || 'python' }}
 
@@ -213,6 +214,7 @@ jobs:
           sccache: false
           args: >-
             ${{ inputs.maturin-args }}
+            --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
             -i python
 

@@ -2,6 +2,7 @@
 name = "timeseries-table-core"
 version = "0.2.2"
 edition = "2024"
+rust-version.workspace = true
 license = "MIT"
 repository = "https://github.com/mag1cfrog/timeseries-table-format"
 description = "Core engine for a Rust-native log-structured time-series table format (metadata log + coverage bitmaps)."

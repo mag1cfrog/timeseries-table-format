@@ -29,6 +29,13 @@ jobs:
               - '**/Cargo.lock'
               - 'rust-toolchain.toml'
               - '**/build.rs'
+              - '.cargo/**'
+              - 'clippy.toml'
+              - '.github/workflows/cache-warm.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/docs.yml'
+              - '.github/workflows/publish-crates.yml'
+              - '.github/workflows/release-plz.yml'
 
   detect-python-changes:
     permissions:
@@ -58,6 +65,14 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - 'python/Cargo.toml'
+              - '.cargo/**'
+              - '.github/workflows/cache-warm.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/docs.yml'
+              - '.github/workflows/publish-pypi.yml'
+              - '.github/workflows/publish-testpypi.yml'
+              - '.github/workflows/python-dist.yml'
       - name: Check for skip label
         id: skip
         env:
