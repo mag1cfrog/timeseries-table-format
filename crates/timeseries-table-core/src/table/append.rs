@@ -1230,16 +1230,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_conflict_returns_error() -> TestResult {
+    async fn stale_append_of_different_path_fails_occ_without_state_mutation() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+        let mut winner = TimeSeriesTable::create(location.clone(), meta).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        let loser_state_before = loser.state.clone();
 
-        let rel_path = "data/conflict.parquet";
-        let abs_path = tmp.path().join(rel_path);
+        let winner_path = "data/winner.parquet";
+        let loser_path = "data/loser.parquet";
         write_test_parquet(
-            &abs_path,
+            &tmp.path().join(winner_path),
             true,
             false,
             &[TestRow {
@@ -1248,16 +1250,21 @@ mod tests {
                 price: 100.0,
             }],
         )?;
+        write_test_parquet(
+            &tmp.path().join(loser_path),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 120_000,
+                symbol: "X",
+                price: 200.0,
+            }],
+        )?;
 
-        // Simulate an external writer advancing CURRENT to version 2 while this handle is at version 1.
-        table
-            .log
-            .commit_with_expected_version(1, vec![])
-            .await
-            .expect("external commit succeeds");
+        assert_eq!(winner.append_parquet_segment(winner_path, "ts").await?, 2);
 
-        let err = table
-            .append_parquet_segment(rel_path, "ts")
+        let err = loser
+            .append_parquet_segment(loser_path, "ts")
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -1274,6 +1281,12 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+
+        assert_eq!(loser.state, loser_state_before);
+        assert_eq!(loser.log_store().load_current_version().await?, 2);
+        let committed = loser.load_latest_state().await?;
+        assert!(committed.segments.contains_key(winner_path));
+        assert!(!committed.segments.contains_key(loser_path));
         Ok(())
     }
 
