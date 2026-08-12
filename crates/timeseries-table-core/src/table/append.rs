@@ -461,7 +461,6 @@ impl TimeSeriesTable {
         let data = Bytes::from(bytes);
 
         let segment_id = segment_id_v1(&relative_path, &data);
-        report.set_context("segment_id", segment_id.0.clone());
 
         let version = self
             .append_parquet_segment_with_id_and_bytes_inner(

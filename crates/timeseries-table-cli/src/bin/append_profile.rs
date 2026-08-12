@@ -73,13 +73,10 @@ fn csv_escape(raw: &str) -> String {
 
 fn write_csv(report: &AppendReport, out_path: &Path) -> std::io::Result<()> {
     let mut out = String::new();
-    out.push_str(
-        "relative_path,time_column,segment_id,bytes_len,step,elapsed_ms,percent,total_ms,fields\n",
-    );
+    out.push_str("relative_path,time_column,bytes_len,step,elapsed_ms,percent,total_ms,fields\n");
 
     let rel = get_context_value(report, "relative_path");
     let time_column = get_context_value(report, "time_column");
-    let segment_id = get_context_value(report, "segment_id");
     let bytes_len = get_context_value(report, "bytes_len");
 
     for step in &report.steps {
@@ -91,10 +88,9 @@ fn write_csv(report: &AppendReport, out_path: &Path) -> std::io::Result<()> {
 
         let fields = format_fields(step);
         let line = format!(
-            "{},{},{},{},{},{},{:.2},{},{}\n",
+            "{},{},{},{},{},{:.2},{},{}\n",
             csv_escape(rel),
             csv_escape(time_column),
-            csv_escape(segment_id),
             csv_escape(bytes_len),
             csv_escape(&step.name),
             step.elapsed_ms,
@@ -106,6 +102,39 @@ fn write_csv(report: &AppendReport, out_path: &Path) -> std::io::Result<()> {
     }
 
     std::fs::write(out_path, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_uses_relative_path_as_segment_identity() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let output = tmp.path().join("report.csv");
+        let report = AppendReport {
+            context: vec![
+                ("relative_path".to_string(), "data/seg.parquet".to_string()),
+                ("time_column".to_string(), "ts".to_string()),
+                ("bytes_len".to_string(), "42".to_string()),
+            ],
+            steps: vec![AppendStep {
+                name: "segment_meta".to_string(),
+                elapsed_ms: 1,
+                fields: Vec::new(),
+            }],
+            total_ms: 2,
+        };
+
+        write_csv(&report, &output).expect("write CSV");
+        let csv = std::fs::read_to_string(output).expect("read CSV");
+
+        assert_eq!(
+            csv,
+            "relative_path,time_column,bytes_len,step,elapsed_ms,percent,total_ms,fields\n\
+             data/seg.parquet,ts,42,segment_meta,1,50.00,2,\n"
+        );
+    }
 }
 
 fn print_report(report: &AppendReport) {
