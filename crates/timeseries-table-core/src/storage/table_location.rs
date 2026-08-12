@@ -194,7 +194,9 @@ impl TableLocation {
     }
 }
 
-fn normalize_relative_segment_path(segment_path: &Path) -> StorageResult<(String, PathBuf)> {
+pub(crate) fn normalize_relative_segment_path(
+    segment_path: &Path,
+) -> StorageResult<(String, PathBuf)> {
     let supplied = segment_path
         .to_str()
         .ok_or_else(|| invalid_segment_path(segment_path, "path is not valid UTF-8"))?;

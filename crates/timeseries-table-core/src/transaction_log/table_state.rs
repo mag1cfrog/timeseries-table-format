@@ -6,7 +6,7 @@
 //! logic isolated from the append-only write path and documents the invariant
 //! that table readers must see a state consistent with the latest committed
 //! version.
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 #[cfg(feature = "test-counters")]
 use std::cell::Cell;
@@ -30,8 +30,32 @@ pub fn reset_rebuild_table_state_count() {
 
 use crate::{
     metadata::{segments::cmp_segment_meta_by_time, table_metadata::TABLE_FORMAT_VERSION},
+    storage::normalize_relative_segment_path,
     transaction_log::*,
 };
+
+fn validate_persisted_segment_path(path: &str) -> Result<(), CommitError> {
+    let (canonical, _) = match normalize_relative_segment_path(Path::new(path)) {
+        Ok(path) => path,
+        Err(source) => {
+            return CorruptStateSnafu {
+                msg: format!("Invalid persisted segment path {path:?}: {source}"),
+            }
+            .fail();
+        }
+    };
+
+    if canonical != path {
+        return CorruptStateSnafu {
+            msg: format!(
+                "Non-canonical persisted segment path {path:?}; canonical form is {canonical:?}"
+            ),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +143,7 @@ impl TransactionLogStore {
             for action in commit.actions {
                 match action {
                     LogAction::AddSegment(meta) => {
+                        validate_persisted_segment_path(&meta.path)?;
                         if segments.contains_key(&meta.path) {
                             return CorruptStateSnafu {
                                 msg: format!("Duplicate live segment path: {}", meta.path),
@@ -128,6 +153,7 @@ impl TransactionLogStore {
                         segments.insert(meta.path.clone(), meta);
                     }
                     LogAction::RemoveSegment { path } => {
+                        validate_persisted_segment_path(&path)?;
                         segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
@@ -359,6 +385,46 @@ mod tests {
             "expected {TABLE_FORMAT_VERSION}, found {}",
             TABLE_FORMAT_VERSION - 1
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_noncanonical_segment_action_paths() -> TestResult {
+        for path in [
+            "",
+            "/data/seg.parquet",
+            "../data/seg.parquet",
+            "data/../seg.parquet",
+            r"data\seg.parquet",
+            "data//seg.parquet",
+            r"C:\data\seg.parquet",
+        ] {
+            let mut segment = sample_segment("seg");
+            segment.path = path.to_owned();
+
+            for action in [
+                LogAction::AddSegment(segment.clone()),
+                LogAction::RemoveSegment {
+                    path: path.to_owned(),
+                },
+            ] {
+                let (_tmp, store) = create_test_log_store();
+                store
+                    .commit_with_expected_version(
+                        0,
+                        vec![LogAction::UpdateTableMeta(sample_table_meta()), action],
+                    )
+                    .await?;
+
+                let err = store
+                    .rebuild_table_state()
+                    .await
+                    .expect_err("noncanonical segment action path should be rejected");
+                assert!(matches!(err, CommitError::CorruptState { .. }));
+                assert!(err.to_string().contains("segment path"), "{err}");
+            }
+        }
+
         Ok(())
     }
 
