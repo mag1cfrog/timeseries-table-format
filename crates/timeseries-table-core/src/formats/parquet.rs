@@ -7,10 +7,9 @@ pub mod coverage;
 pub mod entity_identity;
 pub mod rg_parallel;
 pub mod schema;
-pub mod segment_meta;
+pub(crate) mod segment_meta;
 
 pub use coverage::*;
 pub use entity_identity::*;
 pub use rg_parallel::*;
 pub use schema::*;
-pub use segment_meta::*;

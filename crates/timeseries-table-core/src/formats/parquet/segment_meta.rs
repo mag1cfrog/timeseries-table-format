@@ -1,7 +1,7 @@
 //! Parquet segment metadata derivation.
 //!
 //! This module extracts per-segment metadata (ts_min/ts_max/row_count, etc.)
-//! from Parquet bytes or a storage location.
+//! from Parquet bytes supplied by the append pipeline.
 
 use std::path::Path;
 
@@ -19,9 +19,7 @@ use rayon::prelude::*;
 use snafu::Backtrace;
 
 use crate::metadata::time_column::TimeColumnError;
-use crate::storage::{self, TableLocation};
-
-use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
+use crate::transaction_log::segments::{SegmentMetaError, SegmentResult};
 use crate::transaction_log::{FileFormat, SegmentMeta};
 
 /// Convert little-endian i64 bytes into i64 with proper error handling.
@@ -342,44 +340,19 @@ fn ts_from_i64(unit: TimestampUnit, value: i64) -> Result<DateTime<Utc>, Segment
 
 /// Profiling details collected while building `SegmentMeta`.
 #[derive(Debug, Clone)]
-pub struct SegmentMetaReport {
+pub(crate) struct SegmentMetaReport {
     /// Number of row groups reported by Parquet metadata.
-    pub row_groups: usize,
+    pub(crate) row_groups: usize,
     /// Total row count from file metadata.
-    pub row_count: u64,
+    pub(crate) row_count: u64,
     /// True if min/max were derived from Parquet statistics.
-    pub used_stats: bool,
+    pub(crate) used_stats: bool,
     /// Number of rows scanned during fallback (0 if stats were used).
-    pub scanned_rows: u64,
-}
-
-/// Build a `SegmentMeta` from in-memory Parquet bytes.
-///
-/// This mirrors `segment_meta_from_parquet_location` but operates on a provided
-/// `Bytes` buffer instead of reading from storage. The caller supplies:
-/// - `rel_path`: relative path of the segment within the table (for metadata/logging).
-/// - `time_column`: name of the timestamp column used for min/max extraction.
-/// - `data`: Parquet file contents (complete file).
-///
-/// Behavior:
-/// - Validates a minimal length before parsing (defensive guard).
-/// - Reads Parquet metadata to get row count and locate the time column.
-/// - Determines the timestamp unit from the column’s logical type.
-/// - Tries to derive min/max timestamps from row-group stats; falls back to a
-///   row scan if stats are missing or incomplete.
-/// - Converts raw i64 timestamps to `DateTime<Utc>` using the chosen unit.
-/// - Returns a `SegmentMeta` with `coverage_path` left as `None`.
-pub fn segment_meta_from_parquet_bytes(
-    rel_path: &Path,
-    time_column: &str,
-    data: Bytes,
-) -> SegmentResult<SegmentMeta> {
-    let (meta, _) = segment_meta_from_parquet_bytes_with_report(rel_path, time_column, data)?;
-    Ok(meta)
+    pub(crate) scanned_rows: u64,
 }
 
 /// Build a `SegmentMeta` from in-memory Parquet bytes and return profiling data.
-pub fn segment_meta_from_parquet_bytes_with_report(
+pub(crate) fn segment_meta_from_parquet_bytes_with_report(
     rel_path: &Path,
     time_column: &str,
     data: Bytes,
@@ -471,25 +444,10 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     Ok((meta_out, report))
 }
 
-/// Read a Parquet file at `rel_path` from `location` and produce a SegmentMeta
-/// containing the min/max timestamps for `time_column` and the row count.
-pub async fn segment_meta_from_parquet_location(
-    location: &TableLocation,
-    rel_path: &Path,
-    time_column: &str,
-) -> SegmentResult<SegmentMeta> {
-    // 1) Read whole file via storage abstraction.
-    let bytes = storage::read_all_bytes(location.as_ref(), rel_path)
-        .await
-        .map_err(map_storage_error)?;
-
-    segment_meta_from_parquet_bytes(rel_path, time_column, Bytes::from(bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction_log::segments::{SegmentError, SegmentIoError};
+    use crate::transaction_log::segments::SegmentError;
     use parquet::basic::{LogicalType, Repetition, TimeUnit};
     use parquet::column::writer::ColumnWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -501,6 +459,10 @@ mod tests {
     use tokio::fs;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    async fn read_parquet_bytes(path: &Path) -> Result<Bytes, std::io::Error> {
+        fs::read(path).await.map(Bytes::from)
+    }
 
     fn write_parquet_file(
         path: &Path,
@@ -623,9 +585,11 @@ mod tests {
             true,
         )?;
 
-        let meta =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await?;
+        let (meta, _) = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        )?;
 
         assert_eq!(meta.ts_min.timestamp_millis(), 10);
         assert_eq!(meta.ts_max.timestamp_millis(), 30);
@@ -650,9 +614,11 @@ mod tests {
             false,
         )?;
 
-        let meta =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await?;
+        let (meta, _) = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        )?;
 
         assert_eq!(meta.ts_min.timestamp_millis(), 5);
         assert_eq!(meta.ts_max.timestamp_millis(), 7);
@@ -675,9 +641,11 @@ mod tests {
             false,
         )?;
 
-        let result =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await;
+        let result = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        );
 
         assert!(matches!(
             result,
@@ -704,9 +672,11 @@ mod tests {
             true,
         )?;
 
-        let meta_micro =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_micro, "ts")
-                .await?;
+        let (meta_micro, _) = segment_meta_from_parquet_bytes_with_report(
+            rel_micro,
+            "ts",
+            read_parquet_bytes(&abs_micro).await?,
+        )?;
         assert_eq!(
             meta_micro.ts_min.timestamp_nanos_opt().map(|n| n / 1_000),
             Some(1_000)
@@ -728,9 +698,11 @@ mod tests {
             true,
         )?;
 
-        let meta_nano =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_nano, "ts")
-                .await?;
+        let (meta_nano, _) = segment_meta_from_parquet_bytes_with_report(
+            rel_nano,
+            "ts",
+            read_parquet_bytes(&abs_nano).await?,
+        )?;
         assert_eq!(meta_nano.ts_min.timestamp_nanos_opt(), Some(3_000));
         assert_eq!(meta_nano.ts_max.timestamp_nanos_opt(), Some(9_000));
 
@@ -753,9 +725,11 @@ mod tests {
             true,
         )?;
 
-        let result =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await;
+        let result = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        );
 
         assert!(matches!(
             result,
@@ -778,9 +752,11 @@ mod tests {
         // INT32 with timestamp logical is unsupported.
         write_parquet_file(&abs, "ts", None, PhysicalType::INT32, &[1, 2], true)?;
 
-        let result =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await;
+        let result = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        );
 
         assert!(matches!(
             result,
@@ -804,32 +780,16 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"PAR1PAR1garbage").await?;
 
-        let result =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await;
+        let result = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        );
 
         assert!(matches!(
             result,
             Err(SegmentError::Meta {
                 source: SegmentMetaError::ParquetRead { .. }
-            })
-        ));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn missing_file_returns_missing_error() -> TestResult {
-        let tmp = TempDir::new()?;
-        let rel_path = Path::new("data/missing.parquet");
-
-        let result =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await;
-
-        assert!(matches!(
-            result,
-            Err(SegmentError::Io {
-                source: SegmentIoError::MissingFile { .. }
             })
         ));
         Ok(())
@@ -843,9 +803,11 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"short").await?;
 
-        let result =
-            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
-                .await;
+        let result = segment_meta_from_parquet_bytes_with_report(
+            rel_path,
+            "ts",
+            read_parquet_bytes(&abs).await?,
+        );
 
         assert!(matches!(
             result,

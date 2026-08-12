@@ -26,7 +26,8 @@ use crate::{
     },
     formats::parquet::{
         coverage::compute_segment_coverage_from_parquet_bytes, logical_schema_from_parquet_bytes,
-        segment_entity_identity_from_parquet_bytes, segment_meta_from_parquet_bytes_with_report,
+        segment_entity_identity_from_parquet_bytes,
+        segment_meta::segment_meta_from_parquet_bytes_with_report,
     },
     metadata::schema_compat::ensure_schema_exact_match,
     storage::{self, StorageError},

@@ -75,24 +75,10 @@ impl SegmentMeta {
 /// `transaction_log::segments::SegmentError`).
 #[derive(Debug, Snafu)]
 pub enum SegmentMetaError {
-    /// File format is not supported for v0.1.
-    #[snafu(display("Unsupported file format: {format:?}"))]
-    UnsupportedFormat {
-        /// The offending file format.
-        format: FileFormat,
-    },
-
     /// The file is too short to be a valid Parquet file.
     #[snafu(display("Segment file too short to be valid Parquet: {path}"))]
     TooShort {
         /// The path to the file that was too short.
-        path: String,
-    },
-
-    /// Magic bytes at the start / end of file don't match the Parquet spec.
-    #[snafu(display("Invalid Parquet magic bytes in segment file: {path}"))]
-    InvalidMagic {
-        /// The path to the file with invalid magic bytes.
         path: String,
     },
 
@@ -159,10 +145,6 @@ pub enum SegmentMetaError {
         source: LogicalSchemaError,
     },
 }
-
-/// Result type for pure (non-IO) segment metadata operations.
-#[allow(clippy::result_large_err)]
-pub type SegmentMetaResult<T> = Result<T, SegmentMetaError>;
 
 /// Deterministic ordering for segments by time.
 ///
