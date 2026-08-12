@@ -40,10 +40,10 @@ use super::{
     TimeSeriesTable,
     append_report::{AppendReport, AppendReportBuilder},
     error::{
-        CoverageOverlapSnafu, EntityMismatchSnafu, ExistingSegmentMissingCoverageSnafu,
-        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
-        SegmentEntityIdentitySnafu, SegmentMetaSnafu, StorageSnafu, TableError,
-        TransactionLogSnafu,
+        CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EntityMismatchSnafu,
+        ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu,
+        SegmentCoverageSnafu, SegmentEntityIdentitySnafu, SegmentMetaSnafu, StorageSnafu,
+        TableError, TransactionLogSnafu,
     },
 };
 
@@ -61,6 +61,25 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
 }
 
 impl TimeSeriesTable {
+    async fn normalize_new_segment_path(&self, relative_path: &str) -> Result<String, TableError> {
+        let normalized = self
+            .location()
+            .normalize_segment_path(Path::new(relative_path))
+            .await
+            .context(StorageSnafu)?;
+
+        if self
+            .state
+            .segments
+            .values()
+            .any(|segment| segment.path == normalized)
+        {
+            return DuplicateSegmentPathSnafu { path: normalized }.fail();
+        }
+
+        Ok(normalized)
+    }
+
     /// Core append implementation that operates on already-loaded Parquet bytes.
     ///
     /// This contains the full v0.1 append flow (schema adoption/enforcement,
@@ -373,7 +392,8 @@ impl TimeSeriesTable {
         relative_path: &str,
         time_column: &str,
     ) -> Result<u64, TableError> {
-        let rel_path = Path::new(relative_path);
+        let relative_path = self.normalize_new_segment_path(relative_path).await?;
+        let rel_path = Path::new(&relative_path);
 
         let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
             .await
@@ -381,7 +401,7 @@ impl TimeSeriesTable {
 
         self.append_parquet_segment_with_id_and_bytes_inner(
             segment_id,
-            relative_path,
+            &relative_path,
             time_column,
             Bytes::from(bytes),
             None,
@@ -401,16 +421,17 @@ impl TimeSeriesTable {
         relative_path: &str,
         time_column: &str,
     ) -> Result<u64, TableError> {
-        let rel_path = Path::new(relative_path);
+        let relative_path = self.normalize_new_segment_path(relative_path).await?;
+        let rel_path = Path::new(&relative_path);
         let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
             .await
             .context(StorageSnafu)?;
         let data = Bytes::from(bytes);
 
-        let segment_id = segment_id_v1(relative_path, &data);
+        let segment_id = segment_id_v1(&relative_path, &data);
         self.append_parquet_segment_with_id_and_bytes_inner(
             segment_id,
-            relative_path,
+            &relative_path,
             time_column,
             data,
             None,
@@ -424,11 +445,12 @@ impl TimeSeriesTable {
         relative_path: &str,
         time_column: &str,
     ) -> Result<(u64, AppendReport), TableError> {
+        let relative_path = self.normalize_new_segment_path(relative_path).await?;
         let mut report = AppendReportBuilder::new();
-        report.set_context("relative_path", relative_path);
+        report.set_context("relative_path", &relative_path);
         report.set_context("time_column", time_column);
 
-        let rel_path = Path::new(relative_path);
+        let rel_path = Path::new(&relative_path);
         let read_start = Instant::now();
         let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
             .await
@@ -438,13 +460,13 @@ impl TimeSeriesTable {
         report.set_context("bytes_len", bytes.len().to_string());
         let data = Bytes::from(bytes);
 
-        let segment_id = segment_id_v1(relative_path, &data);
+        let segment_id = segment_id_v1(&relative_path, &data);
         report.set_context("segment_id", segment_id.0.clone());
 
         let version = self
             .append_parquet_segment_with_id_and_bytes_inner(
                 segment_id,
-                relative_path,
+                &relative_path,
                 time_column,
                 data,
                 Some(&mut report),
@@ -835,8 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_with_id_allows_same_id_with_nonoverlapping_coverage()
-    -> TestResult {
+    async fn append_rejects_duplicate_path_before_parquet_read_without_mutation() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -855,56 +876,45 @@ mod tests {
                 price: 10.0,
             }],
         )?;
-        let v2 = table
-            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
-            .await?;
-        assert_eq!(v2, 2);
-        assert_eq!(table.state.version, 2);
+        table.append_parquet_segment(rel_path, "ts").await?;
+        let state_before = table.state.clone();
+        let sidecar_counts_before = [
+            std::fs::read_dir(tmp.path().join(layout::SEGMENT_COVERAGE_DIR))?.count(),
+            std::fs::read_dir(tmp.path().join(layout::TABLE_SNAPSHOT_DIR))?.count(),
+        ];
+
+        // Keep the path resolvable but make the file invalid. A duplicate-path
+        // error proves the append returned before reading or inspecting it.
+        tokio::fs::write(&abs_path, b"not parquet").await?;
+
+        let err = table
+            .append_parquet_segment(rel_path, "ts")
+            .await
+            .expect_err("live path must be rejected");
+        assert!(matches!(
+            err,
+            TableError::DuplicateSegmentPath { ref path } if path == rel_path
+        ));
+
+        let err = table
+            .append_parquet_segment_with_report(r"data\dup.parquet", "ts")
+            .await
+            .expect_err("normalized live path must be rejected");
+        assert!(matches!(
+            err,
+            TableError::DuplicateSegmentPath { ref path } if path == rel_path
+        ));
+
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log_store().load_current_version().await?, 2);
+        assert!(!tmp.path().join(layout::commit_rel_path(3)).exists());
         assert_eq!(
-            table
-                .state
-                .segments
-                .get(&SegmentId("seg-dup".to_string()))
-                .unwrap()
-                .row_count,
-            1
-        );
-
-        // Overwrite the same path with different content and append again with the same segment ID.
-        write_test_parquet(
-            &abs_path,
-            true,
-            false,
-            &[
-                TestRow {
-                    ts_millis: 120_000,
-                    symbol: "A",
-                    price: 20.0,
-                },
-                TestRow {
-                    ts_millis: 121_000,
-                    symbol: "A",
-                    price: 30.0,
-                },
+            [
+                std::fs::read_dir(tmp.path().join(layout::SEGMENT_COVERAGE_DIR))?.count(),
+                std::fs::read_dir(tmp.path().join(layout::TABLE_SNAPSHOT_DIR))?.count(),
             ],
-        )?;
-
-        let v3 = table
-            .append_parquet_segment_with_id(SegmentId("seg-dup".to_string()), rel_path, "ts")
-            .await?;
-        assert_eq!(v3, 3);
-        assert_eq!(table.state.version, 3);
-
-        let seg = table
-            .state
-            .segments
-            .get(&SegmentId("seg-dup".to_string()))
-            .expect("segment retained after duplicate append");
-        assert_eq!(seg.row_count, 2);
-        assert_eq!(seg.ts_min.timestamp_millis(), 120_000);
-        assert_eq!(seg.ts_max.timestamp_millis(), 121_000);
-
-        assert!(tmp.path().join(layout::commit_rel_path(3)).is_file());
+            sidecar_counts_before
+        );
         Ok(())
     }
 
