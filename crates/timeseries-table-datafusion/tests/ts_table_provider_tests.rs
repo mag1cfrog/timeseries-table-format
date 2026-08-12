@@ -28,8 +28,7 @@ use timeseries_table_core::metadata::logical_schema::{
 use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::table::TimeSeriesTable;
 use timeseries_table_core::transaction_log::{
-    FileFormat, LogAction, SegmentId, SegmentMeta, TableMeta, TimeBucket, TimeIndexSpec,
-    TransactionLogStore,
+    FileFormat, LogAction, SegmentMeta, TableMeta, TimeBucket, TimeIndexSpec, TransactionLogStore,
 };
 use timeseries_table_datafusion::TsTableProvider;
 use timeseries_table_datafusion::test_utils::{
@@ -866,7 +865,6 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
         .unwrap();
 
     let seg = SegmentMeta {
-        segment_id: SegmentId("seg-missing-size".to_string()),
         path: rel_path.to_string(),
         format: FileFormat::Parquet,
         ts_min,

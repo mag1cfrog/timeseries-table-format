@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use timeseries_table_core::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use timeseries_table_core::metadata::segments::{FileFormat, SegmentId, SegmentMeta};
+use timeseries_table_core::metadata::segments::{FileFormat, SegmentMeta};
 use timeseries_table_core::metadata::table_metadata::{
     TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
 };
@@ -68,7 +68,6 @@ fn sample_table_meta() -> TableMeta {
 
 fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
     SegmentMeta {
-        segment_id: SegmentId(id.to_string()),
         path: format!("data/{id}.parquet"),
         format: FileFormat::Parquet,
         ts_min: utc_datetime(2025, 1, 1, ts_hour, 0, 0),

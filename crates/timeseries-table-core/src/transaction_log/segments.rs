@@ -13,9 +13,7 @@ use snafu::{Backtrace, prelude::*};
 use crate::storage::{self, StorageError, TableLocation};
 
 // Re-export pure types for compatibility (`transaction_log::segments::*`).
-pub use crate::metadata::segments::{
-    FileFormat, SegmentId, SegmentMeta, SegmentMetaError, SegmentMetaResult, segment_id_v1,
-};
+pub use crate::metadata::segments::{FileFormat, SegmentMeta, SegmentMetaError, SegmentMetaResult};
 
 /// IO-layer errors when constructing/validating segments.
 #[derive(Debug, Snafu)]
@@ -97,7 +95,6 @@ impl SegmentMeta {
     /// which currently only supports `TableLocation::Local`.
     pub async fn for_parquet(
         location: &TableLocation,
-        segment_id: SegmentId,
         path: &str,
         ts_min: DateTime<Utc>,
         ts_max: DateTime<Utc>,
@@ -125,7 +122,6 @@ impl SegmentMeta {
         }
 
         Ok(SegmentMeta {
-            segment_id,
             path: path.to_string(),
             format: FileFormat::Parquet,
             ts_min,
@@ -142,7 +138,6 @@ impl SegmentMeta {
     /// `for_parquet`.
     pub async fn new_validated(
         location: &TableLocation,
-        segment_id: SegmentId,
         path: &str,
         format: FileFormat,
         ts_min: DateTime<Utc>,
@@ -151,8 +146,7 @@ impl SegmentMeta {
     ) -> SegmentResult<Self> {
         match format {
             FileFormat::Parquet => {
-                SegmentMeta::for_parquet(location, segment_id, path, ts_min, ts_max, row_count)
-                    .await
+                SegmentMeta::for_parquet(location, path, ts_min, ts_max, row_count).await
             } // other => UnsupportedFormatSnafu { format: other }.fail(),
         }
     }
@@ -181,7 +175,6 @@ mod tests {
 
     fn sample_segment_meta() -> SegmentMeta {
         SegmentMeta {
-            segment_id: SegmentId("seg-001".to_string()),
             path: "data/seg-001.parquet".to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
@@ -235,19 +228,11 @@ mod tests {
         let ts_min = utc_datetime(2025, 1, 1, 0, 0, 0);
         let ts_max = utc_datetime(2025, 1, 1, 1, 0, 0);
 
-        let meta = SegmentMeta::for_parquet(
-            &location,
-            SegmentId("seg-001".to_string()),
-            rel_path,
-            ts_min,
-            ts_max,
-            1_234,
-        )
-        .await
-        .map_err(into_boxed)?;
+        let meta = SegmentMeta::for_parquet(&location, rel_path, ts_min, ts_max, 1_234)
+            .await
+            .map_err(into_boxed)?;
 
         assert_eq!(meta.path, rel_path);
-        assert_eq!(meta.segment_id, SegmentId("seg-001".to_string()));
         assert_eq!(meta.format, FileFormat::Parquet);
         assert_eq!(meta.ts_min, ts_min);
         assert_eq!(meta.ts_max, ts_max);
@@ -264,7 +249,6 @@ mod tests {
 
         let result = SegmentMeta::for_parquet(
             &location,
-            SegmentId("missing".to_string()),
             "data/missing.parquet",
             utc_datetime(2025, 1, 1, 0, 0, 0),
             utc_datetime(2025, 1, 1, 1, 0, 0),
@@ -291,7 +275,6 @@ mod tests {
 
         let result = SegmentMeta::for_parquet(
             &location,
-            SegmentId("short".to_string()),
             rel_path,
             utc_datetime(2025, 1, 1, 0, 0, 0),
             utc_datetime(2025, 1, 1, 1, 0, 0),
@@ -318,7 +301,6 @@ mod tests {
 
         let result = SegmentMeta::for_parquet(
             &location,
-            SegmentId("bad".to_string()),
             rel_path,
             utc_datetime(2025, 1, 1, 0, 0, 0),
             utc_datetime(2025, 1, 1, 1, 0, 0),
@@ -346,17 +328,10 @@ mod tests {
         let ts_min = utc_datetime(2025, 1, 1, 0, 0, 0);
         let ts_max = utc_datetime(2025, 1, 1, 1, 0, 0);
 
-        let meta = SegmentMeta::new_validated(
-            &location,
-            SegmentId("delegate".to_string()),
-            rel_path,
-            FileFormat::Parquet,
-            ts_min,
-            ts_max,
-            5,
-        )
-        .await
-        .map_err(into_boxed)?;
+        let meta =
+            SegmentMeta::new_validated(&location, rel_path, FileFormat::Parquet, ts_min, ts_max, 5)
+                .await
+                .map_err(into_boxed)?;
 
         assert_eq!(meta.path, rel_path);
         assert_eq!(meta.format, FileFormat::Parquet);

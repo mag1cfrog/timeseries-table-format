@@ -22,7 +22,7 @@ use crate::metadata::time_column::TimeColumnError;
 use crate::storage::{self, TableLocation};
 
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
-use crate::transaction_log::{FileFormat, SegmentId, SegmentMeta};
+use crate::transaction_log::{FileFormat, SegmentMeta};
 
 /// Convert little-endian i64 bytes into i64 with proper error handling.
 fn le_bytes_to_i64(
@@ -358,7 +358,6 @@ pub struct SegmentMetaReport {
 /// This mirrors `segment_meta_from_parquet_location` but operates on a provided
 /// `Bytes` buffer instead of reading from storage. The caller supplies:
 /// - `rel_path`: relative path of the segment within the table (for metadata/logging).
-/// - `segment_id`: stable identifier to store in the resulting `SegmentMeta`.
 /// - `time_column`: name of the timestamp column used for min/max extraction.
 /// - `data`: Parquet file contents (complete file).
 ///
@@ -372,19 +371,16 @@ pub struct SegmentMetaReport {
 /// - Returns a `SegmentMeta` with `coverage_path` left as `None`.
 pub fn segment_meta_from_parquet_bytes(
     rel_path: &Path,
-    segment_id: SegmentId,
     time_column: &str,
     data: Bytes,
 ) -> SegmentResult<SegmentMeta> {
-    let (meta, _) =
-        segment_meta_from_parquet_bytes_with_report(rel_path, segment_id, time_column, data)?;
+    let (meta, _) = segment_meta_from_parquet_bytes_with_report(rel_path, time_column, data)?;
     Ok(meta)
 }
 
 /// Build a `SegmentMeta` from in-memory Parquet bytes and return profiling data.
 pub fn segment_meta_from_parquet_bytes_with_report(
     rel_path: &Path,
-    segment_id: SegmentId,
     time_column: &str,
     data: Bytes,
 ) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
@@ -455,9 +451,7 @@ pub fn segment_meta_from_parquet_bytes_with_report(
     let ts_min = ts_from_i64(unit, ts_min_raw)?;
     let ts_max = ts_from_i64(unit, ts_max_raw)?;
 
-    // Build SegmentMeta: caller supplies segment_id; we fill in the ts_* and row_count.
     let meta_out = SegmentMeta {
-        segment_id,
         path: rel_path.to_string_lossy().into_owned(),
         format: FileFormat::Parquet,
         ts_min,
@@ -478,12 +472,10 @@ pub fn segment_meta_from_parquet_bytes_with_report(
 }
 
 /// Read a Parquet file at `rel_path` from `location` and produce a SegmentMeta
-/// containing the given `segment_id`, the min/max timestamps for `time_column`,
-/// and the row count; returns a SegmentMeta on success or a SegmentMetaError on failure.
+/// containing the min/max timestamps for `time_column` and the row count.
 pub async fn segment_meta_from_parquet_location(
     location: &TableLocation,
     rel_path: &Path,
-    segment_id: SegmentId,
     time_column: &str,
 ) -> SegmentResult<SegmentMeta> {
     // 1) Read whole file via storage abstraction.
@@ -491,7 +483,7 @@ pub async fn segment_meta_from_parquet_location(
         .await
         .map_err(map_storage_error)?;
 
-    segment_meta_from_parquet_bytes(rel_path, segment_id, time_column, Bytes::from(bytes))
+    segment_meta_from_parquet_bytes(rel_path, time_column, Bytes::from(bytes))
 }
 
 #[cfg(test)]
@@ -631,13 +623,9 @@ mod tests {
             true,
         )?;
 
-        let meta = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-1".to_string()),
-            "ts",
-        )
-        .await?;
+        let meta =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await?;
 
         assert_eq!(meta.ts_min.timestamp_millis(), 10);
         assert_eq!(meta.ts_max.timestamp_millis(), 30);
@@ -662,13 +650,9 @@ mod tests {
             false,
         )?;
 
-        let meta = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-scan".to_string()),
-            "ts",
-        )
-        .await?;
+        let meta =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await?;
 
         assert_eq!(meta.ts_min.timestamp_millis(), 5);
         assert_eq!(meta.ts_max.timestamp_millis(), 7);
@@ -691,13 +675,9 @@ mod tests {
             false,
         )?;
 
-        let result = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-empty".to_string()),
-            "ts",
-        )
-        .await;
+        let result =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await;
 
         assert!(matches!(
             result,
@@ -724,13 +704,9 @@ mod tests {
             true,
         )?;
 
-        let meta_micro = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_micro,
-            SegmentId("seg-micro".to_string()),
-            "ts",
-        )
-        .await?;
+        let meta_micro =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_micro, "ts")
+                .await?;
         assert_eq!(
             meta_micro.ts_min.timestamp_nanos_opt().map(|n| n / 1_000),
             Some(1_000)
@@ -752,13 +728,9 @@ mod tests {
             true,
         )?;
 
-        let meta_nano = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_nano,
-            SegmentId("seg-nano".to_string()),
-            "ts",
-        )
-        .await?;
+        let meta_nano =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_nano, "ts")
+                .await?;
         assert_eq!(meta_nano.ts_min.timestamp_nanos_opt(), Some(3_000));
         assert_eq!(meta_nano.ts_max.timestamp_nanos_opt(), Some(9_000));
 
@@ -781,13 +753,9 @@ mod tests {
             true,
         )?;
 
-        let result = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-missing".to_string()),
-            "ts",
-        )
-        .await;
+        let result =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await;
 
         assert!(matches!(
             result,
@@ -810,13 +778,9 @@ mod tests {
         // INT32 with timestamp logical is unsupported.
         write_parquet_file(&abs, "ts", None, PhysicalType::INT32, &[1, 2], true)?;
 
-        let result = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-bad".to_string()),
-            "ts",
-        )
-        .await;
+        let result =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await;
 
         assert!(matches!(
             result,
@@ -840,13 +804,9 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"PAR1PAR1garbage").await?;
 
-        let result = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-corrupt".to_string()),
-            "ts",
-        )
-        .await;
+        let result =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await;
 
         assert!(matches!(
             result,
@@ -862,13 +822,9 @@ mod tests {
         let tmp = TempDir::new()?;
         let rel_path = Path::new("data/missing.parquet");
 
-        let result = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-missing".to_string()),
-            "ts",
-        )
-        .await;
+        let result =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await;
 
         assert!(matches!(
             result,
@@ -887,13 +843,9 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"short").await?;
 
-        let result = segment_meta_from_parquet_location(
-            &TableLocation::local(tmp.path()),
-            rel_path,
-            SegmentId("seg-short".to_string()),
-            "ts",
-        )
-        .await;
+        let result =
+            segment_meta_from_parquet_location(&TableLocation::local(tmp.path()), rel_path, "ts")
+                .await;
 
         assert!(matches!(
             result,

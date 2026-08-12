@@ -30,10 +30,7 @@ use crate::{
     },
     metadata::schema_compat::ensure_schema_exact_match,
     storage::{self, StorageError},
-    transaction_log::{
-        LogAction, SegmentId, TableState, segments::segment_id_v1,
-        table_state::TableCoveragePointer,
-    },
+    transaction_log::{LogAction, TableState, table_state::TableCoveragePointer},
 };
 
 use super::{
@@ -77,7 +74,6 @@ impl TimeSeriesTable {
 
     async fn append_parquet_segment_bytes(
         &mut self,
-        segment_id: SegmentId,
         relative_path: &str,
         time_column: &str,
         data: Bytes,
@@ -92,13 +88,9 @@ impl TimeSeriesTable {
 
         // 1) Segment meta + schema.
         let step_start = Instant::now();
-        let (mut segment_meta, meta_report) = segment_meta_from_parquet_bytes_with_report(
-            rel_path,
-            segment_id,
-            time_column,
-            data.clone(),
-        )
-        .context(SegmentMetaSnafu)?;
+        let (mut segment_meta, meta_report) =
+            segment_meta_from_parquet_bytes_with_report(rel_path, time_column, data.clone())
+                .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
             let fields = vec![
                 ("row_groups".to_string(), meta_report.row_groups.to_string()),
@@ -335,10 +327,7 @@ impl TimeSeriesTable {
         Ok(new_version)
     }
 
-    /// Append a Parquet segment using a deterministic, content-derived `segment_id`.
-    ///
-    /// This wrapper reads the Parquet bytes from storage, derives `segment_id`
-    /// via `segment_id_v1(relative_path, bytes)`, then runs the append pipeline.
+    /// Append a Parquet segment using its canonical relative path as identity.
     pub async fn append_parquet_segment(
         &mut self,
         relative_path: &str,
@@ -351,8 +340,7 @@ impl TimeSeriesTable {
             .context(StorageSnafu)?;
         let data = Bytes::from(bytes);
 
-        let segment_id = segment_id_v1(&relative_path, &data);
-        self.append_parquet_segment_bytes(segment_id, &relative_path, time_column, data, None)
+        self.append_parquet_segment_bytes(&relative_path, time_column, data, None)
             .await
     }
 
@@ -377,16 +365,8 @@ impl TimeSeriesTable {
         report.set_context("bytes_len", bytes.len().to_string());
         let data = Bytes::from(bytes);
 
-        let segment_id = segment_id_v1(&relative_path, &data);
-
         let version = self
-            .append_parquet_segment_bytes(
-                segment_id,
-                &relative_path,
-                time_column,
-                data,
-                Some(&mut report),
-            )
+            .append_parquet_segment_bytes(&relative_path, time_column, data, Some(&mut report))
             .await?;
 
         Ok((version, report.finish()))
@@ -806,7 +786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_generates_id_and_updates_snapshot() -> TestResult {
+    async fn append_parquet_segment_keys_paths_and_updates_snapshot() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -859,13 +839,10 @@ mod tests {
         let data1 = Bytes::from(tokio::fs::read(&path1).await?);
         let data2 = Bytes::from(tokio::fs::read(&path2).await?);
 
-        let expected_id1 = segment_id_v1(rel1, &data1);
-        let expected_id2 = segment_id_v1(rel2, &data2);
-
         let seg1 = table.state.segments.get(rel1).expect("segment 1 present");
         let seg2 = table.state.segments.get(rel2).expect("segment 2 present");
-        assert_eq!(seg1.segment_id, expected_id1);
-        assert_eq!(seg2.segment_id, expected_id2);
+        assert_eq!(seg1.path, rel1);
+        assert_eq!(seg2.path, rel2);
         assert!(seg1.coverage_path.is_some());
         assert!(seg2.coverage_path.is_some());
 

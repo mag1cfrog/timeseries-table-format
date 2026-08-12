@@ -3,7 +3,7 @@
 
 use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
-use timeseries_table_core::metadata::segments::{FileFormat, SegmentId, SegmentMeta};
+use timeseries_table_core::metadata::segments::{FileFormat, SegmentMeta};
 use timeseries_table_core::metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec};
 use timeseries_table_core::storage::TableLocation;
 use timeseries_table_core::table::TimeSeriesTable;
@@ -36,7 +36,6 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
     // Commit a new segment directly through the log (version 2).
     let log = TransactionLogStore::new(location.clone());
     let seg = SegmentMeta {
-        segment_id: SegmentId("seg_0001".to_string()),
         path: "data/seg_0001.parquet".to_string(),
         format: FileFormat::Parquet,
         ts_min: Utc.timestamp_opt(10, 0).single().unwrap(),

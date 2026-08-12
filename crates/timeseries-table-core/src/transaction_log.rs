@@ -46,7 +46,6 @@
 //!   "actions": [
 //!     {
 //!       "AddSegment": {
-//!         "segment_id": "seg-0001",
 //!         "path": "data/nvda_1h_0001.parquet",
 //!         "ts_min": "2020-01-01T00:00:00Z",
 //!         "ts_max": "2020-01-02T00:00:00Z",
@@ -72,7 +71,7 @@ pub use crate::metadata::table_metadata::{
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
-pub use segments::{FileFormat, SegmentId, SegmentMeta};
+pub use segments::{FileFormat, SegmentMeta};
 pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};
@@ -176,7 +175,6 @@ mod tests {
         };
 
         let seg_meta = SegmentMeta {
-            segment_id: SegmentId("seg-0001".to_string()),
             path: "data/nvda_1h_0001.parquet".to_string(),
             format: FileFormat::Parquet,
             ts_min: ts0,
@@ -345,17 +343,5 @@ mod tests {
 
         assert_eq!(commit, decoded);
         assert!(decoded.actions.is_empty());
-    }
-
-    #[test]
-    fn segment_id_transparent_serialization() {
-        let id = SegmentId("my-segment".to_string());
-        let json = serde_json::to_string(&id).expect("serialize");
-
-        // Should be a plain string, not {"0": "my-segment"}.
-        assert_eq!(json, r#""my-segment""#);
-
-        let decoded: SegmentId = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(id, decoded);
     }
 }

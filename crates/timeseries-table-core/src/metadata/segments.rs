@@ -5,31 +5,13 @@
 //! must live outside `metadata/` (for example under `transaction_log` or
 //! format-specific helpers).
 
-use std::fmt;
-
 use arrow::error::ArrowError;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
 use crate::metadata::{logical_schema::LogicalSchemaError, time_column::TimeColumnError};
-
-/// Identifier for a physical segment (e.g. a Parquet file or group).
-///
-/// This is a logical ID used by the metadata; the actual file path is stored
-/// separately in [`SegmentMeta`]. Using a newtype makes it harder to mix
-/// up segment IDs with other stringly-typed fields.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(transparent)]
-pub struct SegmentId(pub String);
-
-impl fmt::Display for SegmentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
 
 /// Supported on-disk file formats for segments.
 ///
@@ -54,10 +36,7 @@ pub enum FileFormat {
 /// In v0.1, a "segment" corresponds to a single data file on disk.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SegmentMeta {
-    /// Logical identifier for this segment.
-    pub segment_id: SegmentId,
-
-    /// File path relative to the table root (for example, `"data/nvda_1h_0001.parquet"`).
+    /// Canonical file path relative to the table root and the segment identity.
     pub path: String,
 
     /// File format for this segment.
@@ -181,24 +160,6 @@ pub enum SegmentMetaError {
     },
 }
 
-/// Derive a deterministic segment id for an append entry.
-///
-/// This is content-addressable: it hashes both the relative path and the bytes
-/// so retries with the same input stay stable while same bytes at different
-/// paths diverge. The returned id uses the `seg-` prefix followed by 32 hex
-/// chars of the BLAKE3 digest, keeping ids bounded and safe for idempotent
-/// appends.
-pub fn segment_id_v1(relative_path: &str, data: &Bytes) -> SegmentId {
-    let mut h = blake3::Hasher::new();
-    h.update(b"segment-id-v1");
-    h.update(b"\0");
-    h.update(relative_path.as_bytes());
-    h.update(b"\0");
-    h.update(data.as_ref());
-    let hex = h.finalize().to_hex();
-    SegmentId(format!("seg-{}", &hex[..32]))
-}
-
 /// Result type for pure (non-IO) segment metadata operations.
 #[allow(clippy::result_large_err)]
 pub type SegmentMetaResult<T> = Result<T, SegmentMetaError>;
@@ -221,7 +182,6 @@ mod tests {
 
     fn seg(id: &str, ts_min: i64, ts_max: i64) -> SegmentMeta {
         SegmentMeta {
-            segment_id: SegmentId(id.to_string()),
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             ts_min: Utc.timestamp_opt(ts_min, 0).single().unwrap(),
@@ -243,8 +203,16 @@ mod tests {
 
         v.sort_unstable_by(cmp_segment_meta_by_time);
 
-        let ids: Vec<String> = v.into_iter().map(|s| s.segment_id.0).collect();
-        assert_eq!(ids, vec!["d", "b", "c", "a"]);
+        let paths: Vec<String> = v.into_iter().map(|s| s.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "data/d.parquet",
+                "data/b.parquet",
+                "data/c.parquet",
+                "data/a.parquet"
+            ]
+        );
     }
 
     #[test]
@@ -261,8 +229,11 @@ mod tests {
 
         v.sort_unstable_by(cmp_segment_meta_by_time);
 
-        let ids: Vec<String> = v.into_iter().map(|s| s.segment_id.0).collect();
-        assert_eq!(ids, vec!["a", "m", "z"]);
+        let paths: Vec<String> = v.into_iter().map(|s| s.path).collect();
+        assert_eq!(
+            paths,
+            vec!["data/a.parquet", "data/m.parquet", "data/z.parquet"]
+        );
     }
 
     #[test]

@@ -164,8 +164,8 @@ mod tests {
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
-        FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
-        TimeIndexSpec, TransactionLogStore,
+        FileFormat, LogAction, SegmentMeta, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        TransactionLogStore,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
@@ -199,7 +199,6 @@ mod tests {
 
     fn sample_segment(id: &str) -> SegmentMeta {
         SegmentMeta {
-            segment_id: SegmentId(id.to_string()),
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             ts_min: chrono::Utc
@@ -218,7 +217,6 @@ mod tests {
 
     fn segment_with_ts(id: &str, ts_min: i64, ts_max: i64) -> SegmentMeta {
         SegmentMeta {
-            segment_id: SegmentId(id.to_string()),
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             ts_min: chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap(),
@@ -256,7 +254,7 @@ mod tests {
                 (
                     seg.ts_min.timestamp(),
                     seg.ts_max.timestamp(),
-                    seg.segment_id.0.clone(),
+                    seg.path.clone(),
                 )
             })
             .collect();

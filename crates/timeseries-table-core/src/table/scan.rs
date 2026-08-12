@@ -361,7 +361,7 @@ mod tests {
     use crate::table::test_util::*;
 
     use crate::metadata::logical_schema::LogicalTimestampUnit;
-    use crate::metadata::segments::{FileFormat, SegmentId};
+    use crate::metadata::segments::FileFormat;
 
     use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 
@@ -380,7 +380,6 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-no-ts".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -412,7 +411,6 @@ mod tests {
         write_arrow_parquet_int_time(&path, &ts_vals, &["A", "B"], &[1.0, 2.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-int".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
@@ -443,7 +441,6 @@ mod tests {
         write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Nanosecond, &[], &[], &[])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-nano-empty".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -717,7 +714,6 @@ mod tests {
         write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Millisecond, &[], &[], &[])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-empty".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -755,7 +751,6 @@ mod tests {
         )?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-null-only".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -787,7 +782,6 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-scan-no-ts".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -821,7 +815,6 @@ mod tests {
         write_arrow_parquet_int_time(&path, &[1_000], &["A"], &[1.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-scan-int".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),

@@ -7,7 +7,7 @@ pub use crate::metadata::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
         SchemaConvertError,
     },
-    segments::{FileFormat, SegmentId, SegmentMeta, SegmentMetaError},
+    segments::{FileFormat, SegmentMeta, SegmentMetaError},
     table_metadata::{
         ParseTimeBucketError, TABLE_FORMAT_VERSION, TableKind, TableMeta, TableMetaDelta,
         TimeBucket, TimeIndexSpec,
