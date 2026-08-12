@@ -6,11 +6,14 @@ on:
     paths:
       - ".github/workflows/cache-warm.yml"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/python-dist.yml"
       - ".cargo/**"
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "**/build.rs"
+      - "python/.python-version"
+      - "python/pyproject.toml"
 
 permissions:
   contents: read
@@ -20,6 +23,29 @@ concurrency:
   queue: max
 
 jobs:
+  changes:
+    name: Find caches to warm
+    runs-on: ubuntu-latest
+    outputs:
+      wheels: ${{ steps.filter.outputs.wheels }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            wheels:
+              - '.github/workflows/cache-warm.yml'
+              - '.github/workflows/python-dist.yml'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**/Cargo.toml'
+              - '**/build.rs'
+              - 'python/.python-version'
+              - 'python/pyproject.toml'
+
   core:
     name: Warm core Rust caches
     runs-on: ubuntu-latest
@@ -70,3 +96,14 @@ jobs:
         run: >-
           sccache --show-stats --stats-format json |
           python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+
+  wheels:
+    name: Warm Python wheel caches
+    needs: [changes, core]
+    if: ${{ needs.changes.outputs.wheels == 'true' }}
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      max-parallel: 2
+      run-pytest: false
+      upload-artifacts: false
+      write-cache: true

@@ -33,6 +33,16 @@ on:
         required: false
         type: boolean
         default: true
+      write-cache:
+        description: Allow this trusted caller to update shared build caches.
+        required: false
+        type: boolean
+        default: false
+      max-parallel:
+        description: Maximum number of matrix jobs to run concurrently.
+        required: false
+        type: number
+        default: 15
       artifact-prefix:
         description: Artifact name prefix.
         required: false
@@ -68,6 +78,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: ${{ inputs.max-parallel }}
       matrix:
         os: ${{ fromJSON(inputs.os-json) }}
         python-version: ${{ fromJSON(inputs.python-versions-json) }}
@@ -78,6 +89,9 @@ jobs:
       # reuse across runs. Disabling debuginfo improves cache hit rates and build times.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ inputs.write-cache && 'READ_WRITE' || 'READ_ONLY' }}
+      RUSTC_WRAPPER: sccache
 
     steps:
       - uses: actions/checkout@v4
@@ -104,21 +118,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust cache
+      - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: python-dist-v1
+          shared-key: python-dist
+          cache-targets: false
+          save-if: ${{ inputs.write-cache }}
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
-      - name: Enable sccache
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Set snapshot version (Cargo)
         if: ${{ inputs.dev-prerelease }}
@@ -162,6 +170,13 @@ jobs:
           working-directory: python
           command: build
           args: ${{ inputs.maturin-args }}
+
+      - name: Verify sccache writes
+        if: ${{ inputs.write-cache }}
+        shell: bash
+        run: >-
+          sccache --show-stats --stats-format json |
+          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
 
       - name: Build sdist (once)
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
