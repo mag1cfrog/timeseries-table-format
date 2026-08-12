@@ -97,7 +97,10 @@ jobs:
       RUSTFLAGS: "-C debuginfo=0"
       CARGO_NET_RETRY: "10"
       CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-      # Keep target artifacts stable across steps (and compatible with rust-cache).
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
+      # Keep target artifacts stable across steps.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
@@ -113,12 +116,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Rust cache
+      - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Verify tag matches Cargo version
         if: ${{ github.ref_type == 'tag' }}

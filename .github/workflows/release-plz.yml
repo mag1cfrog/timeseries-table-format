@@ -16,8 +16,11 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-C debuginfo=0"
-      # release-plz operates in temp worktrees; share build artifacts across them (and with rust-cache).
+      # release-plz operates in temp worktrees; share build artifacts across them.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Generate GitHub token
         uses: actions/create-github-app-token@v2
@@ -51,36 +54,14 @@ jobs:
           if [[ -n "${libdir}" ]]; then
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
-      - name: Rust cache
+      - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-      - name: Preflight sccache
-        id: sccache
-        shell: bash
-        run: |
-          set -euo pipefail
-          if SCCACHE_GHA_ENABLED=true sccache --start-server; then
-            echo "mode=gha" >> "$GITHUB_OUTPUT"
-          elif SCCACHE_DIR="${RUNNER_TEMP}/sccache" sccache --start-server; then
-            echo "mode=local" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=off" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Enable sccache (best-effort)
-        if: ${{ steps.sccache.outputs.mode != 'off' }}
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          if [[ "${{ steps.sccache.outputs.mode }}" == "gha" ]]; then
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
-          fi
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run release-plz (release)
         uses: release-plz/action@v0.5
         with:
@@ -113,8 +94,11 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-C debuginfo=0"
-      # release-plz operates in temp worktrees; share build artifacts across them (and with rust-cache).
+      # release-plz operates in temp worktrees; share build artifacts across them.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
     concurrency:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
@@ -151,36 +135,14 @@ jobs:
           if [[ -n "${libdir}" ]]; then
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
-      - name: Rust cache
+      - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-      - name: Preflight sccache
-        id: sccache
-        shell: bash
-        run: |
-          set -euo pipefail
-          if SCCACHE_GHA_ENABLED=true sccache --start-server; then
-            echo "mode=gha" >> "$GITHUB_OUTPUT"
-          elif SCCACHE_DIR="${RUNNER_TEMP}/sccache" sccache --start-server; then
-            echo "mode=local" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=off" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Enable sccache (best-effort)
-        if: ${{ steps.sccache.outputs.mode != 'off' }}
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          if [[ "${{ steps.sccache.outputs.mode }}" == "gha" ]]; then
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
-          fi
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:

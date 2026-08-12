@@ -31,6 +31,10 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'ci:skip-python') }}
     env:
       RUSTFLAGS: "-C debuginfo=0"
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
 
@@ -56,12 +60,15 @@ jobs:
             echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
           fi
 
-      - name: Rust cache
+      - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Install docs dependencies
         run: |
