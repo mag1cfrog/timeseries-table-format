@@ -51,7 +51,7 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
     for seg in state.segments.values() {
         if seg.coverage_path.is_none() {
             return ExistingSegmentMissingCoverageSnafu {
-                segment_id: seg.segment_id.clone(),
+                path: seg.path.clone(),
             }
             .fail();
         }
@@ -1331,13 +1331,13 @@ mod tests {
 
         let mut state = table.state.clone();
         state.table_coverage = None;
-        let (corrupt_seg_id, corrupt_cov_path) = state
+        let (corrupt_segment_path, corrupt_cov_path) = state
             .segments
-            .iter()
+            .values()
             .next()
-            .map(|(id, meta)| {
+            .map(|meta| {
                 (
-                    id.clone(),
+                    meta.path.clone(),
                     meta.coverage_path.as_ref().expect("coverage path").clone(),
                 )
             })
@@ -1356,11 +1356,11 @@ mod tests {
 
         match err {
             TableError::SegmentCoverageSidecarRead {
-                segment_id,
+                path,
                 coverage_path,
                 ..
             } => {
-                assert_eq!(segment_id, corrupt_seg_id);
+                assert_eq!(path, corrupt_segment_path);
                 assert_eq!(coverage_path, corrupt_cov_path);
             }
             other => panic!("unexpected error: {other:?}"),

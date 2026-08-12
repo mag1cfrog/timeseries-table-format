@@ -18,7 +18,7 @@ use crate::{
     formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
     metadata::schema_compat::SchemaCompatibilityError,
     storage::StorageError,
-    transaction_log::{CommitError, SegmentId, TableKind, TimeBucket, segments::SegmentError},
+    transaction_log::{CommitError, TableKind, TimeBucket, segments::SegmentError},
 };
 
 /// Errors from high-level time-series table operations.
@@ -186,20 +186,20 @@ pub enum TableError {
 
     /// Existing segment lacks a coverage_path when coverage is required.
     #[snafu(display(
-        "Cannot append because existing segment {segment_id} is missing coverage_path (required for coverage tracking)"
+        "Cannot append because existing segment {path} is missing coverage_path (required for coverage tracking)"
     ))]
     ExistingSegmentMissingCoverage {
-        /// Segment ID missing a coverage_path entry.
-        segment_id: SegmentId,
+        /// Canonical segment path missing a coverage_path entry.
+        path: String,
     },
 
     /// Reading the per-segment coverage sidecar failed while rebuilding coverage.
     #[snafu(display(
-        "Cannot recover table coverage: failed to read segment coverage sidecar for {segment_id} at {coverage_path}: {source}"
+        "Cannot recover table coverage: failed to read segment coverage sidecar for {path} at {coverage_path}: {source}"
     ))]
     SegmentCoverageSidecarRead {
-        /// Segment whose coverage sidecar could not be read.
-        segment_id: SegmentId,
+        /// Canonical path of the segment whose coverage sidecar could not be read.
+        path: String,
         /// Path to the coverage sidecar file that failed to read.
         coverage_path: String,
         /// Underlying coverage error (boxed to keep the variant size small).
