@@ -75,35 +75,7 @@ impl TimeSeriesTable {
         Ok(normalized)
     }
 
-    /// Core append implementation that operates on already-loaded Parquet bytes.
-    ///
-    /// This contains the full v0.1 append flow (schema adoption/enforcement,
-    /// coverage computation + overlap detection, sidecar writes, OCC commit,
-    /// and in-memory state update). The public
-    /// `append_parquet_segment_with_id` wrapper is responsible only for
-    /// fetching the bytes from storage before delegating here.
-    ///
-    /// Callers must ensure `data` corresponds to `relative_path`; the function
-    /// does not re-read from storage.
-    #[allow(dead_code)]
-    async fn append_parquet_segment_with_id_and_bytes(
-        &mut self,
-        segment_id: SegmentId,
-        relative_path: &str,
-        time_column: &str,
-        data: Bytes,
-    ) -> Result<u64, TableError> {
-        self.append_parquet_segment_with_id_and_bytes_inner(
-            segment_id,
-            relative_path,
-            time_column,
-            data,
-            None,
-        )
-        .await
-    }
-
-    async fn append_parquet_segment_with_id_and_bytes_inner(
+    async fn append_parquet_segment_bytes(
         &mut self,
         segment_id: SegmentId,
         relative_path: &str,
@@ -363,54 +335,10 @@ impl TimeSeriesTable {
         Ok(new_version)
     }
 
-    /// Append a new Parquet segment with a caller-provided `segment_id`, registering it in the transaction log.
-    ///
-    /// v0.1 behavior:
-    /// - Build SegmentMeta from the Parquet file (ts_min, ts_max, row_count).
-    /// - Derive the segment logical schema from the Parquet file.
-    /// - If the table has no logical_schema yet, adopt this segment schema
-    ///   as canonical and write an UpdateTableMeta + AddSegment commit.
-    /// - Otherwise, enforce "no schema evolution" via schema_helpers.
-    /// - Compute coverage for the segment and table; reject if coverage overlaps.
-    /// - Write the segment coverage sidecar before committing (safe to orphan on failure).
-    /// - Commit with OCC on the current version.
-    /// - Update in-memory TableState on success.
-    ///
-    /// v0.1: duplicates (same segment_id/path) are allowed if their coverage
-    /// does not overlap existing data; otherwise overlap is rejected.
-    ///
-    /// This wrapper reads the Parquet bytes from storage, then delegates to
-    /// `append_parquet_segment_with_id_and_bytes` for the core logic.
-    pub async fn append_parquet_segment_with_id(
-        &mut self,
-        segment_id: SegmentId,
-        relative_path: &str,
-        time_column: &str,
-    ) -> Result<u64, TableError> {
-        let relative_path = self.normalize_new_segment_path(relative_path).await?;
-        let rel_path = Path::new(&relative_path);
-
-        let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
-            .await
-            .context(StorageSnafu)?;
-
-        self.append_parquet_segment_with_id_and_bytes_inner(
-            segment_id,
-            &relative_path,
-            time_column,
-            Bytes::from(bytes),
-            None,
-        )
-        .await
-    }
-
     /// Append a Parquet segment using a deterministic, content-derived `segment_id`.
     ///
     /// This wrapper reads the Parquet bytes from storage, derives `segment_id`
-    /// via `segment_id_v1(relative_path, bytes)`, then delegates to
-    /// `append_parquet_segment_with_id_and_bytes` for the core logic.
-    /// Behavior (schema adoption/enforcement, coverage, OCC, state updates)
-    /// matches `append_parquet_segment_with_id`.
+    /// via `segment_id_v1(relative_path, bytes)`, then runs the append pipeline.
     pub async fn append_parquet_segment(
         &mut self,
         relative_path: &str,
@@ -424,14 +352,8 @@ impl TimeSeriesTable {
         let data = Bytes::from(bytes);
 
         let segment_id = segment_id_v1(&relative_path, &data);
-        self.append_parquet_segment_with_id_and_bytes_inner(
-            segment_id,
-            &relative_path,
-            time_column,
-            data,
-            None,
-        )
-        .await
+        self.append_parquet_segment_bytes(segment_id, &relative_path, time_column, data, None)
+            .await
     }
 
     /// Append a Parquet segment and return a profiling report.
@@ -458,7 +380,7 @@ impl TimeSeriesTable {
         let segment_id = segment_id_v1(&relative_path, &data);
 
         let version = self
-            .append_parquet_segment_with_id_and_bytes_inner(
+            .append_parquet_segment_bytes(
                 segment_id,
                 &relative_path,
                 time_column,
