@@ -94,9 +94,24 @@ jobs:
           fi
 
       - name: Warm test cache
-        run: cargo test --workspace --all-features --no-run
+        run: cargo test --locked --workspace --all-features --no-run
 
-      - name: Verify sccache writes
+      - name: Check sccache writes
+        id: sccache-writes
+        continue-on-error: true
+        run: >-
+          sccache --show-stats --stats-format json |
+          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+
+      - name: Retry cache writes
+        if: steps.sccache-writes.outcome == 'failure'
+        run: |
+          sccache --zero-stats
+          cargo clean
+          cargo test --locked --workspace --all-features --no-run
+
+      - name: Verify retried sccache writes
+        if: steps.sccache-writes.outcome == 'failure'
         run: >-
           sccache --show-stats --stats-format json |
           python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'

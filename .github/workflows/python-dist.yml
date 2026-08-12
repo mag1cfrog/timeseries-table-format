@@ -74,7 +74,6 @@ jobs:
     name: build (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     permissions:
-      actions: write
       contents: read
     strategy:
       fail-fast: false
@@ -91,7 +90,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: ${{ inputs.write-cache && 'READ_WRITE' || 'READ_ONLY' }}
-      RUSTC_WRAPPER: sccache
+      RUSTC_WRAPPER: ${{ startsWith(matrix.os, 'ubuntu') && '' || 'sccache' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -121,14 +120,20 @@ jobs:
           cache: false
           rustflags: ""
 
+      - name: Read installed Rust version
+        id: rust-version
+        shell: bash
+        run: echo "version=$(rustc -V | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: python-dist
           cache-targets: false
-          save-if: ${{ inputs.write-cache }}
+          save-if: ${{ inputs.write-cache && matrix.python-version == inputs.sdist-python-version }}
 
       - name: Set up sccache
+        if: ${{ !startsWith(matrix.os, 'ubuntu') }}
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Set snapshot version (Cargo)
@@ -172,10 +177,47 @@ jobs:
         with:
           working-directory: python
           command: build
-          args: ${{ inputs.maturin-args }}
+          rust-toolchain: ${{ steps.rust-version.outputs.version }}
+          manylinux: ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'off' }}
+          sccache: ${{ startsWith(matrix.os, 'ubuntu') }}
+          args: >-
+            ${{ inputs.maturin-args }}
+            ${{ !inputs.dev-prerelease && '--locked' || '' }}
+            -i ${{ startsWith(matrix.os, 'ubuntu') && format('python{0}', matrix.python-version) || 'python' }}
 
-      - name: Verify sccache writes
-        if: ${{ inputs.write-cache }}
+      - name: Check sccache writes
+        id: sccache-writes
+        if: ${{ inputs.write-cache && !startsWith(matrix.os, 'ubuntu') }}
+        continue-on-error: true
+        shell: bash
+        run: >-
+          sccache --show-stats --stats-format json |
+          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+
+      - name: Prepare cache write retry
+        if: steps.sccache-writes.outcome == 'failure'
+        shell: bash
+        run: |
+          sccache --zero-stats
+          cargo clean
+          rm -rf python/dist
+
+      - name: Retry wheel build
+        if: steps.sccache-writes.outcome == 'failure'
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: build
+          rust-toolchain: ${{ steps.rust-version.outputs.version }}
+          manylinux: "off"
+          sccache: false
+          args: >-
+            ${{ inputs.maturin-args }}
+            ${{ !inputs.dev-prerelease && '--locked' || '' }}
+            -i python
+
+      - name: Verify retried sccache writes
+        if: steps.sccache-writes.outcome == 'failure'
         shell: bash
         run: >-
           sccache --show-stats --stats-format json |
@@ -187,7 +229,9 @@ jobs:
         with:
           working-directory: python
           command: sdist
-          args: ${{ inputs.sdist-args }}
+          args: >-
+            ${{ inputs.sdist-args }}
+            ${{ !inputs.dev-prerelease && '--locked' || '' }}
 
       - name: Upload dist artifacts
         if: ${{ inputs.upload-artifacts }}

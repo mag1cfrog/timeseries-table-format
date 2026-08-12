@@ -172,7 +172,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-features -- -D warnings
 
       - name: Install nextest
         uses: taiki-e/install-action@v2
@@ -180,7 +180,7 @@ jobs:
           tool: nextest
       
       - name: test
-        run: cargo nextest run --workspace --all-features --no-fail-fast
+        run: cargo nextest run --locked --workspace --all-features --no-fail-fast
 
   python-quality-gate:
     runs-on: ubuntu-latest
@@ -254,7 +254,7 @@ jobs:
       - name: pytest (editable, test-utils)
         run: |
           source .venv/bin/activate
-          .venv/bin/python -m maturin develop --features test-utils
+          .venv/bin/python -m maturin develop --locked --features test-utils
           .venv/bin/python -m pytest -q
 
       - name: wheel smoke (linux, py3.12)
@@ -265,7 +265,7 @@ jobs:
           rm -rf python/dist
           # Build a non-release wheel here to avoid recompiling in a separate profile.
           # The full release wheel matrix is validated by the publish workflows.
-          (cd python && .venv/bin/python -m maturin build -o dist -i .venv/bin/python)
+          (cd python && .venv/bin/python -m maturin build --locked -o dist -i .venv/bin/python)
           venv_dir="$(mktemp -d)"
           uv venv -p 3.12 "${venv_dir}"
           uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
@@ -275,7 +275,6 @@ jobs:
     needs: [detect-python-changes, python-wheel-stamp-autofix]
     if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
     permissions:
-      actions: write
       contents: read
     uses: ./.github/workflows/python-dist.yml
     with:

@@ -247,7 +247,7 @@ jobs:
               return 1
             fi
             echo "Publishing ${crate} v${ver}"
-            if ! retry 5 15 cargo publish -p "${crate}"; then
+            if ! retry 5 15 cargo publish --locked -p "${crate}"; then
               if has_version "${crate}" "${ver}"; then
                 echo "cargo publish failed but ${crate} v${ver} exists on crates.io; continuing"
               else

@@ -14,7 +14,6 @@ jobs:
   build:
     uses: ./.github/workflows/python-dist.yml
     permissions:
-      actions: write
       contents: read
     with:
       include-sdist: true
