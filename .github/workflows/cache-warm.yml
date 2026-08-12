@@ -1,0 +1,72 @@
+name: Warm CI caches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cache-warm.yml"
+      - ".github/workflows/ci.yml"
+      - ".cargo/**"
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "**/build.rs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sccache-write
+  queue: max
+
+jobs:
+  core:
+    name: Warm core Rust caches
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      CLIPPY_CONF_DIR: ${{ github.workspace }}
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      RUSTC_WRAPPER: sccache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-ci
+          cache-targets: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Configure PyO3
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "$libdir" ]]; then
+            echo "LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Warm test cache
+        run: cargo test --workspace --all-features --no-run
+
+      - name: Verify sccache writes
+        run: >-
+          sccache --show-stats --stats-format json |
+          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'

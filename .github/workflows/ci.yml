@@ -125,6 +125,9 @@ jobs:
       RUST_BACKTRACE: 1
       CLIPPY_CONF_DIR: ${{ github.workspace }}
       CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
 
     steps:
       - uses: actions/checkout@v4
@@ -134,20 +137,31 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Rust cache
-        id: rust-cache
+      - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
 
-      - name: Cache summary
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Configure PyO3
+        shell: bash
         run: |
-          echo "rust-cache shared-key: rust-cache-v1"
-          echo "rust-cache exact cache-hit: ${{ steps.rust-cache.outputs.cache-hit }}"
-          echo "See above logs for restore/save details."
-      
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "$libdir" ]]; then
+            echo "LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
+
       - run: rustc -Vv && cargo -V && cargo clippy -V
       
       - name: fmt
@@ -160,19 +174,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-
-      - name: Configure Python for PyO3 tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -V
-          python3 -c 'import sysconfig; print("LIBDIR=", sysconfig.get_config_var("LIBDIR")); print("LDLIBRARY=", sysconfig.get_config_var("LDLIBRARY")); print("Py_ENABLE_SHARED=", sysconfig.get_config_var("Py_ENABLE_SHARED"))'
-          PYTHON="$(command -v python3)"
-          echo "PYO3_PYTHON=$PYTHON" >> "$GITHUB_ENV"
-          LIBDIR="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
-          if [[ -n "$LIBDIR" ]]; then
-            echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          fi
       
       - name: test
         run: cargo nextest run --workspace --all-features --no-fail-fast
