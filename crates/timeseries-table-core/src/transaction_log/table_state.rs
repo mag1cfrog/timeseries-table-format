@@ -116,11 +116,16 @@ impl TransactionLogStore {
             for action in commit.actions {
                 match action {
                     LogAction::AddSegment(meta) => {
-                        // Insert or replace the segment; latest info wins.
+                        if segments.values().any(|segment| segment.path == meta.path) {
+                            return CorruptStateSnafu {
+                                msg: format!("Duplicate live segment path: {}", meta.path),
+                            }
+                            .fail();
+                        }
                         segments.insert(meta.segment_id.clone(), meta);
                     }
-                    LogAction::RemoveSegment { segment_id } => {
-                        segments.remove(&segment_id);
+                    LogAction::RemoveSegment { path } => {
+                        segments.retain(|_, segment| segment.path != path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
                         // v0.1: full replacement of TableMeta
@@ -284,7 +289,7 @@ mod tests {
             .commit_with_expected_version(
                 v2,
                 vec![LogAction::RemoveSegment {
-                    segment_id: seg1.segment_id.clone(),
+                    path: seg1.path.clone(),
                 }],
             )
             .await?;

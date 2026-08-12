@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn remove_segment_action_roundtrip() {
         let action = LogAction::RemoveSegment {
-            segment_id: SegmentId("seg-to-remove".to_string()),
+            path: "data/seg-to-remove.parquet".to_string(),
         };
 
         let json = serde_json::to_string(&action).expect("serialize");

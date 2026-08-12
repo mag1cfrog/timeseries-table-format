@@ -234,7 +234,7 @@ async fn remove_segment_removes_from_state() -> TestResult {
         .commit_with_expected_version(
             v1,
             vec![LogAction::RemoveSegment {
-                segment_id: seg2.segment_id.clone(),
+                path: seg2.path.clone(),
             }],
         )
         .await?;
@@ -589,60 +589,36 @@ async fn update_table_meta_last_one_wins() -> TestResult {
     Ok(())
 }
 
-/// Test: AddSegment with same ID replaces previous segment metadata.
+/// Test: replay rejects a second live segment with the same path.
 #[tokio::test]
-async fn add_segment_with_same_id_replaces() -> TestResult {
+async fn duplicate_live_segment_path_is_corrupt_state() -> TestResult {
     let (_tmp, store) = create_test_log_store();
-
     let meta = sample_table_meta();
+    let seg = sample_segment("seg-001", 0);
+    let mut duplicate = sample_segment("seg-002", 1);
+    duplicate.path = seg.path.clone();
 
-    let seg_v1 = SegmentMeta {
-        segment_id: SegmentId("seg-001".to_string()),
-        path: "data/seg-001-v1.parquet".to_string(),
-        format: FileFormat::Parquet,
-        ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
-        ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
-        row_count: 100,
-        file_size: None,
-        coverage_path: None,
-    };
-
-    let seg_v2 = SegmentMeta {
-        segment_id: SegmentId("seg-001".to_string()), // Same ID
-        path: "data/seg-001-v2.parquet".to_string(),  // Different path
-        format: FileFormat::Parquet,
-        ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
-        ts_max: utc_datetime(2025, 1, 1, 2, 0, 0), // Different ts_max
-        row_count: 200,                            // Different row_count
-        file_size: None,
-        coverage_path: None,
-    };
-
-    // Commit 1: Add seg_v1
     store
         .commit_with_expected_version(
             0,
             vec![
                 LogAction::UpdateTableMeta(meta),
-                LogAction::AddSegment(seg_v1),
+                LogAction::AddSegment(seg.clone()),
             ],
         )
         .await?;
-
-    // Commit 2: Add seg_v2 (same ID, should replace)
     store
-        .commit_with_expected_version(1, vec![LogAction::AddSegment(seg_v2.clone())])
+        .commit_with_expected_version(1, vec![LogAction::AddSegment(duplicate)])
         .await?;
 
-    let state = store.rebuild_table_state().await?;
-
-    assert_eq!(state.segments.len(), 1);
-    let seg = state
-        .segments
-        .get(&SegmentId("seg-001".to_string()))
-        .expect("segment should be present after replacement");
-    assert_eq!(seg.path, "data/seg-001-v2.parquet");
-    assert_eq!(seg.row_count, 200);
+    let err = store
+        .rebuild_table_state()
+        .await
+        .expect_err("duplicate live path must be corrupt");
+    assert!(matches!(
+        err,
+        CommitError::CorruptState { ref msg, .. } if msg.contains(&seg.path)
+    ));
 
     Ok(())
 }
@@ -671,7 +647,7 @@ async fn remove_nonexistent_segment_is_noop() -> TestResult {
         .commit_with_expected_version(
             1,
             vec![LogAction::RemoveSegment {
-                segment_id: SegmentId("seg-does-not-exist".to_string()),
+                path: "data/does-not-exist.parquet".to_string(),
             }],
         )
         .await?;

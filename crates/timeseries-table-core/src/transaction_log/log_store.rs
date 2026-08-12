@@ -209,8 +209,6 @@ impl TransactionLogStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::transaction_log::segments::SegmentId;
-
     use super::*;
     use crate::storage::layout;
     use serde_json;
@@ -370,7 +368,7 @@ mod tests {
         let (tmp, store) = create_test_log_store();
 
         let action = LogAction::RemoveSegment {
-            segment_id: SegmentId("test-seg".to_string()),
+            path: "data/test-seg.parquet".to_string(),
         };
 
         store.commit_with_expected_version(0, vec![action]).await?;
@@ -385,7 +383,7 @@ mod tests {
         assert_eq!(commit.actions.len(), 1);
         assert!(matches!(
             &commit.actions[0],
-            LogAction::RemoveSegment { segment_id } if segment_id.0 == "test-seg"
+            LogAction::RemoveSegment { path } if path == "data/test-seg.parquet"
         ));
 
         Ok(())
