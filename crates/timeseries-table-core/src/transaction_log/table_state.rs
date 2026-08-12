@@ -28,7 +28,10 @@ pub fn reset_rebuild_table_state_count() {
     REBUILD_TABLE_STATE_COUNT.with(|c| c.set(0));
 }
 
-use crate::{metadata::segments::cmp_segment_meta_by_time, transaction_log::*};
+use crate::{
+    metadata::{segments::cmp_segment_meta_by_time, table_metadata::TABLE_FORMAT_VERSION},
+    transaction_log::*,
+};
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +131,15 @@ impl TransactionLogStore {
                         segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
+                        if delta.format_version() != TABLE_FORMAT_VERSION {
+                            return CorruptStateSnafu {
+                                msg: format!(
+                                    "Unsupported table format version: expected {TABLE_FORMAT_VERSION}, found {}",
+                                    delta.format_version()
+                                ),
+                            }
+                            .fail();
+                        }
                         // v0.1: full replacement of TableMeta
                         table_meta = Some(delta);
                     }
@@ -192,7 +204,7 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid sample table metadata timestamp"),
-            format_version: 1,
+            format_version: TABLE_FORMAT_VERSION,
             entity_identity: None,
         }
     }
@@ -325,6 +337,28 @@ mod tests {
             .await
             .expect_err("expected error");
         assert!(matches!(err, CommitError::CorruptState { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_old_format_version() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.format_version = TABLE_FORMAT_VERSION - 1;
+
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("old format version should be rejected");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(err.to_string().contains(&format!(
+            "expected {TABLE_FORMAT_VERSION}, found {}",
+            TABLE_FORMAT_VERSION - 1
+        )));
         Ok(())
     }
 

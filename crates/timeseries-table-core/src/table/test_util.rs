@@ -2,7 +2,9 @@ use super::*;
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use crate::metadata::table_metadata::{TableKind, TableMeta, TimeBucket, TimeIndexSpec};
+use crate::metadata::table_metadata::{
+    TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+};
 use arrow::array::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
     TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
@@ -68,7 +70,7 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
         kind: TableKind::TimeSeries(index),
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: 1,
+        format_version: TABLE_FORMAT_VERSION,
         entity_identity: None,
     }
 }
@@ -399,7 +401,7 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
         kind: TableKind::TimeSeries(index),
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: 1,
+        format_version: TABLE_FORMAT_VERSION,
         entity_identity: None,
     }
 }

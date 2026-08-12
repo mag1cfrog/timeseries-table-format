@@ -380,6 +380,7 @@ mod tests {
     use crate::coverage::Coverage;
     use crate::coverage::io::read_coverage_sidecar;
     use crate::metadata::logical_schema::{LogicalDataType, LogicalTimestampUnit};
+    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::metadata::time_column::TimeColumnError;
     use crate::storage::layout;
     use crate::storage::{StorageLocation, TableLocation};
@@ -645,7 +646,7 @@ mod tests {
             kind: TableKind::TimeSeries(index),
             logical_schema: None,
             created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-            format_version: 1,
+            format_version: TABLE_FORMAT_VERSION,
             entity_identity: None,
         };
 

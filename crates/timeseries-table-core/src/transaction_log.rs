@@ -117,6 +117,7 @@ mod tests {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
     };
+    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::transaction_log::*;
 
     use chrono::{DateTime, TimeZone, Utc};
@@ -170,7 +171,7 @@ mod tests {
                 .expect("valid logical schema"),
             ),
             created_at: ts0,
-            format_version: 1,
+            format_version: TABLE_FORMAT_VERSION,
             entity_identity: None,
         };
 
