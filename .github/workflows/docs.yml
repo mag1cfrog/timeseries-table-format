@@ -73,11 +73,11 @@ jobs:
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Install docs dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r docs-site/requirements.txt "maturin==1.13.3"
+        run: python -m pip install -r docs-site/requirements.txt "maturin==1.13.3"
 
       - name: Build + install extension (debug, no deps)
         run: |

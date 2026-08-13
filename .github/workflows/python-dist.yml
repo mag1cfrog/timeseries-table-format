@@ -121,6 +121,8 @@ jobs:
       - name: Set up sccache
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Set snapshot version (Cargo)
         if: ${{ inputs.dev-prerelease }}
@@ -170,6 +172,9 @@ jobs:
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
           manylinux: ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'off' }}
           sccache: ${{ startsWith(matrix.os, 'ubuntu') }}
+          before-script-linux: |
+            printf 'sccache==0.16.0\n' > /tmp/sccache-constraints.txt
+            export UV_CONSTRAINT=/tmp/sccache-constraints.txt
           args: >-
             --release -o dist
             --compatibility pypi
@@ -275,6 +280,64 @@ jobs:
           command: sdist
           maturin-version: v1.13.3
           args: ${{ inputs.sdist-args }}
+
+      - name: Verify sdist contents
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import email.parser
+          import os
+          import re
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          sdists = list(Path("python/dist").glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
+
+          cargo_toml = Path("crates/timeseries-table-python/Cargo.toml").read_text()
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_toml)
+          if not match:
+              raise SystemExit("could not read the Python package version")
+          expected_version = os.environ.get("EXPECTED_PYTHON_VERSION", match.group(1))
+
+          required = {
+              "Cargo.lock",
+              "Cargo.toml",
+              "PKG-INFO",
+              "pyproject.toml",
+              "crates/timeseries-table-core/Cargo.toml",
+              "crates/timeseries-table-datafusion/Cargo.toml",
+              "crates/timeseries-table-python/Cargo.toml",
+              "crates/timeseries-table-python/src/lib.rs",
+              "src/timeseries_table_format/__init__.py",
+              "src/timeseries_table_format/__init__.pyi",
+              "src/timeseries_table_format/_native.pyi",
+              "src/timeseries_table_format/py.typed",
+          }
+          with tarfile.open(sdists[0], "r:gz") as sdist:
+              paths = {PurePosixPath(name) for name in sdist.getnames()}
+              roots = {path.parts[0] for path in paths if path.parts}
+              if len(roots) != 1:
+                  raise SystemExit(f"expected one sdist root, found {len(roots)}")
+              root = roots.pop()
+              relative_paths = {
+                  str(PurePosixPath(*path.parts[1:])) for path in paths
+              }
+              missing = sorted(required - relative_paths)
+              if missing:
+                  raise SystemExit(f"missing sdist entries: {', '.join(missing)}")
+              metadata_file = sdist.extractfile(f"{root}/PKG-INFO")
+              if metadata_file is None:
+                  raise SystemExit("sdist PKG-INFO is not a regular file")
+              metadata = email.parser.Parser().parsestr(metadata_file.read().decode())
+              if metadata["Name"] != "timeseries-table-format":
+                  raise SystemExit(f"unexpected package name: {metadata['Name']}")
+              if metadata["Version"] != expected_version:
+                  raise SystemExit(f"unexpected package version: {metadata['Version']}")
+          PY
 
       - name: Upload dist artifacts
         if: ${{ inputs.upload-artifacts }}
