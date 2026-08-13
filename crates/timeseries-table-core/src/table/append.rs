@@ -60,15 +60,18 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
 
 impl TimeSeriesTable {
     async fn normalize_new_segment_path(&self, relative_path: &str) -> Result<String, TableError> {
-        let normalized = self
-            .location()
-            .normalize_segment_path(Path::new(relative_path))
-            .await
-            .context(StorageSnafu)?;
+        let supplied_path = Path::new(relative_path);
+        let (normalized, native_path) =
+            storage::normalize_relative_segment_path(supplied_path).context(StorageSnafu)?;
 
         if self.state.segments.contains_key(&normalized) {
             return DuplicateSegmentPathSnafu { path: normalized }.fail();
         }
+
+        self.location()
+            .validate_segment_file(supplied_path, &native_path)
+            .await
+            .context(StorageSnafu)?;
 
         Ok(normalized)
     }
@@ -752,9 +755,9 @@ mod tests {
             std::fs::read_dir(tmp.path().join(layout::TABLE_SNAPSHOT_DIR))?.count(),
         ];
 
-        // Keep the path resolvable but make the file invalid. A duplicate-path
-        // error proves the append returned before reading or inspecting it.
-        tokio::fs::write(&abs_path, b"not parquet").await?;
+        // Removing the file proves duplicate detection depends only on the
+        // normalized live identity, not filesystem or Parquet inspection.
+        tokio::fs::remove_file(&abs_path).await?;
 
         let err = table
             .append_parquet_segment(rel_path, "ts")

@@ -57,7 +57,7 @@ impl TableLocation {
         Ok(normalized)
     }
 
-    async fn validate_segment_file(
+    pub(crate) async fn validate_segment_file(
         &self,
         supplied_path: &Path,
         native_path: &Path,
