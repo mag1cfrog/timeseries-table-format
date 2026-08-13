@@ -118,7 +118,7 @@ jobs:
         continue-on-error: true
         run: >-
           sccache --show-stats --stats-format json |
-          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+          python -c 'import json, os, sys; count = json.load(sys.stdin)["stats"]["cache_write_errors"]; errors = [line for line in open(os.environ["SCCACHE_ERROR_LOG"], errors="replace") if "Error executing cache write:" in line][-count:] if count else []; fatal = count and (len(errors) != count or any("AlreadyExists" not in line for line in errors)); sys.exit(f"sccache reported {count} cache write errors") if fatal else print(f"Ignoring {count} cache entries that already exist") if count else None'
 
       - name: Retry cache writes
         if: steps.sccache-writes.outcome == 'failure'
@@ -132,7 +132,7 @@ jobs:
         if: steps.sccache-writes.outcome == 'failure'
         run: >-
           sccache --show-stats --stats-format json |
-          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+          python -c 'import json, os, sys; count = json.load(sys.stdin)["stats"]["cache_write_errors"]; errors = [line for line in open(os.environ["SCCACHE_ERROR_LOG"], errors="replace") if "Error executing cache write:" in line][-count:] if count else []; fatal = count and (len(errors) != count or any("AlreadyExists" not in line for line in errors)); sys.exit(f"sccache reported {count} cache write errors") if fatal else print(f"Ignoring {count} cache entries that already exist") if count else None'
 
       - name: Show sccache backend errors
         if: always()
