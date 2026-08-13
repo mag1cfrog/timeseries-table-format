@@ -1,4 +1,4 @@
-# timeseries-table-datafusion changelog
+# Changelog
 All notable changes to timeseries-table-datafusion will be documented in this file.
 ## 0.1.2
 
