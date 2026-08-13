@@ -12,18 +12,17 @@ and prints the result.
 Run from the repo root:
 
 ```bash
-python/.venv/bin/python python/examples/create_append_sql.py
+crates/timeseries-table-python/.venv/bin/python crates/timeseries-table-python/examples/create_append_sql.py
 ```
 
 To keep the temp directory (useful for inspecting files on disk):
 
 ```bash
-python/.venv/bin/python python/examples/create_append_sql.py --keep
+crates/timeseries-table-python/.venv/bin/python crates/timeseries-table-python/examples/create_append_sql.py --keep
 ```
 
 To write into a specific location:
 
 ```bash
-python/.venv/bin/python python/examples/create_append_sql.py --table-root ./demo_table
+crates/timeseries-table-python/.venv/bin/python crates/timeseries-table-python/examples/create_append_sql.py --table-root ./demo_table
 ```
-
