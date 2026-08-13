@@ -309,10 +309,12 @@ jobs:
                   raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 
-      - name: Disable host sccache for sdist
+      - name: Prepare host sdist build
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         shell: bash
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          sudo chown -R "$(id -u):$(id -g)" crates/timeseries-table-python/dist
 
       - name: Build sdist (once)
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
