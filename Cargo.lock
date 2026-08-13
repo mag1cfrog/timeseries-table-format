@@ -3278,6 +3278,7 @@ dependencies = [
  "datafusion",
  "object_store",
  "parquet",
+ "serde_json",
  "tempfile",
  "timeseries-table-core",
  "tokio",
