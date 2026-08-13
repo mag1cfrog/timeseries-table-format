@@ -1,13 +1,13 @@
 //! Integration test for latest snapshot helpers on TimeSeriesTable.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use crate::metadata::segments::{FileFormat, SegmentMeta};
+use crate::metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec};
+use crate::storage::TableLocation;
+use crate::table::TimeSeriesTable;
+use crate::transaction_log::{LogAction, TransactionLogStore};
 use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
-use timeseries_table_core::metadata::segments::{FileFormat, SegmentId, SegmentMeta};
-use timeseries_table_core::metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec};
-use timeseries_table_core::storage::TableLocation;
-use timeseries_table_core::table::TimeSeriesTable;
-use timeseries_table_core::transaction_log::{LogAction, TransactionLogStore};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -36,7 +36,6 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
     // Commit a new segment directly through the log (version 2).
     let log = TransactionLogStore::new(location.clone());
     let seg = SegmentMeta {
-        segment_id: SegmentId("seg_0001".to_string()),
         path: "data/seg_0001.parquet".to_string(),
         format: FileFormat::Parquet,
         ts_min: Utc.timestamp_opt(10, 0).single().unwrap(),
@@ -58,11 +57,8 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
 
     let latest = stale.load_latest_state().await?;
     assert_eq!(latest.version, 2);
-    assert!(latest.segments.contains_key(&seg.segment_id));
-    let latest_seg = latest
-        .segments
-        .get(&seg.segment_id)
-        .expect("segment present");
+    assert!(latest.segments.contains_key(&seg.path));
+    let latest_seg = latest.segments.get(&seg.path).expect("segment present");
     assert_eq!(latest_seg.ts_min, seg.ts_min);
     assert_eq!(latest_seg.ts_max, seg.ts_max);
     assert!(latest.table_coverage.is_none());
@@ -86,7 +82,7 @@ async fn load_latest_state_no_change_returns_current_snapshot() -> TestResult {
     assert!(latest.segments.is_empty());
     assert!(latest.table_coverage.is_none());
     match latest.table_meta.kind() {
-        timeseries_table_core::metadata::table_metadata::TableKind::TimeSeries(_) => {}
+        crate::metadata::table_metadata::TableKind::TimeSeries(_) => {}
         other => panic!("expected time series table kind, got {other:?}"),
     }
 

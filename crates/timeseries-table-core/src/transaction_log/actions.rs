@@ -7,23 +7,20 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::transaction_log::{
-    TableMetaDelta, TimeBucket,
-    segments::{SegmentId, SegmentMeta},
-};
+use crate::transaction_log::{TableMetaDelta, TimeBucket, segments::SegmentMeta};
 /// An action recorded in a commit.
 ///
 /// Each commit contains a sequence of actions that are applied in order to
 /// evolve table state.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogAction {
-    /// Add or replace a segment.
+    /// Add a segment whose path is not currently live.
     AddSegment(SegmentMeta),
 
-    /// Remove a segment by its logical ID.
+    /// Remove a segment by its canonical table-relative path.
     RemoveSegment {
-        /// Logical identifier of the segment to remove.
-        segment_id: SegmentId,
+        /// Canonical table-relative path of the segment to remove.
+        path: String,
     },
 
     /// Update table-level metadata (v0.1 uses full replacement).

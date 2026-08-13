@@ -139,7 +139,9 @@ jobs:
     if: ${{ needs.changes.outputs.wheels == 'true' }}
     uses: ./.github/workflows/python-dist.yml
     with:
-      max-parallel: 2
+      os-json: '["windows-latest","ubuntu-latest","macos-latest"]'
+      python-versions-json: '["3.12"]'
+      max-parallel: 1
       run-pytest: false
       upload-artifacts: false
       write-cache: true

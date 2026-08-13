@@ -154,7 +154,7 @@ impl TransactionLogStore {
     /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
     ///    "create only if not exists" semantics (atomic guard).
     /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
-    pub async fn commit_with_expected_version(
+    pub(crate) async fn commit_with_expected_version(
         &self,
         expected: u64,
         actions: Vec<LogAction>,
@@ -209,8 +209,6 @@ impl TransactionLogStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::transaction_log::segments::SegmentId;
-
     use super::*;
     use crate::storage::layout;
     use serde_json;
@@ -370,7 +368,7 @@ mod tests {
         let (tmp, store) = create_test_log_store();
 
         let action = LogAction::RemoveSegment {
-            segment_id: SegmentId("test-seg".to_string()),
+            path: "data/test-seg.parquet".to_string(),
         };
 
         store.commit_with_expected_version(0, vec![action]).await?;
@@ -385,7 +383,7 @@ mod tests {
         assert_eq!(commit.actions.len(), 1);
         assert!(matches!(
             &commit.actions[0],
-            LogAction::RemoveSegment { segment_id } if segment_id.0 == "test-seg"
+            LogAction::RemoveSegment { path } if path == "data/test-seg.parquet"
         ));
 
         Ok(())

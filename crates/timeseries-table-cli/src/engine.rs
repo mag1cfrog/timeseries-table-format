@@ -255,13 +255,7 @@ impl DataFusionEngine {
         &self,
         table: &TimeSeriesTable,
     ) -> CliResult<DataFusionSession> {
-        let state = table.state().clone();
-        let location = table.location().clone();
-        let table = TimeSeriesTable::from_state(location, state).context(OpenTableSnafu {
-            table: self.table_root.display().to_string(),
-        })?;
-
-        let table = Arc::new(table);
+        let table = Arc::new(table.clone());
         let provider = TsTableProvider::try_new(table).context(DataFusionSnafu)?;
 
         let cfg = SessionConfig::new();

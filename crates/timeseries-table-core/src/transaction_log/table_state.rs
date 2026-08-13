@@ -6,7 +6,7 @@
 //! logic isolated from the append-only write path and documents the invariant
 //! that table readers must see a state consistent with the latest committed
 //! version.
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 #[cfg(feature = "test-counters")]
 use std::cell::Cell;
@@ -28,7 +28,34 @@ pub fn reset_rebuild_table_state_count() {
     REBUILD_TABLE_STATE_COUNT.with(|c| c.set(0));
 }
 
-use crate::{metadata::segments::cmp_segment_meta_by_time, transaction_log::*};
+use crate::{
+    metadata::{segments::cmp_segment_meta_by_time, table_metadata::TABLE_FORMAT_VERSION},
+    storage::normalize_relative_segment_path,
+    transaction_log::*,
+};
+
+fn validate_persisted_segment_path(path: &str) -> Result<(), CommitError> {
+    let (canonical, _) = match normalize_relative_segment_path(Path::new(path)) {
+        Ok(path) => path,
+        Err(source) => {
+            return CorruptStateSnafu {
+                msg: format!("Invalid persisted segment path {path:?}: {source}"),
+            }
+            .fail();
+        }
+    };
+
+    if canonical != path {
+        return CorruptStateSnafu {
+            msg: format!(
+                "Non-canonical persisted segment path {path:?}; canonical form is {canonical:?}"
+            ),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
 
 /// Pointer to table coverage metadata including bucket specification, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +80,8 @@ pub struct TableState {
     pub version: u64,
     /// Table-level metadata reconstructed from the log.
     pub table_meta: TableMeta,
-    /// Current live segments keyed by SegmentId.
-    pub segments: HashMap<SegmentId, SegmentMeta>,
+    /// Current live segments keyed by canonical table-relative path.
+    pub segments: HashMap<String, SegmentMeta>,
 
     /// Optional pointer to the latest table coverage metadata.
     pub table_coverage: Option<TableCoveragePointer>,
@@ -63,7 +90,7 @@ pub struct TableState {
 impl TableState {
     /// Return live segments sorted deterministically by time.
     ///
-    /// Ordering is by `ts_min`, then `ts_max`, and finally `segment_id` as a
+    /// Ordering is by `ts_min`, then `ts_max`, and finally `path` as a
     /// stable tie-breaker.
     pub fn segments_sorted_by_time(&self) -> Vec<&SegmentMeta> {
         let mut v: Vec<&SegmentMeta> = self.segments.values().collect();
@@ -94,7 +121,7 @@ impl TransactionLogStore {
         }
 
         let mut table_meta: Option<TableMeta> = None;
-        let mut segments: HashMap<SegmentId, SegmentMeta> = HashMap::new();
+        let mut segments: HashMap<String, SegmentMeta> = HashMap::new();
 
         let mut table_coverage: Option<TableCoveragePointer> = None;
 
@@ -116,13 +143,29 @@ impl TransactionLogStore {
             for action in commit.actions {
                 match action {
                     LogAction::AddSegment(meta) => {
-                        // Insert or replace the segment; latest info wins.
-                        segments.insert(meta.segment_id.clone(), meta);
+                        validate_persisted_segment_path(&meta.path)?;
+                        if segments.contains_key(&meta.path) {
+                            return CorruptStateSnafu {
+                                msg: format!("Duplicate live segment path: {}", meta.path),
+                            }
+                            .fail();
+                        }
+                        segments.insert(meta.path.clone(), meta);
                     }
-                    LogAction::RemoveSegment { segment_id } => {
-                        segments.remove(&segment_id);
+                    LogAction::RemoveSegment { path } => {
+                        validate_persisted_segment_path(&path)?;
+                        segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
+                        if delta.format_version() != TABLE_FORMAT_VERSION {
+                            return CorruptStateSnafu {
+                                msg: format!(
+                                    "Unsupported table format version: expected {TABLE_FORMAT_VERSION}, found {}",
+                                    delta.format_version()
+                                ),
+                            }
+                            .fail();
+                        }
                         // v0.1: full replacement of TableMeta
                         table_meta = Some(delta);
                     }
@@ -159,8 +202,8 @@ mod tests {
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
-        FileFormat, LogAction, SegmentId, SegmentMeta, TableKind, TableMeta, TimeBucket,
-        TimeIndexSpec, TransactionLogStore,
+        FileFormat, LogAction, SegmentMeta, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        TransactionLogStore,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
@@ -187,14 +230,13 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid sample table metadata timestamp"),
-            format_version: 1,
+            format_version: TABLE_FORMAT_VERSION,
             entity_identity: None,
         }
     }
 
     fn sample_segment(id: &str) -> SegmentMeta {
         SegmentMeta {
-            segment_id: SegmentId(id.to_string()),
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             ts_min: chrono::Utc
@@ -213,7 +255,6 @@ mod tests {
 
     fn segment_with_ts(id: &str, ts_min: i64, ts_max: i64) -> SegmentMeta {
         SegmentMeta {
-            segment_id: SegmentId(id.to_string()),
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             ts_min: chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap(),
@@ -232,10 +273,10 @@ mod tests {
         let seg_d = segment_with_ts("d", 5, 7);
         let seg_b = segment_with_ts("b", 10, 20);
 
-        segments.insert(seg_c.segment_id.clone(), seg_c);
-        segments.insert(seg_a.segment_id.clone(), seg_a);
-        segments.insert(seg_d.segment_id.clone(), seg_d);
-        segments.insert(seg_b.segment_id.clone(), seg_b);
+        segments.insert(seg_c.path.clone(), seg_c);
+        segments.insert(seg_a.path.clone(), seg_a);
+        segments.insert(seg_d.path.clone(), seg_d);
+        segments.insert(seg_b.path.clone(), seg_b);
 
         let state = TableState {
             version: 3,
@@ -251,7 +292,7 @@ mod tests {
                 (
                     seg.ts_min.timestamp(),
                     seg.ts_max.timestamp(),
-                    seg.segment_id.0.clone(),
+                    seg.path.clone(),
                 )
             })
             .collect();
@@ -284,7 +325,7 @@ mod tests {
             .commit_with_expected_version(
                 v2,
                 vec![LogAction::RemoveSegment {
-                    segment_id: seg1.segment_id.clone(),
+                    path: seg1.path.clone(),
                 }],
             )
             .await?;
@@ -292,8 +333,8 @@ mod tests {
         let state = store.rebuild_table_state().await?;
         assert_eq!(state.version, v3);
         assert_eq!(state.table_meta, meta);
-        assert!(state.segments.contains_key(&seg2.segment_id));
-        assert!(!state.segments.contains_key(&seg1.segment_id));
+        assert!(state.segments.contains_key(&seg2.path));
+        assert!(!state.segments.contains_key(&seg1.path));
         Ok(())
     }
 
@@ -322,6 +363,70 @@ mod tests {
             .await
             .expect_err("expected error");
         assert!(matches!(err, CommitError::CorruptState { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_old_format_version() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.format_version = TABLE_FORMAT_VERSION - 1;
+
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("old format version should be rejected");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(err.to_string().contains(&format!(
+            "expected {TABLE_FORMAT_VERSION}, found {}",
+            TABLE_FORMAT_VERSION - 1
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_noncanonical_segment_action_paths() -> TestResult {
+        for path in [
+            "",
+            "/data/seg.parquet",
+            "../data/seg.parquet",
+            "data/../seg.parquet",
+            r"data\seg.parquet",
+            "data//seg.parquet",
+            r"C:\data\seg.parquet",
+            "data/C:/seg.parquet",
+            "data/C:seg.parquet",
+        ] {
+            let mut segment = sample_segment("seg");
+            segment.path = path.to_owned();
+
+            for action in [
+                LogAction::AddSegment(segment.clone()),
+                LogAction::RemoveSegment {
+                    path: path.to_owned(),
+                },
+            ] {
+                let (_tmp, store) = create_test_log_store();
+                store
+                    .commit_with_expected_version(
+                        0,
+                        vec![LogAction::UpdateTableMeta(sample_table_meta()), action],
+                    )
+                    .await?;
+
+                let err = store
+                    .rebuild_table_state()
+                    .await
+                    .expect_err("noncanonical segment action path should be rejected");
+                assert!(matches!(err, CommitError::CorruptState { .. }));
+                assert!(err.to_string().contains("segment path"), "{err}");
+            }
+        }
+
         Ok(())
     }
 

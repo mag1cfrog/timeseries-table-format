@@ -25,12 +25,9 @@ use tempfile::TempDir;
 use timeseries_table_core::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use timeseries_table_core::storage::TableLocation;
+use timeseries_table_core::storage::{TableLocation, layout};
 use timeseries_table_core::table::TimeSeriesTable;
-use timeseries_table_core::transaction_log::{
-    FileFormat, LogAction, SegmentId, SegmentMeta, TableMeta, TimeBucket, TimeIndexSpec,
-    TransactionLogStore,
-};
+use timeseries_table_core::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
 use timeseries_table_datafusion::TsTableProvider;
 use timeseries_table_datafusion::test_utils::{
     CompiledIntervalTruth, CompiledTimePred, TestInterval, add_interval_for_tests,
@@ -850,35 +847,29 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     let location = TableLocation::local(tmp.path());
 
     let meta = make_table_meta(false)?;
-    let _table = TimeSeriesTable::create(location.clone(), meta).await?;
+    let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
 
     let rows = make_rows(minutes_to_millis(1), 5, "A", 10.0);
     let rel_path = "data/seg-missing-size.parquet";
     write_segment(tmp.path(), rel_path, &rows, false)?;
 
-    let ts_min = Utc
-        .timestamp_millis_opt(minutes_to_millis(1))
-        .single()
-        .unwrap();
-    let ts_max = Utc
-        .timestamp_millis_opt(minutes_to_millis(1) + 4)
-        .single()
-        .unwrap();
+    table.append_parquet_segment(rel_path, "ts").await?;
+    drop(table);
 
-    let seg = SegmentMeta {
-        segment_id: SegmentId("seg-missing-size".to_string()),
-        path: rel_path.to_string(),
-        format: FileFormat::Parquet,
-        ts_min,
-        ts_max,
-        row_count: rows.len() as u64,
-        file_size: None,
-        coverage_path: None,
-    };
-
-    let log = TransactionLogStore::new(location.clone());
-    log.commit_with_expected_version(1, vec![LogAction::AddSegment(seg)])
-        .await?;
+    let commit_path = tmp.path().join(layout::commit_rel_path(2));
+    let mut commit: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+    let segment = commit["actions"]
+        .as_array_mut()
+        .and_then(|actions| {
+            actions
+                .iter_mut()
+                .find_map(|action| action.get_mut("AddSegment"))
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("append commit contains AddSegment");
+    segment.remove("file_size");
+    tokio::fs::write(&commit_path, serde_json::to_vec(&commit)?).await?;
 
     let table = Arc::new(TimeSeriesTable::open(location).await?);
     let ctx = SessionContext::new();

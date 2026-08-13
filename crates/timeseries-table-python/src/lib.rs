@@ -1491,18 +1491,23 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
-    /// Test-only helper: creates a table at `table_root`, copies `parquet_path`
-    /// under the table root if needed, appends it twice, and expects the second
-    /// append to fail with a coverage overlap.
+    /// Test-only helper: creates a table at `table_root`, appends two Parquet
+    /// files, and expects the second append to fail with a coverage overlap.
     #[cfg(feature = "test-utils")]
     #[pyfunction]
-    fn _test_trigger_overlap(py: Python<'_>, table_root: &str, parquet_path: &str) -> PyResult<()> {
+    fn _test_trigger_overlap(
+        py: Python<'_>,
+        table_root: &str,
+        first_parquet_path: &str,
+        second_parquet_path: &str,
+    ) -> PyResult<()> {
         use crate::{error_map, tokio_runner};
 
         let rt = tokio_runner::global_runtime()?;
 
         let table_root = table_root.to_string();
-        let parquet_path = parquet_path.to_string();
+        let first_parquet_path = first_parquet_path.to_string();
+        let second_parquet_path = second_parquet_path.to_string();
 
         tokio_runner::run_blocking_map_err(
             py,
@@ -1531,21 +1536,21 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
                 let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
 
-                let rel = location
-                    .ensure_parquet_under_root(Path::new(&parquet_path))
+                let first_rel = location
+                    .ensure_parquet_under_root(Path::new(&first_parquet_path))
+                    .await
+                    .map_err(|e| TableError::Storage { source: e })?;
+                let second_rel = location
+                    .ensure_parquet_under_root(Path::new(&second_parquet_path))
                     .await
                     .map_err(|e| TableError::Storage { source: e })?;
 
-                let rel_str = rel.to_string_lossy().to_string();
-                let rel_str = if cfg!(windows) {
-                    rel_str.replace('\\', "/")
-                } else {
-                    rel_str
-                };
-
-                let _v1 = table.append_parquet_segment(&rel_str, "ts").await?;
-
-                let _v2 = table.append_parquet_segment(&rel_str, "ts").await?;
+                let _v1 = table
+                    .append_parquet_segment(&first_rel.to_string_lossy(), "ts")
+                    .await?;
+                let _v2 = table
+                    .append_parquet_segment(&second_rel.to_string_lossy(), "ts")
+                    .await?;
 
                 Ok::<(), TableError>(())
             },

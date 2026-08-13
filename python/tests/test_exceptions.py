@@ -13,7 +13,9 @@ import timeseries_table_format._native as native
 
 
 class _TestingModule(Protocol):
-    def _test_trigger_overlap(self, table_root: str, parquet_path: str) -> None: ...
+    def _test_trigger_overlap(
+        self, table_root: str, first_parquet_path: str, second_parquet_path: str
+    ) -> None: ...
     def _test_sleep_without_gil(self, millis: int) -> None: ...
 
 
@@ -25,15 +27,19 @@ def test_coverage_overlap_maps_to_specific_exception():
 
     with tempfile.TemporaryDirectory() as tmp:
         table_root = os.path.join(tmp, "table")
-        parquet_path = os.path.join(tmp, "seg.parquet")
+        first_parquet_path = os.path.join(tmp, "first.parquet")
+        second_parquet_path = os.path.join(tmp, "second.parquet")
 
         ts = pa.array([0, 60 * 60 * 1_000_000], type=pa.timestamp("us"))
         v = pa.array([1, 2], type=pa.int64())
         tbl = pa.table({"ts": ts, "v": v})
-        pq.write_table(tbl, parquet_path)
+        pq.write_table(tbl, first_parquet_path)
+        pq.write_table(tbl, second_parquet_path)
 
         with pytest.raises(ttf.CoverageOverlapError) as excinfo:
-            testing._test_trigger_overlap(table_root, parquet_path)
+            testing._test_trigger_overlap(
+                table_root, first_parquet_path, second_parquet_path
+            )
 
         e = excinfo.value
         assert isinstance(e.segment_path, str)

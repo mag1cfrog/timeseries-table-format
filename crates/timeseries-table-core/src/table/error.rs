@@ -18,7 +18,7 @@ use crate::{
     formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
     metadata::schema_compat::SchemaCompatibilityError,
     storage::StorageError,
-    transaction_log::{CommitError, SegmentId, TableKind, TimeBucket, segments::SegmentError},
+    transaction_log::{CommitError, TableKind, TimeBucket, segments::SegmentError},
 };
 
 /// Errors from high-level time-series table operations.
@@ -47,6 +47,15 @@ pub enum TableError {
     NotTimeSeries {
         /// The actual kind of the underlying table that was discovered.
         kind: TableKind,
+    },
+
+    /// Attempting to create a table with an unsupported metadata format version.
+    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
+    UnsupportedFormatVersion {
+        /// Format version supported by this writer.
+        expected: u32,
+        /// Format version supplied by the caller.
+        found: u32,
     },
 
     /// Attempt to create a table where commits already exist (idempotency guard for create).
@@ -164,7 +173,7 @@ pub enum TableError {
         source: CoverageError,
     },
 
-    /// Appending would overlap existing coverage for the same segment path.
+    /// Appending would overlap existing table coverage.
     #[snafu(display(
         "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example={example_bucket:?})"
     ))]
@@ -177,22 +186,29 @@ pub enum TableError {
         example_bucket: Option<u32>,
     },
 
+    /// A live segment already uses the normalized path supplied for append.
+    #[snafu(display("Segment path is already live: {path}"))]
+    DuplicateSegmentPath {
+        /// Canonical table-relative path that is already registered.
+        path: String,
+    },
+
     /// Existing segment lacks a coverage_path when coverage is required.
     #[snafu(display(
-        "Cannot append because existing segment {segment_id} is missing coverage_path (required for coverage tracking)"
+        "Cannot append because existing segment {path} is missing coverage_path (required for coverage tracking)"
     ))]
     ExistingSegmentMissingCoverage {
-        /// Segment ID missing a coverage_path entry.
-        segment_id: SegmentId,
+        /// Canonical segment path missing a coverage_path entry.
+        path: String,
     },
 
     /// Reading the per-segment coverage sidecar failed while rebuilding coverage.
     #[snafu(display(
-        "Cannot recover table coverage: failed to read segment coverage sidecar for {segment_id} at {coverage_path}: {source}"
+        "Cannot recover table coverage: failed to read segment coverage sidecar for {path} at {coverage_path}: {source}"
     ))]
     SegmentCoverageSidecarRead {
-        /// Segment whose coverage sidecar could not be read.
-        segment_id: SegmentId,
+        /// Canonical path of the segment whose coverage sidecar could not be read.
+        path: String,
         /// Path to the coverage sidecar file that failed to read.
         coverage_path: String,
         /// Underlying coverage error (boxed to keep the variant size small).

@@ -326,15 +326,13 @@ impl TimeSeriesTable {
         // 1) Pick candidate segments.
         let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
 
-        // 2) Sort by ts_min to ensure segments are processed in chronological order.
-        //    In v0.1 we assume non-overlapping segments, so sorting guarantees scan order.
-        //    Unstable is fine here; we only care about ordering by ts_min.
+        // 2) Sort deterministically by ts_min, ts_max, and path.
         candidates.sort_unstable_by(cmp_segment_meta_by_time);
 
         let location = self.location().clone();
 
         // 3) Build stream: for each segment, read + filter
-        let stream = futures::stream::iter(candidates.into_iter())
+        let stream = futures::stream::iter(candidates)
             .then(move |seg| {
                 let location = location.clone();
                 let ts_column = ts_column.clone();
@@ -361,7 +359,7 @@ mod tests {
     use crate::table::test_util::*;
 
     use crate::metadata::logical_schema::LogicalTimestampUnit;
-    use crate::metadata::segments::{FileFormat, SegmentId};
+    use crate::metadata::segments::FileFormat;
 
     use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 
@@ -380,7 +378,6 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-no-ts".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -412,7 +409,6 @@ mod tests {
         write_arrow_parquet_int_time(&path, &ts_vals, &["A", "B"], &[1.0, 2.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-int".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
@@ -443,7 +439,6 @@ mod tests {
         write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Nanosecond, &[], &[], &[])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-nano-empty".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -512,12 +507,8 @@ mod tests {
             ],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-scan-1".to_string()), rel1, "ts")
-            .await?;
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-scan-2".to_string()), rel2, "ts")
-            .await?;
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
 
         // Query spans both segments but excludes the last row of the second segment.
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
@@ -563,9 +554,7 @@ mod tests {
             ],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-boundary".to_string()), rel, "ts")
-            .await?;
+        table.append_parquet_segment(rel, "ts").await?;
 
         let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
         let end = Utc.timestamp_millis_opt(2_000).single().expect("valid ts");
@@ -613,9 +602,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-micros".to_string()), rel, "ts")
-            .await?;
+        table.append_parquet_segment(rel, "ts").await?;
 
         let start = Utc
             .timestamp_opt(1, 500_000_000)
@@ -652,9 +639,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-nanos".to_string()), rel, "ts")
-            .await?;
+        table.append_parquet_segment(rel, "ts").await?;
 
         let start = Utc
             .timestamp_opt(1, 250_000_000)
@@ -687,9 +672,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-null".to_string()), rel, "ts")
-            .await?;
+        table.append_parquet_segment(rel, "ts").await?;
 
         let start = Utc.timestamp_millis_opt(500).single().unwrap();
         let end = Utc.timestamp_millis_opt(2_500).single().unwrap();
@@ -729,7 +712,6 @@ mod tests {
         write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Millisecond, &[], &[], &[])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-empty".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -739,10 +721,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
@@ -770,7 +749,6 @@ mod tests {
         )?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-null-only".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -780,10 +758,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 0, 5);
@@ -805,7 +780,6 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-scan-no-ts".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
@@ -815,10 +789,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 2, 0);
@@ -842,7 +813,6 @@ mod tests {
         write_arrow_parquet_int_time(&path, &[1_000], &["A"], &[1.0])?;
 
         let segment = SegmentMeta {
-            segment_id: SegmentId("seg-scan-int".to_string()),
             path: rel.to_string(),
             format: FileFormat::Parquet,
             ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
@@ -852,10 +822,7 @@ mod tests {
             coverage_path: None,
         };
 
-        table
-            .state
-            .segments
-            .insert(segment.segment_id.clone(), segment);
+        table.state.segments.insert(segment.path.clone(), segment);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
@@ -900,13 +867,9 @@ mod tests {
             }],
         )?;
 
-        // append in reverse ts_min order to ensure sort_by_key is exercised
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-b".to_string()), rel_b, "ts")
-            .await?;
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-a".to_string()), rel_a, "ts")
-            .await?;
+        // Append in reverse ts_min order to exercise the segment comparator.
+        table.append_parquet_segment(rel_b, "ts").await?;
+        table.append_parquet_segment(rel_a, "ts").await?;
 
         let start = Utc.timestamp_millis_opt(50_000).single().unwrap();
         let end = Utc.timestamp_millis_opt(150_000).single().unwrap();
@@ -955,12 +918,8 @@ mod tests {
             }],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-early".to_string()), rel1, "ts")
-            .await?;
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-late".to_string()), rel2, "ts")
-            .await?;
+        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel2, "ts").await?;
 
         let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
         let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
@@ -990,9 +949,7 @@ mod tests {
             }],
         )?;
 
-        table
-            .append_parquet_segment_with_id(SegmentId("seg-corrupt".to_string()), rel, "ts")
-            .await?;
+        table.append_parquet_segment(rel, "ts").await?;
 
         // Corrupt the file after append so scan encounters a read failure.
         let f = std::fs::OpenOptions::new().write(true).open(&path)?;

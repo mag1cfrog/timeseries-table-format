@@ -62,7 +62,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         assert!(
             seg.coverage_path.is_some(),
             "segment {} missing coverage_path",
-            seg.segment_id.0
+            seg.path
         );
     }
 
@@ -207,7 +207,7 @@ where
         let cov_path = seg
             .coverage_path
             .as_ref()
-            .ok_or_else(|| format!("missing coverage_path for segment {}", seg.segment_id.0))?;
+            .ok_or_else(|| format!("missing coverage_path for segment {}", seg.path))?;
         let cov = read_coverage_sidecar(location, Path::new(cov_path)).await?;
         acc.union_inplace(&cov);
     }

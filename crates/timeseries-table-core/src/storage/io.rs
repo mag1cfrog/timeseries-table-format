@@ -1,11 +1,11 @@
 use snafu::{Backtrace, prelude::*};
 use std::{
-    io::{self, SeekFrom},
+    io,
     path::{Path, PathBuf},
 };
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::AsyncWriteExt,
 };
 
 use crate::storage::{
@@ -218,103 +218,6 @@ pub async fn write_new(
                 })?;
 
             Ok(())
-        }
-    }
-}
-
-/// Small probe structure used by higher-level code (e.g. segment validators)
-/// to inspect a file's length and its first/last 4 bytes.
-pub struct FileHeadTail4 {
-    /// Length of the file in bytes.
-    pub len: u64,
-    /// First 4 bytes of the file (zero-filled if the file is shorter).
-    pub head: [u8; 4],
-    /// Last 4 bytes of the file (zero-filled if the file is shorter).
-    pub tail: [u8; 4],
-}
-
-/// Read the length, first 4 bytes, and last 4 bytes of a file at `rel_path`
-/// within the given `location`.
-///
-/// Semantics:
-/// - On missing file: `StorageError::NotFound`.
-/// - On other I/O problems: `StorageError::LocalIo`.
-/// - Only `StorageLocation::Local` is supported in v0.1.
-///
-/// For files shorter than 4 bytes, both `head` and `tail` remain zero-filled.
-/// For files between 4 and 7 bytes, `head` contains the first 4 bytes but
-/// `tail` remains zero-filled since reading both without overlap is not
-/// possible. Callers that need distinct head/tail (e.g., Parquet magic
-/// validation) should check `len >= 8` before inspecting `tail`.
-pub async fn read_head_tail_4(
-    location: &StorageLocation,
-    rel_path: &Path,
-) -> StorageResult<FileHeadTail4> {
-    match location {
-        StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
-            let path_str = abs.display().to_string();
-
-            // Metadata: we special-case NotFound like read_to_string does.
-            let meta = match fs::metadata(&abs).await {
-                Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    return Err(BackendError::Local(e)).context(NotFoundSnafu { path: path_str });
-                }
-                Err(e) => {
-                    return Err(BackendError::Local(e)).context(OtherIoSnafu { path: path_str });
-                }
-            };
-
-            // 2) Non-regular file: treat as semantic "NotFound" (no real OS error).
-            if !meta.is_file() {
-                let synthetic = io::Error::other("not a regular file");
-                let backend = BackendError::Local(synthetic);
-                return Err(StorageError::NotFound {
-                    path: path_str,
-                    source: backend,
-                    backtrace: Backtrace::capture(),
-                });
-            }
-
-            let len = meta.len();
-
-            let mut file = fs::File::open(&abs)
-                .await
-                .map_err(BackendError::Local)
-                .context(OtherIoSnafu {
-                    path: path_str.clone(),
-                })?;
-
-            let mut head = [0u8; 4];
-            let mut tail = [0u8; 4];
-
-            // Only attempt to read the header if file is at least 4 bytes.
-            if len >= 4 {
-                file.read_exact(&mut head)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: path_str.clone(),
-                    })?;
-            }
-
-            // Only attempt to read the footer if file is at least 8 bytes.
-            if len >= 8 {
-                file.seek(SeekFrom::End(-4))
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: path_str.clone(),
-                    })?;
-                file.read_exact(&mut tail)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: path_str.clone(),
-                    })?;
-            }
-            Ok(FileHeadTail4 { len, head, tail })
         }
     }
 }

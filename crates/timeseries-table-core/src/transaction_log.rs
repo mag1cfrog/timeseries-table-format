@@ -46,7 +46,6 @@
 //!   "actions": [
 //!     {
 //!       "AddSegment": {
-//!         "segment_id": "seg-0001",
 //!         "path": "data/nvda_1h_0001.parquet",
 //!         "ts_min": "2020-01-01T00:00:00Z",
 //!         "ts_max": "2020-01-02T00:00:00Z",
@@ -67,12 +66,15 @@ pub mod log_store;
 pub mod segments;
 pub mod table_state;
 
+#[cfg(test)]
+mod log_integration_tests;
+
 pub use crate::metadata::table_metadata::{
     TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
-pub use segments::{FileFormat, SegmentId, SegmentMeta};
+pub use segments::{FileFormat, SegmentMeta};
 pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};
@@ -118,6 +120,7 @@ mod tests {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
     };
+    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::transaction_log::*;
 
     use chrono::{DateTime, TimeZone, Utc};
@@ -171,12 +174,11 @@ mod tests {
                 .expect("valid logical schema"),
             ),
             created_at: ts0,
-            format_version: 1,
+            format_version: TABLE_FORMAT_VERSION,
             entity_identity: None,
         };
 
         let seg_meta = SegmentMeta {
-            segment_id: SegmentId("seg-0001".to_string()),
             path: "data/nvda_1h_0001.parquet".to_string(),
             format: FileFormat::Parquet,
             ts_min: ts0,
@@ -320,7 +322,7 @@ mod tests {
     #[test]
     fn remove_segment_action_roundtrip() {
         let action = LogAction::RemoveSegment {
-            segment_id: SegmentId("seg-to-remove".to_string()),
+            path: "data/seg-to-remove.parquet".to_string(),
         };
 
         let json = serde_json::to_string(&action).expect("serialize");
@@ -345,17 +347,5 @@ mod tests {
 
         assert_eq!(commit, decoded);
         assert!(decoded.actions.is_empty());
-    }
-
-    #[test]
-    fn segment_id_transparent_serialization() {
-        let id = SegmentId("my-segment".to_string());
-        let json = serde_json::to_string(&id).expect("serialize");
-
-        // Should be a plain string, not {"0": "my-segment"}.
-        assert_eq!(json, r#""my-segment""#);
-
-        let decoded: SegmentId = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(id, decoded);
     }
 }

@@ -20,6 +20,9 @@ pub mod scan;
 #[cfg(test)]
 pub(crate) mod test_util;
 
+#[cfg(test)]
+mod latest_snapshot_tests;
+
 use std::pin::Pin;
 
 use arrow::array::RecordBatch;
@@ -28,9 +31,11 @@ use snafu::prelude::*;
 
 use crate::table::error::{
     AlreadyExistsSnafu, EmptyTableSnafu, NotTimeSeriesSnafu, TransactionLogSnafu,
+    UnsupportedFormatVersionSnafu,
 };
 
 use crate::{
+    metadata::table_metadata::TABLE_FORMAT_VERSION,
     storage::TableLocation,
     transaction_log::{
         LogAction, TableKind, TableMeta, TableState, TimeIndexSpec, TransactionLogStore,
@@ -49,7 +54,7 @@ pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableErr
 /// - how to talk to the transaction log,
 /// - what the current committed state is,
 /// - and the extracted time index spec.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TimeSeriesTable {
     log: TransactionLogStore,
     state: TableState,
@@ -57,25 +62,6 @@ pub struct TimeSeriesTable {
 }
 
 impl TimeSeriesTable {
-    /// Construct a table handle from an existing snapshot.
-    ///
-    /// This does not replay the transaction log; callers must provide a state
-    /// derived from the same location.
-    pub fn from_state(location: TableLocation, state: TableState) -> Result<Self, TableError> {
-        let index = match &state.table_meta.kind {
-            TableKind::TimeSeries(spec) => spec.clone(),
-            other => {
-                return NotTimeSeriesSnafu {
-                    kind: other.clone(),
-                }
-                .fail();
-            }
-        };
-
-        let log = TransactionLogStore::new(location);
-        Ok(Self { log, state, index })
-    }
-
     /// Return the current committed table state.
     pub fn state(&self) -> &TableState {
         &self.state
@@ -98,11 +84,6 @@ impl TimeSeriesTable {
     /// Return the table location.
     pub fn location(&self) -> &TableLocation {
         self.log.location()
-    }
-
-    /// Return the transaction log store handle.
-    pub fn log_store(&self) -> &TransactionLogStore {
-        &self.log
     }
 
     /// Open an existing time-series table at the given location.
@@ -149,6 +130,7 @@ impl TimeSeriesTable {
     /// Create a new time-series table at the given location.
     ///
     /// This:
+    /// - Requires `table_meta.format_version` to match [`TABLE_FORMAT_VERSION`],
     /// - Requires `table_meta.kind` to be `TableKind::TimeSeries`,
     /// - Verifies that there are no existing commits (version must be 0),
     /// - Writes an initial commit with `UpdateTableMeta(table_meta.clone())`,
@@ -157,6 +139,14 @@ impl TimeSeriesTable {
         location: TableLocation,
         table_meta: TableMeta,
     ) -> Result<Self, TableError> {
+        if table_meta.format_version() != TABLE_FORMAT_VERSION {
+            return UnsupportedFormatVersionSnafu {
+                expected: TABLE_FORMAT_VERSION,
+                found: table_meta.format_version(),
+            }
+            .fail();
+        }
+
         // 1) Extract the time index spec from the provided metadata
         // and ensure this is actually a time-series table.
         let index = match &table_meta.kind {
@@ -284,6 +274,31 @@ mod tests {
         let current_path = root.join(layout::current_rel_path());
         let current_contents = tokio::fs::read_to_string(&current_path).await?;
         assert_eq!(current_contents.trim(), "1");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_rejects_unsupported_format_without_writing_log() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+            let mut meta = make_basic_table_meta();
+            meta.format_version = found;
+
+            let err = TimeSeriesTable::create(location.clone(), meta)
+                .await
+                .expect_err("unsupported format version should be rejected");
+            assert!(matches!(
+                err,
+                TableError::UnsupportedFormatVersion {
+                    expected: TABLE_FORMAT_VERSION,
+                    found: actual,
+                } if actual == found
+            ));
+            assert!(!tmp.path().join(layout::log_rel_dir()).exists());
+        }
 
         Ok(())
     }

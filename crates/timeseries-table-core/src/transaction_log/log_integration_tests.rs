@@ -6,17 +6,17 @@
 //! - Robust handling of missing/malformed metadata.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use chrono::{DateTime, TimeZone, Utc};
-use tempfile::TempDir;
-use timeseries_table_core::metadata::logical_schema::{
+use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use timeseries_table_core::metadata::segments::{FileFormat, SegmentId, SegmentMeta};
-use timeseries_table_core::metadata::table_metadata::{
+use crate::metadata::segments::{FileFormat, SegmentMeta};
+use crate::metadata::table_metadata::{
     TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
 };
-use timeseries_table_core::storage::{StorageError, TableLocation, layout};
-use timeseries_table_core::transaction_log::{CommitError, LogAction, TransactionLogStore};
+use crate::storage::{StorageError, TableLocation, layout};
+use crate::transaction_log::{CommitError, LogAction, TransactionLogStore};
+use chrono::{DateTime, TimeZone, Utc};
+use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -68,7 +68,6 @@ fn sample_table_meta() -> TableMeta {
 
 fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
     SegmentMeta {
-        segment_id: SegmentId(id.to_string()),
         path: format!("data/{id}.parquet"),
         format: FileFormat::Parquet,
         ts_min: utc_datetime(2025, 1, 1, ts_hour, 0, 0),
@@ -153,8 +152,8 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
 
     assert_eq!(state.version, 2);
     assert_eq!(state.segments.len(), 2);
-    assert!(state.segments.contains_key(&seg1.segment_id));
-    assert!(state.segments.contains_key(&seg2.segment_id));
+    assert!(state.segments.contains_key(&seg1.path));
+    assert!(state.segments.contains_key(&seg2.path));
 
     // Verify table_meta.kind is TableKind::TimeSeries
     match state.table_meta.kind() {
@@ -234,7 +233,7 @@ async fn remove_segment_removes_from_state() -> TestResult {
         .commit_with_expected_version(
             v1,
             vec![LogAction::RemoveSegment {
-                segment_id: seg2.segment_id.clone(),
+                path: seg2.path.clone(),
             }],
         )
         .await?;
@@ -242,8 +241,8 @@ async fn remove_segment_removes_from_state() -> TestResult {
     let state = store.rebuild_table_state().await?;
     assert_eq!(state.version, v2);
     assert_eq!(state.segments.len(), 1);
-    assert!(state.segments.contains_key(&seg1.segment_id));
-    assert!(!state.segments.contains_key(&seg2.segment_id));
+    assert!(state.segments.contains_key(&seg1.path));
+    assert!(!state.segments.contains_key(&seg2.path));
 
     Ok(())
 }
@@ -589,60 +588,36 @@ async fn update_table_meta_last_one_wins() -> TestResult {
     Ok(())
 }
 
-/// Test: AddSegment with same ID replaces previous segment metadata.
+/// Test: replay rejects a second live segment with the same path.
 #[tokio::test]
-async fn add_segment_with_same_id_replaces() -> TestResult {
+async fn duplicate_live_segment_path_is_corrupt_state() -> TestResult {
     let (_tmp, store) = create_test_log_store();
-
     let meta = sample_table_meta();
+    let seg = sample_segment("seg-001", 0);
+    let mut duplicate = sample_segment("seg-002", 1);
+    duplicate.path = seg.path.clone();
 
-    let seg_v1 = SegmentMeta {
-        segment_id: SegmentId("seg-001".to_string()),
-        path: "data/seg-001-v1.parquet".to_string(),
-        format: FileFormat::Parquet,
-        ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
-        ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
-        row_count: 100,
-        file_size: None,
-        coverage_path: None,
-    };
-
-    let seg_v2 = SegmentMeta {
-        segment_id: SegmentId("seg-001".to_string()), // Same ID
-        path: "data/seg-001-v2.parquet".to_string(),  // Different path
-        format: FileFormat::Parquet,
-        ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
-        ts_max: utc_datetime(2025, 1, 1, 2, 0, 0), // Different ts_max
-        row_count: 200,                            // Different row_count
-        file_size: None,
-        coverage_path: None,
-    };
-
-    // Commit 1: Add seg_v1
     store
         .commit_with_expected_version(
             0,
             vec![
                 LogAction::UpdateTableMeta(meta),
-                LogAction::AddSegment(seg_v1),
+                LogAction::AddSegment(seg.clone()),
             ],
         )
         .await?;
-
-    // Commit 2: Add seg_v2 (same ID, should replace)
     store
-        .commit_with_expected_version(1, vec![LogAction::AddSegment(seg_v2.clone())])
+        .commit_with_expected_version(1, vec![LogAction::AddSegment(duplicate)])
         .await?;
 
-    let state = store.rebuild_table_state().await?;
-
-    assert_eq!(state.segments.len(), 1);
-    let seg = state
-        .segments
-        .get(&SegmentId("seg-001".to_string()))
-        .expect("segment should be present after replacement");
-    assert_eq!(seg.path, "data/seg-001-v2.parquet");
-    assert_eq!(seg.row_count, 200);
+    let err = store
+        .rebuild_table_state()
+        .await
+        .expect_err("duplicate live path must be corrupt");
+    assert!(matches!(
+        err,
+        CommitError::CorruptState { ref msg, .. } if msg.contains(&seg.path)
+    ));
 
     Ok(())
 }
@@ -671,7 +646,7 @@ async fn remove_nonexistent_segment_is_noop() -> TestResult {
         .commit_with_expected_version(
             1,
             vec![LogAction::RemoveSegment {
-                segment_id: SegmentId("seg-does-not-exist".to_string()),
+                path: "data/does-not-exist.parquet".to_string(),
             }],
         )
         .await?;
@@ -679,7 +654,7 @@ async fn remove_nonexistent_segment_is_noop() -> TestResult {
     // Should succeed, original segment still there
     let state = store.rebuild_table_state().await?;
     assert_eq!(state.segments.len(), 1);
-    assert!(state.segments.contains_key(&seg.segment_id));
+    assert!(state.segments.contains_key(&seg.path));
 
     Ok(())
 }
@@ -827,7 +802,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
 
     let rebuilt_seg = state
         .segments
-        .get(&seg.segment_id)
+        .get(&seg.path)
         .expect("segment present after rebuild");
     assert_eq!(
         rebuilt_seg.coverage_path.as_deref(),

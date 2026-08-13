@@ -34,14 +34,14 @@ impl TimeSeriesTable {
         for seg in self.state().segments.values() {
             let path = seg.coverage_path.as_ref().ok_or_else(|| {
                 TableError::ExistingSegmentMissingCoverage {
-                    segment_id: seg.segment_id.clone(),
+                    path: seg.path.clone(),
                 }
             })?;
 
             let cov = read_coverage_sidecar(self.location(), Path::new(path))
                 .await
                 .map_err(|source| TableError::SegmentCoverageSidecarRead {
-                    segment_id: seg.segment_id.clone(),
+                    path: seg.path.clone(),
                     coverage_path: path.clone(),
                     source: Box::new(source),
                 })?;
@@ -546,19 +546,14 @@ mod tests {
     async fn coverage_ratio_errors_when_recovery_missing_segment_coverage_path() -> TestResult {
         let (_tmp, mut table) = table_with_sparse_coverage().await?;
         table.state_mut().table_coverage = None;
-        let seg_id = table
-            .state()
-            .segments
-            .keys()
-            .next()
-            .cloned()
-            .expect("segment present");
-        table
+        let segment = table
             .state_mut()
             .segments
-            .get_mut(&seg_id)
-            .expect("segment present")
-            .coverage_path = None;
+            .values_mut()
+            .next()
+            .expect("segment present");
+        let segment_path = segment.path.clone();
+        segment.coverage_path = None;
 
         let err = table
             .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
@@ -566,7 +561,7 @@ mod tests {
             .expect_err("missing segment coverage_path should bubble up");
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { segment_id } if segment_id == seg_id
+            TableError::ExistingSegmentMissingCoverage { path } if path == segment_path
         ));
         Ok(())
     }
@@ -675,19 +670,14 @@ mod tests {
     async fn last_window_errors_when_recovery_fails() -> TestResult {
         let (_tmp, mut table) = table_with_contiguous_run().await?;
         table.state_mut().table_coverage = None;
-        let seg_id = table
-            .state()
-            .segments
-            .keys()
-            .next()
-            .cloned()
-            .expect("segment present");
-        table
+        let segment = table
             .state_mut()
             .segments
-            .get_mut(&seg_id)
-            .expect("segment present")
-            .coverage_path = None;
+            .values_mut()
+            .next()
+            .expect("segment present");
+        let segment_path = segment.path.clone();
+        segment.coverage_path = None;
 
         let err = table
             .last_fully_covered_window(ts_from_secs(360), 1)
@@ -695,7 +685,7 @@ mod tests {
             .expect_err("missing coverage_path should bubble up");
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { segment_id } if segment_id == seg_id
+            TableError::ExistingSegmentMissingCoverage { path } if path == segment_path
         ));
         Ok(())
     }

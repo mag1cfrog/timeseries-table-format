@@ -16,7 +16,7 @@ use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 /// Current table metadata / log format version.
 ///
 /// Bumped only when we make a breaking change to the on-disk JSON format.
-pub const TABLE_FORMAT_VERSION: u32 = 1;
+pub const TABLE_FORMAT_VERSION: u32 = 2;
 
 /// The high-level "kind" of table.
 ///
@@ -53,7 +53,7 @@ pub struct TableMeta {
 
     /// Format version for future evolution of the log/table format.
     ///
-    /// v0.1 can hard-code this to 1.
+    /// Writers set this to [`TABLE_FORMAT_VERSION`].
     pub(crate) format_version: u32,
 
     /// v0.1: If TimeIndexSpec.entity_columns is non-empty, we pin a single entity identity
