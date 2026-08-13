@@ -398,6 +398,8 @@ mod tests {
             r"data\seg.parquet",
             "data//seg.parquet",
             r"C:\data\seg.parquet",
+            "data/C:/seg.parquet",
+            "data/C:seg.parquet",
         ] {
             let mut segment = sample_segment("seg");
             segment.path = path.to_owned();

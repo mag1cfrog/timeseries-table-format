@@ -220,14 +220,12 @@ pub(crate) fn normalize_relative_segment_path(
                 "path contains a current- or parent-directory component",
             ));
         }
-        if components.is_empty() {
-            let bytes = component.as_bytes();
-            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-                return Err(invalid_segment_path(
-                    segment_path,
-                    "path contains a platform prefix",
-                ));
-            }
+        let bytes = component.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return Err(invalid_segment_path(
+                segment_path,
+                "path contains a platform prefix",
+            ));
         }
         components.push(component);
     }
@@ -351,6 +349,8 @@ mod tests {
             "",
             "/data/seg.parquet",
             r"C:\data\seg.parquet",
+            "data/C:/seg.parquet",
+            "data/C:seg.parquet",
             "data/./seg.parquet",
             "data/../seg.parquet",
         ] {
