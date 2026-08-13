@@ -33,9 +33,10 @@ To run the Python test suite against the local editable Rust extension, build th
 the repo virtualenv first, then run `pytest` with the same interpreter.
 
 ```bash
-cd python
-uv run -p .venv/bin/python maturin develop --features test-utils
-uv run --no-sync -C build-args="--features test-utils" pytest -q
+cd crates/timeseries-table-python
+uv sync --group dev
+uv run maturin develop --features test-utils
+uv run pytest -q
 ```
 
 ## Return type and interop
@@ -68,24 +69,7 @@ align = "auto"
 
 ## Maintainers: releasing the Python package
 
-The PyPI package version is derived from `crates/timeseries-table-python/Cargo.toml` (via maturin).
-If you change the pure-Python sources under `python/src/` (or `python/pyproject.toml` / `python/README.md`),
-CI will automatically update `crates/timeseries-table-python/python-src.stamp` on PRs from branches in
-this repository.
-
-If you need to update it locally (e.g. working on a fork, or before pushing), run:
-
-```bash
-python3 scripts/update_python_wheel_stamp.py
-```
-
-If your development environment uses the repo venv, you can also run:
-
-```bash
-python/.venv/bin/python scripts/update_python_wheel_stamp.py
-```
-
-CI enforces the stamp, and it helps the release automation notice python-only changes for version bumps.
+The PyPI package version is derived from the local `Cargo.toml` via maturin.
 
 ## Quickstart: create → append → query
 
@@ -139,7 +123,7 @@ with tempfile.TemporaryDirectory() as d:
 ## Join multiple tables
 
 ```python
-# Aligned with python/examples/register_and_join_two_tables.py
+# Aligned with examples/register_and_join_two_tables.py
 import tempfile
 from pathlib import Path
 
@@ -215,7 +199,7 @@ DataFusion infers placeholder types from context when possible (e.g. in `WHERE` 
 If you use placeholders in a `SELECT` projection without type context, you may need an explicit cast.
 
 ```python
-# Aligned with python/examples/parameterized_queries.py
+# Aligned with examples/parameterized_queries.py
 import timeseries_table_format as ttf
 
 sess = ttf.Session()
@@ -243,32 +227,16 @@ Prereqs:
 From the repo root:
 
 ```bash
-uv venv -p 3.12 python/.venv
-uv pip install -p python/.venv/bin/python -e python --group dev
-python/.venv/bin/python -m pytest
+cd crates/timeseries-table-python
+uv sync --group dev
+uv run maturin develop --features test-utils
+uv run pytest -q
 ```
 
 Type checking (ty):
 
 ```bash
-uvx ty check --project python
-```
-
-Alternative (uses the `python/` dev environment):
-
-```bash
-cd python
-uv run ty check
-```
-
-Alternative: build with `maturin` directly:
-
-```bash
-cd python
-uv venv -p 3.12 .venv
-uv pip install -p .venv/bin/python pyarrow --group dev
-uv run -p .venv/bin/python maturin develop
-.venv/bin/python -m pytest
+uv run ty check python tests
 ```
 
 ## Benchmark: SQL conversion and streaming SQL
@@ -280,7 +248,7 @@ fall back to an in-memory Arrow IPC stream otherwise. To compare the two paths a
 conversion overhead, run:
 
 ```bash
-cd python
+cd crates/timeseries-table-python
 uv pip install -p .venv/bin/python numpy
 uv run -p .venv/bin/python maturin develop --features test-utils
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2
@@ -289,7 +257,7 @@ uv run -p .venv/bin/python maturin develop --features test-utils
 To also benchmark the streaming SQL API (`Session.sql_reader(...)`), include the streaming mode:
 
 ```bash
-cd python
+cd crates/timeseries-table-python
 uv pip install -p .venv/bin/python numpy
 uv run -p .venv/bin/python maturin develop --features test-utils
 .venv/bin/python bench/sql_conversion.py --target-ipc-gb 2 --include-streaming --summary

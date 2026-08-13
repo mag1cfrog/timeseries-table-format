@@ -25,7 +25,7 @@
 The full example below is the exact code used in docs (kept in sync with the repo):
 
 ```python
---8<-- "python/examples/quickstart_create_append_query.py"
+--8<-- "crates/timeseries-table-python/examples/quickstart_create_append_query.py"
 ```
 
 ## What happens in the example?

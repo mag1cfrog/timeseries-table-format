@@ -33,8 +33,6 @@ All notable changes to timeseries-table-python will be documented in this file.
 
 - Enhance header transparency in HTML rendering for better visibility ([d1c37ba](https://github.com/mag1cfrog/timeseries-table-format/commit/d1c37baed6bd839418d5459f3ae3fc40cfbc3aec))
 
-- Update package version to 0.1.2 for timeseries-table-python-src ([8d4d028](https://github.com/mag1cfrog/timeseries-table-format/commit/8d4d0283410a7458bfb2c107583fc51a5ccd0513))
-
 - Correct formatting and improve readability in benchmark helper function ([9ba3331](https://github.com/mag1cfrog/timeseries-table-format/commit/9ba33318c8b68d1120213fa73b7c7143831b631f))
 
 

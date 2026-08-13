@@ -10,7 +10,7 @@
 #   direnv allow
 
 if [[ -z "${PYO3_PYTHON:-}" ]]; then
-  export PYO3_PYTHON="$PWD/python/.venv/bin/python"
+  export PYO3_PYTHON="$PWD/crates/timeseries-table-python/.venv/bin/python"
 fi
 
 if [[ -x "$PYO3_PYTHON" ]]; then

@@ -86,8 +86,8 @@ print(type(out))  # pyarrow.Table
 Convert to Polars: `import polars as pl; pl.from_arrow(out)`
 
 More examples:
-- `python/examples/quickstart_create_append_query.py`
-- `python/examples/register_and_join_two_tables.py`
+- `crates/timeseries-table-python/examples/quickstart_create_append_query.py`
+- `crates/timeseries-table-python/examples/register_and_join_two_tables.py`
 
 <details>
 <summary><strong>End-to-end example (create → append → register 2 tables → join)</strong></summary>
