@@ -190,7 +190,9 @@ jobs:
               trap - EXIT
               exit "${status}"
             }
-            trap verify_sccache_writes EXIT
+            if [[ "${SCCACHE_GHA_RW_MODE}" == "READ_WRITE" ]]; then
+              trap verify_sccache_writes EXIT
+            fi
           args: >-
             --release -o dist
             --compatibility pypi
