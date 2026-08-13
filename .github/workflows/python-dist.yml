@@ -48,11 +48,6 @@ on:
         required: false
         type: string
         default: "dist"
-      maturin-args:
-        description: Args passed to maturin build.
-        required: false
-        type: string
-        default: "--release -o dist"
       sdist-args:
         description: Args passed to maturin sdist.
         required: false
@@ -79,9 +74,6 @@ jobs:
     env:
       # Speed up release builds (especially on Windows) by disabling debuginfo.
       CARGO_PROFILE_RELEASE_DEBUG: "0"
-      # PR validation uses non-release wheels; on Windows, PDB/debug info tends to reduce sccache
-      # reuse across runs. Disabling debuginfo improves cache hit rates and build times.
-      CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: ${{ inputs.write-cache && 'READ_WRITE' || 'READ_ONLY' }}
@@ -103,7 +95,6 @@ jobs:
           # release builds. On Windows this can materially reduce sccache reuse due to PDB/debug
           # outputs varying across runs.
           printf 'CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0\n' >> "$GITHUB_ENV"
-          printf 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=0\n' >> "$GITHUB_ENV"
           # Make paths stable across runners for sccache keys.
           printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${GITHUB_WORKSPACE}=." >> "$GITHUB_ENV"
 
@@ -175,11 +166,12 @@ jobs:
         with:
           working-directory: python
           command: build
+          maturin-version: v1.13.3
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
           manylinux: ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'off' }}
           sccache: ${{ startsWith(matrix.os, 'ubuntu') }}
           args: >-
-            ${{ inputs.maturin-args }}
+            --release -o dist
             --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
             -i ${{ startsWith(matrix.os, 'ubuntu') && format('python{0}', matrix.python-version) || 'python' }}
@@ -207,11 +199,12 @@ jobs:
         with:
           working-directory: python
           command: build
+          maturin-version: v1.13.3
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
           manylinux: "off"
           sccache: false
           args: >-
-            ${{ inputs.maturin-args }}
+            --release -o dist
             --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
             -i python
@@ -280,6 +273,7 @@ jobs:
         with:
           working-directory: python
           command: sdist
+          maturin-version: v1.13.3
           args: ${{ inputs.sdist-args }}
 
       - name: Upload dist artifacts

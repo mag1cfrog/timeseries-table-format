@@ -60,4 +60,3 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
-          skip-existing: true
