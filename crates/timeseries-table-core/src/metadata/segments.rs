@@ -1,4 +1,4 @@
-//! Segment identifiers, formats, and per-file metadata recorded in table metadata.
+//! Segment formats and per-file metadata recorded in table metadata.
 //!
 //! This module contains **pure** data types + non-IO validation/decoding errors.
 //! Any functions that touch storage backends (filesystem, object store, etc.)

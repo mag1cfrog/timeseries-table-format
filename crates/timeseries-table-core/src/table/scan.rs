@@ -326,9 +326,7 @@ impl TimeSeriesTable {
         // 1) Pick candidate segments.
         let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
 
-        // 2) Sort by ts_min to ensure segments are processed in chronological order.
-        //    In v0.1 we assume non-overlapping segments, so sorting guarantees scan order.
-        //    Unstable is fine here; we only care about ordering by ts_min.
+        // 2) Sort deterministically by ts_min, ts_max, and path.
         candidates.sort_unstable_by(cmp_segment_meta_by_time);
 
         let location = self.location().clone();
@@ -869,7 +867,7 @@ mod tests {
             }],
         )?;
 
-        // append in reverse ts_min order to ensure sort_by_key is exercised
+        // Append in reverse ts_min order to exercise the segment comparator.
         table.append_parquet_segment(rel_b, "ts").await?;
         table.append_parquet_segment(rel_a, "ts").await?;
 

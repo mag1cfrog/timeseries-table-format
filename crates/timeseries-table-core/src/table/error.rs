@@ -173,7 +173,7 @@ pub enum TableError {
         source: CoverageError,
     },
 
-    /// Appending would overlap existing coverage for the same segment path.
+    /// Appending would overlap existing table coverage.
     #[snafu(display(
         "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example={example_bucket:?})"
     ))]
