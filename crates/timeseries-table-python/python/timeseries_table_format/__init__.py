@@ -5,20 +5,19 @@ from timeseries_table_format.notebook_display import (
     load_notebook_display_config,
 )
 from . import _native as _native
+from ._native import (
+    __version__,
+    ConflictError,
+    CoverageOverlapError,
+    DataFusionError,
+    SchemaMismatchError,
+    Session,
+    StorageError,
+    TimeSeriesTable,
+    TimeseriesTableError,
+)
 
 __doc__ = _native.__doc__
-
-__version__ = _native.__version__
-
-TimeseriesTableError = _native.TimeseriesTableError
-StorageError = _native.StorageError
-ConflictError = _native.ConflictError
-CoverageOverlapError = _native.CoverageOverlapError
-SchemaMismatchError = _native.SchemaMismatchError
-DataFusionError = _native.DataFusionError
-
-Session = _native.Session
-TimeSeriesTable = _native.TimeSeriesTable
 
 _auto_enable_notebook_display()
 del _auto_enable_notebook_display

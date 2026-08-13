@@ -31,6 +31,7 @@ jobs:
   build:
     uses: ./.github/workflows/python-dist.yml
     permissions:
+      actions: read
       contents: read
     with:
       include-sdist: true
@@ -60,3 +61,73 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
+
+  verify:
+    name: verify TestPyPI (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: [build, publish]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the published wheel
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m pip install "pyarrow>=23.0.0"
+          for attempt in {1..10}; do
+            if python -m pip install \
+              --no-cache-dir \
+              --no-deps \
+              --only-binary=:all: \
+              --index-url https://test.pypi.org/simple/ \
+              "timeseries-table-format==${VERSION}"
+            then
+              break
+            fi
+            if [[ ${attempt} -eq 10 ]]; then
+              echo "TestPyPI did not serve version ${VERSION}" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Smoke test the published wheel
+        shell: bash
+        env:
+          EXPECTED_PYTHON: ${{ matrix.python-version }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.metadata
+          import os
+          import sys
+
+          import pyarrow
+          import timeseries_table_format as ttf
+
+          expected_python = tuple(map(int, os.environ["EXPECTED_PYTHON"].split(".")))
+          if sys.version_info[:2] != expected_python:
+              raise SystemExit(f"expected Python {expected_python}, found {sys.version}")
+          installed = importlib.metadata.version("timeseries-table-format")
+          if installed != os.environ["EXPECTED_VERSION"]:
+              raise SystemExit(f"expected version {os.environ['EXPECTED_VERSION']}, found {installed}")
+          if ttf.__version__.replace("-dev.", ".dev") != installed:
+              raise SystemExit(f"package version {ttf.__version__} != metadata {installed}")
+          if not ttf._native.__file__.endswith(".abi3.so"):
+              raise SystemExit(f"unexpected native extension: {ttf._native.__file__}")
+          result = ttf.Session().sql("select 1 as value")
+          if not isinstance(result, pyarrow.Table) or result.to_pydict() != {"value": [1]}:
+              raise SystemExit(f"unexpected SQL result: {result}")
+          PY

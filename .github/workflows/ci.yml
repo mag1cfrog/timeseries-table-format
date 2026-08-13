@@ -233,51 +233,23 @@ jobs:
           .venv/bin/python -m maturin develop --locked --features test-utils
           .venv/bin/python -m pytest -q
 
-      - name: wheel smoke (linux, py3.12)
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf dist
-          # Build a non-release wheel here to avoid recompiling in a separate profile.
-          # The full release wheel matrix is validated by the publish workflows.
-          .venv/bin/python -m maturin build --locked -o dist -i .venv/bin/python
-          venv_dir="$(mktemp -d)"
-          uv venv -p 3.12 "${venv_dir}"
-          uv pip install -p "${venv_dir}/bin/python" dist/*.whl "pytest==9.0.2"
-          "${venv_dir}/bin/python" -m pytest -q -c pyproject.toml tests
-
-  python-wheel-matrix:
+  python-distribution:
     needs: [detect-python-changes]
     if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' }}
     permissions:
+      actions: read
       contents: read
     uses: ./.github/workflows/python-dist.yml
     with:
-      os-json: '["ubuntu-latest"]'
-      python-versions-json: '["3.12"]'
-      include-sdist: false
+      include-sdist: true
       run-pytest: true
       upload-artifacts: false
-      artifact-prefix: ci-wheel
-
-  python-wheel-platforms:
-    needs: [detect-python-changes]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/python-dist.yml
-    with:
-      os-json: '["windows-latest","macos-latest"]'
-      python-versions-json: '["3.12"]'
-      include-sdist: false
-      run-pytest: true
-      upload-artifacts: false
-      artifact-prefix: ci-wheel-platform
+      artifact-prefix: ci-dist
 
   ci-summary:
     # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
-    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-quality-gate, python-wheel-matrix, python-wheel-platforms]
+    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-quality-gate, python-distribution]
     if: ${{ always() }}
     steps:
       - name: Summarize outcome
@@ -301,10 +273,8 @@ jobs:
           if [ "${{ needs['detect-python-changes'].outputs.code }}" = "true" ] && [ "${{ needs['detect-python-changes'].outputs.skip }}" != "true" ]; then
             echo "Python/binding changed; python gate result: ${{ needs['python-quality-gate'].result }}"
             [ "${{ needs['python-quality-gate'].result }}" = "success" ] || exit 1
-            echo "Python/binding changed; wheel matrix result: ${{ needs['python-wheel-matrix'].result }}"
-            [ "${{ needs['python-wheel-matrix'].result }}" = "success" ] || exit 1
-            echo "Python/binding changed; platform wheel result: ${{ needs['python-wheel-platforms'].result }}"
-            [ "${{ needs['python-wheel-platforms'].result }}" = "success" ] || exit 1
+            echo "Python/binding changed; distribution result: ${{ needs['python-distribution'].result }}"
+            [ "${{ needs['python-distribution'].result }}" = "success" ] || exit 1
           else
             echo "No Python/binding changes; skipping python checks."
           fi

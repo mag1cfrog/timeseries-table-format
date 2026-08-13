@@ -3,26 +3,11 @@ name: Python dist (reusable)
 on:
   workflow_call:
     inputs:
-      os-json:
-        description: JSON array of runner labels.
-        required: false
-        type: string
-        default: '["ubuntu-latest","macos-latest","macos-15-intel","windows-latest"]'
-      python-versions-json:
-        description: JSON array of Python versions.
-        required: false
-        type: string
-        default: '["3.10","3.11","3.12","3.13","3.14"]'
       include-sdist:
-        description: Build sdist (once, on ubuntu + sdist-python-version).
+        description: Build sdist once on ubuntu.
         required: false
         type: boolean
         default: false
-      sdist-python-version:
-        description: Which Python version should build sdist on ubuntu.
-        required: false
-        type: string
-        default: "3.12"
       run-pytest:
         description: Install built wheel and run pytest.
         required: false
@@ -39,7 +24,7 @@ on:
         type: boolean
         default: false
       max-parallel:
-        description: Maximum number of matrix jobs to run concurrently.
+        description: Maximum number of platform build jobs to run concurrently.
         required: false
         type: number
         default: 15
@@ -48,22 +33,21 @@ on:
         required: false
         type: string
         default: "dist"
-      sdist-args:
-        description: Args passed to maturin sdist.
-        required: false
-        type: string
-        default: "-o dist"
       dev-prerelease:
         description: Rewrite Cargo package version to a prerelease snapshot (for TestPyPI).
         required: false
         type: boolean
         default: false
+    outputs:
+      version:
+        description: Validated Python distribution version when artifacts are uploaded.
+        value: ${{ jobs['validate-artifacts'].outputs.version }}
 
 permissions: {}
 
 jobs:
   build:
-    name: build (${{ matrix.os }}, py${{ matrix.python-version }})
+    name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -71,8 +55,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ inputs.max-parallel }}
       matrix:
-        os: ${{ fromJSON(inputs.os-json) }}
-        python-version: ${{ fromJSON(inputs.python-versions-json) }}
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
     env:
       # Speed up release builds (especially on Windows) by disabling debuginfo.
       CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -90,7 +73,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.10"
 
       - name: Improve Rust cache determinism (Windows)
         if: ${{ startsWith(matrix.os, 'windows') }}
@@ -119,7 +102,7 @@ jobs:
         with:
           shared-key: python-dist
           cache-targets: false
-          save-if: ${{ inputs.write-cache && matrix.python-version == inputs.sdist-python-version }}
+          save-if: ${{ inputs.write-cache }}
 
       - name: Set up sccache
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
@@ -167,6 +150,8 @@ jobs:
           PY
 
       - name: Build wheel (maturin)
+        id: wheel-build
+        continue-on-error: ${{ inputs.write-cache && startsWith(matrix.os, 'ubuntu') }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: crates/timeseries-table-python
@@ -197,7 +182,7 @@ jobs:
             --release -o dist
             --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
-            -i ${{ startsWith(matrix.os, 'ubuntu') && format('python{0}', matrix.python-version) || 'python' }}
+            -i ${{ startsWith(matrix.os, 'ubuntu') && 'python3.10' || 'python' }}
 
       - name: Check sccache writes
         id: sccache-writes
@@ -209,28 +194,46 @@ jobs:
           python -c 'import json, os, sys; count = json.load(sys.stdin)["stats"]["cache_write_errors"]; errors = [line for line in open(os.environ["SCCACHE_ERROR_LOG"], errors="replace") if "Error executing cache write:" in line][-count:] if count else []; fatal = count and (len(errors) != count or any("AlreadyExists" not in line for line in errors)); sys.exit(f"sccache reported {count} cache write errors") if fatal else print(f"Ignoring {count} cache entries that already exist") if count else None'
 
       - name: Prepare cache write retry
-        if: steps.sccache-writes.outcome == 'failure'
+        if: ${{ steps.wheel-build.outcome == 'failure' || steps.sccache-writes.outcome == 'failure' }}
         shell: bash
         run: |
-          sccache --zero-stats
+          if [[ "${{ startsWith(matrix.os, 'ubuntu') }}" != "true" ]]; then
+            sccache --zero-stats
+          fi
           cargo clean
           rm -rf crates/timeseries-table-python/dist
 
       - name: Retry wheel build
-        if: steps.sccache-writes.outcome == 'failure'
+        if: ${{ steps.wheel-build.outcome == 'failure' || steps.sccache-writes.outcome == 'failure' }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: crates/timeseries-table-python
           command: build
           maturin-version: v1.13.3
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
-          manylinux: "off"
-          sccache: false
+          container: ${{ startsWith(matrix.os, 'ubuntu') && 'quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4' || '' }}
+          manylinux: ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'off' }}
+          sccache: ${{ startsWith(matrix.os, 'ubuntu') }}
+          before-script-linux: |
+            printf 'sccache==0.16.0\n' > /tmp/sccache-constraints.txt
+            export UV_CONSTRAINT=/tmp/sccache-constraints.txt
+            export SCCACHE_ERROR_LOG=/tmp/sccache.log
+            verify_sccache_writes() {
+              status=$?
+              if ! sccache --show-stats --stats-format json |
+                python3 -c 'import json, os, sys; count = json.load(sys.stdin)["stats"]["cache_write_errors"]; errors = [line for line in open(os.environ["SCCACHE_ERROR_LOG"], errors="replace") if "Error executing cache write:" in line][-count:] if count else []; fatal = count and (len(errors) != count or any("AlreadyExists" not in line for line in errors)); sys.exit(f"sccache reported {count} cache write errors") if fatal else print(f"Ignoring {count} cache entries that already exist") if count else None'
+              then
+                status=1
+              fi
+              trap - EXIT
+              exit "${status}"
+            }
+            trap verify_sccache_writes EXIT
           args: >-
             --release -o dist
             --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
-            -i python
+            -i ${{ startsWith(matrix.os, 'ubuntu') && 'python3.10' || 'python' }}
 
       - name: Verify retried sccache writes
         if: steps.sccache-writes.outcome == 'failure'
@@ -253,6 +256,8 @@ jobs:
           wheels = list(Path("crates/timeseries-table-python/dist").glob("*.whl"))
           if len(wheels) != 1:
               raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          if "-cp310-abi3-" not in wheels[0].name:
+              raise SystemExit(f"expected a cp310-abi3 wheel, found {wheels[0].name}")
 
           cargo_toml = Path("crates/timeseries-table-python/Cargo.toml").read_text()
           match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_toml)
@@ -261,8 +266,11 @@ jobs:
           expected_version = os.environ.get("EXPECTED_PYTHON_VERSION", match.group(1))
 
           required = {
+              "timeseries_table_format/__init__.py",
               "timeseries_table_format/__init__.pyi",
               "timeseries_table_format/_native.pyi",
+              "timeseries_table_format/notebook_display.py",
+              "timeseries_table_format/notebook_display_config.py",
               "timeseries_table_format/py.typed",
           }
           with zipfile.ZipFile(wheels[0]) as wheel:
@@ -281,6 +289,17 @@ jobs:
               ]
               if len(metadata_paths) != 1:
                   raise SystemExit("expected exactly one METADATA file")
+              wheel_paths = [
+                  name for name in names if name.endswith(".dist-info/WHEEL")
+              ]
+              if len(wheel_paths) != 1:
+                  raise SystemExit("expected exactly one WHEEL metadata file")
+              wheel_metadata = email.parser.Parser().parsestr(
+                  wheel.read(wheel_paths[0]).decode()
+              )
+              tags = wheel_metadata.get_all("Tag", [])
+              if not tags or any(not tag.startswith("cp310-abi3-") for tag in tags):
+                  raise SystemExit(f"unexpected wheel tags: {tags}")
               metadata = email.parser.Parser().parsestr(
                   wheel.read(metadata_paths[0]).decode()
               )
@@ -290,17 +309,80 @@ jobs:
                   raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 
+      - name: Prepare host sdist build
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          sudo chown -R "$(id -u):$(id -g)" crates/timeseries-table-python/dist
+
       - name: Build sdist (once)
-        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: crates/timeseries-table-python
           command: sdist
           maturin-version: v1.13.3
-          args: ${{ inputs.sdist-args }}
+          args: -o dist
 
-      - name: Verify sdist contents
-        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
+      - name: Normalize and extract sdist in isolation
+        id: extract-sdist
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+          import tarfile
+          import tempfile
+          from pathlib import Path, PurePosixPath
+
+          sdists = list(Path("crates/timeseries-table-python/dist").glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
+
+          def extract_safely(archive_path, destination):
+              destination.mkdir()
+              with tarfile.open(archive_path, "r:gz") as archive:
+                  members = archive.getmembers()
+                  for member in members:
+                      path = PurePosixPath(member.name)
+                      if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
+                          raise SystemExit(f"unsafe sdist entry: {member.name}")
+                  roots = {PurePosixPath(member.name).parts[0] for member in members}
+                  if len(roots) != 1:
+                      raise SystemExit(f"expected one sdist root, found {len(roots)}")
+                  archive.extractall(destination)
+              return destination / roots.pop()
+
+          work = Path(tempfile.mkdtemp(prefix=".timeseries-table-sdist-", dir=os.environ["GITHUB_WORKSPACE"]))
+          root = extract_safely(sdists[0], work / "source")
+          subprocess.run(
+              [
+                  "cargo",
+                  "metadata",
+                  "--format-version",
+                  "1",
+                  "--manifest-path",
+                  str(root / "Cargo.toml"),
+              ],
+              check=True,
+              stdout=subprocess.DEVNULL,
+          )
+
+          repacked = sdists[0].with_name(f"{sdists[0].name}.tmp")
+          with tarfile.open(repacked, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+              archive.add(root, arcname=root.name)
+          os.replace(repacked, sdists[0])
+
+          clean_root = extract_safely(sdists[0], work / "clean")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"root={clean_root.as_posix()}\n")
+          PY
+
+      - name: Verify normalized sdist contents
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -357,18 +439,242 @@ jobs:
                   raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 
+      - name: Build wheel from clean sdist
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: ${{ steps.extract-sdist.outputs.root }}
+          command: build
+          maturin-version: v1.13.3
+          rust-toolchain: ${{ steps.rust-version.outputs.version }}
+          container: quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4
+          manylinux: "2_28"
+          sccache: true
+          before-script-linux: |
+            printf 'sccache==0.16.0\n' > /tmp/sccache-constraints.txt
+            export UV_CONSTRAINT=/tmp/sccache-constraints.txt
+          args: >-
+            --release -o sdist-wheel
+            --compatibility pypi
+            --locked
+            -i python3.10
+
+      - name: Verify wheel built from sdist
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        env:
+          SDIST_ROOT: ${{ steps.extract-sdist.outputs.root }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import email.parser
+          import os
+          import zipfile
+          from pathlib import Path
+
+          wheels = list((Path(os.environ["SDIST_ROOT"]) / "sdist-wheel").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel from the sdist, found {len(wheels)}")
+          if "-cp310-abi3-" not in wheels[0].name:
+              raise SystemExit(f"expected a cp310-abi3 wheel, found {wheels[0].name}")
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              paths = [name for name in wheel.namelist() if name.endswith(".dist-info/WHEEL")]
+              if len(paths) != 1:
+                  raise SystemExit("expected exactly one WHEEL metadata file")
+              metadata = email.parser.Parser().parsestr(wheel.read(paths[0]).decode())
+              tags = metadata.get_all("Tag", [])
+              if not tags or any(not tag.startswith("cp310-abi3-") for tag in tags):
+                  raise SystemExit(f"unexpected wheel tags: {tags}")
+          PY
+
       - name: Upload dist artifacts
-        if: ${{ inputs.upload-artifacts }}
+        if: ${{ inputs.upload-artifacts || (inputs.run-pytest && matrix.os == 'ubuntu-latest') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}
           path: crates/timeseries-table-python/dist/*
           if-no-files-found: error
 
-      - name: Install wheel + run pytest
+      - name: Install wheel + run platform smoke tests
         if: ${{ inputs.run-pytest }}
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install crates/timeseries-table-python/dist/*.whl "pytest==9.0.2"
+          python -m pip install crates/timeseries-table-python/dist/*.whl
+          python - <<'PY'
+          import importlib.metadata
+          import sys
+
+          import pyarrow
+          import timeseries_table_format as ttf
+
+          if sys.version_info[:2] != (3, 10):
+              raise SystemExit(f"expected Python 3.10, found {sys.version}")
+          installed = importlib.metadata.version("timeseries-table-format")
+          if ttf.__version__.replace("-dev.", ".dev") != installed:
+              raise SystemExit(f"package version {ttf.__version__} != metadata {installed}")
+          if not ttf._native.__file__.endswith((".so", ".pyd")):
+              raise SystemExit(f"unexpected native extension: {ttf._native.__file__}")
+          result = ttf.Session().sql("select 1 as value")
+          if not isinstance(result, pyarrow.Table) or result.to_pydict() != {"value": [1]}:
+              raise SystemExit(f"unexpected SQL result: {result}")
+          PY
+
+  test-linux-wheel:
+    name: test Linux wheel (py${{ matrix.python-version }})
+    if: ${{ inputs.run-pytest }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download the Linux wheel
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v8
+        with:
+          name: ${{ inputs.artifact-prefix }}-ubuntu-latest
+          path: dist
+
+      - name: Install and test the exact wheel
+        shell: bash
+        env:
+          EXPECTED_PYTHON: ${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one Linux wheel, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          python -m pip install "${wheels[0]}" "pytest==9.0.2"
+          python - <<'PY'
+          import importlib.metadata
+          import os
+          import sys
+
+          import pyarrow
+          import timeseries_table_format as ttf
+
+          expected = tuple(map(int, os.environ["EXPECTED_PYTHON"].split(".")))
+          if sys.version_info[:2] != expected:
+              raise SystemExit(f"expected Python {expected}, found {sys.version}")
+          installed = importlib.metadata.version("timeseries-table-format")
+          if ttf.__version__.replace("-dev.", ".dev") != installed:
+              raise SystemExit(f"package version {ttf.__version__} != metadata {installed}")
+          if not ttf._native.__file__.endswith(".abi3.so"):
+              raise SystemExit(f"unexpected native extension: {ttf._native.__file__}")
+          result = ttf.Session().sql("select 1 as value")
+          if not isinstance(result, pyarrow.Table) or result.to_pydict() != {"value": [1]}:
+              raise SystemExit(f"unexpected SQL result: {result}")
+          PY
           python -m pytest -q -c crates/timeseries-table-python/pyproject.toml crates/timeseries-table-python/tests
+
+  validate-artifacts:
+    name: validate release artifact set
+    if: ${{ inputs.upload-artifacts }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: ${{ inputs.artifact-prefix }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Validate complete artifact set
+        id: validate
+        shell: bash
+        env:
+          INCLUDE_SDIST: ${{ inputs.include-sdist }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import email.parser
+          import os
+          import re
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          dist = Path("dist")
+          wheels = sorted(dist.glob("*.whl"))
+          sdists = sorted(dist.glob("*.tar.gz"))
+          if len(wheels) != 4:
+              raise SystemExit(f"expected four wheels, found {len(wheels)}")
+          expected_sdists = 1 if os.environ["INCLUDE_SDIST"] == "true" else 0
+          if len(sdists) != expected_sdists:
+              raise SystemExit(f"expected {expected_sdists} sdist, found {len(sdists)}")
+
+          platforms = set()
+          versions = set()
+          for wheel_path in wheels:
+              name = wheel_path.name
+              if "-cp310-abi3-" not in name:
+                  raise SystemExit(f"expected a cp310-abi3 wheel, found {name}")
+              if re.search(r"-manylinux_.*_x86_64\.whl$", name):
+                  platform = "linux-x86_64"
+              elif re.search(r"-macosx_.*_arm64\.whl$", name):
+                  platform = "macos-arm64"
+              elif re.search(r"-macosx_.*_x86_64\.whl$", name):
+                  platform = "macos-x86_64"
+              elif name.endswith("-win_amd64.whl"):
+                  platform = "windows-x86_64"
+              else:
+                  raise SystemExit(f"unexpected wheel platform: {name}")
+              if platform in platforms:
+                  raise SystemExit(f"duplicate wheel platform: {platform}")
+              platforms.add(platform)
+
+              with zipfile.ZipFile(wheel_path) as wheel:
+                  names = wheel.namelist()
+                  wheel_metadata = [path for path in names if path.endswith(".dist-info/WHEEL")]
+                  package_metadata = [path for path in names if path.endswith(".dist-info/METADATA")]
+                  if len(wheel_metadata) != 1 or len(package_metadata) != 1:
+                      raise SystemExit(f"invalid metadata files in {name}")
+                  tags = email.parser.Parser().parsestr(
+                      wheel.read(wheel_metadata[0]).decode()
+                  ).get_all("Tag", [])
+                  if not tags or any(not tag.startswith("cp310-abi3-") for tag in tags):
+                      raise SystemExit(f"unexpected wheel tags in {name}: {tags}")
+                  metadata = email.parser.Parser().parsestr(
+                      wheel.read(package_metadata[0]).decode()
+                  )
+                  versions.add(metadata["Version"])
+
+          if sdists:
+              with tarfile.open(sdists[0], "r:gz") as sdist:
+                  metadata_paths = [name for name in sdist.getnames() if name.endswith("/PKG-INFO")]
+                  if len(metadata_paths) != 1:
+                      raise SystemExit("expected exactly one sdist PKG-INFO")
+                  metadata_file = sdist.extractfile(metadata_paths[0])
+                  if metadata_file is None:
+                      raise SystemExit("sdist PKG-INFO is not a regular file")
+                  metadata = email.parser.Parser().parsestr(metadata_file.read().decode())
+                  versions.add(metadata["Version"])
+
+          if len(versions) != 1 or None in versions:
+              raise SystemExit(f"artifact versions do not match: {versions}")
+          version = versions.pop()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          print(f"Validated four ABI3 wheels and {len(sdists)} sdist for {version}")
+          PY
