@@ -356,7 +356,7 @@ jobs:
                   archive.extractall(destination)
               return destination / roots.pop()
 
-          work = Path(tempfile.mkdtemp(prefix="timeseries-table-sdist-", dir=os.environ["RUNNER_TEMP"]))
+          work = Path(tempfile.mkdtemp(prefix=".timeseries-table-sdist-", dir=os.environ["GITHUB_WORKSPACE"]))
           root = extract_safely(sdists[0], work / "source")
           subprocess.run(
               [
