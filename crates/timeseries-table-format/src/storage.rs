@@ -1,7 +1,7 @@
 //! Filesystem layout and path utilities.
 //!
 //! This module centralizes all filesystem- and path-related logic for
-//! `timeseries-table-core`. It is responsible for mapping a table root
+//! `timeseries-table-format`. It is responsible for mapping a table root
 //! directory to the locations of:
 //!
 //! - The metadata log directory (for example, `<root>/_timeseries_log/`).

@@ -37,7 +37,7 @@ mod _native {
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
     };
 
-    use timeseries_table_core::datafusion::TsTableProvider;
+    use timeseries_table_format::datafusion::TsTableProvider;
 
     use crate::error_map::datafusion_error_to_py;
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;
@@ -50,12 +50,12 @@ mod _native {
     };
 
     enum AppendParquetError {
-        Table(timeseries_table_core::table::TableError),
+        Table(timeseries_table_format::table::TableError),
         ValueError(String),
     }
 
     enum RegisterTsTableError {
-        Table(timeseries_table_core::table::TableError),
+        Table(timeseries_table_format::table::TableError),
         DataFusion(DFError),
         RestoreFailed { original: DFError, restore: DFError },
         Runtime(&'static str),
@@ -168,7 +168,7 @@ mod _native {
     fn table_error_to_py_with_root(
         py: Python<'_>,
         table_root: &str,
-        err: timeseries_table_core::table::TableError,
+        err: timeseries_table_format::table::TableError,
     ) -> PyErr {
         let base_msg = err.to_string();
         let py_err = crate::error_map::table_error_to_py(py, err);
@@ -562,8 +562,8 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
             name: String,
             table_root: String,
         ) -> PyResult<()> {
-            use timeseries_table_core::storage::TableLocation;
-            use timeseries_table_core::table::{TableError, TimeSeriesTable};
+            use timeseries_table_format::storage::TableLocation;
+            use timeseries_table_format::table::{TableError, TimeSeriesTable};
 
             if name.is_empty() {
                 return Err(PyValueError::new_err("name must be non-empty"));
@@ -1198,7 +1198,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     /// Appends are overlap-checked according to the table's time bucket configuration.
     #[pyclass]
     struct TimeSeriesTable {
-        inner: timeseries_table_core::table::TimeSeriesTable,
+        inner: timeseries_table_format::table::TimeSeriesTable,
         table_root: String,
     }
 
@@ -1242,9 +1242,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ) -> PyResult<Self> {
             use crate::tokio_runner;
 
-            use timeseries_table_core::storage::TableLocation;
-            use timeseries_table_core::table::TableError;
-            use timeseries_table_core::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
+            use timeseries_table_format::storage::TableLocation;
+            use timeseries_table_format::table::TableError;
+            use timeseries_table_format::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
 
             let bucket = TimeBucket::parse(&bucket).map_err(|e| {
                 let msg = format!("invalid bucket spec {bucket:?} (table_root={table_root}): {e}");
@@ -1274,7 +1274,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                         .map_err(|e| TableError::Storage { source: e })?;
 
                     let table =
-                        timeseries_table_core::table::TimeSeriesTable::create(location, meta)
+                        timeseries_table_format::table::TimeSeriesTable::create(location, meta)
                             .await?;
 
                     Ok::<_, TableError>(table)
@@ -1298,7 +1298,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         fn open(_cls: &Bound<'_, PyType>, py: Python<'_>, table_root: String) -> PyResult<Self> {
             use crate::tokio_runner;
 
-            use timeseries_table_core::{storage::TableLocation, table::TableError};
+            use timeseries_table_format::{storage::TableLocation, table::TableError};
 
             let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = table_root.clone();
@@ -1312,7 +1312,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                         .map_err(|e| TableError::Storage { source: e })?;
 
                     let table =
-                        timeseries_table_core::table::TimeSeriesTable::open(location).await?;
+                        timeseries_table_format::table::TimeSeriesTable::open(location).await?;
 
                     Ok::<_, TableError>(table)
                 },
@@ -1339,7 +1339,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///
         /// Keys: `timestamp_column`, `entity_columns`, `bucket`, `timezone`.
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            use timeseries_table_core::transaction_log::TimeBucket;
+            use timeseries_table_format::transaction_log::TimeBucket;
 
             let spec = self.inner.index_spec();
 
@@ -1397,8 +1397,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             use std::path::{Component, Path};
 
-            use timeseries_table_core::storage::StorageLocation;
-            use timeseries_table_core::table::TableError;
+            use timeseries_table_format::storage::StorageLocation;
+            use timeseries_table_format::table::TableError;
 
             let rt = tokio_runner::global_runtime()?;
 
@@ -1515,8 +1515,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             async move {
                 use std::path::Path;
 
-                use timeseries_table_core::table::TimeSeriesTable;
-                use timeseries_table_core::{
+                use timeseries_table_format::table::TimeSeriesTable;
+                use timeseries_table_format::{
                     storage::TableLocation,
                     table::TableError,
                     transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},

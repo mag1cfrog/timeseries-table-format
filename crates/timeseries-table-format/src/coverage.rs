@@ -10,7 +10,7 @@
 //! Typical usage:
 //!
 //! ```
-//! use timeseries_table_core::coverage::{Coverage, RoaringBitmap};
+//! use timeseries_table_format::coverage::{Coverage, RoaringBitmap};
 //!
 //! // "expected" domain: buckets 0..10
 //! let expected: RoaringBitmap = (0u32..10).collect();

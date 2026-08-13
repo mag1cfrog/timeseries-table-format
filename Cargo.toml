@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/timeseries-table-format", "crates/timeseries-table-cli", "crates/timeseries-table-core", "crates/timeseries-table-python"]
+members = ["crates/timeseries-table-format", "crates/timeseries-table-cli", "crates/timeseries-table-python"]
 resolver = "3"
 
 [workspace.package]

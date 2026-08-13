@@ -13,8 +13,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use timeseries_table_core::coverage::Coverage;
-//! use timeseries_table_core::coverage::serde::{coverage_to_bytes, coverage_from_bytes};
+//! use timeseries_table_format::coverage::Coverage;
+//! use timeseries_table_format::coverage::serde::{coverage_to_bytes, coverage_from_bytes};
 //!
 //! let cov = Coverage::from_iter(vec![1u32, 2, 3]);
 //! let bytes = coverage_to_bytes(&cov)?;

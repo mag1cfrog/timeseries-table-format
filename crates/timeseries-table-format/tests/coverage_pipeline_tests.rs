@@ -9,7 +9,7 @@ use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
-use timeseries_table_core::{
+use timeseries_table_format::{
     coverage::Coverage,
     coverage::io::read_coverage_sidecar,
     metadata::logical_schema::{
@@ -200,7 +200,7 @@ async fn union_segment_coverages<'a, I>(
     segments: I,
 ) -> Result<Coverage, Box<dyn std::error::Error>>
 where
-    I: IntoIterator<Item = &'a timeseries_table_core::transaction_log::SegmentMeta>,
+    I: IntoIterator<Item = &'a timeseries_table_format::transaction_log::SegmentMeta>,
 {
     let mut acc = Coverage::empty();
     for seg in segments {

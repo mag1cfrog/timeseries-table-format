@@ -917,4 +917,3 @@ All notable changes to timeseries-table-core will be documented in this file.
 - Format imports for improved readability ([c13c4a0](https://github.com/mag1cfrog/timeseries-table-format/commit/c13c4a0088f1a8f80a00822f3fcbeb3f6c1e6fec))
 
 - Improve formatting and readability in segment entity identity tests ([2a43313](https://github.com/mag1cfrog/timeseries-table-format/commit/2a43313457b50281ee3b19b56511608979782b1b))
-

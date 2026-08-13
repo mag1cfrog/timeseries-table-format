@@ -267,8 +267,8 @@ impl TimeSeriesTable {
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
-    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::table::TableError> {
+    /// # use timeseries_table_format::{storage::TableLocation, table::TimeSeriesTable};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_format::table::TableError> {
     /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
     /// let end = Utc.timestamp_opt(120, 0).single().unwrap();
     /// let ratio = table.coverage_ratio_for_range(start, end).await?;
@@ -295,8 +295,8 @@ impl TimeSeriesTable {
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
-    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::table::TableError> {
+    /// # use timeseries_table_format::{storage::TableLocation, table::TimeSeriesTable};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_format::table::TableError> {
     /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
     /// let end = Utc.timestamp_opt(180, 0).single().unwrap();
     /// let gap = table.max_gap_len_for_range(start, end).await?;
@@ -327,8 +327,8 @@ impl TimeSeriesTable {
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
-    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_core::table::TableError> {
+    /// # use timeseries_table_format::{storage::TableLocation, table::TimeSeriesTable};
+    /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_format::table::TableError> {
     /// let ts_end = Utc.timestamp_opt(360, 0).single().unwrap(); // end of bucket 5
     /// let window = table.last_fully_covered_window(ts_end, 2).await?;
     /// # let _ = window;

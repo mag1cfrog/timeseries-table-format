@@ -2,7 +2,7 @@
 //!
 //! Append-only time-series table format with gap/overlap tracking.
 //!
-//! This crate is the supported public entry point and provides a small, stable surface.
+//! This crate is the canonical library for the table engine and optional integrations.
 //!
 //! ## Features
 //!
@@ -25,29 +25,22 @@
 //! use timeseries_table_format::prelude::*;
 //! ```
 
+pub mod coverage;
+#[cfg(feature = "datafusion")]
+pub mod datafusion;
+pub mod formats;
+pub mod metadata;
 /// Convenience prelude with the stable, supported surface.
 pub mod prelude;
+pub mod storage;
+pub mod table;
+pub mod transaction_log;
 
-/// Coverage namespace (wrapper-only).
-pub mod coverage {
-    pub use timeseries_table_core::coverage::Bucket;
-}
-
-/// DataFusion integration (enabled by default).
-#[cfg(feature = "datafusion")]
-pub mod datafusion {
-    pub use timeseries_table_core::datafusion::*;
-}
-
-pub use timeseries_table_core::metadata::logical_schema::{
-    LogicalDataType, LogicalField, LogicalSchema,
-};
-pub use timeseries_table_core::metadata::table_metadata::{
-    ParseTimeBucketError, TableMeta, TimeBucket, TimeIndexSpec,
-};
-pub use timeseries_table_core::storage::TableLocation;
-pub use timeseries_table_core::table::{TableError, TimeSeriesTable};
+pub use metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
+pub use metadata::table_metadata::{ParseTimeBucketError, TableMeta, TimeBucket, TimeIndexSpec};
+pub use storage::TableLocation;
+pub use table::{TableError, TimeSeriesTable};
 
 /// DataFusion table provider (enabled by default).
 #[cfg(feature = "datafusion")]
-pub use timeseries_table_core::datafusion::TsTableProvider;
+pub use datafusion::TsTableProvider;

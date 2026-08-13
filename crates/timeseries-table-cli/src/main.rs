@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
-use timeseries_table_core::{
+use timeseries_table_format::{
     metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
     table::TimeSeriesTable,

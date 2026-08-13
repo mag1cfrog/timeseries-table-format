@@ -7,7 +7,7 @@ use arrow_csv::ReaderBuilder;
 use arrow_csv::reader::Format;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use timeseries_table_core::{
+use timeseries_table_format::{
     metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
     table::TimeSeriesTable,

@@ -22,17 +22,17 @@ use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
-use timeseries_table_core::datafusion::TsTableProvider;
-use timeseries_table_core::datafusion::test_utils::{
+use timeseries_table_format::datafusion::TsTableProvider;
+use timeseries_table_format::datafusion::test_utils::{
     CompiledIntervalTruth, CompiledTimePred, TestInterval, add_interval_for_tests,
     compile_time_pred_for_tests, eval_time_pred_on_segment_for_tests_utc,
 };
-use timeseries_table_core::metadata::logical_schema::{
+use timeseries_table_format::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use timeseries_table_core::storage::{TableLocation, layout};
-use timeseries_table_core::table::TimeSeriesTable;
-use timeseries_table_core::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
+use timeseries_table_format::storage::{TableLocation, layout};
+use timeseries_table_format::table::TimeSeriesTable;
+use timeseries_table_format::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

@@ -1,4 +1,4 @@
-//! DataFusion integration for `timeseries-table-core`.
+//! DataFusion integration for `timeseries-table-format`.
 //!
 //! This module is enabled by the `datafusion` feature. The main entry point is
 //! [`TsTableProvider`].

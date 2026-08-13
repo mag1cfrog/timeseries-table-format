@@ -10,7 +10,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
-use timeseries_table_core::{
+use timeseries_table_format::{
     metadata::table_metadata::TimeBucket, storage::TableLocation, table::TimeSeriesTable,
 };
 

@@ -1,7 +1,7 @@
 use arrow::error::ArrowError;
 use std::path::PathBuf;
-use timeseries_table_core::metadata::table_metadata::ParseTimeBucketError;
-use timeseries_table_core::table::TableError;
+use timeseries_table_format::metadata::table_metadata::ParseTimeBucketError;
+use timeseries_table_format::table::TableError;
 
 use snafu::Snafu;
 
@@ -37,7 +37,7 @@ pub enum CliError {
 
     #[snafu(display(
         "Failed to open v0.1 table at {table}. \
-         Ensure it is a valid timeseries-table-core table (v0.1 log format)."
+         Ensure it is a valid timeseries-table-format table (v0.1 log format)."
     ))]
     OpenTable {
         table: String,
@@ -63,7 +63,7 @@ pub enum CliError {
 
     #[snafu(display("Storage error: {source}"))]
     Storage {
-        source: timeseries_table_core::storage::StorageError,
+        source: timeseries_table_format::storage::StorageError,
     },
 
     #[snafu(display("DataFusion error: {source}"))]

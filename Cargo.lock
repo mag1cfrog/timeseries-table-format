@@ -3239,13 +3239,13 @@ dependencies = [
  "tabled",
  "tempfile",
  "terminal_size",
- "timeseries-table-core",
+ "timeseries-table-format",
  "tokio",
 ]
 
 [[package]]
-name = "timeseries-table-core"
-version = "0.2.2"
+name = "timeseries-table-format"
+version = "0.1.4"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3271,13 +3271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "timeseries-table-format"
-version = "0.1.4"
-dependencies = [
- "timeseries-table-core",
-]
-
-[[package]]
 name = "timeseries-table-python"
 version = "0.1.4"
 dependencies = [
@@ -3286,7 +3279,7 @@ dependencies = [
  "datafusion",
  "futures-util",
  "pyo3",
- "timeseries-table-core",
+ "timeseries-table-format",
  "tokio",
 ]
 

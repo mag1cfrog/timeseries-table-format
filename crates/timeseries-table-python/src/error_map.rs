@@ -4,7 +4,7 @@ use crate::exceptions::{
     ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
     TimeseriesTableError,
 };
-use timeseries_table_core::{
+use timeseries_table_format::{
     storage::StorageError as CoreStorageError, table::TableError, transaction_log::CommitError,
 };
 
