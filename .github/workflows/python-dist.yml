@@ -150,6 +150,8 @@ jobs:
           PY
 
       - name: Build wheel (maturin)
+        id: wheel-build
+        continue-on-error: ${{ inputs.write-cache && startsWith(matrix.os, 'ubuntu') }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: crates/timeseries-table-python
@@ -192,28 +194,34 @@ jobs:
           python -c 'import json, os, sys; count = json.load(sys.stdin)["stats"]["cache_write_errors"]; errors = [line for line in open(os.environ["SCCACHE_ERROR_LOG"], errors="replace") if "Error executing cache write:" in line][-count:] if count else []; fatal = count and (len(errors) != count or any("AlreadyExists" not in line for line in errors)); sys.exit(f"sccache reported {count} cache write errors") if fatal else print(f"Ignoring {count} cache entries that already exist") if count else None'
 
       - name: Prepare cache write retry
-        if: steps.sccache-writes.outcome == 'failure'
+        if: ${{ steps.wheel-build.outcome == 'failure' || steps.sccache-writes.outcome == 'failure' }}
         shell: bash
         run: |
-          sccache --zero-stats
+          if [[ "${{ startsWith(matrix.os, 'ubuntu') }}" != "true" ]]; then
+            sccache --zero-stats
+          fi
           cargo clean
           rm -rf crates/timeseries-table-python/dist
 
       - name: Retry wheel build
-        if: steps.sccache-writes.outcome == 'failure'
+        if: ${{ steps.wheel-build.outcome == 'failure' || steps.sccache-writes.outcome == 'failure' }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        env:
+          RUSTC_WRAPPER: ""
+          SCCACHE_GHA_ENABLED: "false"
         with:
           working-directory: crates/timeseries-table-python
           command: build
           maturin-version: v1.13.3
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
-          manylinux: "off"
+          container: ${{ startsWith(matrix.os, 'ubuntu') && 'quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4' || '' }}
+          manylinux: ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'off' }}
           sccache: false
           args: >-
             --release -o dist
             --compatibility pypi
             ${{ !inputs.dev-prerelease && '--locked' || '' }}
-            -i python
+            -i ${{ startsWith(matrix.os, 'ubuntu') && 'python3.10' || 'python' }}
 
       - name: Verify retried sccache writes
         if: steps.sccache-writes.outcome == 'failure'
@@ -298,7 +306,63 @@ jobs:
           maturin-version: v1.13.3
           args: -o dist
 
-      - name: Verify sdist contents
+      - name: Normalize and extract sdist in isolation
+        id: extract-sdist
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+          import tarfile
+          import tempfile
+          from pathlib import Path, PurePosixPath
+
+          sdists = list(Path("crates/timeseries-table-python/dist").glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
+
+          def extract_safely(archive_path, destination):
+              destination.mkdir()
+              with tarfile.open(archive_path, "r:gz") as archive:
+                  members = archive.getmembers()
+                  for member in members:
+                      path = PurePosixPath(member.name)
+                      if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
+                          raise SystemExit(f"unsafe sdist entry: {member.name}")
+                  roots = {PurePosixPath(member.name).parts[0] for member in members}
+                  if len(roots) != 1:
+                      raise SystemExit(f"expected one sdist root, found {len(roots)}")
+                  archive.extractall(destination)
+              return destination / roots.pop()
+
+          work = Path(tempfile.mkdtemp(prefix="timeseries-table-sdist-", dir=os.environ["RUNNER_TEMP"]))
+          root = extract_safely(sdists[0], work / "source")
+          subprocess.run(
+              [
+                  "cargo",
+                  "metadata",
+                  "--format-version",
+                  "1",
+                  "--manifest-path",
+                  str(root / "Cargo.toml"),
+              ],
+              check=True,
+              stdout=subprocess.DEVNULL,
+          )
+
+          repacked = sdists[0].with_name(f"{sdists[0].name}.tmp")
+          with tarfile.open(repacked, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+              archive.add(root, arcname=root.name)
+          os.replace(repacked, sdists[0])
+
+          clean_root = extract_safely(sdists[0], work / "clean")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"root={clean_root.as_posix()}\n")
+          PY
+
+      - name: Verify normalized sdist contents
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         shell: bash
         run: |
@@ -356,39 +420,6 @@ jobs:
                   raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 
-      - name: Extract sdist in isolation
-        id: extract-sdist
-        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          import tarfile
-          from pathlib import Path, PurePosixPath
-
-          sdists = list(Path("crates/timeseries-table-python/dist").glob("*.tar.gz"))
-          if len(sdists) != 1:
-              raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
-
-          destination = Path("crates/timeseries-table-python/sdist-check")
-          destination.mkdir()
-          with tarfile.open(sdists[0], "r:gz") as sdist:
-              members = sdist.getmembers()
-              for member in members:
-                  path = PurePosixPath(member.name)
-                  if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
-                      raise SystemExit(f"unsafe sdist entry: {member.name}")
-              roots = {PurePosixPath(member.name).parts[0] for member in members}
-              if len(roots) != 1:
-                  raise SystemExit(f"expected one sdist root, found {len(roots)}")
-              sdist.extractall(destination)
-
-          root = destination / roots.pop()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"root={root.as_posix()}\n")
-          PY
-
       - name: Build wheel from clean sdist
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
@@ -406,6 +437,7 @@ jobs:
           args: >-
             --release -o sdist-wheel
             --compatibility pypi
+            --locked
             -i python3.10
 
       - name: Verify wheel built from sdist
