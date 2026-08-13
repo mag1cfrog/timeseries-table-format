@@ -16,8 +16,10 @@ on:
     tags:
       - "timeseries-table-python-v*"
 
+permissions: {}
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: pypi-publish
   queue: max
 
 jobs:

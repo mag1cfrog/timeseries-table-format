@@ -23,6 +23,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   queue: max
