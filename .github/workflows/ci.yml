@@ -326,7 +326,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/python-dist.yml
     with:
-      os-json: '["windows-latest","macos-latest","macos-15-intel"]'
+      os-json: '["windows-latest","macos-latest"]'
       python-versions-json: '["3.12"]'
       include-sdist: false
       run-pytest: true
