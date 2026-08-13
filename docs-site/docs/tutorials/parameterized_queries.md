@@ -16,7 +16,7 @@ DataFusion SQL supports placeholders:
 This example shows both styles:
 
 ```python
---8<-- "python/examples/parameterized_queries.py"
+--8<-- "crates/timeseries-table-python/examples/parameterized_queries.py"
 ```
 
 ## Supported parameter types

@@ -18,8 +18,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "**/build.rs"
-      - "python/.python-version"
-      - "python/pyproject.toml"
+      - "crates/timeseries-table-python/**"
 
 permissions:
   contents: read
@@ -55,8 +54,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '**/build.rs'
-              - 'python/.python-version'
-              - 'python/pyproject.toml'
+              - 'crates/timeseries-table-python/**'
 
   core:
     name: Warm core Rust caches

@@ -5,14 +5,12 @@ on:
     branches: [main]
     paths:
       - "docs-site/**"
-      - "python/**"
       - "crates/timeseries-table-python/**"
       - ".github/workflows/docs.yml"
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - "docs-site/**"
-      - "python/**"
       - "crates/timeseries-table-python/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch: {}
@@ -48,7 +46,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             docs-site/requirements.txt
-            python/pyproject.toml
+            crates/timeseries-table-python/pyproject.toml
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -83,12 +81,12 @@ jobs:
 
       - name: Build + install extension (debug, no deps)
         run: |
-          rm -rf ../docs-site/.wheels
+          rm -rf ../../docs-site/.wheels
           # Force a debug-style build for faster docs CI. (maturin build defaults can vary depending
           # on invocation/config; `--profile dev` makes the intent explicit.)
-          maturin build --locked --profile dev -i python -o ../docs-site/.wheels
-          python -m pip install --no-deps ../docs-site/.wheels/*.whl
-        working-directory: python
+          maturin build --locked --profile dev -i python -o ../../docs-site/.wheels
+          python -m pip install --no-deps ../../docs-site/.wheels/*.whl
+        working-directory: crates/timeseries-table-python
 
       - name: Build docs
         run: |

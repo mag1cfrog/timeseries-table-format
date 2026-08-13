@@ -55,7 +55,7 @@ In this example:
 - `Session` runs SQL over what you register and returns a `pyarrow.Table`.
 
 ```python
---8<-- "python/examples/quickstart_create_append_query.py"
+--8<-- "crates/timeseries-table-python/examples/quickstart_create_append_query.py"
 ```
 
 Next:

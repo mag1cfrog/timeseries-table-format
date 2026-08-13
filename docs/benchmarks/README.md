@@ -244,14 +244,14 @@ system,test,file,rows,bytes,elapsed_ms,cpu_limit,mem_limit,notes
 ## Python Streaming SQL Microbenchmark
 
 The repository also includes a Python-side microbenchmark for SQL result conversion and streaming
-at [`python/bench/sql_conversion.py`](../../python/bench/sql_conversion.py).
+at [`crates/timeseries-table-python/bench/sql_conversion.py`](../../crates/timeseries-table-python/bench/sql_conversion.py).
 This benchmark is separate from the cross-system results above: it focuses on the Python API and
 compares `Session.sql_reader(...)` against `Session.sql(...)`.
 
 Example local command:
 
 ```bash
-cd python
+cd crates/timeseries-table-python
 .venv/bin/python bench/sql_conversion.py \
   --target-ipc-gb 2 \
   --warmups 1 \
