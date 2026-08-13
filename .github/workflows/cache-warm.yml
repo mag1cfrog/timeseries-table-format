@@ -49,6 +49,7 @@ jobs:
               - '.github/workflows/publish-testpypi.yml'
               - '.github/workflows/python-dist.yml'
               - '.cargo/**'
+              - 'crates/**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -66,6 +67,8 @@ jobs:
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_WRITE
+      SCCACHE_LOG: sccache::server=debug,opendal=debug
+      SCCACHE_ERROR_LOG: ${{ runner.temp }}/sccache.log
       RUSTC_WRAPPER: sccache
 
     steps:
@@ -131,10 +134,18 @@ jobs:
           sccache --show-stats --stats-format json |
           python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
 
+      - name: Show sccache backend errors
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$SCCACHE_ERROR_LOG" ]]; then
+            grep -Ei 'Error executing cache write|RateLimited|AlreadyExists|status.*[45][0-9][0-9]|operation=write.*(error|failed)' "$SCCACHE_ERROR_LOG" || true
+          fi
+
   wheels:
     name: Warm Python wheel caches
     needs: [changes, core]
-    if: ${{ needs.changes.outputs.wheels == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.wheels == 'true' }}
     uses: ./.github/workflows/python-dist.yml
     with:
       os-json: '["windows-latest","ubuntu-latest","macos-latest"]'
