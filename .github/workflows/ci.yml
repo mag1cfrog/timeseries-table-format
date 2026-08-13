@@ -3,7 +3,12 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch: {}   # manual run
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -16,10 +21,12 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      code: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           filters: |
@@ -27,7 +34,15 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
+              - 'rust-toolchain.toml'
               - '**/build.rs'
+              - '.cargo/**'
+              - 'clippy.toml'
+              - '.github/workflows/cache-warm.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/docs.yml'
+              - '.github/workflows/publish-crates.yml'
+              - '.github/workflows/release-plz.yml'
 
   detect-python-changes:
     permissions:
@@ -35,27 +50,36 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      code: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.code }}
       skip: ${{ steps.skip.outputs.skip }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           filters: |
             code:
-              - 'python/**/*.py'
-              - 'python/**/*.pyi'
-              - 'python/pyproject.toml'
-              - 'python/uv.lock'
-              - 'python/.python-version'
+              - 'python/**'
               - 'scripts/update_python_wheel_stamp.py'
               - 'crates/timeseries-table-python/**/*.rs'
               - 'crates/timeseries-table-python/Cargo.toml'
               - 'crates/timeseries-table-python/build.rs'
               - 'crates/timeseries-table-python/python-src.stamp'
+              - 'crates/timeseries-table-core/**'
+              - 'crates/timeseries-table-datafusion/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'python/Cargo.toml'
+              - '.cargo/**'
+              - '.github/workflows/cache-warm.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/docs.yml'
+              - '.github/workflows/publish-pypi.yml'
+              - '.github/workflows/publish-testpypi.yml'
+              - '.github/workflows/python-dist.yml'
       - name: Check for skip label
         id: skip
         env:
@@ -74,14 +98,15 @@ jobs:
       contents: write
     steps:
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: generate-token
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
 
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
@@ -89,7 +114,7 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -116,91 +141,112 @@ jobs:
   rust-quality-gate:
     runs-on: ubuntu-latest
     needs: [detect-rust-changes]
-    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' }}
     defaults:
       run:
         working-directory: .
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
+      RUSTFLAGS: "-C debuginfo=0"
       CLIPPY_CONF_DIR: ${{ github.workspace }}
       CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          toolchain: stable
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
           components: rustfmt, clippy
+          cache: false
+          rustflags: ""
 
-      - name: Rust cache
-        id: rust-cache
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
 
-      - name: Cache summary
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Configure PyO3
+        shell: bash
         run: |
-          echo "rust-cache shared-key: rust-cache-v1"
-          echo "rust-cache exact cache-hit: ${{ steps.rust-cache.outputs.cache-hit }}"
-          echo "See above logs for restore/save details."
-      
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "$libdir" ]]; then
+            echo "LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
+
       - run: rustc -Vv && cargo -V && cargo clippy -V
       
       - name: fmt
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Install nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
+      - name: test default features
+        run: cargo test --locked --workspace --no-fail-fast
 
-      - name: Configure Python for PyO3 tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -V
-          python3 -c 'import sysconfig; print("LIBDIR=", sysconfig.get_config_var("LIBDIR")); print("LDLIBRARY=", sysconfig.get_config_var("LDLIBRARY")); print("Py_ENABLE_SHARED=", sysconfig.get_config_var("Py_ENABLE_SHARED"))'
-          PYTHON="$(command -v python3)"
-          echo "PYO3_PYTHON=$PYTHON" >> "$GITHUB_ENV"
-          LIBDIR="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
-          if [[ -n "$LIBDIR" ]]; then
-            echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          fi
-      
-      - name: test
-        run: cargo nextest run --workspace --all-features --no-fail-fast
+      - name: test all features and targets
+        run: cargo test --locked --workspace --all-targets --all-features --no-fail-fast
+
+      - name: docs
+        run: cargo doc --locked --workspace --no-deps
 
   python-quality-gate:
     runs-on: ubuntu-latest
     needs: [detect-python-changes, python-wheel-stamp-autofix]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
+    if: ${{ always() && needs['detect-python-changes'].result == 'success' && (needs['python-wheel-stamp-autofix'].result == 'success' || needs['python-wheel-stamp-autofix'].result == 'skipped') && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true' }}
     defaults:
       run:
         working-directory: python
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.10.0"
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
 
       - name: Configure PyO3 env
         shell: bash
@@ -215,18 +261,23 @@ jobs:
       - name: Verify python wheel stamp
         run: python ../scripts/update_python_wheel_stamp.py --check
 
-      - name: Rust cache (for extension build)
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Create venv + install deps (no extension build)
         run: |
           uv venv -p 3.12 .venv
           source .venv/bin/activate
-          uv sync --group dev --no-install-project --active
+          uv sync --locked --group dev --no-install-project --active
 
       - name: ruff
         run: .venv/bin/ruff check src tests
@@ -237,7 +288,7 @@ jobs:
       - name: pytest (editable, test-utils)
         run: |
           source .venv/bin/activate
-          .venv/bin/python -m maturin develop --features test-utils
+          .venv/bin/python -m maturin develop --locked --features test-utils
           .venv/bin/python -m pytest -q
 
       - name: wheel smoke (linux, py3.12)
@@ -248,17 +299,16 @@ jobs:
           rm -rf python/dist
           # Build a non-release wheel here to avoid recompiling in a separate profile.
           # The full release wheel matrix is validated by the publish workflows.
-          (cd python && .venv/bin/python -m maturin build -o dist -i .venv/bin/python)
+          (cd python && .venv/bin/python -m maturin build --locked -o dist -i .venv/bin/python)
           venv_dir="$(mktemp -d)"
           uv venv -p 3.12 "${venv_dir}"
-          uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl pytest
+          uv pip install -p "${venv_dir}/bin/python" python/dist/*.whl "pytest==9.0.2"
           "${venv_dir}/bin/python" -m pytest -q -c python/pyproject.toml python/tests
 
   python-wheel-matrix:
     needs: [detect-python-changes, python-wheel-stamp-autofix]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
+    if: ${{ always() && needs['detect-python-changes'].result == 'success' && (needs['python-wheel-stamp-autofix'].result == 'success' || needs['python-wheel-stamp-autofix'].result == 'skipped') && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true' }}
     permissions:
-      actions: write
       contents: read
     uses: ./.github/workflows/python-dist.yml
     with:
@@ -266,19 +316,40 @@ jobs:
       python-versions-json: '["3.10","3.11","3.12","3.13","3.14"]'
       include-sdist: false
       run-pytest: true
-      # PR validation: debug wheels compile faster; release wheels are built in publish workflows.
-      maturin-args: "-o dist"
       upload-artifacts: false
       artifact-prefix: ci-wheel
+
+  python-wheel-platforms:
+    needs: [detect-python-changes, python-wheel-stamp-autofix]
+    if: ${{ always() && needs['detect-python-changes'].result == 'success' && (needs['python-wheel-stamp-autofix'].result == 'success' || needs['python-wheel-stamp-autofix'].result == 'skipped') && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      os-json: '["windows-latest","macos-latest","macos-15-intel"]'
+      python-versions-json: '["3.12"]'
+      include-sdist: false
+      run-pytest: true
+      upload-artifacts: false
+      artifact-prefix: ci-wheel-platform
 
   ci-summary:
     # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
-    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-wheel-stamp-autofix, python-quality-gate, python-wheel-matrix]
+    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-wheel-stamp-autofix, python-quality-gate, python-wheel-matrix, python-wheel-platforms]
     if: ${{ always() }}
     steps:
       - name: Summarize outcome
         run: |
+          if [ "${{ needs['detect-rust-changes'].result }}" != "success" ]; then
+            echo "Rust change detection failed: ${{ needs['detect-rust-changes'].result }}"
+            exit 1
+          fi
+          if [ "${{ needs['detect-python-changes'].result }}" != "success" ]; then
+            echo "Python change detection failed: ${{ needs['detect-python-changes'].result }}"
+            exit 1
+          fi
+
           if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs['python-wheel-stamp-autofix'].outputs.pushed }}" = "true" ]; then
             echo "Python wheel stamp was updated in this run; waiting for the follow-up CI run on the new commit."
             exit 0
@@ -296,6 +367,8 @@ jobs:
             [ "${{ needs['python-quality-gate'].result }}" = "success" ] || exit 1
             echo "Python/binding changed; wheel matrix result: ${{ needs['python-wheel-matrix'].result }}"
             [ "${{ needs['python-wheel-matrix'].result }}" = "success" ] || exit 1
+            echo "Python/binding changed; platform wheel result: ${{ needs['python-wheel-platforms'].result }}"
+            [ "${{ needs['python-wheel-platforms'].result }}" = "success" ] || exit 1
           else
             echo "No Python/binding changes; skipping python checks."
           fi

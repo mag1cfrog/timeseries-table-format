@@ -9,83 +9,17 @@ on:
       - "timeseries-table-format-v*"
       - "timeseries-table-cli-v*"
 
+permissions:
+  contents: read
+
 jobs:
-  decide:
-    name: decide leader tag
-    if: ${{ github.repository_owner == 'mag1cfrog' }}
-    runs-on: ubuntu-latest
-    outputs:
-      proceed: ${{ steps.decide.outputs.proceed }}
-      leader: ${{ steps.decide.outputs.leader }}
-      current: ${{ steps.decide.outputs.current }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-      - id: decide
-        shell: bash
-        run: |
-          set -euo pipefail
-          sha="${GITHUB_SHA}"
-          current="${GITHUB_REF_NAME}"
-          echo "current=${current}" >> "$GITHUB_OUTPUT"
-
-          mapfile -t tags < <(git tag --points-at "${sha}")
-          echo "Tags on ${sha}: ${tags[*]:-<none>}"
-
-          leader=""
-          for pat in \
-            "timeseries-table-core-v*" \
-            "timeseries-table-datafusion-v*" \
-            "timeseries-table-format-v*" \
-            "timeseries-table-cli-v*"
-          do
-            for t in "${tags[@]}"; do
-              if [[ "${t}" == ${pat} ]]; then
-                leader="${t}"
-                break 2
-              fi
-            done
-          done
-
-          echo "Leader tag: ${leader:-<none>}"
-          echo "leader=${leader}" >> "$GITHUB_OUTPUT"
-          if [[ -n "${leader}" && "${current}" == "${leader}" ]]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Publish (crates.io)::Leader tag is '${leader}'. This run will publish all crates tagged on ${sha}."
-          else
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Publish (crates.io)::Skipping publish for '${current}'. Leader tag for ${sha} is '${leader:-<none>}'."
-          fi
-
-          {
-            echo "### Publish (crates.io) gating"
-            echo
-            echo "- Commit: \`${sha}\`"
-            echo "- Current ref: \`${current}\`"
-            if (( ${#tags[@]} )); then
-              echo "- Tags on commit: \`${tags[*]}\`"
-            else
-              echo "- Tags on commit: <none>"
-            fi
-            echo "- Leader tag: \`${leader:-<none>}\`"
-            echo
-            if [[ -n "${leader}" && "${current}" == "${leader}" ]]; then
-              echo "This is the **leader** run, so \`publish (crates.io)\` will execute and publish any missing versions for all crates whose tags point at this commit."
-            else
-              echo "This is **not** the leader run, so \`publish (crates.io)\` is intentionally skipped to avoid duplicate publishes and extra environment approvals."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
   publish:
     name: publish (crates.io)
-    needs: [decide]
-    if: ${{ needs.decide.outputs.proceed == 'true' }}
+    if: ${{ github.repository_owner == 'mag1cfrog' }}
     runs-on: ubuntu-latest
     concurrency:
       group: crates-io-publish
-      cancel-in-progress: false
+      queue: max
     timeout-minutes: 30
     environment: crates-io-release
     permissions:
@@ -94,31 +28,40 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: 1
       RUSTFLAGS: "-C debuginfo=0"
-      CARGO_NET_RETRY: "10"
-      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-      # Keep target artifacts stable across steps (and compatible with rust-cache).
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: |
-            . -> target
-          shared-key: rust-cache-v1
+          shared-key: core-ci
+          cache-targets: false
+          save-if: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Verify tag matches Cargo version
         if: ${{ github.ref_type == 'tag' }}
@@ -150,7 +93,7 @@ jobs:
               ;;
           esac
 
-          expected="${tag#${crate}-v}"
+          expected="${tag#"${crate}"-v}"
           actual="$(
             python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('${crate_dir}/Cargo.toml').read_text(encoding='utf-8'))['package']['version'])"
           )"
@@ -161,12 +104,15 @@ jobs:
 
       - name: Mint crates.io token (OIDC)
         id: cratesio
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
 
       - name: Publish crates (skip already-published versions)
         shell: bash
         env:
+          CARGO_NET_RETRY: "10"
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           set -euo pipefail
           ua="mag1cfrog/timeseries-table-format publish-crates (GitHub Actions)"
@@ -238,7 +184,7 @@ jobs:
               return 1
             fi
             echo "Publishing ${crate} v${ver}"
-            if ! retry 5 15 cargo publish -p "${crate}"; then
+            if ! retry 5 15 cargo publish --locked -p "${crate}"; then
               if has_version "${crate}" "${ver}"; then
                 echo "cargo publish failed but ${crate} v${ver} exists on crates.io; continuing"
               else
@@ -271,6 +217,14 @@ jobs:
           if has_tag_on_sha "${cli_tag}"; then cli_on_sha=true; fi
 
           echo "Tag matrix on ${GITHUB_SHA}: core=${core_on_sha} df=${df_on_sha} fmt=${fmt_on_sha} cli=${cli_on_sha}"
+
+          if [[ "${core_on_sha}" != true &&
+                "${df_on_sha}" != true &&
+                "${fmt_on_sha}" != true &&
+                "${cli_on_sha}" != true ]]; then
+            echo "No release tags point at ${GITHUB_SHA}; refusing to report a successful no-op publish."
+            exit 1
+          fi
 
           if [[ "${core_on_sha}" == true ]]; then
             publish_if_missing "timeseries-table-core" "${core_ver}"

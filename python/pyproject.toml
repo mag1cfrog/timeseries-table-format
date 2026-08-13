@@ -38,7 +38,7 @@ dev = [
     "ruff",
     "ty",
     "pytest>=9.0.2",
-    "maturin>=1.11.0,<2.0",
+    "maturin==1.13.3",
 ]
 
 [tool.pytest.ini_options]

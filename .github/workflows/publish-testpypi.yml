@@ -11,41 +11,34 @@ on:
   push:
     branches: [main]
     paths:
-      - "python/**/*.py"
-      - "python/**/*.pyi"
-      - "python/pyproject.toml"
-      - "python/uv.lock"
-      - "python/.python-version"
+      - ".github/workflows/publish-testpypi.yml"
+      - ".github/workflows/python-dist.yml"
+      - ".cargo/**"
+      - "python/**"
+      - "rust-toolchain.toml"
       - "scripts/update_python_wheel_stamp.py"
-      - "crates/timeseries-table-python/**/*.rs"
-      - "crates/timeseries-table-python/Cargo.toml"
-      - "crates/timeseries-table-python/build.rs"
-      - "crates/timeseries-table-python/python-src.stamp"
-      - "crates/timeseries-table-core/**/*.rs"
-      - "crates/timeseries-table-core/Cargo.toml"
-      - "crates/timeseries-table-core/build.rs"
-      - "crates/timeseries-table-datafusion/**/*.rs"
-      - "crates/timeseries-table-datafusion/Cargo.toml"
-      - "crates/timeseries-table-datafusion/build.rs"
+      - "crates/timeseries-table-python/**"
+      - "crates/timeseries-table-core/**"
+      - "crates/timeseries-table-datafusion/**"
       - "Cargo.toml"
       - "Cargo.lock"
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  queue: max
 
 jobs:
   build:
     uses: ./.github/workflows/python-dist.yml
     permissions:
-      actions: write
       contents: read
     with:
       include-sdist: true
       run-pytest: true
       artifact-prefix: dist
       dev-prerelease: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.snapshot) }}
-      dev-prerelease-label: dev
 
   publish:
     name: publish (TestPyPI)
@@ -58,15 +51,14 @@ jobs:
       id-token: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
 
       - name: Publish to TestPyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
-          skip-existing: true

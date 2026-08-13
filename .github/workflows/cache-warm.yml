@@ -1,0 +1,145 @@
+name: Warm CI caches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cache-warm.yml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/publish-crates.yml"
+      - ".github/workflows/publish-pypi.yml"
+      - ".github/workflows/publish-testpypi.yml"
+      - ".github/workflows/python-dist.yml"
+      - ".github/workflows/release-plz.yml"
+      - ".cargo/**"
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "**/build.rs"
+      - "python/.python-version"
+      - "python/pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sccache-write
+  queue: max
+
+jobs:
+  changes:
+    name: Find caches to warm
+    runs-on: ubuntu-latest
+    outputs:
+      wheels: ${{ steps.filter.outputs.wheels }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        with:
+          filters: |
+            wheels:
+              - '.github/workflows/cache-warm.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish-pypi.yml'
+              - '.github/workflows/publish-testpypi.yml'
+              - '.github/workflows/python-dist.yml'
+              - '.cargo/**'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '**/build.rs'
+              - 'python/.python-version'
+              - 'python/pyproject.toml'
+
+  core:
+    name: Warm core Rust caches
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-C debuginfo=0"
+      CLIPPY_CONF_DIR: ${{ github.workspace }}
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      RUSTC_WRAPPER: sccache
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: core-ci
+          cache-targets: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Configure PyO3
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          if [[ -n "$libdir" ]]; then
+            echo "LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Warm default test cache
+        run: cargo test --locked --workspace --no-run
+
+      - name: Warm all-features test cache
+        run: cargo test --locked --workspace --all-targets --all-features --no-run
+
+      - name: Check sccache writes
+        id: sccache-writes
+        continue-on-error: true
+        run: >-
+          sccache --show-stats --stats-format json |
+          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+
+      - name: Retry cache writes
+        if: steps.sccache-writes.outcome == 'failure'
+        run: |
+          sccache --zero-stats
+          cargo clean
+          cargo test --locked --workspace --no-run
+          cargo test --locked --workspace --all-targets --all-features --no-run
+
+      - name: Verify retried sccache writes
+        if: steps.sccache-writes.outcome == 'failure'
+        run: >-
+          sccache --show-stats --stats-format json |
+          python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+
+  wheels:
+    name: Warm Python wheel caches
+    needs: [changes, core]
+    if: ${{ needs.changes.outputs.wheels == 'true' }}
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      max-parallel: 2
+      run-pytest: false
+      upload-artifacts: false
+      write-cache: true
