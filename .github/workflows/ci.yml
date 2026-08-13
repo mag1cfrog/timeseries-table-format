@@ -70,7 +70,7 @@ jobs:
           filters: |
             code:
               - 'crates/timeseries-table-python/**'
-              - 'crates/timeseries-table-core/**'
+              - 'crates/timeseries-table-format/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'

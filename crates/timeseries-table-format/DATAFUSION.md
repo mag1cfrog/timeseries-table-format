@@ -1,6 +1,6 @@
 # DataFusion integration
 
-The optional `datafusion` feature lets you query a `timeseries-table-core` table using DataFusion SQL.
+The optional `datafusion` feature lets you query a `timeseries-table-format` table using DataFusion SQL.
 It focuses on time-series workloads and includes **segment-level pruning**:
 when a query has a time predicate, we determine which data segments cannot
 possibly match (based on each segment's `ts_min`/`ts_max`), and skip them
@@ -14,7 +14,7 @@ The goal is simple: keep SQL queries fast without changing your data.
 
 ```toml
 [dependencies]
-timeseries-table-core = { version = "0.2", features = ["datafusion"] }
+timeseries-table-format = { version = "0.1", features = ["datafusion"] }
 datafusion = "51"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 ```
@@ -24,7 +24,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 ```rust
 use datafusion::prelude::*;
 use std::sync::Arc;
-use timeseries_table_core::{
+use timeseries_table_format::{
     datafusion::TsTableProvider,
     storage::TableLocation,
     table::TimeSeriesTable,
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let table = TimeSeriesTable::open(TableLocation::local("./my_table")).await?;
 
     // 2. Create a TsTableProvider (implements DataFusion's TableProvider)
-    let provider = TsTableProvider::try_new(Arc::new(table)).await?;
+    let provider = TsTableProvider::try_new(Arc::new(table))?;
 
     // 3. Register it in a DataFusion SessionContext
     let ctx = SessionContext::new();
@@ -77,7 +77,7 @@ This happens automatically; you don't need to do anything special.
 
 ### Current Limitations
 
-- **Read-only**: This integration is for querying only. Use `timeseries-table-core` or the CLI for writes.
+- **Read-only**: This integration is for querying only. Use `timeseries-table-format` or the CLI for writes.
 - **Best-effort filter extraction**: Complex predicates may not be fully recognized (see below). Unrecognized predicates fall back to scanning all segments—correctness is preserved.
 - **No custom execution plan**: We use DataFusion's default `ParquetExec` after pruning. Future versions may add custom operators.
 
@@ -207,4 +207,4 @@ Queries still run correctly; they just won’t be pruned.
 ## Related
 
 - `timeseries-table-cli` - Command-line tool for managing and querying tables (no Rust code required)
-- `timeseries-table-format` - Facade crate with DataFusion enabled by default
+- `timeseries-table-format` - Canonical Rust crate with DataFusion enabled by default
