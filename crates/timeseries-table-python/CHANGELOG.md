@@ -1,5 +1,32 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.5
+
+
+### Bug Fixes
+
+- Harden GitHub Actions cache management ([#257](https://github.com/mag1cfrog/timeseries-table-format/pull/257)) ([bef0e8d](https://github.com/mag1cfrog/timeseries-table-format/commit/bef0e8d188e5029bab0a397bc99fc41abbabdf95))
+
+
+### Code Refactoring
+
+- Co-locate Python project ([#260](https://github.com/mag1cfrog/timeseries-table-format/pull/260)) ([2bf3d35](https://github.com/mag1cfrog/timeseries-table-format/commit/2bf3d3528c04c5f69e848328ad7de13ba040595c))
+
+- Fold DataFusion integration into core ([#266](https://github.com/mag1cfrog/timeseries-table-format/pull/266)) ([4d1ce8b](https://github.com/mag1cfrog/timeseries-table-format/commit/4d1ce8b9db76475ad3758720913b4c43a99a8c1d))
+
+
+### Features
+
+- Simplify appends with immutable Parquet path identities ([75e888d](https://github.com/mag1cfrog/timeseries-table-format/commit/75e888da423e7613f9e559fcb8396db8f34ce436))
+
+- Publish ABI3 Python wheels ([#265](https://github.com/mag1cfrog/timeseries-table-format/pull/265)) ([21ed312](https://github.com/mag1cfrog/timeseries-table-format/commit/21ed3121599069774a02eb493a432e8a472b4d32))
+
+
+### Maintenance
+
+- Enable package publishing in Cargo.toml ([#224](https://github.com/mag1cfrog/timeseries-table-format/pull/224)) ([e7bc337](https://github.com/mag1cfrog/timeseries-table-format/commit/e7bc33765964ad22ea797d53d3cc5b9a52015359))
+
+
 ## 0.1.4
 
 
