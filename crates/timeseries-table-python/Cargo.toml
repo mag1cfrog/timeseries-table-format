@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-python"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,8 +16,8 @@ futures-util = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
-timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.2" }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.3.0" }
+timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.3" }
 
 
 [lints]

@@ -1,5 +1,23 @@
 # Changelog
 All notable changes to timeseries-table-python will be documented in this file.
+## 0.1.5
+
+
+### Bug Fixes
+
+- Harden GitHub Actions cache management ([#257](https://github.com/mag1cfrog/timeseries-table-format/pull/257)) ([bef0e8d](https://github.com/mag1cfrog/timeseries-table-format/commit/bef0e8d188e5029bab0a397bc99fc41abbabdf95))
+
+
+### Features
+
+- Simplify appends with immutable Parquet path identities ([75e888d](https://github.com/mag1cfrog/timeseries-table-format/commit/75e888da423e7613f9e559fcb8396db8f34ce436))
+
+
+### Maintenance
+
+- Enable package publishing in Cargo.toml ([#224](https://github.com/mag1cfrog/timeseries-table-format/pull/224)) ([e7bc337](https://github.com/mag1cfrog/timeseries-table-format/commit/e7bc33765964ad22ea797d53d3cc5b9a52015359))
+
+
 ## 0.1.4
 
 

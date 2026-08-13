@@ -1,5 +1,13 @@
 # Changelog
 All notable changes to timeseries-table-format will be documented in this file.
+## 0.1.5
+
+
+### Bug Fixes
+
+- Harden GitHub Actions cache management ([#257](https://github.com/mag1cfrog/timeseries-table-format/pull/257)) ([bef0e8d](https://github.com/mag1cfrog/timeseries-table-format/commit/bef0e8d188e5029bab0a397bc99fc41abbabdf95))
+
+
 ## 0.1.4
 
 
