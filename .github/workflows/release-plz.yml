@@ -22,13 +22,13 @@ jobs:
       RUSTC_WRAPPER: sccache
     steps:
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         id: generate-token
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -44,7 +44,7 @@ jobs:
         with:
           tool: cargo-semver-checks
       - name: Install Python (for PyO3)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Configure PyO3 env
@@ -106,13 +106,13 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         id: generate-token
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -128,7 +128,7 @@ jobs:
         with:
           tool: cargo-semver-checks
       - name: Install Python (for PyO3)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Configure PyO3 env

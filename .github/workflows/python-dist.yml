@@ -7,7 +7,7 @@ on:
         description: JSON array of runner labels.
         required: false
         type: string
-        default: '["ubuntu-latest","macos-latest","windows-latest"]'
+        default: '["ubuntu-latest","macos-latest","macos-15-intel","windows-latest"]'
       python-versions-json:
         description: JSON array of Python versions.
         required: false
@@ -93,9 +93,9 @@ jobs:
       RUSTC_WRAPPER: ${{ startsWith(matrix.os, 'ubuntu') && '' || 'sccache' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload dist artifacts
         if: ${{ inputs.upload-artifacts }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}
           path: python/dist/*

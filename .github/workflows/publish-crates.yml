@@ -19,7 +19,7 @@ jobs:
       leader: ${{ steps.decide.outputs.leader }}
       current: ${{ steps.decide.outputs.current }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -100,7 +100,7 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -112,7 +112,7 @@ jobs:
           rustflags: ""
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

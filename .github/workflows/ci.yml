@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch: {}   # manual run
 
+permissions:
+  contents: read
+  pull-requests: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -18,8 +22,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -46,8 +50,8 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       skip: ${{ steps.skip.outputs.skip }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -62,6 +66,8 @@ jobs:
               - 'crates/timeseries-table-python/Cargo.toml'
               - 'crates/timeseries-table-python/build.rs'
               - 'crates/timeseries-table-python/python-src.stamp'
+              - 'crates/timeseries-table-core/**'
+              - 'crates/timeseries-table-datafusion/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -91,14 +97,14 @@ jobs:
       contents: write
     steps:
       - name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         id: generate-token
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
@@ -106,7 +112,7 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -148,7 +154,7 @@ jobs:
       RUSTC_WRAPPER: sccache
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -167,7 +173,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -215,13 +221,13 @@ jobs:
       RUSTC_WRAPPER: sccache
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.0.0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -302,10 +308,25 @@ jobs:
       upload-artifacts: false
       artifact-prefix: ci-wheel
 
+  python-wheel-platforms:
+    needs: [detect-python-changes, python-wheel-stamp-autofix]
+    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      os-json: '["windows-latest","macos-latest","macos-15-intel"]'
+      python-versions-json: '["3.12"]'
+      include-sdist: false
+      run-pytest: true
+      maturin-args: "-o dist"
+      upload-artifacts: false
+      artifact-prefix: ci-wheel-platform
+
   ci-summary:
     # The only job to mark as "required" in branch protection.
     runs-on: ubuntu-latest
-    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-wheel-stamp-autofix, python-quality-gate, python-wheel-matrix]
+    needs: [detect-rust-changes, rust-quality-gate, detect-python-changes, python-wheel-stamp-autofix, python-quality-gate, python-wheel-matrix, python-wheel-platforms]
     if: ${{ always() }}
     steps:
       - name: Summarize outcome
@@ -327,6 +348,8 @@ jobs:
             [ "${{ needs['python-quality-gate'].result }}" = "success" ] || exit 1
             echo "Python/binding changed; wheel matrix result: ${{ needs['python-wheel-matrix'].result }}"
             [ "${{ needs['python-wheel-matrix'].result }}" = "success" ] || exit 1
+            echo "Python/binding changed; platform wheel result: ${{ needs['python-wheel-platforms'].result }}"
+            [ "${{ needs['python-wheel-platforms'].result }}" = "success" ] || exit 1
           else
             echo "No Python/binding changes; skipping python checks."
           fi
