@@ -50,6 +50,7 @@ jobs:
               - '.github/workflows/publish-testpypi.yml'
               - '.github/workflows/python-dist.yml'
               - '.cargo/**'
+              - 'crates/**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -146,7 +147,7 @@ jobs:
   wheels:
     name: Warm Python wheel caches
     needs: [changes, core]
-    if: ${{ needs.changes.outputs.wheels == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.wheels == 'true' }}
     uses: ./.github/workflows/python-dist.yml
     with:
       os-json: '["windows-latest","ubuntu-latest","macos-latest"]'
