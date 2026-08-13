@@ -26,8 +26,7 @@ rayon = "1.11.0"
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
-timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2" }
-timeseries-table-datafusion = { path = "../timeseries-table-datafusion", version = "0.1.2" }
+timeseries-table-core = { path = "../timeseries-table-core", version = "0.2.2", features = ["datafusion"] }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }

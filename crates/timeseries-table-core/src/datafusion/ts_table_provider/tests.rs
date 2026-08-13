@@ -119,11 +119,11 @@ fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
     })
 }
 
-fn make_table_meta() -> timeseries_table_core::metadata::table_metadata::TableMeta {
-    use timeseries_table_core::metadata::logical_schema::{
+fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
+    use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
-    use timeseries_table_core::metadata::table_metadata::{TimeBucket, TimeIndexSpec};
+    use crate::metadata::table_metadata::{TimeBucket, TimeIndexSpec};
 
     let index = TimeIndexSpec {
         timestamp_column: "ts".to_string(),
@@ -154,15 +154,13 @@ fn make_table_meta() -> timeseries_table_core::metadata::table_metadata::TableMe
     ])
     .expect("valid logical schema");
 
-    timeseries_table_core::metadata::table_metadata::TableMeta::new_time_series_with_schema(
-        index,
-        logical_schema,
-    )
+    crate::metadata::table_metadata::TableMeta::new_time_series_with_schema(index, logical_schema)
 }
 
+#[cfg(feature = "test-counters")]
 #[tokio::test(flavor = "current_thread")]
 async fn provider_cache_is_primed_from_snapshot() -> DFResult<()> {
-    use timeseries_table_core::{
+    use crate::{
         storage::TableLocation,
         table::TimeSeriesTable,
         transaction_log::table_state::{

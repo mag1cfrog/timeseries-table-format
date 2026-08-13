@@ -37,7 +37,7 @@ mod _native {
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
     };
 
-    use timeseries_table_datafusion::TsTableProvider;
+    use timeseries_table_core::datafusion::TsTableProvider;
 
     use crate::error_map::datafusion_error_to_py;
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;

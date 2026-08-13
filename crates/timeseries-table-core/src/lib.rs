@@ -21,6 +21,8 @@
 //! - [`coverage`]: bitmap-based coverage math and utilities.
 //! - [`formats`]: format-specific helpers (currently Parquet).
 pub mod coverage;
+#[cfg(feature = "datafusion")]
+pub mod datafusion;
 pub mod formats;
 pub mod metadata;
 pub mod storage;

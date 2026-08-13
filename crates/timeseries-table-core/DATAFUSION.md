@@ -1,4 +1,4 @@
-# timeseries-table-datafusion
+# DataFusion integration
 
 This crate lets you query a `timeseries-table-core` table using DataFusion SQL.
 It focuses on time-series workloads and includes **segment-level pruning**:

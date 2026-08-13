@@ -3240,7 +3240,6 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "timeseries-table-core",
- "timeseries-table-datafusion",
  "tokio",
 ]
 
@@ -3252,11 +3251,15 @@ dependencies = [
  "arrow-array",
  "arrow-csv",
  "arrow-select",
+ "async-trait",
  "blake3",
  "bytes",
  "chrono",
+ "chrono-tz",
+ "datafusion",
  "futures",
  "log",
+ "object_store",
  "parquet",
  "rayon",
  "roaring",
@@ -3268,28 +3271,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "timeseries-table-datafusion"
-version = "0.1.2"
-dependencies = [
- "arrow",
- "async-trait",
- "chrono",
- "chrono-tz",
- "datafusion",
- "object_store",
- "parquet",
- "serde_json",
- "tempfile",
- "timeseries-table-core",
- "tokio",
-]
-
-[[package]]
 name = "timeseries-table-format"
 version = "0.1.4"
 dependencies = [
  "timeseries-table-core",
- "timeseries-table-datafusion",
 ]
 
 [[package]]
@@ -3302,7 +3287,6 @@ dependencies = [
  "futures-util",
  "pyo3",
  "timeseries-table-core",
- "timeseries-table-datafusion",
  "tokio",
 ]
 
