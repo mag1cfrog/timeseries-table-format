@@ -5,7 +5,6 @@ on:
   push:
     tags:
       - "timeseries-table-core-v*"
-      - "timeseries-table-datafusion-v*"
       - "timeseries-table-format-v*"
       - "timeseries-table-cli-v*"
 
@@ -74,10 +73,6 @@ jobs:
             timeseries-table-core-v*)
               crate="timeseries-table-core"
               crate_dir="crates/timeseries-table-core"
-              ;;
-            timeseries-table-datafusion-v*)
-              crate="timeseries-table-datafusion"
-              crate_dir="crates/timeseries-table-datafusion"
               ;;
             timeseries-table-format-v*)
               crate="timeseries-table-format"
@@ -197,29 +192,24 @@ jobs:
           }
 
           core_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-core/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
-          df_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-datafusion/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
           fmt_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-format/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
           cli_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-cli/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
 
           # Only publish versions that correspond to tags on this commit (release-plz creates per-crate tags).
           core_tag="timeseries-table-core-v${core_ver}"
-          df_tag="timeseries-table-datafusion-v${df_ver}"
           fmt_tag="timeseries-table-format-v${fmt_ver}"
           cli_tag="timeseries-table-cli-v${cli_ver}"
 
           core_on_sha=false
-          df_on_sha=false
           fmt_on_sha=false
           cli_on_sha=false
           if has_tag_on_sha "${core_tag}"; then core_on_sha=true; fi
-          if has_tag_on_sha "${df_tag}"; then df_on_sha=true; fi
           if has_tag_on_sha "${fmt_tag}"; then fmt_on_sha=true; fi
           if has_tag_on_sha "${cli_tag}"; then cli_on_sha=true; fi
 
-          echo "Tag matrix on ${GITHUB_SHA}: core=${core_on_sha} df=${df_on_sha} fmt=${fmt_on_sha} cli=${cli_on_sha}"
+          echo "Tag matrix on ${GITHUB_SHA}: core=${core_on_sha} fmt=${fmt_on_sha} cli=${cli_on_sha}"
 
           if [[ "${core_on_sha}" != true &&
-                "${df_on_sha}" != true &&
                 "${fmt_on_sha}" != true &&
                 "${cli_on_sha}" != true ]]; then
             echo "No release tags point at ${GITHUB_SHA}; refusing to report a successful no-op publish."
@@ -229,17 +219,11 @@ jobs:
           if [[ "${core_on_sha}" == true ]]; then
             publish_if_missing "timeseries-table-core" "${core_ver}"
           fi
-          if [[ "${df_on_sha}" == true ]]; then
-            publish_if_missing "timeseries-table-core" "${core_ver}"
-            publish_if_missing "timeseries-table-datafusion" "${df_ver}"
-          fi
           if [[ "${fmt_on_sha}" == true ]]; then
             publish_if_missing "timeseries-table-core" "${core_ver}"
-            publish_if_missing "timeseries-table-datafusion" "${df_ver}"
             publish_if_missing "timeseries-table-format" "${fmt_ver}"
           fi
           if [[ "${cli_on_sha}" == true ]]; then
             publish_if_missing "timeseries-table-core" "${core_ver}"
-            publish_if_missing "timeseries-table-datafusion" "${df_ver}"
             publish_if_missing "timeseries-table-cli" "${cli_ver}"
           fi

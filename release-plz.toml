@@ -24,13 +24,6 @@ changelog_path = "crates/timeseries-table-core/CHANGELOG.md"
 git_release_enable = true
 
 [[package]]
-name = "timeseries-table-datafusion"
-release = true
-changelog_update = true
-changelog_path = "crates/timeseries-table-datafusion/CHANGELOG.md"
-git_release_enable = true
-
-[[package]]
 name = "timeseries-table-cli"
 release = true
 changelog_update = true

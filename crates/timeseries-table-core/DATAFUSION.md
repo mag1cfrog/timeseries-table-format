@@ -1,6 +1,6 @@
 # DataFusion integration
 
-This crate lets you query a `timeseries-table-core` table using DataFusion SQL.
+The optional `datafusion` feature lets you query a `timeseries-table-core` table using DataFusion SQL.
 It focuses on time-series workloads and includes **segment-level pruning**:
 when a query has a time predicate, we determine which data segments cannot
 possibly match (based on each segment's `ts_min`/`ts_max`), and skip them
@@ -14,7 +14,7 @@ The goal is simple: keep SQL queries fast without changing your data.
 
 ```toml
 [dependencies]
-timeseries-table-datafusion = "0.1"
+timeseries-table-core = { version = "0.2", features = ["datafusion"] }
 datafusion = "51"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 ```
@@ -23,14 +23,17 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 ```rust
 use datafusion::prelude::*;
-use timeseries_table_core::TimeSeriesTable;
-use timeseries_table_datafusion::TsTableProvider;
 use std::sync::Arc;
+use timeseries_table_core::{
+    datafusion::TsTableProvider,
+    storage::TableLocation,
+    table::TimeSeriesTable,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open an existing table
-    let table = TimeSeriesTable::open("./my_table")?;
+    let table = TimeSeriesTable::open(TableLocation::local("./my_table")).await?;
 
     // 2. Create a TsTableProvider (implements DataFusion's TableProvider)
     let provider = TsTableProvider::try_new(Arc::new(table)).await?;
@@ -203,5 +206,5 @@ Queries still run correctly; they just won’t be pruned.
 
 ## Related
 
-- `timeseries-table-cli` — Command-line tool for managing and querying tables (no Rust code required)
-- `timeseries-table-core` — Core library for table creation, appends, and coverage tracking
+- `timeseries-table-cli` - Command-line tool for managing and querying tables (no Rust code required)
+- `timeseries-table-format` - Facade crate with DataFusion enabled by default

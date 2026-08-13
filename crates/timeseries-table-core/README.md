@@ -4,8 +4,9 @@ Core engine for a log-structured time-series table format. It owns table metadat
 append rules, coverage math, storage IO, and the `TimeSeriesTable` API that
 higher-level integrations build on.
 
-This crate does **not** implement a query engine. It exposes metadata and scan
-streams that other layers (DataFusion, Polars, custom code) can consume.
+Without optional features, this crate exposes metadata and scan streams without
+including a query engine. Enable the `datafusion` feature for SQL queries with
+time-based segment pruning.
 
 ## Layers (module layout)
 - `metadata`: pure metadata model + validation (logical schema, table metadata, segment types). No IO.
@@ -14,6 +15,9 @@ streams that other layers (DataFusion, Polars, custom code) can consume.
 - `storage`: local backend + table-root IO helpers.
 - `coverage`: coverage math and gap analysis.
 - `formats`: format-specific helpers (currently `formats::parquet`).
+- `datafusion` (optional): DataFusion `TableProvider` and pruning integration.
+
+See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
 
 During the refactor, older module paths remain available as compatibility
 re-exports (for example, `transaction_log`, `time_series_table`, `helpers`).

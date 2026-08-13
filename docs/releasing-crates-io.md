@@ -3,7 +3,6 @@
 This repo publishes these crates to crates.io:
 
 - `timeseries-table-core`
-- `timeseries-table-datafusion`
 - `timeseries-table-format`
 - `timeseries-table-cli`
 
