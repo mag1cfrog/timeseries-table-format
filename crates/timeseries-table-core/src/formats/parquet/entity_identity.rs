@@ -282,7 +282,7 @@ fn try_entity_identity_from_stats(
 
     // Ensure we actually found a value per column
     let mut out = EntityIdentity::new();
-    for (col, v) in entity_columns.iter().zip(pinned.into_iter()) {
+    for (col, v) in entity_columns.iter().zip(pinned) {
         let Some(v) = v else {
             return Err(SegmentEntityIdentityError::EntityColumnEmpty {
                 path: rel_path.to_string(),
@@ -463,7 +463,7 @@ pub fn segment_entity_identity_from_parquet_bytes(
     }
 
     let mut out = EntityIdentity::new();
-    for (col, v) in entity_columns.iter().zip(pinned.into_iter()) {
+    for (col, v) in entity_columns.iter().zip(pinned) {
         let Some(v) = v else {
             return Err(SegmentEntityIdentityError::EntityColumnEmpty {
                 path: path_str.clone(),

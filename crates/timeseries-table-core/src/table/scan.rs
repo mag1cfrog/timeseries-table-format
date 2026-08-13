@@ -332,7 +332,7 @@ impl TimeSeriesTable {
         let location = self.location().clone();
 
         // 3) Build stream: for each segment, read + filter
-        let stream = futures::stream::iter(candidates.into_iter())
+        let stream = futures::stream::iter(candidates)
             .then(move |seg| {
                 let location = location.clone();
                 let ts_column = ts_column.clone();
