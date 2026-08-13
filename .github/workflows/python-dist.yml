@@ -309,6 +309,11 @@ jobs:
                   raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 
+      - name: Disable host sccache for sdist
+        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+
       - name: Build sdist (once)
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
