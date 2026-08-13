@@ -66,6 +66,9 @@ pub mod log_store;
 pub mod segments;
 pub mod table_state;
 
+#[cfg(test)]
+mod log_integration_tests;
+
 pub use crate::metadata::table_metadata::{
     TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,
 };

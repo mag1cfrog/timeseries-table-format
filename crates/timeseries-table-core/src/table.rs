@@ -20,6 +20,9 @@ pub mod scan;
 #[cfg(test)]
 pub(crate) mod test_util;
 
+#[cfg(test)]
+mod latest_snapshot_tests;
+
 use std::pin::Pin;
 
 use arrow::array::RecordBatch;
@@ -100,11 +103,6 @@ impl TimeSeriesTable {
     /// Return the table location.
     pub fn location(&self) -> &TableLocation {
         self.log.location()
-    }
-
-    /// Return the transaction log store handle.
-    pub fn log_store(&self) -> &TransactionLogStore {
-        &self.log
     }
 
     /// Open an existing time-series table at the given location.

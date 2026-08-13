@@ -6,17 +6,17 @@
 //! - Robust handling of missing/malformed metadata.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use chrono::{DateTime, TimeZone, Utc};
-use tempfile::TempDir;
-use timeseries_table_core::metadata::logical_schema::{
+use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use timeseries_table_core::metadata::segments::{FileFormat, SegmentMeta};
-use timeseries_table_core::metadata::table_metadata::{
+use crate::metadata::segments::{FileFormat, SegmentMeta};
+use crate::metadata::table_metadata::{
     TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
 };
-use timeseries_table_core::storage::{StorageError, TableLocation, layout};
-use timeseries_table_core::transaction_log::{CommitError, LogAction, TransactionLogStore};
+use crate::storage::{StorageError, TableLocation, layout};
+use crate::transaction_log::{CommitError, LogAction, TransactionLogStore};
+use chrono::{DateTime, TimeZone, Utc};
+use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

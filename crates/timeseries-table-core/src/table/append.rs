@@ -775,7 +775,7 @@ mod tests {
         ));
 
         assert_eq!(table.state, state_before);
-        assert_eq!(table.log_store().load_current_version().await?, 2);
+        assert_eq!(table.log.load_current_version().await?, 2);
         assert!(!tmp.path().join(layout::commit_rel_path(3)).exists());
         assert_eq!(
             [
@@ -1284,7 +1284,7 @@ mod tests {
         }
 
         assert_eq!(loser.state, loser_state_before);
-        assert_eq!(loser.log_store().load_current_version().await?, 2);
+        assert_eq!(loser.log.load_current_version().await?, 2);
         let committed = loser.load_latest_state().await?;
         assert!(committed.segments.contains_key(winner_path));
         assert!(!committed.segments.contains_key(loser_path));

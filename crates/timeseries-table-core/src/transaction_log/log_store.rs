@@ -154,7 +154,7 @@ impl TransactionLogStore {
     /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
     ///    "create only if not exists" semantics (atomic guard).
     /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
-    pub async fn commit_with_expected_version(
+    pub(crate) async fn commit_with_expected_version(
         &self,
         expected: u64,
         actions: Vec<LogAction>,
