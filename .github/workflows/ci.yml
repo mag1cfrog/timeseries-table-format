@@ -56,11 +56,7 @@ jobs:
         with:
           filters: |
             code:
-              - 'python/**/*.py'
-              - 'python/**/*.pyi'
-              - 'python/pyproject.toml'
-              - 'python/uv.lock'
-              - 'python/.python-version'
+              - 'python/**'
               - 'scripts/update_python_wheel_stamp.py'
               - 'crates/timeseries-table-python/**/*.rs'
               - 'crates/timeseries-table-python/Cargo.toml'
@@ -100,8 +96,9 @@ jobs:
         uses: actions/create-github-app-token@v3
         id: generate-token
         with:
-          app-id: ${{ secrets.APP_ID }}
+          client-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
 
       - name: Checkout PR head
         uses: actions/checkout@v7
@@ -139,7 +136,7 @@ jobs:
   rust-quality-gate:
     runs-on: ubuntu-latest
     needs: [detect-rust-changes]
-    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' }}
     defaults:
       run:
         working-directory: .
@@ -193,20 +190,21 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --locked --workspace --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Install nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-      
-      - name: test
-        run: cargo nextest run --locked --workspace --all-features --no-fail-fast
+      - name: test default features
+        run: cargo test --locked --workspace --no-fail-fast
+
+      - name: test all features and targets
+        run: cargo test --locked --workspace --all-targets --all-features --no-fail-fast
+
+      - name: docs
+        run: cargo doc --locked --workspace --no-deps
 
   python-quality-gate:
     runs-on: ubuntu-latest
     needs: [detect-python-changes, python-wheel-stamp-autofix]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
+    if: ${{ always() && needs['detect-python-changes'].result == 'success' && (needs['python-wheel-stamp-autofix'].result == 'success' || needs['python-wheel-stamp-autofix'].result == 'skipped') && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true' }}
     defaults:
       run:
         working-directory: python
@@ -294,7 +292,7 @@ jobs:
 
   python-wheel-matrix:
     needs: [detect-python-changes, python-wheel-stamp-autofix]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
+    if: ${{ always() && needs['detect-python-changes'].result == 'success' && (needs['python-wheel-stamp-autofix'].result == 'success' || needs['python-wheel-stamp-autofix'].result == 'skipped') && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/python-dist.yml
@@ -310,7 +308,7 @@ jobs:
 
   python-wheel-platforms:
     needs: [detect-python-changes, python-wheel-stamp-autofix]
-    if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true')) }}
+    if: ${{ always() && needs['detect-python-changes'].result == 'success' && (needs['python-wheel-stamp-autofix'].result == 'success' || needs['python-wheel-stamp-autofix'].result == 'skipped') && needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' && needs['python-wheel-stamp-autofix'].outputs.pushed != 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/python-dist.yml
@@ -331,6 +329,15 @@ jobs:
     steps:
       - name: Summarize outcome
         run: |
+          if [ "${{ needs['detect-rust-changes'].result }}" != "success" ]; then
+            echo "Rust change detection failed: ${{ needs['detect-rust-changes'].result }}"
+            exit 1
+          fi
+          if [ "${{ needs['detect-python-changes'].result }}" != "success" ]; then
+            echo "Python change detection failed: ${{ needs['detect-python-changes'].result }}"
+            exit 1
+          fi
+
           if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs['python-wheel-stamp-autofix'].outputs.pushed }}" = "true" ]; then
             echo "Python wheel stamp was updated in this run; waiting for the follow-up CI run on the new commit."
             exit 0

@@ -11,11 +11,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "python/**/*.py"
-      - "python/**/*.pyi"
-      - "python/pyproject.toml"
-      - "python/uv.lock"
-      - "python/.python-version"
+      - "python/**"
       - "scripts/update_python_wheel_stamp.py"
       - "crates/timeseries-table-python/**/*.rs"
       - "crates/timeseries-table-python/Cargo.toml"

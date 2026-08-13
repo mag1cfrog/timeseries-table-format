@@ -9,6 +9,9 @@ on:
       - "timeseries-table-format-v*"
       - "timeseries-table-cli-v*"
 
+permissions:
+  contents: read
+
 jobs:
   decide:
     name: decide leader tag

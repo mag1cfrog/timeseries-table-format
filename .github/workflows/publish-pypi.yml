@@ -1,7 +1,17 @@
 name: Publish (PyPI)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to PyPI after building and validating artifacts.
+        required: true
+        type: boolean
+        default: false
+      version:
+        description: Expected package version, such as 0.1.4 or v0.1.4.
+        required: false
+        type: string
   push:
     tags:
       - "timeseries-table-python-v*"
@@ -11,7 +21,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: validate release request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify requested version matches Cargo version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          requested="${GITHUB_REF_NAME}"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            requested="${REQUESTED_VERSION}"
+            if [[ "${PUBLISH}" != "true" && -z "${requested}" ]]; then
+              exit 0
+            fi
+            if [[ -z "${requested}" ]]; then
+              echo "An expected version is required when publishing."
+              exit 1
+            fi
+          elif [[ "${requested}" != timeseries-table-python-v* ]]; then
+            echo "Unexpected tag format: ${requested}"
+            exit 1
+          fi
+
+          expected="${requested#timeseries-table-python-v}"
+          expected="${expected#v}"
+          actual="$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/timeseries-table-python/Cargo.toml)"
+          if [[ -z "${actual}" || "${actual}" != "${expected}" ]]; then
+            echo "Requested/Cargo version mismatch: requested=${expected} cargo=${actual:-<missing>}"
+            exit 1
+          fi
+
   build:
+    needs: [validate]
     uses: ./.github/workflows/python-dist.yml
     permissions:
       contents: read
@@ -24,36 +74,13 @@ jobs:
     name: publish (PyPI)
     runs-on: ubuntu-latest
     needs: [build]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
     environment: pypi
     permissions:
       actions: read
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Verify tag matches Cargo version
-        if: ${{ github.ref_type == 'tag' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          expected="${tag#timeseries-table-python-v}"
-          actual="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-python/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
-          if [[ "${tag}" != timeseries-table-python-v* ]]; then
-            echo "Unexpected tag format: ${tag}"
-            exit 1
-          fi
-          if [[ "${actual}" != "${expected}" ]]; then
-            echo "Tag/version mismatch: tag=${expected} cargo=${actual}"
-            exit 1
-          fi
-
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:

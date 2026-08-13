@@ -92,8 +92,11 @@ jobs:
             echo "LD_LIBRARY_PATH=$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           fi
 
-      - name: Warm test cache
-        run: cargo test --locked --workspace --all-features --no-run
+      - name: Warm default test cache
+        run: cargo test --locked --workspace --no-run
+
+      - name: Warm all-features test cache
+        run: cargo test --locked --workspace --all-targets --all-features --no-run
 
       - name: Check sccache writes
         id: sccache-writes
@@ -107,7 +110,8 @@ jobs:
         run: |
           sccache --zero-stats
           cargo clean
-          cargo test --locked --workspace --all-features --no-run
+          cargo test --locked --workspace --no-run
+          cargo test --locked --workspace --all-targets --all-features --no-run
 
       - name: Verify retried sccache writes
         if: steps.sccache-writes.outcome == 'failure'

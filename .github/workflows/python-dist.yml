@@ -90,7 +90,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: ${{ inputs.write-cache && 'READ_WRITE' || 'READ_ONLY' }}
-      RUSTC_WRAPPER: ${{ startsWith(matrix.os, 'ubuntu') && '' || 'sccache' }}
+      RUSTC_WRAPPER: ${{ !startsWith(matrix.os, 'ubuntu') && 'sccache' || '' }}
 
     steps:
       - uses: actions/checkout@v7
@@ -224,6 +224,55 @@ jobs:
         run: >-
           sccache --show-stats --stats-format json |
           python -c 'import json, sys; errors = json.load(sys.stdin)["stats"]["cache_write_errors"]; sys.exit(f"sccache reported {errors} cache write errors") if errors else None'
+
+      - name: Verify wheel contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import email.parser
+          import re
+          import zipfile
+          from pathlib import Path
+
+          wheels = list(Path("python/dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+
+          cargo_toml = Path("crates/timeseries-table-python/Cargo.toml").read_text()
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_toml)
+          if not match:
+              raise SystemExit("could not read the Python package version")
+
+          required = {
+              "timeseries_table_format/__init__.pyi",
+              "timeseries_table_format/_native.pyi",
+              "timeseries_table_format/py.typed",
+          }
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"missing wheel entries: {', '.join(missing)}")
+              if not any(
+                  name.startswith("timeseries_table_format/_native")
+                  and name.endswith((".so", ".pyd"))
+                  for name in names
+              ):
+                  raise SystemExit("wheel is missing the native extension")
+              metadata_paths = [
+                  name for name in names if name.endswith(".dist-info/METADATA")
+              ]
+              if len(metadata_paths) != 1:
+                  raise SystemExit("expected exactly one METADATA file")
+              metadata = email.parser.Parser().parsestr(
+                  wheel.read(metadata_paths[0]).decode()
+              )
+              if metadata["Name"] != "timeseries-table-format":
+                  raise SystemExit(f"unexpected package name: {metadata['Name']}")
+              if metadata["Version"] != match.group(1):
+                  raise SystemExit(f"unexpected package version: {metadata['Version']}")
+          PY
 
       - name: Build sdist (once)
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
