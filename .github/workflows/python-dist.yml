@@ -102,9 +102,6 @@ jobs:
           # Make paths stable across runners for sccache keys.
           printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${GITHUB_WORKSPACE}=." >> "$GITHUB_ENV"
 
-      - name: Verify python wheel stamp
-        run: python scripts/update_python_wheel_stamp.py --check
-
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
@@ -170,7 +167,7 @@ jobs:
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          working-directory: python
+          working-directory: crates/timeseries-table-python
           command: build
           maturin-version: v1.13.3
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
@@ -214,13 +211,13 @@ jobs:
         run: |
           sccache --zero-stats
           cargo clean
-          rm -rf python/dist
+          rm -rf crates/timeseries-table-python/dist
 
       - name: Retry wheel build
         if: steps.sccache-writes.outcome == 'failure'
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          working-directory: python
+          working-directory: crates/timeseries-table-python
           command: build
           maturin-version: v1.13.3
           rust-toolchain: ${{ steps.rust-version.outputs.version }}
@@ -250,7 +247,7 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = list(Path("python/dist").glob("*.whl"))
+          wheels = list(Path("crates/timeseries-table-python/dist").glob("*.whl"))
           if len(wheels) != 1:
               raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
 
@@ -294,7 +291,7 @@ jobs:
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          working-directory: python
+          working-directory: crates/timeseries-table-python
           command: sdist
           maturin-version: v1.13.3
           args: ${{ inputs.sdist-args }}
@@ -311,7 +308,7 @@ jobs:
           import tarfile
           from pathlib import Path, PurePosixPath
 
-          sdists = list(Path("python/dist").glob("*.tar.gz"))
+          sdists = list(Path("crates/timeseries-table-python/dist").glob("*.tar.gz"))
           if len(sdists) != 1:
               raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
 
@@ -330,10 +327,10 @@ jobs:
               "crates/timeseries-table-datafusion/Cargo.toml",
               "crates/timeseries-table-python/Cargo.toml",
               "crates/timeseries-table-python/src/lib.rs",
-              "src/timeseries_table_format/__init__.py",
-              "src/timeseries_table_format/__init__.pyi",
-              "src/timeseries_table_format/_native.pyi",
-              "src/timeseries_table_format/py.typed",
+              "python/timeseries_table_format/__init__.py",
+              "python/timeseries_table_format/__init__.pyi",
+              "python/timeseries_table_format/_native.pyi",
+              "python/timeseries_table_format/py.typed",
           }
           with tarfile.open(sdists[0], "r:gz") as sdist:
               paths = {PurePosixPath(name) for name in sdist.getnames()}
@@ -362,7 +359,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: python/dist/*
+          path: crates/timeseries-table-python/dist/*
           if-no-files-found: error
 
       - name: Install wheel + run pytest
@@ -370,5 +367,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install python/dist/*.whl "pytest==9.0.2"
-          python -m pytest -q -c python/pyproject.toml python/tests
+          python -m pip install crates/timeseries-table-python/dist/*.whl "pytest==9.0.2"
+          python -m pytest -q -c crates/timeseries-table-python/pyproject.toml crates/timeseries-table-python/tests

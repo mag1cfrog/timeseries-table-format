@@ -14,7 +14,7 @@ This tutorial creates two time-series tables, registers them as `prices` and `vo
 and joins them on `(ts, symbol)`.
 
 ```python
---8<-- "python/examples/register_and_join_two_tables.py"
+--8<-- "crates/timeseries-table-python/examples/register_and_join_two_tables.py"
 ```
 
 ## Tips

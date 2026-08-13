@@ -102,7 +102,7 @@ finally:
 ## Reproducing the benchmark
 
 ```bash
-cd python
+cd crates/timeseries-table-python
 uv pip install -p .venv/bin/python numpy
 uv run -p .venv/bin/python maturin develop --features test-utils
 .venv/bin/python bench/sql_conversion.py \
