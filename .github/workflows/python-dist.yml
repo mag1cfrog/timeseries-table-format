@@ -88,9 +88,9 @@ jobs:
       RUSTC_WRAPPER: ${{ !startsWith(matrix.os, 'ubuntu') && 'sccache' || '' }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -110,7 +110,7 @@ jobs:
       - name: Verify python wheel stamp
         run: python scripts/update_python_wheel_stamp.py --check
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
           rustflags: ""
@@ -121,7 +121,7 @@ jobs:
         run: echo "version=$(rustc -V | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo registry
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: python-dist
           cache-targets: false
@@ -129,7 +129,7 @@ jobs:
 
       - name: Set up sccache
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Set snapshot version (Cargo)
         if: ${{ inputs.dev-prerelease }}
@@ -171,7 +171,7 @@ jobs:
           PY
 
       - name: Build wheel (maturin)
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: python
           command: build
@@ -203,7 +203,7 @@ jobs:
 
       - name: Retry wheel build
         if: steps.sccache-writes.outcome == 'failure'
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: python
           command: build
@@ -276,17 +276,15 @@ jobs:
 
       - name: Build sdist (once)
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' && matrix.python-version == inputs.sdist-python-version }}
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: python
           command: sdist
-          args: >-
-            ${{ inputs.sdist-args }}
-            ${{ !inputs.dev-prerelease && '--locked' || '' }}
+          args: ${{ inputs.sdist-args }}
 
       - name: Upload dist artifacts
         if: ${{ inputs.upload-artifacts }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}-py${{ matrix.python-version }}
           path: python/dist/*
