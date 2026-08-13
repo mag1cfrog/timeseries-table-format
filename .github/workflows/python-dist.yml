@@ -63,11 +63,6 @@ on:
         required: false
         type: boolean
         default: false
-      dev-prerelease-label:
-        description: SemVer prerelease label to use when dev-prerelease is true (e.g. alpha, beta, rc).
-        required: false
-        type: string
-        default: "dev"
 
 jobs:
   build:
@@ -139,8 +134,6 @@ jobs:
       - name: Set snapshot version (Cargo)
         if: ${{ inputs.dev-prerelease }}
         shell: bash
-        env:
-          DEV_LABEL: ${{ inputs.dev-prerelease-label }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -154,12 +147,15 @@ jobs:
           if not m:
               raise SystemExit("Could not find version in crates/timeseries-table-python/Cargo.toml")
           base = m.group(1)
-          core = base.split("-", 1)[0]
-          label = os.environ["DEV_LABEL"]
+          version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", base)
+          if not version:
+              raise SystemExit(f"Snapshot base must be a stable major.minor.patch version: {base}")
+          major, minor, patch = map(int, version.groups())
           run_number = int(os.environ["GITHUB_RUN_NUMBER"])
           run_attempt = int(os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
           snapshot = run_number * 100 + run_attempt
-          new_version = f"{core}-{label}.{snapshot}"
+          new_version = f"{major}.{minor}.{patch + 1}-dev.{snapshot}"
+          python_version = f"{major}.{minor}.{patch + 1}.dev{snapshot}"
           text2, n = re.subn(
               r'(?m)^version\s*=\s*"([^"]+)"',
               f'version = "{new_version}"',
@@ -169,6 +165,8 @@ jobs:
           if n != 1:
               raise SystemExit("Failed to rewrite version in Cargo.toml")
           cargo_toml.write_text(text2, encoding="utf-8")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"EXPECTED_PYTHON_VERSION={python_version}\n")
           print(f"Using snapshot version: {base} -> {new_version}")
           PY
 
@@ -231,6 +229,7 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import email.parser
+          import os
           import re
           import zipfile
           from pathlib import Path
@@ -243,6 +242,7 @@ jobs:
           match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_toml)
           if not match:
               raise SystemExit("could not read the Python package version")
+          expected_version = os.environ.get("EXPECTED_PYTHON_VERSION", match.group(1))
 
           required = {
               "timeseries_table_format/__init__.pyi",
@@ -270,7 +270,7 @@ jobs:
               )
               if metadata["Name"] != "timeseries-table-format":
                   raise SystemExit(f"unexpected package name: {metadata['Name']}")
-              if metadata["Version"] != match.group(1):
+              if metadata["Version"] != expected_version:
                   raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 

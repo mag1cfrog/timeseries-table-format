@@ -11,18 +11,15 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/workflows/publish-testpypi.yml"
+      - ".github/workflows/python-dist.yml"
+      - ".cargo/**"
       - "python/**"
+      - "rust-toolchain.toml"
       - "scripts/update_python_wheel_stamp.py"
-      - "crates/timeseries-table-python/**/*.rs"
-      - "crates/timeseries-table-python/Cargo.toml"
-      - "crates/timeseries-table-python/build.rs"
-      - "crates/timeseries-table-python/python-src.stamp"
-      - "crates/timeseries-table-core/**/*.rs"
-      - "crates/timeseries-table-core/Cargo.toml"
-      - "crates/timeseries-table-core/build.rs"
-      - "crates/timeseries-table-datafusion/**/*.rs"
-      - "crates/timeseries-table-datafusion/Cargo.toml"
-      - "crates/timeseries-table-datafusion/build.rs"
+      - "crates/timeseries-table-python/**"
+      - "crates/timeseries-table-core/**"
+      - "crates/timeseries-table-datafusion/**"
       - "Cargo.toml"
       - "Cargo.lock"
 
@@ -40,7 +37,6 @@ jobs:
       run-pytest: true
       artifact-prefix: dist
       dev-prerelease: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.snapshot) }}
-      dev-prerelease-label: dev
 
   publish:
     name: publish (TestPyPI)

@@ -9,6 +9,7 @@ on:
       - "crates/timeseries-table-python/**"
       - ".github/workflows/docs.yml"
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - "docs-site/**"
       - "python/**"
