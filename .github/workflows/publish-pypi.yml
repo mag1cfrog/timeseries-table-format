@@ -68,6 +68,7 @@ jobs:
     needs: [validate]
     uses: ./.github/workflows/python-dist.yml
     permissions:
+      actions: read
       contents: read
     with:
       include-sdist: true

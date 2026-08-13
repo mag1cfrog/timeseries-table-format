@@ -71,6 +71,12 @@ align = "auto"
 
 The PyPI package version is derived from the local `Cargo.toml` via maturin.
 
+Published wheels use CPython's stable ABI with a Python 3.10 minimum and carry the
+`cp310-abi3` tag. Release CI builds one wheel for Linux x86_64, macOS arm64, macOS
+x86_64, and Windows x86_64, then tests the same Linux wheel on CPython 3.10 through
+3.14. These wheels target ordinary GIL-enabled CPython. Free-threaded CPython, PyPy,
+and other Python implementations are not supported by this wheel policy.
+
 ## Quickstart: create → append → query
 
 ```python

@@ -237,6 +237,7 @@ jobs:
     needs: [detect-python-changes]
     if: ${{ needs['detect-python-changes'].outputs.code == 'true' && needs['detect-python-changes'].outputs.skip != 'true' }}
     permissions:
+      actions: read
       contents: read
     uses: ./.github/workflows/python-dist.yml
     with:
