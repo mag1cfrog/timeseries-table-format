@@ -289,6 +289,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install python/dist/*.whl pytest
+          python -m pip install python/dist/*.whl "pytest==9.0.2"
           python -m pytest -q -c python/pyproject.toml python/tests

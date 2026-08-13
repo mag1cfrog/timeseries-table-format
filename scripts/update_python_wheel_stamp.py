@@ -18,94 +18,66 @@ WHEEL_INPUT_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _git_tracked_file_blobs() -> list[tuple[str, str]]:
-    # Return (repo-relative posix path, git blob oid) pairs.
-    #
-    # Important: we hash git *blobs* (not working tree bytes) to avoid cross-platform differences
-    # from git's line-ending conversion (core.autocrlf).
+def _git_worktree_file_blobs(
+    repo_root: pathlib.Path = REPO_ROOT,
+    prefixes: tuple[str, ...] = WHEEL_INPUT_PREFIXES,
+) -> list[tuple[str, str]]:
+    # Hash normalized Git blobs from the working tree so unstaged changes are included without
+    # making the result depend on core.autocrlf.
     try:
         out = subprocess.check_output(
             [
                 "git",
                 "-C",
-                str(REPO_ROOT),
+                str(repo_root),
                 "ls-files",
-                "-s",
+                "--cached",
+                "--others",
+                "--exclude-standard",
                 "-z",
-                *WHEEL_INPUT_PREFIXES,
+                "--",
+                *prefixes,
             ],
             stderr=subprocess.DEVNULL,
         )
-    except Exception:
+        paths = sorted({raw.decode("utf-8") for raw in out.split(b"\0") if raw})
+        pairs = []
+        for path in paths:
+            if not (repo_root / path).is_file():
+                continue
+            oid = subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(repo_root),
+                    "hash-object",
+                    f"--path={path}",
+                    "--",
+                    path,
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            pairs.append((path, oid))
+        return pairs
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
         return []
 
-    pairs: list[tuple[str, str]] = []
-    for raw in out.split(b"\0"):
-        if not raw:
-            continue
-        # Format: "{mode} {oid} {stage}\t{path}"
-        try:
-            meta, path_raw = raw.split(b"\t", 1)
-            parts = meta.split()
-            oid = parts[1].decode("ascii")
-            path = path_raw.decode("utf-8")
-        except Exception:
-            continue
-        pairs.append((path, oid))
 
-    # Deterministic ordering, stable across platforms.
-    return sorted(pairs, key=lambda t: t[0])
-
-
-def _hash_inputs() -> tuple[str, int]:
+def _hash_inputs(
+    repo_root: pathlib.Path = REPO_ROOT,
+    prefixes: tuple[str, ...] = WHEEL_INPUT_PREFIXES,
+) -> tuple[str, int]:
     h = hashlib.sha256()
-    blobs = _git_tracked_file_blobs()
+    blobs = _git_worktree_file_blobs(repo_root, prefixes)
     if not blobs:
-        raise RuntimeError(
-            "Could not find git-tracked inputs for stamp; run from a git checkout."
-        )
+        raise RuntimeError("Could not find wheel inputs; run from a git checkout.")
 
-    proc = subprocess.Popen(
-        ["git", "-C", str(REPO_ROOT), "cat-file", "--batch"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-
-    for _path, oid in blobs:
-        proc.stdin.write(oid.encode("ascii") + b"\n")
-    proc.stdin.close()
-
-    for path, _oid in blobs:
-        header = proc.stdout.readline()
-        if not header:
-            raise RuntimeError("Unexpected EOF from git cat-file --batch")
-        # Format: "{oid} {type} {size}\n"
-        try:
-            _obj, obj_type, size_s = header.decode("ascii").rstrip("\n").split(" ", 2)
-        except Exception as e:
-            raise RuntimeError(f"Unexpected cat-file header: {header!r}") from e
-        if obj_type != "blob":
-            raise RuntimeError(f"Expected blob for {path}, got {obj_type}")
-        try:
-            size = int(size_s)
-        except ValueError as e:
-            raise RuntimeError(f"Unexpected blob size for {path}: {size_s!r}") from e
-
-        content = proc.stdout.read(size)
-        # cat-file outputs a trailing newline after the object content
-        proc.stdout.read(1)
-
+    for path, oid in blobs:
         h.update(path.encode("utf-8"))
         h.update(b"\0")
-        h.update(content)
+        h.update(oid.encode("ascii"))
         h.update(b"\0")
-
-    rc = proc.wait()
-    if rc != 0:
-        raise RuntimeError(f"git cat-file --batch failed with exit code {rc}")
 
     return h.hexdigest(), len(blobs)
 

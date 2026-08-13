@@ -6,7 +6,10 @@ on:
     paths:
       - ".github/workflows/cache-warm.yml"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/publish-crates.yml"
       - ".github/workflows/python-dist.yml"
+      - ".github/workflows/release-plz.yml"
       - ".cargo/**"
       - "**/*.rs"
       - "**/Cargo.toml"
