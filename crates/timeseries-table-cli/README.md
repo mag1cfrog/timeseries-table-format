@@ -276,4 +276,4 @@ AAPL,2024-01-03,186.00,187.10,185.50,186.80,48000000
 ## Related
 
 - [timeseries-table-core](../timeseries-table-core/README.md) — Core Rust library for building on this format
-- [timeseries-table-datafusion](../timeseries-table-datafusion/README.md) — DataFusion integration with time-based pruning
+- [DataFusion integration](../timeseries-table-core/DATAFUSION.md) - SQL integration with time-based pruning

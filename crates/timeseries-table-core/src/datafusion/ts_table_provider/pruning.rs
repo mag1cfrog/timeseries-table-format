@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use datafusion::logical_expr::Operator;
 
-use crate::ts_table_provider::{IntervalTruth, TimePred};
+use super::{IntervalTruth, TimePred};
 
 pub(crate) fn eval_cmp_on_interval(
     op: Operator,

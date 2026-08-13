@@ -10,7 +10,7 @@ use datafusion::logical_expr::{Between, Operator};
 use datafusion::scalar::ScalarValue;
 use std::ops::{Add, Sub};
 
-use crate::ts_table_provider::ParsedTz;
+use super::ParsedTz;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TimePred {

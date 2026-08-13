@@ -206,7 +206,7 @@ cargo run -p timeseries-table-core --example ingest_nvda
 2) Query with DataFusion + moving average window:
 
 ```bash
-cargo run -p timeseries-table-datafusion --example query_nvda_ma
+cargo run -p timeseries-table-core --features datafusion --example query_nvda_ma
 ```
 
 Example output:
@@ -290,7 +290,7 @@ See [timeseries-table-core](crates/timeseries-table-core/README.md) for full API
 timeseries-table-format = "0.1"
 ```
 
-See [timeseries-table-datafusion](crates/timeseries-table-datafusion/README.md) for SQL query examples.
+See the [DataFusion integration guide](crates/timeseries-table-core/DATAFUSION.md) for SQL query examples.
 
 ---
 
@@ -383,7 +383,7 @@ Current status and near-term roadmap:
 - [Python docs](https://mag1cfrog.github.io/timeseries-table-format/)
 - [CLI reference](crates/timeseries-table-cli/README.md)
 - [Core library API](crates/timeseries-table-core/README.md)
-- [DataFusion integration](crates/timeseries-table-datafusion/README.md)
+- [DataFusion integration](crates/timeseries-table-core/DATAFUSION.md)
 
 ---
 

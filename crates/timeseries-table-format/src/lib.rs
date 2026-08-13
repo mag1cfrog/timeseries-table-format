@@ -36,7 +36,7 @@ pub mod coverage {
 /// DataFusion integration (enabled by default).
 #[cfg(feature = "datafusion")]
 pub mod datafusion {
-    pub use timeseries_table_datafusion::*;
+    pub use timeseries_table_core::datafusion::*;
 }
 
 pub use timeseries_table_core::metadata::logical_schema::{
@@ -50,4 +50,4 @@ pub use timeseries_table_core::table::{TableError, TimeSeriesTable};
 
 /// DataFusion table provider (enabled by default).
 #[cfg(feature = "datafusion")]
-pub use timeseries_table_datafusion::TsTableProvider;
+pub use timeseries_table_core::datafusion::TsTableProvider;

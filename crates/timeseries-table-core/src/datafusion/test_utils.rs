@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use datafusion::logical_expr::{Expr, Operator};
 
-use crate::ts_table_provider::{IntervalTruth, ParsedTz, TimePred, UnifiedInterval};
+use super::ts_table_provider::{IntervalTruth, ParsedTz, TimePred, UnifiedInterval};
 
 /// Simplified, public view of a compiled time predicate for tests.
 #[derive(Debug, PartialEq)]
@@ -47,7 +47,7 @@ pub(crate) fn compile_time_pred_for_tests_with_tz(
     ts_col: &str,
     tz: Option<&ParsedTz>,
 ) -> CompiledTimePred {
-    match crate::ts_table_provider::compile_time_pred(expr, ts_col, tz) {
+    match super::ts_table_provider::compile_time_pred(expr, ts_col, tz) {
         TimePred::True => CompiledTimePred::True,
         TimePred::False => CompiledTimePred::False,
         TimePred::NonTime => CompiledTimePred::NonTime,
@@ -75,8 +75,8 @@ pub(crate) fn eval_time_pred_on_segment_for_tests_with_tz(
     seg_max: DateTime<Utc>,
     tz: Option<&ParsedTz>,
 ) -> CompiledIntervalTruth {
-    let pred = crate::ts_table_provider::compile_time_pred(expr, ts_col, tz);
-    match crate::ts_table_provider::eval_time_pred_on_segment(&pred, seg_min, seg_max) {
+    let pred = super::ts_table_provider::compile_time_pred(expr, ts_col, tz);
+    match super::ts_table_provider::eval_time_pred_on_segment(&pred, seg_min, seg_max) {
         IntervalTruth::AlwaysTrue => CompiledIntervalTruth::AlwaysTrue,
         IntervalTruth::AlwaysFalse => CompiledIntervalTruth::AlwaysFalse,
         IntervalTruth::MaybeTrue => CompiledIntervalTruth::MaybeTrue,
@@ -115,7 +115,7 @@ pub fn add_interval_for_tests(
     interval: TestInterval,
     sign: i32,
 ) -> Option<DateTime<Utc>> {
-    crate::ts_table_provider::add_interval(
+    super::ts_table_provider::add_interval(
         dt,
         UnifiedInterval {
             months: interval.months,

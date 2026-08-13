@@ -9,9 +9,9 @@ use chrono_tz::Tz;
 pub(crate) use time_predicate::*;
 
 mod pruning;
+use crate::storage::StorageLocation;
+use crate::storage::file_size;
 pub(crate) use pruning::*;
-use timeseries_table_core::storage::StorageLocation;
-use timeseries_table_core::storage::file_size;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -37,12 +37,12 @@ use datafusion::logical_expr::Expr;
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
+use crate::table::TimeSeriesTable;
+use crate::transaction_log::SegmentMeta;
+use crate::transaction_log::TableState;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
-use timeseries_table_core::table::TimeSeriesTable;
-use timeseries_table_core::transaction_log::SegmentMeta;
-use timeseries_table_core::transaction_log::TableState;
 use tokio::sync::RwLock;
 
 /// DataFusion table provider for a timeseries table schema.

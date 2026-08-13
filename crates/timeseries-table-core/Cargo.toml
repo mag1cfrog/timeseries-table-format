@@ -12,10 +12,15 @@ readme = "README.md"
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-select = { workspace = true }
+async-trait = { workspace = true, optional = true }
 blake3 = "1.8.2"
 bytes = "1.11.0"
 chrono = { workspace = true }
+chrono-tz = { workspace = true, optional = true }
+datafusion = { workspace = true, optional = true }
 futures = { workspace = true }
+log = "0.4"
+object_store = { version = "0.12.5", optional = true }
 parquet = { workspace = true }
 rayon = "1.11.0"
 roaring = "0.11.2"
@@ -23,16 +28,30 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 snafu = { workspace = true, features = ["backtrace"] }
 tokio = { version = "1.48.0", features = ["fs", "io-util"] }
-log = "0.4"
 
 [features]
 default = []
+datafusion = [
+    "dep:async-trait",
+    "dep:chrono-tz",
+    "dep:datafusion",
+    "dep:object_store",
+    "tokio/sync",
+]
 test-counters = []
 
 [dev-dependencies]
 arrow-csv = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[example]]
+name = "query_nvda_ma"
+required-features = ["datafusion"]
+
+[[test]]
+name = "ts_table_provider_tests"
+required-features = ["datafusion"]
 
 [lints]
 workspace = true

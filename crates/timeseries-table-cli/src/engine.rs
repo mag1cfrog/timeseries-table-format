@@ -14,12 +14,12 @@ use arrow::{
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures_util::StreamExt;
 use snafu::ResultExt;
+use timeseries_table_core::datafusion::TsTableProvider;
+use timeseries_table_core::datafusion::pretty::pretty_format_batches_compact_floats;
 use timeseries_table_core::{
     storage::{OutputLocation, OutputSink, TableLocation, open_output_sink},
     table::TimeSeriesTable,
 };
-use timeseries_table_datafusion::TsTableProvider;
-use timeseries_table_datafusion::pretty::pretty_format_batches_compact_floats;
 
 use crate::{
     error::{

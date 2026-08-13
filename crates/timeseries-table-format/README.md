@@ -2,9 +2,8 @@
 
 Append-only time-series table format with gap/overlap tracking.
 
-This is the main entry point crate that re-exports:
-- `timeseries-table-core` — core storage + coverage logic
-- `timeseries-table-datafusion` — DataFusion SQL integration (optional)
+This is the main entry point crate. It re-exports `timeseries-table-core`,
+including its optional DataFusion SQL integration.
 
 ## Installation
 

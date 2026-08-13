@@ -409,7 +409,7 @@ jobs:
               "PKG-INFO",
               "pyproject.toml",
               "crates/timeseries-table-core/Cargo.toml",
-              "crates/timeseries-table-datafusion/Cargo.toml",
+              "crates/timeseries-table-core/src/datafusion/mod.rs",
               "crates/timeseries-table-python/Cargo.toml",
               "crates/timeseries-table-python/src/lib.rs",
               "python/timeseries_table_format/__init__.py",

@@ -63,7 +63,6 @@ jobs:
             code:
               - 'crates/timeseries-table-python/**'
               - 'crates/timeseries-table-core/**'
-              - 'crates/timeseries-table-datafusion/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
