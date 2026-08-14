@@ -1,11 +1,15 @@
 name: Publish (crates.io)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing canonical release tag to publish
+        required: true
+        type: string
   push:
     tags:
       - "timeseries-table-format-v*"
-      - "timeseries-table-cli-v*"
 
 permissions:
   contents: read
@@ -37,6 +41,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -61,36 +66,18 @@ jobs:
         with:
           version: "v0.16.0"
 
-      - name: Verify tag matches Cargo version
-        if: ${{ github.ref_type == 'tag' }}
+      - name: Verify canonical tag and workspace version
+        id: release
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          version="$(python scripts/check_release_version.py --tag "${RELEASE_TAG}")"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-          case "${tag}" in
-            timeseries-table-format-v*)
-              crate="timeseries-table-format"
-              crate_dir="crates/timeseries-table-format"
-              ;;
-            timeseries-table-cli-v*)
-              crate="timeseries-table-cli"
-              crate_dir="crates/timeseries-table-cli"
-              ;;
-            *)
-              echo "Unexpected tag format: ${tag}"
-              exit 1
-              ;;
-          esac
-
-          expected="${tag#"${crate}"-v}"
-          actual="$(
-            python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('${crate_dir}/Cargo.toml').read_text(encoding='utf-8'))['package']['version'])"
-          )"
-          if [[ "${actual}" != "${expected}" ]]; then
-            echo "Tag/version mismatch for ${crate}: tag=${expected} cargo=${actual}"
-            exit 1
-          fi
+      - name: Verify crate archives
+        run: cargo package --locked -p timeseries-table-format -p timeseries-table-cli
 
       - name: Mint crates.io token (OIDC)
         id: cratesio
@@ -103,14 +90,10 @@ jobs:
           CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           ua="mag1cfrog/timeseries-table-format publish-crates (GitHub Actions)"
-
-          has_tag_on_sha() {
-            local tag="$1"
-            git tag --points-at "${GITHUB_SHA}" | grep -Fxq "${tag}"
-          }
 
           has_version() {
             local crate="$1"
@@ -155,11 +138,11 @@ jobs:
                 'edition = "2021"' \
                 '' \
                 '[dependencies]' \
-                "${crate} = \"=${ver}\""
+                "${crate} = { version = \"=${ver}\", default-features = false }"
             } >"${tmp}/Cargo.toml"
             echo "fn main() {}" >"${tmp}/src/main.rs"
 
-            retry 10 5 bash -lc "cd '${tmp}' && cargo fetch -q"
+            retry 10 5 bash -lc "cd '${tmp}' && CARGO_HOME='${tmp}/cargo-home' cargo fetch -q"
           }
 
           publish_if_missing() {
@@ -169,10 +152,6 @@ jobs:
               echo "Skipping ${crate} v${ver} (already on crates.io)"
               return 0
             fi
-            if ! has_tag_on_sha "${crate}-v${ver}"; then
-              echo "Refusing to publish ${crate} v${ver}: tag ${crate}-v${ver} is not on commit ${GITHUB_SHA}"
-              return 1
-            fi
             echo "Publishing ${crate} v${ver}"
             if ! retry 5 15 cargo publish --locked -p "${crate}"; then
               if has_version "${crate}" "${ver}"; then
@@ -181,35 +160,8 @@ jobs:
                 return 1
               fi
             fi
-            if [[ "${crate}" != "timeseries-table-cli" ]]; then
-              wait_for_registry "${crate}" "${ver}"
-            fi
           }
 
-          fmt_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-format/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
-          cli_ver="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("crates/timeseries-table-cli/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
-
-          # Only publish versions that correspond to tags on this commit (release-plz creates per-crate tags).
-          fmt_tag="timeseries-table-format-v${fmt_ver}"
-          cli_tag="timeseries-table-cli-v${cli_ver}"
-
-          fmt_on_sha=false
-          cli_on_sha=false
-          if has_tag_on_sha "${fmt_tag}"; then fmt_on_sha=true; fi
-          if has_tag_on_sha "${cli_tag}"; then cli_on_sha=true; fi
-
-          echo "Tag matrix on ${GITHUB_SHA}: fmt=${fmt_on_sha} cli=${cli_on_sha}"
-
-          if [[ "${fmt_on_sha}" != true &&
-                "${cli_on_sha}" != true ]]; then
-            echo "No release tags point at ${GITHUB_SHA}; refusing to report a successful no-op publish."
-            exit 1
-          fi
-
-          if [[ "${fmt_on_sha}" == true ]]; then
-            publish_if_missing "timeseries-table-format" "${fmt_ver}"
-          fi
-          if [[ "${cli_on_sha}" == true ]]; then
-            publish_if_missing "timeseries-table-format" "${fmt_ver}"
-            publish_if_missing "timeseries-table-cli" "${cli_ver}"
-          fi
+          publish_if_missing "timeseries-table-format" "${RELEASE_VERSION}"
+          wait_for_registry "timeseries-table-format" "${RELEASE_VERSION}"
+          publish_if_missing "timeseries-table-cli" "${RELEASE_VERSION}"
