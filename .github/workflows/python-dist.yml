@@ -196,7 +196,7 @@ jobs:
               env.write(f"EXPECTED_PYTHON_VERSION={python_version}\n")
           print(f"Using snapshot version: {base} -> {new_version}")
           PY
-          cargo update --workspace --offline
+          cargo update --workspace
           python scripts/check_release_version.py
 
       - name: Build wheel (maturin)
