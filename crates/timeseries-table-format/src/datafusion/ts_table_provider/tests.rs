@@ -119,6 +119,7 @@ fn binary(left: Expr, op: Operator, right: Expr) -> Expr {
     })
 }
 
+#[cfg(feature = "test-counters")]
 fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
