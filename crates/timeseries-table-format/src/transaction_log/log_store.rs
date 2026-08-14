@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 /// Helper for reading and writing the commit log under a table root.
 ///
 /// Layout:
-///   <root>/_timeseries_log/0000000001.json
-///   <root>/_timeseries_log/0000000002.json
-///   <root>/_timeseries_log/CURRENT
+///   `<root>/_timeseries_log/0000000001.json`
+///   `<root>/_timeseries_log/0000000002.json`
+///   `<root>/_timeseries_log/CURRENT`
 #[derive(Debug, Clone)]
 pub struct TransactionLogStore {
     location: TableLocation,

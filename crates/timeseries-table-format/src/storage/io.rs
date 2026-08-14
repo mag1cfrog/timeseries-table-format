@@ -223,7 +223,7 @@ pub async fn write_new(
 }
 
 /// Read the full contents of a file at `rel_path` within `location` and return
-/// them as a Vec<u8>.
+/// them as a `Vec<u8>`.
 ///
 /// Only `StorageLocation::Local` is supported in this crate version.
 ///

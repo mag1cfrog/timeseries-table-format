@@ -223,7 +223,7 @@ Example output:
 +---------------------+--------+------------+
 ```
 
-Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
+Sample data lives at `crates/timeseries-table-format/examples/assets/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
 
 ---
 

@@ -1,7 +1,7 @@
 //! Reconstructing the current table state by replaying log commits.
 //!
 //! `TableState` materializes the metadata stored in `_timeseries_log/` and the
-//! [`LogStore::rebuild_table_state`] helper walks all commits from version 1 up
+//! [`TransactionLogStore::rebuild_table_state`] helper walks all commits from version 1 up
 //! to the `CURRENT` pointer, applying their actions in order. This keeps read
 //! logic isolated from the append-only write path and documents the invariant
 //! that table readers must see a state consistent with the latest committed

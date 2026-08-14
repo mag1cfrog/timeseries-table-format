@@ -105,4 +105,4 @@ Log actions:
 ## Extension points
 - **Storage**: extend `TableLocation` and `storage` for new backends.
 - **Segment formats**: extend `FileFormat` and `SegmentMeta::new_validated`.
-- **Schema evolution**: rules live in `helpers::schema`.
+- **Schema evolution**: rules live in `metadata::schema_compat`.
