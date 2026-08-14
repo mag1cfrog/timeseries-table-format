@@ -1,10 +1,11 @@
+use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
 use std::{
     io,
     path::{Path, PathBuf},
 };
 use tokio::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::AsyncWriteExt,
 };
 
@@ -49,20 +50,21 @@ pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
     }
 }
 
-/// Open a local file without reading its contents into memory.
-pub(crate) async fn open_local_file(
+/// Open a stored Parquet file for asynchronous range reads.
+pub(crate) async fn open_parquet_reader(
     location: &StorageLocation,
     rel_path: &Path,
-) -> StorageResult<File> {
-    let abs = join_local(location, rel_path);
+) -> StorageResult<Box<dyn AsyncFileReader>> {
     let path = rel_path.display().to_string();
 
-    match File::open(abs).await {
-        Ok(file) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Err(BackendError::Local(error)).context(NotFoundSnafu { path })
-        }
-        Err(error) => Err(BackendError::Local(error)).context(OtherIoSnafu { path }),
+    match location {
+        StorageLocation::Local(root) => match fs::File::open(root.join(rel_path)).await {
+            Ok(file) => Ok(Box::new(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(BackendError::Local(error)).context(NotFoundSnafu { path })
+            }
+            Err(error) => Err(BackendError::Local(error)).context(OtherIoSnafu { path }),
+        },
     }
 }
 
@@ -271,7 +273,7 @@ pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageRe
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
-            let path_str = abs.display().to_string();
+            let path_str = rel_path.display().to_string();
 
             let meta = fs::metadata(&abs).await;
             match meta {

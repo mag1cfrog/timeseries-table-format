@@ -17,7 +17,7 @@ use parquet::{
 use snafu::prelude::*;
 use tokio::task::JoinSet;
 
-use crate::storage::{StorageError, TableLocation, open_local_file};
+use crate::storage::{StorageError, TableLocation, open_parquet_reader};
 
 use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 
@@ -419,7 +419,7 @@ async fn scan_entity_row_groups(
         let mask = mask.clone();
 
         tasks.spawn(async move {
-            let file = open_local_file(location.as_ref(), &rel_path)
+            let file = open_parquet_reader(location.as_ref(), &rel_path)
                 .await
                 .map_err(|source| SegmentEntityIdentityError::Storage {
                     path: path.clone(),
@@ -466,7 +466,7 @@ pub(crate) async fn segment_entity_identity_from_parquet(
         return Ok(EntityIdentity::new());
     }
 
-    let mut file = open_local_file(location.as_ref(), rel_path)
+    let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
         .map_err(|source| SegmentEntityIdentityError::Storage {
             path: path.clone(),

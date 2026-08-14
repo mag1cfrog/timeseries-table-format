@@ -36,7 +36,7 @@ use crate::{
     coverage::bucket::bucket_id_from_epoch_secs,
     metadata::table_metadata::TimeBucket,
     metadata::time_column::TimeColumnError,
-    storage::{StorageError, TableLocation, open_local_file},
+    storage::{StorageError, TableLocation, open_parquet_reader},
 };
 
 use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
@@ -263,7 +263,7 @@ pub async fn compute_segment_coverage(
     bucket_spec: &TimeBucket,
 ) -> Result<Coverage, SegmentCoverageError> {
     let path = rel_path.display().to_string();
-    let mut file = open_local_file(location.as_ref(), rel_path)
+    let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
         .map_err(|source| SegmentCoverageError::Storage {
             path: path.clone(),
@@ -317,7 +317,7 @@ pub async fn compute_segment_coverage(
         let mask = mask.clone();
 
         tasks.spawn(async move {
-            let file = open_local_file(location.as_ref(), &rel_path)
+            let file = open_parquet_reader(location.as_ref(), &rel_path)
                 .await
                 .map_err(|source| SegmentCoverageError::Storage {
                     path: path.clone(),

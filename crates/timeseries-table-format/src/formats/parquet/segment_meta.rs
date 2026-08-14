@@ -20,7 +20,7 @@ use snafu::Backtrace;
 use tokio::task::JoinSet;
 
 use crate::metadata::time_column::TimeColumnError;
-use crate::storage::{TableLocation, open_local_file};
+use crate::storage::{TableLocation, file_size, open_parquet_reader};
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
 use crate::transaction_log::{FileFormat, SegmentMeta};
 
@@ -204,7 +204,7 @@ async fn scan_timestamp_row_groups(
         let mask = mask.clone();
 
         tasks.spawn(async move {
-            let file = open_local_file(location.as_ref(), &rel_path)
+            let file = open_parquet_reader(location.as_ref(), &rel_path)
                 .await
                 .map_err(map_storage_error)?;
             let reader = ParquetRecordBatchStreamBuilder::new_with_metadata(file, metadata)
@@ -321,24 +321,19 @@ pub(crate) async fn segment_meta_from_parquet(
     time_column: &str,
 ) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
     let path_str = rel_path.display().to_string();
-    let mut file = open_local_file(location.as_ref(), rel_path)
+    let file_size = file_size(location.as_ref(), rel_path)
         .await
         .map_err(map_storage_error)?;
-    let file_size = file
-        .metadata()
-        .await
-        .map_err(|source| SegmentMetaError::ParquetRead {
-            path: path_str.clone(),
-            source: parquet::errors::ParquetError::External(Box::new(source)),
-            backtrace: Backtrace::capture(),
-        })?
-        .len();
     if file_size < 8 {
         return Err(SegmentMetaError::TooShort {
             path: path_str.clone(),
         }
         .into());
     }
+
+    let mut file = open_parquet_reader(location.as_ref(), rel_path)
+        .await
+        .map_err(map_storage_error)?;
 
     let metadata = ArrowReaderMetadata::load_async(&mut file, ArrowReaderOptions::default())
         .await

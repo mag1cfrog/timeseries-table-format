@@ -14,7 +14,7 @@ use snafu::Backtrace;
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
-use crate::storage::{TableLocation, open_local_file};
+use crate::storage::{TableLocation, open_parquet_reader};
 use crate::transaction_log::segments::{
     SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
 };
@@ -394,7 +394,7 @@ pub async fn logical_schema_from_parquet(
     rel_path: &Path,
 ) -> SegmentResult<LogicalSchema> {
     let path = rel_path.display().to_string();
-    let mut file = open_local_file(location.as_ref(), rel_path)
+    let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
         .map_err(map_storage_error)?;
     let metadata =
