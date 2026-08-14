@@ -7,15 +7,14 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: release-plz
-  queue: max
-
 jobs:
   release-plz-release:
     name: Release-plz release
     if: ${{ github.repository_owner == 'mag1cfrog' }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-release
+      queue: max
     permissions:
       contents: write
     env:
@@ -94,8 +93,12 @@ jobs:
 
   release-plz-pr:
     name: Release-plz PR
+    needs: release-plz-release
     if: ${{ github.repository_owner == 'mag1cfrog' }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: true
     permissions:
       contents: write
       pull-requests: write
