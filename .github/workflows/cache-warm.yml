@@ -5,21 +5,14 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/cache-warm.yml"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/docs.yml"
-      - ".github/workflows/publish-crates.yml"
-      - ".github/workflows/publish-pypi.yml"
-      - ".github/workflows/publish-testpypi.yml"
-      - ".github/workflows/publish-testpypi-snapshot.yml"
       - ".github/workflows/python-dist.yml"
-      - ".github/workflows/release-plz.yml"
       - ".cargo/**"
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "**/build.rs"
-      - "crates/timeseries-table-python/**"
+      - "crates/timeseries-table-python/pyproject.toml"
 
 permissions:
   contents: read
@@ -45,10 +38,6 @@ jobs:
           filters: |
             wheels:
               - '.github/workflows/cache-warm.yml'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/publish-pypi.yml'
-              - '.github/workflows/publish-testpypi.yml'
-              - '.github/workflows/publish-testpypi-snapshot.yml'
               - '.github/workflows/python-dist.yml'
               - '.cargo/**'
               - 'crates/**/*.rs'
@@ -56,7 +45,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '**/build.rs'
-              - 'crates/timeseries-table-python/**'
+              - 'crates/timeseries-table-python/pyproject.toml'
 
   core:
     name: Warm core Rust caches
