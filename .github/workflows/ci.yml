@@ -173,7 +173,15 @@ jobs:
 
       - name: append RSS regression checks
         run: |
-          uv sync --project crates/timeseries-table-python --locked --no-dev --no-install-project
+          uv sync --project crates/timeseries-table-python --locked --no-install-project
+          crates/timeseries-table-python/.venv/bin/ruff check scripts/append_rss_regression.py scripts/test_append_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/append_rss_regression.py scripts/test_append_rss_regression.py
+          (
+            cd crates/timeseries-table-python
+            PYTHONPATH=../../scripts .venv/bin/ty check \
+              ../../scripts/append_rss_regression.py \
+              ../../scripts/test_append_rss_regression.py
+          )
           crates/timeseries-table-python/.venv/bin/python scripts/test_append_rss_regression.py
 
       - name: fmt

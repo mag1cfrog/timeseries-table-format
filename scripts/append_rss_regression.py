@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TypedDict
 
 
 MIB = 1024 * 1024
@@ -21,6 +22,12 @@ DEFAULT_ROW_COUNT = 1024
 DEFAULT_ROW_GROUP_COUNT = 32
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GNU_TIME = Path("/usr/bin/time")
+
+
+class AppendMeasurement(TypedDict):
+    input_file_bytes: int
+    peak_rss_bytes: int
+    command: str
 
 
 def parse_max_rss_bytes(time_output: str) -> int:
@@ -194,7 +201,7 @@ def measure_append(
     input_path: Path,
     table_root: Path,
     timing_path: Path,
-) -> dict[str, object]:
+) -> AppendMeasurement:
     create_command = [
         str(tstable),
         "create",
@@ -299,7 +306,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             args.row_groups,
         )
 
-        measurements = {}
+        measurements: dict[str, AppendMeasurement] = {}
         for name, input_path in (("small", small_path), ("large", large_path)):
             print(f"Measuring {name} input", file=sys.stderr)
             measurements[name] = measure_append(
