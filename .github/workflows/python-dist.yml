@@ -201,6 +201,7 @@ jobs:
 
       - name: Build wheel (maturin)
         id: wheel-build
+        if: ${{ !inputs.include-sdist || matrix.os != 'ubuntu-latest' }}
         continue-on-error: ${{ inputs.write-cache && startsWith(matrix.os, 'ubuntu') }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
@@ -291,75 +292,6 @@ jobs:
         run: >-
           sccache --show-stats --stats-format json |
           python -c 'import json, os, sys; count = json.load(sys.stdin)["stats"]["cache_write_errors"]; errors = [line for line in open(os.environ["SCCACHE_ERROR_LOG"], errors="replace") if "Error executing cache write:" in line][-count:] if count else []; fatal = count and (len(errors) != count or any("AlreadyExists" not in line for line in errors)); sys.exit(f"sccache reported {count} cache write errors") if fatal else print(f"Ignoring {count} cache entries that already exist") if count else None'
-
-      - name: Verify wheel contents
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import email.parser
-          import os
-          import zipfile
-          from pathlib import Path
-
-          wheels = list(Path("crates/timeseries-table-python/dist").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
-          if "-cp310-abi3-" not in wheels[0].name:
-              raise SystemExit(f"expected a cp310-abi3 wheel, found {wheels[0].name}")
-
-          expected_version = os.environ["EXPECTED_PYTHON_VERSION"]
-
-          required = {
-              "timeseries_table_format/__init__.py",
-              "timeseries_table_format/__init__.pyi",
-              "timeseries_table_format/_native.pyi",
-              "timeseries_table_format/notebook_display.py",
-              "timeseries_table_format/notebook_display_config.py",
-              "timeseries_table_format/py.typed",
-          }
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              names = set(wheel.namelist())
-              missing = sorted(required - names)
-              if missing:
-                  raise SystemExit(f"missing wheel entries: {', '.join(missing)}")
-              if not any(
-                  name.startswith("timeseries_table_format/_native")
-                  and name.endswith((".so", ".pyd"))
-                  for name in names
-              ):
-                  raise SystemExit("wheel is missing the native extension")
-              metadata_paths = [
-                  name for name in names if name.endswith(".dist-info/METADATA")
-              ]
-              if len(metadata_paths) != 1:
-                  raise SystemExit("expected exactly one METADATA file")
-              wheel_paths = [
-                  name for name in names if name.endswith(".dist-info/WHEEL")
-              ]
-              if len(wheel_paths) != 1:
-                  raise SystemExit("expected exactly one WHEEL metadata file")
-              wheel_metadata = email.parser.Parser().parsestr(
-                  wheel.read(wheel_paths[0]).decode()
-              )
-              tags = wheel_metadata.get_all("Tag", [])
-              if not tags or any(not tag.startswith("cp310-abi3-") for tag in tags):
-                  raise SystemExit(f"unexpected wheel tags: {tags}")
-              metadata = email.parser.Parser().parsestr(
-                  wheel.read(metadata_paths[0]).decode()
-              )
-              if metadata["Name"] != "timeseries-table-format":
-                  raise SystemExit(f"unexpected package name: {metadata['Name']}")
-              if metadata["Version"] != expected_version:
-                  raise SystemExit(f"unexpected package version: {metadata['Version']}")
-          PY
-
-      - name: Prepare host sdist build
-        if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          sudo chown -R "$(id -u):$(id -g)" crates/timeseries-table-python/dist
 
       - name: Build sdist (once)
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
@@ -499,11 +431,23 @@ jobs:
             --locked
             -i python3.10
 
-      - name: Verify wheel built from sdist
+      - name: Use wheel built from sdist
         if: ${{ inputs.include-sdist && matrix.os == 'ubuntu-latest' }}
         shell: bash
         env:
           SDIST_ROOT: ${{ steps.extract-sdist.outputs.root }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=("${SDIST_ROOT}"/sdist-wheel/*.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "Expected one wheel from the sdist, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          cp "${wheels[0]}" crates/timeseries-table-python/dist/
+
+      - name: Verify wheel contents
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -512,19 +456,56 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = list((Path(os.environ["SDIST_ROOT"]) / "sdist-wheel").glob("*.whl"))
+          wheels = list(Path("crates/timeseries-table-python/dist").glob("*.whl"))
           if len(wheels) != 1:
-              raise SystemExit(f"expected one wheel from the sdist, found {len(wheels)}")
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
           if "-cp310-abi3-" not in wheels[0].name:
               raise SystemExit(f"expected a cp310-abi3 wheel, found {wheels[0].name}")
+
+          expected_version = os.environ["EXPECTED_PYTHON_VERSION"]
+
+          required = {
+              "timeseries_table_format/__init__.py",
+              "timeseries_table_format/__init__.pyi",
+              "timeseries_table_format/_native.pyi",
+              "timeseries_table_format/notebook_display.py",
+              "timeseries_table_format/notebook_display_config.py",
+              "timeseries_table_format/py.typed",
+          }
           with zipfile.ZipFile(wheels[0]) as wheel:
-              paths = [name for name in wheel.namelist() if name.endswith(".dist-info/WHEEL")]
-              if len(paths) != 1:
+              names = set(wheel.namelist())
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"missing wheel entries: {', '.join(missing)}")
+              if not any(
+                  name.startswith("timeseries_table_format/_native")
+                  and name.endswith((".so", ".pyd"))
+                  for name in names
+              ):
+                  raise SystemExit("wheel is missing the native extension")
+              metadata_paths = [
+                  name for name in names if name.endswith(".dist-info/METADATA")
+              ]
+              if len(metadata_paths) != 1:
+                  raise SystemExit("expected exactly one METADATA file")
+              wheel_paths = [
+                  name for name in names if name.endswith(".dist-info/WHEEL")
+              ]
+              if len(wheel_paths) != 1:
                   raise SystemExit("expected exactly one WHEEL metadata file")
-              metadata = email.parser.Parser().parsestr(wheel.read(paths[0]).decode())
-              tags = metadata.get_all("Tag", [])
+              wheel_metadata = email.parser.Parser().parsestr(
+                  wheel.read(wheel_paths[0]).decode()
+              )
+              tags = wheel_metadata.get_all("Tag", [])
               if not tags or any(not tag.startswith("cp310-abi3-") for tag in tags):
                   raise SystemExit(f"unexpected wheel tags: {tags}")
+              metadata = email.parser.Parser().parsestr(
+                  wheel.read(metadata_paths[0]).decode()
+              )
+              if metadata["Name"] != "timeseries-table-format":
+                  raise SystemExit(f"unexpected package name: {metadata['Name']}")
+              if metadata["Version"] != expected_version:
+                  raise SystemExit(f"unexpected package version: {metadata['Version']}")
           PY
 
       - name: Upload dist artifacts
