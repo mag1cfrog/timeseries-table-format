@@ -5,15 +5,21 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/publish-testpypi-snapshot.yml"
-      - ".github/workflows/python-dist.yml"
-      - ".cargo/**"
+      - ".cargo/config.toml"
       - "rust-toolchain.toml"
-      - "crates/timeseries-table-python/**"
-      - "crates/timeseries-table-core/**"
-      - "crates/timeseries-table-format/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "crates/timeseries-table-python/Cargo.toml"
+      - "crates/timeseries-table-python/pyproject.toml"
+      - "crates/timeseries-table-python/build.rs"
+      - "crates/timeseries-table-python/src/**"
+      - "crates/timeseries-table-python/python/**"
+      - "crates/timeseries-table-core/Cargo.toml"
+      - "crates/timeseries-table-core/build.rs"
+      - "crates/timeseries-table-core/src/**"
+      - "crates/timeseries-table-format/Cargo.toml"
+      - "crates/timeseries-table-format/build.rs"
+      - "crates/timeseries-table-format/src/**"
 
 permissions: {}
 
