@@ -69,10 +69,20 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
+          predicate-quantifier: some-with-excludes
           filters: |
             code:
               - 'crates/timeseries-table-python/**'
               - 'crates/timeseries-table-format/**'
+              - '!crates/timeseries-table-format/src/bin/tstable/**'
+              - '!crates/timeseries-table-format/tests/cli_create_append_query.rs'
+              - '!crates/timeseries-table-format/tests/cli_workflows.rs'
+              - '!crates/timeseries-table-format/tests/shell_interactive.rs'
+              - '!crates/timeseries-table-format/tests/common/**'
+              - '!crates/timeseries-table-format/examples/append_profile.rs'
+              - '!crates/timeseries-table-format/examples/segment_meta_bench.rs'
+              - '!crates/timeseries-table-format/CLI.md'
+              - '!crates/timeseries-table-format/CHANGELOG.cli.md'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
