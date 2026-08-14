@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+import tempfile
 import unittest
+from pathlib import Path
 
-from append_rss_regression import MIB, parse_max_rss_bytes, require_bounded_rss
+from append_rss_regression import (
+    MIB,
+    generate_fixture_pair,
+    parse_max_rss_bytes,
+    require_bounded_rss,
+)
 
 
 class AppendRssRegressionTests(unittest.TestCase):
@@ -35,6 +43,43 @@ Command being timed: "tstable append"
 
     def test_rss_delta_may_be_negative(self) -> None:
         self.assertEqual(require_bounded_rss(128 * MIB, 64 * MIB), -64 * MIB)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("pyarrow"), "PyArrow is not installed"
+    )
+    def test_generates_comparable_uncompressed_parquet_fixtures(self) -> None:
+        import pyarrow.parquet as pq
+
+        with tempfile.TemporaryDirectory() as tmp:
+            small_path, large_path = generate_fixture_pair(
+                Path(tmp),
+                small_target_bytes=1 * MIB,
+                large_target_bytes=2 * MIB,
+                row_count=64,
+                row_group_count=4,
+            )
+
+            small = pq.ParquetFile(small_path)
+            large = pq.ParquetFile(large_path)
+            self.assertEqual(small.schema_arrow, large.schema_arrow)
+            self.assertEqual(small.metadata.num_rows, large.metadata.num_rows)
+            self.assertEqual(small.metadata.num_row_groups, 4)
+            self.assertEqual(large.metadata.num_row_groups, 4)
+            self.assertTrue(
+                small.read(columns=["ts", "entity"]).equals(
+                    large.read(columns=["ts", "entity"])
+                )
+            )
+
+            for parquet_file in (small, large):
+                payload_column = parquet_file.metadata.row_group(0).column(2)
+                self.assertEqual(payload_column.compression, "UNCOMPRESSED")
+                self.assertNotIn("RLE_DICTIONARY", payload_column.encodings)
+                self.assertNotIn("PLAIN_DICTIONARY", payload_column.encodings)
+                self.assertIsNone(payload_column.statistics)
+
+            self.assertLess(abs(small_path.stat().st_size - 1 * MIB), 64 * 1024)
+            self.assertLess(abs(large_path.stat().st_size - 2 * MIB), 64 * 1024)
 
 
 if __name__ == "__main__":
