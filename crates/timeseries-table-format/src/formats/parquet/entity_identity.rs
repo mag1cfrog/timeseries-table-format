@@ -1,21 +1,25 @@
 //! Helpers for reading and validating entity identity metadata from a segment.
 
-use std::{collections::BTreeMap, path::Path, vec};
+use std::{collections::BTreeMap, path::Path};
 
-use arrow::{
-    datatypes::{DataType, Schema},
-    error::ArrowError,
-};
+use arrow::datatypes::{DataType, Schema};
 use arrow_array::{Array, ArrayRef, LargeStringArray, StringArray};
-use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use parquet::{
-    arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder},
+    arrow::{
+        ProjectionMask,
+        arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
+        async_reader::ParquetRecordBatchStreamBuilder,
+    },
     errors::ParquetError,
     file::metadata::ParquetMetaData,
 };
 use snafu::prelude::*;
+use tokio::task::JoinSet;
 
-use crate::storage::StorageError;
+use crate::storage::{StorageError, TableLocation, open_local_file};
+
+use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 
 /// Mapping of entity attribute names to their normalized string values.
 pub type EntityIdentity = BTreeMap<String, String>;
@@ -40,15 +44,6 @@ pub enum SegmentEntityIdentityError {
         path: String,
         /// Parquet error emitted by the reader.
         source: ParquetError,
-    },
-
-    /// Failed to decode Arrow data from the Parquet reader.
-    #[snafu(display("Arrow read error for {path}: {source}"))]
-    ArrowRead {
-        /// Path of the Parquet file being read.
-        path: String,
-        /// Arrow error emitted while decoding batches.
-        source: ArrowError,
     },
 
     /// Requested entity column is missing from the segment schema.
@@ -105,31 +100,127 @@ pub enum SegmentEntityIdentityError {
     },
 }
 
-fn try_entity_identity_from_stats(
+struct EntityScanPlan {
+    pinned: Vec<Option<String>>,
+    row_groups_to_scan: Vec<usize>,
+}
+
+fn merge_entity_value(
+    path: &str,
+    column: &str,
+    pinned: &mut Option<String>,
+    value: &str,
+) -> Result<(), SegmentEntityIdentityError> {
+    match pinned.as_deref() {
+        None => *pinned = Some(value.to_string()),
+        Some(first) if first == value => {}
+        Some(first) => {
+            return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
+                path: path.to_string(),
+                column: column.to_string(),
+                first: first.to_string(),
+                other: value.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn constant_entity_value_from_stats(
+    stats: &parquet::file::statistics::Statistics,
+    path: &str,
+    column: &str,
+    column_is_required: bool,
+) -> Result<Option<String>, SegmentEntityIdentityError> {
+    match stats.null_count_opt() {
+        Some(0) => {}
+        Some(_) => {
+            return Err(SegmentEntityIdentityError::EntityColumnHasNull {
+                path: path.to_string(),
+                column: column.to_string(),
+            });
+        }
+        None => return Ok(None),
+    }
+
+    // arrow-rs reports Some(0) when a Parquet null count was omitted. A
+    // required column cannot contain nulls by schema; an optional column must
+    // therefore be scanned even when this API reports zero.
+    if !column_is_required {
+        return Ok(None);
+    }
+
+    if let Some(distinct) = stats.distinct_count_opt()
+        && distinct != 1
+    {
+        let first = stats
+            .min_bytes_opt()
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .unwrap_or("<unknown>");
+        let other = stats
+            .max_bytes_opt()
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .unwrap_or("<unknown>");
+        return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
+            path: path.to_string(),
+            column: column.to_string(),
+            first: first.to_string(),
+            other: other.to_string(),
+        });
+    }
+
+    if !stats.min_is_exact() || !stats.max_is_exact() {
+        return Ok(None);
+    }
+
+    let (Some(min), Some(max)) = (stats.min_bytes_opt(), stats.max_bytes_opt()) else {
+        return Ok(None);
+    };
+    let min = std::str::from_utf8(min).map_err(|_| {
+        SegmentEntityIdentityError::EntityColumnUnsupportedType {
+            path: path.to_string(),
+            column: column.to_string(),
+            datatype: "non-utf8 bytes".to_string(),
+        }
+    })?;
+    let max = std::str::from_utf8(max).map_err(|_| {
+        SegmentEntityIdentityError::EntityColumnUnsupportedType {
+            path: path.to_string(),
+            column: column.to_string(),
+            datatype: "non-utf8 bytes".to_string(),
+        }
+    })?;
+
+    if min != max {
+        return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
+            path: path.to_string(),
+            column: column.to_string(),
+            first: min.to_string(),
+            other: max.to_string(),
+        });
+    }
+
+    Ok(Some(min.to_string()))
+}
+
+fn plan_entity_scan(
     meta: &ParquetMetaData,
     rel_path: &str,
     entity_columns: &[String],
     arrow_schema: &Schema,
-) -> Result<Option<EntityIdentity>, SegmentEntityIdentityError> {
-    if entity_columns.is_empty() {
-        return Ok(Some(EntityIdentity::new()));
-    }
-
-    // If the whole file is empty, treat as empty segment for identity purposes.
+) -> Result<EntityScanPlan, SegmentEntityIdentityError> {
     if meta.file_metadata().num_rows() == 0 {
-        // pick the first column for an actionable error
         return Err(SegmentEntityIdentityError::EntityColumnEmpty {
             path: rel_path.to_string(),
             column: entity_columns[0].clone(),
         });
     }
 
-    // Map entity column name -> parquet leaf column index
     let schema_descr = meta.file_metadata().schema_descr();
     let mut parquet_col_idxs = Vec::with_capacity(entity_columns.len());
+    let mut column_is_required = Vec::with_capacity(entity_columns.len());
 
     for col_name in entity_columns {
-        // Ensure Arrow type is supported up-front (so stats bytes -> UTF-8 makes sense)
         let dt = arrow_schema
             .field_with_name(col_name)
             .map_err(|_| SegmentEntityIdentityError::EntityColumnNotFound {
@@ -159,140 +250,51 @@ fn try_entity_identity_from_stats(
             })?;
 
         parquet_col_idxs.push(idx);
+        column_is_required.push(schema_descr.column(idx).max_def_level() == 0);
     }
 
     let mut pinned = vec![None; entity_columns.len()];
+    let mut row_groups_to_scan = Vec::new();
 
-    for rg in meta.row_groups() {
-        for (i, (col_name, &col_idx)) in entity_columns
+    for (row_group_index, row_group) in meta.row_groups().iter().enumerate() {
+        if row_group.num_rows() == 0 {
+            continue;
+        }
+
+        let mut group_values = Vec::with_capacity(entity_columns.len());
+        let mut requires_scan = false;
+        for ((col_name, &col_idx), &column_is_required) in entity_columns
             .iter()
-            .zip(parquet_col_idxs.iter())
-            .enumerate()
+            .zip(&parquet_col_idxs)
+            .zip(&column_is_required)
         {
-            let col_chunk = rg.column(col_idx);
-
-            let Some(stats) = col_chunk.statistics() else {
-                // No stats => can't fast-path
-                return Ok(None);
+            let value = match row_group.column(col_idx).statistics() {
+                Some(stats) => {
+                    constant_entity_value_from_stats(stats, rel_path, col_name, column_is_required)?
+                }
+                None => None,
             };
+            requires_scan |= value.is_none();
+            group_values.push(value);
+        }
 
-            // null_count is optional; if missing we must not assume 0 => can't fast-path safely
-            // if present and > 0, that's a definite error.
-            match stats.null_count_opt() {
-                Some(0) => {}
-                Some(_) => {
-                    return Err(SegmentEntityIdentityError::EntityColumnHasNull {
-                        path: rel_path.to_string(),
-                        column: col_name.clone(),
-                    });
-                }
-                None => return Ok(None),
-            }
+        if requires_scan {
+            row_groups_to_scan.push(row_group_index);
+            continue;
+        }
 
-            // If distinct_count is present and != 1, we can fail immediately.
-            if let Some(d) = stats.distinct_count_opt()
-                && d != 1
-            {
-                // Try to give a helpful first/other if we can; else generic.
-                let (first, other) = match (stats.min_bytes_opt(), stats.max_bytes_opt()) {
-                    (Some(minb), Some(maxb)) => {
-                        let a = std::str::from_utf8(minb)
-                            .unwrap_or("<non-utf8>")
-                            .to_string();
-                        let b = std::str::from_utf8(maxb)
-                            .unwrap_or("<non-utf8>")
-                            .to_string();
-                        (a, b)
-                    }
-                    _ => ("<unknown>".to_string(), "<unknown>".to_string()),
-                };
-
-                return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
-                    path: rel_path.to_string(),
-                    column: col_name.clone(),
-                    first,
-                    other,
-                });
-            }
-
-            // For strings, Parquet may store compact bounds; require "exact" to trust equality/inequality.
-            // If not exact, fallback to scan.
-            if !stats.min_is_exact() || !stats.max_is_exact() {
-                return Ok(None);
-            }
-
-            let (Some(minb), Some(maxb)) = (stats.min_bytes_opt(), stats.max_bytes_opt()) else {
-                // Missing min/max => can't derive the value
-                return Ok(None);
-            };
-
-            // If exact and min != max, then there are definitely multiple values.
-            if minb != maxb {
-                let first = std::str::from_utf8(minb)
-                    .map_err(
-                        |_| SegmentEntityIdentityError::EntityColumnUnsupportedType {
-                            path: rel_path.to_string(),
-                            column: col_name.clone(),
-                            datatype: "non-utf8 bytes".to_string(),
-                        },
-                    )?
-                    .to_string();
-                let other = std::str::from_utf8(maxb)
-                    .map_err(
-                        |_| SegmentEntityIdentityError::EntityColumnUnsupportedType {
-                            path: rel_path.to_string(),
-                            column: col_name.clone(),
-                            datatype: "non-utf8 bytes".to_string(),
-                        },
-                    )?
-                    .to_string();
-
-                return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
-                    path: rel_path.to_string(),
-                    column: col_name.clone(),
-                    first,
-                    other,
-                });
-            }
-
-            // min == max and exact => constant value for this row group
-            let v = std::str::from_utf8(minb).map_err(|_| {
-                SegmentEntityIdentityError::EntityColumnUnsupportedType {
-                    path: rel_path.to_string(),
-                    column: col_name.clone(),
-                    datatype: "non-utf8 bytes".to_string(),
-                }
-            })?;
-
-            match pinned[i].as_deref() {
-                None => pinned[i] = Some(v.to_string()),
-                Some(first) if first == v => {}
-                Some(first) => {
-                    // Different constants across row groups => multiple values in the segment
-                    return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
-                        path: rel_path.to_string(),
-                        column: col_name.clone(),
-                        first: first.to_string(),
-                        other: v.to_string(),
-                    });
-                }
+        for ((col_name, pinned), value) in entity_columns.iter().zip(&mut pinned).zip(group_values)
+        {
+            if let Some(value) = value {
+                merge_entity_value(rel_path, col_name, pinned, &value)?;
             }
         }
     }
 
-    // Ensure we actually found a value per column
-    let mut out = EntityIdentity::new();
-    for (col, v) in entity_columns.iter().zip(pinned) {
-        let Some(v) = v else {
-            return Err(SegmentEntityIdentityError::EntityColumnEmpty {
-                path: rel_path.to_string(),
-                column: col.clone(),
-            });
-        };
-        out.insert(col.clone(), v);
-    }
-
-    Ok(Some(out))
+    Ok(EntityScanPlan {
+        pinned,
+        row_groups_to_scan,
+    })
 }
 
 fn feed_entity_column(
@@ -321,19 +323,7 @@ fn feed_entity_column(
             }
 
             for row in 0..arr.len() {
-                let v = arr.value(row);
-                match pinned.as_deref() {
-                    None => *pinned = Some(v.to_string()),
-                    Some(first) if first == v => {}
-                    Some(first) => {
-                        return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
-                            path: path_str.to_string(),
-                            column: col_name.to_string(),
-                            first: first.to_string(),
-                            other: v.to_string(),
-                        });
-                    }
-                }
+                merge_entity_value(path_str, col_name, pinned, arr.value(row))?;
             }
 
             Ok(())
@@ -357,19 +347,7 @@ fn feed_entity_column(
             }
 
             for row in 0..arr.len() {
-                let v = arr.value(row);
-                match pinned.as_deref() {
-                    None => *pinned = Some(v.to_string()),
-                    Some(first) if first == v => {}
-                    Some(first) => {
-                        return Err(SegmentEntityIdentityError::EntityColumnMultipleValues {
-                            path: path_str.to_string(),
-                            column: col_name.to_string(),
-                            first: first.to_string(),
-                            other: v.to_string(),
-                        });
-                    }
-                }
+                merge_entity_value(path_str, col_name, pinned, arr.value(row))?;
             }
 
             Ok(())
@@ -383,82 +361,148 @@ fn feed_entity_column(
     }
 }
 
-/// Extracts entity identity values from a Parquet payload.
-///
-/// Reads only the requested `entity_columns` from `parquet_bytes`, validating
-/// that each column exists, is string-typed, contains no nulls, and is constant
-/// across the segment. Returns an empty map when `entity_columns` is empty.
-pub fn segment_entity_identity_from_parquet_bytes(
-    parquet_bytes: Bytes,
+async fn scan_entity_batches(
+    path: &str,
+    entity_columns: &[String],
+    mut reader: impl Stream<
+        Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
+    > + Unpin,
+) -> Result<Vec<Option<String>>, SegmentEntityIdentityError> {
+    let mut pinned = vec![None; entity_columns.len()];
+
+    while let Some(batch) = reader.next().await {
+        let batch = batch.map_err(|source| SegmentEntityIdentityError::ParquetRead {
+            path: path.to_string(),
+            source,
+        })?;
+
+        for (column, pinned) in entity_columns.iter().zip(&mut pinned) {
+            let array = batch.column_by_name(column).ok_or_else(|| {
+                SegmentEntityIdentityError::EntityColumnNotFound {
+                    path: path.to_string(),
+                    column: column.clone(),
+                }
+            })?;
+            feed_entity_column(path, column, array, pinned)?;
+        }
+
+        tokio::task::yield_now().await;
+    }
+
+    Ok(pinned)
+}
+
+async fn scan_entity_row_groups(
+    location: &TableLocation,
+    rel_path: &Path,
+    path: &str,
+    entity_columns: &[String],
+    metadata: ArrowReaderMetadata,
+    row_groups: Vec<usize>,
+) -> Result<Vec<Option<String>>, SegmentEntityIdentityError> {
+    let columns = entity_columns.iter().map(String::as_str);
+    let mask = ProjectionMask::columns(metadata.parquet_schema(), columns);
+    let (max_tasks, row_groups_per_task) = resolve_rg_settings(row_groups.len());
+    let chunks = row_groups
+        .chunks(row_groups_per_task)
+        .map(<[usize]>::to_vec)
+        .collect::<Vec<_>>();
+    debug_assert!(chunks.len() <= max_tasks);
+
+    let mut tasks = JoinSet::new();
+    for chunk in chunks {
+        let location = location.clone();
+        let rel_path = rel_path.to_path_buf();
+        let path = path.to_string();
+        let entity_columns = entity_columns.to_vec();
+        let metadata = metadata.clone();
+        let mask = mask.clone();
+
+        tasks.spawn(async move {
+            let file = open_local_file(location.as_ref(), &rel_path)
+                .await
+                .map_err(|source| SegmentEntityIdentityError::Storage {
+                    path: path.clone(),
+                    source,
+                })?;
+            let reader = ParquetRecordBatchStreamBuilder::new_with_metadata(file, metadata)
+                .with_projection(mask)
+                .with_row_groups(chunk)
+                .with_batch_size(INSPECTION_BATCH_SIZE)
+                .build()
+                .map_err(|source| SegmentEntityIdentityError::ParquetRead {
+                    path: path.clone(),
+                    source,
+                })?;
+            scan_entity_batches(&path, &entity_columns, reader).await
+        });
+    }
+
+    let mut pinned = vec![None; entity_columns.len()];
+    while let Some(result) = tasks.join_next().await {
+        let task_values = result.map_err(|source| SegmentEntityIdentityError::ParquetRead {
+            path: path.to_string(),
+            source: ParquetError::General(format!("row-group scan task failed: {source}")),
+        })??;
+        for ((column, pinned), value) in entity_columns.iter().zip(&mut pinned).zip(task_values) {
+            if let Some(value) = value {
+                merge_entity_value(path, column, pinned, &value)?;
+            }
+        }
+    }
+
+    Ok(pinned)
+}
+
+/// Extract entity identity values directly from a local Parquet file.
+pub(crate) async fn segment_entity_identity_from_parquet(
+    location: &TableLocation,
     rel_path: &Path,
     entity_columns: &[String],
 ) -> Result<EntityIdentity, SegmentEntityIdentityError> {
-    let path_str = rel_path.display().to_string();
+    let path = rel_path.display().to_string();
 
     if entity_columns.is_empty() {
         return Ok(EntityIdentity::new());
     }
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(parquet_bytes).map_err(|source| {
-        SegmentEntityIdentityError::ParquetRead {
-            path: path_str.clone(),
-            source,
-        }
-    })?;
-
-    let arrow_schema = builder.schema();
-
-    // validate columns exist up-front (nicer error)
-    for c in entity_columns {
-        if arrow_schema.index_of(c).is_err() {
-            return Err(SegmentEntityIdentityError::EntityColumnNotFound {
-                path: path_str.clone(),
-                column: c.clone(),
-            });
-        }
-    }
-
-    // stats fast-path (no batch decode)
-    if let Some(identity) = try_entity_identity_from_stats(
-        builder.metadata(),
-        &path_str,
-        entity_columns,
-        arrow_schema.as_ref(),
-    )? {
-        return Ok(identity);
-    }
-
-    // project just entity columns
-    let cols_as_str: Vec<&str> = entity_columns.iter().map(|s| s.as_str()).collect();
-    let mask = ProjectionMask::columns(builder.parquet_schema(), cols_as_str);
-    let reader = builder.with_projection(mask).build().map_err(|source| {
-        SegmentEntityIdentityError::ParquetRead {
-            path: path_str.clone(),
-            source,
-        }
-    })?;
-
-    // one "pinned" value per column
-    let mut pinned = vec![None; entity_columns.len()];
-
-    for batch_res in reader {
-        let batch = batch_res.map_err(|source| SegmentEntityIdentityError::ArrowRead {
-            path: path_str.clone(),
+    let mut file = open_local_file(location.as_ref(), rel_path)
+        .await
+        .map_err(|source| SegmentEntityIdentityError::Storage {
+            path: path.clone(),
             source,
         })?;
+    let metadata = ArrowReaderMetadata::load_async(&mut file, ArrowReaderOptions::default())
+        .await
+        .map_err(|source| SegmentEntityIdentityError::ParquetRead {
+            path: path.clone(),
+            source,
+        })?;
+    let EntityScanPlan {
+        mut pinned,
+        row_groups_to_scan,
+    } = plan_entity_scan(
+        metadata.metadata(),
+        &path,
+        entity_columns,
+        metadata.schema(),
+    )?;
+    drop(file);
 
-        let batch_schema = batch.schema();
-
-        for (i, col_name) in entity_columns.iter().enumerate() {
-            let idx = batch_schema.index_of(col_name).map_err(|_| {
-                SegmentEntityIdentityError::EntityColumnNotFound {
-                    path: path_str.clone(),
-                    column: col_name.clone(),
-                }
-            })?;
-
-            let col = batch.column(idx);
-            feed_entity_column(&path_str, col_name, col, &mut pinned[i])?;
+    if !row_groups_to_scan.is_empty() {
+        let scanned = scan_entity_row_groups(
+            location,
+            rel_path,
+            &path,
+            entity_columns,
+            metadata,
+            row_groups_to_scan,
+        )
+        .await?;
+        for ((column, pinned), value) in entity_columns.iter().zip(&mut pinned).zip(scanned) {
+            if let Some(value) = value {
+                merge_entity_value(&path, column, pinned, &value)?;
+            }
         }
     }
 
@@ -466,7 +510,7 @@ pub fn segment_entity_identity_from_parquet_bytes(
     for (col, v) in entity_columns.iter().zip(pinned) {
         let Some(v) = v else {
             return Err(SegmentEntityIdentityError::EntityColumnEmpty {
-                path: path_str.clone(),
+                path: path.clone(),
                 column: col.clone(),
             });
         };
@@ -479,43 +523,66 @@ pub fn segment_entity_identity_from_parquet_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::Cursor, path::Path, sync::Arc};
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Seek, SeekFrom, Write},
+        sync::Arc,
+    };
 
     use arrow::{
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use arrow_array::{ArrayRef, Int32Array, LargeStringArray, StringArray};
-    use parquet::arrow::ArrowWriter;
-    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use arrow_array::{
+        ArrayRef, Int32Array, LargeStringArray, StringArray, builder::BinaryBuilder,
+    };
+    use parquet::{
+        arrow::ArrowWriter,
+        basic::Compression,
+        file::{
+            metadata::ParquetMetaDataWriter,
+            properties::{EnabledStatistics, WriterProperties},
+            reader::{FileReader, SerializedFileReader},
+        },
+    };
+    use tempfile::TempDir;
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn make_batch(schema: Arc<Schema>, columns: Vec<ArrayRef>) -> RecordBatch {
         RecordBatch::try_new(schema, columns).expect("record batch")
     }
 
-    fn parquet_bytes_from_batches(
+    fn write_parquet_batches(
+        path: &Path,
         schema: Arc<Schema>,
         batches: Vec<RecordBatch>,
         props: WriterProperties,
-    ) -> Vec<u8> {
-        let cursor = Cursor::new(Vec::new());
-        let mut writer = ArrowWriter::try_new(cursor, schema, Some(props)).expect("arrow writer");
-        for batch in batches {
-            writer.write(&batch).expect("write batch");
+    ) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        let cursor = writer.into_inner().expect("finalize parquet");
-        cursor.into_inner()
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(props))?;
+        for batch in batches {
+            writer.write(&batch)?;
+            writer.flush()?;
+        }
+        writer.close()?;
+        Ok(())
     }
 
-    fn identity_from_bytes(
-        bytes: Vec<u8>,
+    async fn identity_from_file(
+        tmp: &TempDir,
+        rel_path: &Path,
         entity_columns: &[String],
     ) -> Result<EntityIdentity, SegmentEntityIdentityError> {
-        segment_entity_identity_from_parquet_bytes(
-            Bytes::from(bytes),
-            Path::new("segment.parquet"),
+        segment_entity_identity_from_parquet(
+            &TableLocation::local(tmp.path()),
+            rel_path,
             entity_columns,
         )
+        .await
     }
 
     fn string_array(values: &[Option<&str>]) -> ArrayRef {
@@ -526,19 +593,60 @@ mod tests {
         Arc::new(LargeStringArray::from(values.to_vec()))
     }
 
-    #[test]
-    fn identity_empty_columns_returns_empty() {
-        let identity = segment_entity_identity_from_parquet_bytes(
-            Bytes::from_static(b"not parquet"),
-            Path::new("segment.parquet"),
+    fn clear_column_statistics(
+        path: &Path,
+        row_group_index: usize,
+        column_index: usize,
+    ) -> TestResult {
+        let reader = SerializedFileReader::new(File::open(path)?)?;
+        let mut metadata = reader.metadata().clone().into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let mut row_group = row_groups[row_group_index].clone().into_builder();
+        let mut columns = row_group.take_columns();
+        columns[column_index] = columns[column_index]
+            .clone()
+            .into_builder()
+            .clear_statistics()
+            .build()?;
+        row_groups[row_group_index] = row_group.set_column_metadata(columns).build()?;
+        let metadata = metadata
+            .set_row_groups(row_groups)
+            .set_column_index(None)
+            .set_offset_index(None)
+            .build();
+        drop(reader);
+
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let file_len = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::End(-8))?;
+        let mut footer = [0; 8];
+        file.read_exact(&mut footer)?;
+        assert_eq!(&footer[4..], b"PAR1");
+        let metadata_len = u32::from_le_bytes(footer[..4].try_into()?) as u64;
+        let metadata_start = file_len - metadata_len - 8;
+        file.set_len(metadata_start)?;
+        file.seek(SeekFrom::Start(metadata_start))?;
+        ParquetMetaDataWriter::new(&mut file, &metadata).finish()?;
+        file.flush()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_entity_columns_return_without_opening_the_file() {
+        let identity = segment_entity_identity_from_parquet(
+            &TableLocation::local("missing-table"),
+            Path::new("not-parquet"),
             &[],
         )
+        .await
         .expect("empty columns");
         assert!(identity.is_empty());
     }
 
-    #[test]
-    fn identity_happy_path_utf8() {
+    #[tokio::test]
+    async fn exact_utf8_statistics_produce_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/utf8.parquet");
         let schema = Arc::new(Schema::new(vec![
             Field::new("entity", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -550,18 +658,22 @@ mod tests {
                 Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef,
             ],
         );
-        let bytes = parquet_bytes_from_batches(
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
             Arc::clone(&schema),
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let identity = identity_from_bytes(bytes, &[String::from("entity")]).expect("identity");
+        let identity = identity_from_file(&tmp, rel_path, &[String::from("entity")]).await?;
         assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+        Ok(())
     }
 
-    #[test]
-    fn identity_happy_path_large_utf8() {
+    #[tokio::test]
+    async fn exact_large_utf8_statistics_produce_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/large_utf8.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::LargeUtf8,
@@ -571,18 +683,58 @@ mod tests {
             Arc::clone(&schema),
             vec![large_string_array(&[Some("alpha"), Some("alpha")])],
         );
-        let bytes = parquet_bytes_from_batches(
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
             Arc::clone(&schema),
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let identity = identity_from_bytes(bytes, &[String::from("entity")]).expect("identity");
+        let identity = identity_from_file(&tmp, rel_path, &[String::from("entity")]).await?;
         assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+        Ok(())
     }
 
-    #[test]
-    fn identity_missing_column_returns_error() {
+    #[tokio::test]
+    async fn multiple_entity_columns_are_extracted() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/multiple_columns.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("site", DataType::Utf8, false),
+            Field::new("sensor", DataType::Utf8, false),
+        ]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![
+                string_array(&[Some("west"), Some("west")]),
+                string_array(&[Some("temperature"), Some("temperature")]),
+            ],
+        );
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
+            vec![batch],
+            WriterProperties::builder().build(),
+        )?;
+
+        let identity = identity_from_file(
+            &tmp,
+            rel_path,
+            &[String::from("site"), String::from("sensor")],
+        )
+        .await?;
+        assert_eq!(identity.get("site").map(String::as_str), Some("west"));
+        assert_eq!(
+            identity.get("sensor").map(String::as_str),
+            Some("temperature")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_column_returns_path_and_column() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/missing_column.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
@@ -592,21 +744,28 @@ mod tests {
             Arc::clone(&schema),
             vec![string_array(&[Some("alpha"), Some("alpha")])],
         );
-        let bytes = parquet_bytes_from_batches(
-            Arc::clone(&schema),
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let err = identity_from_bytes(bytes, &[String::from("missing")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("missing")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
-            SegmentEntityIdentityError::EntityColumnNotFound { .. }
+            SegmentEntityIdentityError::EntityColumnNotFound { path, column }
+                if path == "data/missing_column.parquet" && column == "missing"
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_unsupported_type_returns_error() {
+    #[tokio::test]
+    async fn unsupported_entity_type_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/unsupported.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Int32,
@@ -616,21 +775,27 @@ mod tests {
             Arc::clone(&schema),
             vec![Arc::new(Int32Array::from(vec![1, 1])) as ArrayRef],
         );
-        let bytes = parquet_bytes_from_batches(
-            Arc::clone(&schema),
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::EntityColumnUnsupportedType { .. }
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_column_has_null_returns_error() {
+    #[tokio::test]
+    async fn statistics_reject_nulls() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/null_stats.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
@@ -640,21 +805,70 @@ mod tests {
             Arc::clone(&schema),
             vec![string_array(&[Some("alpha"), None])],
         );
-        let bytes = parquet_bytes_from_batches(
-            Arc::clone(&schema),
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::EntityColumnHasNull { .. }
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_multiple_values_returns_error() {
+    #[tokio::test]
+    async fn optional_column_scans_when_zero_null_count_is_ambiguous() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/optional.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            true,
+        )]));
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .build();
+        write_parquet_batches(&abs_path, schema, vec![batch], props)?;
+
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let data_page = reader.metadata().row_group(0).column(0).data_page_offset() as u64;
+        drop(reader);
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&abs_path)
+            .await?;
+        file.seek(SeekFrom::Start(data_page)).await?;
+        file.write_all(&[0xFF; 16]).await?;
+        file.flush().await?;
+        drop(file);
+
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SegmentEntityIdentityError::ParquetRead { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn statistics_reject_multiple_values() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/multiple_stats.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
@@ -664,62 +878,133 @@ mod tests {
             Arc::clone(&schema),
             vec![string_array(&[Some("alpha"), Some("beta")])],
         );
-        let bytes = parquet_bytes_from_batches(
-            Arc::clone(&schema),
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::EntityColumnMultipleValues { .. }
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_empty_segment_returns_error() {
+    #[tokio::test]
+    async fn empty_segment_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/empty.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
             false,
         )]));
         let batch = make_batch(Arc::clone(&schema), vec![string_array(&[])]);
-        let bytes = parquet_bytes_from_batches(
-            Arc::clone(&schema),
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
             vec![batch],
             WriterProperties::builder().build(),
-        );
+        )?;
 
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::EntityColumnEmpty { .. }
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_fallback_scan_success() {
+    #[tokio::test]
+    async fn missing_statistics_scan_only_the_affected_row_group() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/partial_stats.parquet");
+        let abs_path = tmp.path().join(rel_path);
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
             false,
         )]));
-        let batch = make_batch(
+        let first = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let second = make_batch(
             Arc::clone(&schema),
             vec![string_array(&[Some("alpha"), Some("alpha")])],
         );
         let props = WriterProperties::builder()
-            .set_statistics_enabled(EnabledStatistics::None)
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
             .build();
-        let bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+        write_parquet_batches(&abs_path, schema, vec![first, second], props)?;
+        clear_column_statistics(&abs_path, 1, 0)?;
 
-        let identity = identity_from_bytes(bytes, &[String::from("entity")]).expect("identity");
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let first_page = reader.metadata().row_group(0).column(0).data_page_offset() as u64;
+        drop(reader);
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&abs_path)
+            .await?;
+        file.seek(SeekFrom::Start(first_page)).await?;
+        file.write_all(&[0xFF; 16]).await?;
+        file.flush().await?;
+        drop(file);
+
+        let identity = identity_from_file(&tmp, rel_path, &[String::from("entity")]).await?;
         assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+        Ok(())
     }
 
-    #[test]
-    fn identity_fallback_scan_nulls_return_error() {
+    #[tokio::test]
+    async fn statistics_and_fallback_scan_reject_conflicting_values() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/hybrid_conflict.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Utf8,
+            false,
+        )]));
+        let first = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("alpha"), Some("alpha")])],
+        );
+        let second = make_batch(
+            Arc::clone(&schema),
+            vec![string_array(&[Some("beta"), Some("beta")])],
+        );
+        write_parquet_batches(
+            &abs_path,
+            schema,
+            vec![first, second],
+            WriterProperties::builder().build(),
+        )?;
+        clear_column_statistics(&abs_path, 1, 0)?;
+
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SegmentEntityIdentityError::EntityColumnMultipleValues { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fallback_scan_rejects_nulls() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/null_scan.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
@@ -732,17 +1017,22 @@ mod tests {
         let props = WriterProperties::builder()
             .set_statistics_enabled(EnabledStatistics::None)
             .build();
-        let bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+        write_parquet_batches(&tmp.path().join(rel_path), schema, vec![batch], props)?;
 
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::EntityColumnHasNull { .. }
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_fallback_scan_multiple_values_return_error() {
+    #[tokio::test]
+    async fn fallback_scan_rejects_multiple_values() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/multiple_scan.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
@@ -755,53 +1045,115 @@ mod tests {
         let props = WriterProperties::builder()
             .set_statistics_enabled(EnabledStatistics::None)
             .build();
-        let bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+        write_parquet_batches(&tmp.path().join(rel_path), schema, vec![batch], props)?;
 
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::EntityColumnMultipleValues { .. }
         ));
+        Ok(())
     }
 
-    #[test]
-    fn identity_arrow_read_error_on_invalid_utf8() {
+    #[tokio::test]
+    async fn fallback_scan_handles_multiple_bounded_batches() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/multiple_batches.parquet");
+        let row_count = INSPECTION_BATCH_SIZE * 2 + 17;
         let schema = Arc::new(Schema::new(vec![Field::new(
             "entity",
             DataType::Utf8,
             false,
         )]));
-        let batch = make_batch(
-            Arc::clone(&schema),
-            vec![string_array(&[Some("alpha"), Some("alpha")])],
-        );
+        let values = StringArray::from_iter_values(std::iter::repeat_n("alpha", row_count));
+        let batch = make_batch(Arc::clone(&schema), vec![Arc::new(values)]);
         let props = WriterProperties::builder()
             .set_statistics_enabled(EnabledStatistics::None)
             .build();
-        let mut bytes = parquet_bytes_from_batches(Arc::clone(&schema), vec![batch], props);
+        write_parquet_batches(&tmp.path().join(rel_path), schema, vec![batch], props)?;
 
-        let needle = b"alpha";
-        let pos = bytes
-            .windows(needle.len())
-            .position(|window| window == needle)
-            .expect("needle in parquet data");
-        bytes[pos] = 0xFF;
-
-        let err = identity_from_bytes(bytes, &[String::from("entity")]).unwrap_err();
-        assert!(matches!(err, SegmentEntityIdentityError::ArrowRead { .. }));
+        let identity = identity_from_file(&tmp, rel_path, &[String::from("entity")]).await?;
+        assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+        Ok(())
     }
 
-    #[test]
-    fn identity_parquet_read_error_on_invalid_bytes() {
-        let err = segment_entity_identity_from_parquet_bytes(
-            Bytes::from_static(b"not parquet"),
-            Path::new("segment.parquet"),
-            &[String::from("entity")],
-        )
-        .unwrap_err();
+    #[tokio::test]
+    async fn fallback_scan_ignores_large_unprojected_payload() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/large_payload.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("payload", DataType::Binary, false),
+        ]));
+        let mut payloads = BinaryBuilder::with_capacity(4, 4 * 1024 * 1024);
+        let payload = vec![0xA5; 1024 * 1024];
+        for _ in 0..4 {
+            payloads.append_value(&payload);
+        }
+        let batch = make_batch(
+            Arc::clone(&schema),
+            vec![
+                string_array(&[Some("alpha"), Some("alpha"), Some("alpha"), Some("alpha")]),
+                Arc::new(payloads.finish()),
+            ],
+        );
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .build();
+        write_parquet_batches(&abs_path, schema, vec![batch], props)?;
+
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let payload_page = reader.metadata().row_group(0).column(1).data_page_offset() as u64;
+        drop(reader);
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&abs_path)
+            .await?;
+        file.seek(SeekFrom::Start(payload_page)).await?;
+        file.write_all(&[0xFF; 32]).await?;
+        file.flush().await?;
+        drop(file);
+
+        assert!(tokio::fs::metadata(&abs_path).await?.len() > 4 * 1024 * 1024);
+        let identity = identity_from_file(&tmp, rel_path, &[String::from("entity")]).await?;
+        assert_eq!(identity.get("entity").map(String::as_str), Some("alpha"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_parquet_returns_read_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/invalid.parquet");
+        tokio::fs::create_dir_all(tmp.path().join("data")).await?;
+        tokio::fs::write(tmp.path().join(rel_path), b"not parquet").await?;
+
+        let err = identity_from_file(&tmp, rel_path, &[String::from("entity")])
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             SegmentEntityIdentityError::ParquetRead { .. }
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_file_returns_storage_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let err = identity_from_file(
+            &tmp,
+            Path::new("data/missing.parquet"),
+            &[String::from("entity")],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, SegmentEntityIdentityError::Storage { .. }));
+        Ok(())
     }
 }

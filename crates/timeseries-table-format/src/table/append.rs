@@ -26,7 +26,7 @@ use crate::{
     },
     formats::parquet::{
         coverage::compute_segment_coverage_from_parquet_bytes, logical_schema_from_parquet_bytes,
-        segment_entity_identity_from_parquet_bytes, segment_meta::segment_meta_from_parquet,
+        segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::ensure_schema_exact_match,
     storage::{self, StorageError},
@@ -147,11 +147,12 @@ impl TimeSeriesTable {
         // 2.5) Entity identity enforcement / pinning (v0.1 single-entity-per-table)
         if !self.index.entity_columns.is_empty() {
             let step_start = Instant::now();
-            let seg_ident = segment_entity_identity_from_parquet_bytes(
-                data.clone(),
+            let seg_ident = segment_entity_identity_from_parquet(
+                self.location(),
                 rel_path,
                 &self.index.entity_columns,
             )
+            .await
             .context(SegmentEntityIdentitySnafu)?;
             if let Some(r) = report.as_mut() {
                 r.push_step("entity_identity", step_start.elapsed(), Vec::new());
