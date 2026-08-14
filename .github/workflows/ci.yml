@@ -43,6 +43,8 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish-crates.yml'
               - '.github/workflows/release-plz.yml'
+              - 'scripts/check_release_version.py'
+              - 'scripts/test_check_release_version.py'
       - name: Check for skip label
         id: skip
         env:
@@ -146,7 +148,12 @@ jobs:
           fi
 
       - run: rustc -Vv && cargo -V && cargo clippy -V
-      
+
+      - name: release version guard
+        run: |
+          python scripts/test_check_release_version.py
+          python scripts/check_release_version.py
+
       - name: fmt
         run: cargo fmt --all -- --check
 

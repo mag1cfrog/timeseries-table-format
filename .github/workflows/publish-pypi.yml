@@ -1,20 +1,8 @@
 name: Publish (PyPI)
 
 on:
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish to PyPI after building and validating artifacts.
-        required: true
-        type: boolean
-        default: false
-      version:
-        description: Expected package version, such as 0.1.4 or v0.1.4.
-        required: false
-        type: string
-  push:
-    tags:
-      - "timeseries-table-python-v*"
+  release:
+    types: [published]
 
 permissions: {}
 
@@ -25,47 +13,33 @@ concurrency:
 jobs:
   validate:
     name: validate release request
+    if: ${{ startsWith(github.event.release.tag_name, 'timeseries-table-format-v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+          ref: refs/tags/${{ github.event.release.tag_name }}
 
-      - name: Verify requested version matches Cargo version
+      - name: Verify canonical tag and workspace version
+        id: release
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PUBLISH: ${{ inputs.publish }}
-          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          requested="${GITHUB_REF_NAME}"
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            requested="${REQUESTED_VERSION}"
-            if [[ "${PUBLISH}" != "true" && -z "${requested}" ]]; then
-              exit 0
-            fi
-            if [[ -z "${requested}" ]]; then
-              echo "An expected version is required when publishing."
-              exit 1
-            fi
-          elif [[ "${requested}" != timeseries-table-python-v* ]]; then
-            echo "Unexpected tag format: ${requested}"
-            exit 1
-          fi
-
-          expected="${requested#timeseries-table-python-v}"
-          expected="${expected#v}"
-          actual="$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/timeseries-table-python/Cargo.toml)"
-          if [[ -z "${actual}" || "${actual}" != "${expected}" ]]; then
-            echo "Requested/Cargo version mismatch: requested=${expected} cargo=${actual:-<missing>}"
-            exit 1
-          fi
+          version="$(python scripts/check_release_version.py --tag "${RELEASE_TAG}")"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
   build:
     needs: [validate]
+    if: ${{ needs.validate.result == 'success' }}
     uses: ./.github/workflows/python-dist.yml
     permissions:
       actions: read
@@ -74,12 +48,12 @@ jobs:
       include-sdist: true
       run-pytest: true
       artifact-prefix: dist
+      expected-version: ${{ needs.validate.outputs.version }}
 
   publish:
     name: publish (PyPI)
     runs-on: ubuntu-latest
     needs: [build]
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
     environment: pypi
     permissions:
       actions: read

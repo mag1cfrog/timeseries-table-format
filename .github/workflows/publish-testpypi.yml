@@ -48,6 +48,7 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
+          skip-existing: true
 
   verify:
     name: verify TestPyPI (py${{ matrix.python-version }})

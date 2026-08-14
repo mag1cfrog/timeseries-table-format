@@ -1,11 +1,11 @@
 [package]
 name = "timeseries-table-cli"
-version = "0.1.2"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 default-run = "tstable"
-license = "MIT"
-repository = "https://github.com/mag1cfrog/timeseries-table-format"
+license.workspace = true
+repository.workspace = true
 description = "Command-line tool for creating, managing, and querying time-series tables (powered by DataFusion)."
 readme = "README.md"
 
@@ -26,7 +26,7 @@ rayon = "1.11.0"
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
-timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.4", default-features = false, features = ["datafusion"] }
+timeseries-table-format = { workspace = true, features = ["datafusion"] }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
@@ -40,7 +40,7 @@ parquet = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.4", default-features = false, features = ["test-counters"] }
+timeseries-table-format = { workspace = true, features = ["test-counters"] }
 
 [lints]
 workspace = true

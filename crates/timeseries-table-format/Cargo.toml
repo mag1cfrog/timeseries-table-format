@@ -1,11 +1,11 @@
 [package]
 name = "timeseries-table-format"
-version = "0.1.4"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "Append-only time-series table format with gap/overlap tracking"
-license = "MIT"
-repository = "https://github.com/mag1cfrog/timeseries-table-format"
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["time-series", "parquet", "datafusion", "analytics"]
 categories = ["database", "data-structures"]

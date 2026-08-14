@@ -14,12 +14,8 @@ on:
       - "crates/timeseries-table-python/build.rs"
       - "crates/timeseries-table-python/src/**"
       - "crates/timeseries-table-python/python/**"
-      - "crates/timeseries-table-core/Cargo.toml"
-      - "crates/timeseries-table-core/build.rs"
-      - "crates/timeseries-table-core/src/**"
-      - "crates/timeseries-table-format/Cargo.toml"
-      - "crates/timeseries-table-format/build.rs"
-      - "crates/timeseries-table-format/src/**"
+      - "crates/timeseries-table-format/**"
+      - "scripts/check_release_version.py"
 
 permissions: {}
 
@@ -65,6 +61,7 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
+          skip-existing: true
 
   verify:
     name: verify snapshot (py${{ matrix.python-version }})

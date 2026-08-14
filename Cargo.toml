@@ -3,6 +3,10 @@ members = ["crates/timeseries-table-format", "crates/timeseries-table-cli", "cra
 resolver = "3"
 
 [workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mag1cfrog/timeseries-table-format"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
@@ -14,6 +18,8 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
+timeseries-table-format = { path = "crates/timeseries-table-format", version = "0.3.0", default-features = false }
+
 arrow = "57.1.0"
 arrow-array = "57.1.0"
 arrow-ipc = "57.1.0"

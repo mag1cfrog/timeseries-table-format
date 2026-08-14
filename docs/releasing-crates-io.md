@@ -1,28 +1,77 @@
-# Releasing Rust crates to crates.io (OIDC / Trusted Publishing)
+# Releasing the workspace
 
-This repo publishes these crates to crates.io:
+This workspace has one version, one root `CHANGELOG.md`, and one canonical GitHub
+tag and release. A production release publishes the same version to crates.io and
+PyPI.
 
-- `timeseries-table-format`
-- `timeseries-table-cli`
+The canonical tag format is `timeseries-table-format-v<VERSION>`.
 
-Publishing is done from GitHub Actions using crates.io Trusted Publishing (OIDC) and is approval-gated via a GitHub Actions environment.
+## One-time trusted publisher setup
 
-## One-time setup (repo + crates.io)
+Create these approval-gated GitHub environments:
 
-1) **GitHub Actions environment**
-   - Create an environment named `crates-io-release`.
-   - Configure required reviewers (manual approval gate).
+- `crates-io-release`
+- `pypi`
+- `testpypi`
+- `testpypi-snapshot`
 
-2) **crates.io Trusted Publisher (per crate)**
-   - For each crate above, configure a Trusted Publisher on crates.io:
-     - Repository: `mag1cfrog/timeseries-table-format`
-     - Workflow filename: `publish-crates.yml` (must live in `.github/workflows/`)
-     - Environment: `crates-io-release`
+Configure a crates.io trusted publisher for `timeseries-table-format` and
+`timeseries-table-cli` with:
 
-## Release flow
+- Repository: `mag1cfrog/timeseries-table-format`
+- Workflow: `publish-crates.yml`
+- Environment: `crates-io-release`
 
-1) Merge the `release-plz` PR(s) that bump versions.
-2) `release-plz` creates tags like `timeseries-table-format-v0.1.5`.
-3) The tag triggers the GitHub Actions workflow `Publish (crates.io)` (`.github/workflows/publish-crates.yml`).
-4) Approve the `crates-io-release` environment deployment when prompted.
-5) The workflow publishes any missing crate versions in dependency order and skips versions that already exist on crates.io.
+Configure PyPI and TestPyPI trusted publishers with their matching workflow and
+environment names.
+
+## Production release
+
+For the first unified `0.3.0` release only, merge the implementation PR and
+manually run the `Release-plz` workflow. This creates the first canonical
+baseline without asking release-plz to compare the retired split-package tags.
+The workflow refuses to create releases on ordinary `main` pushes.
+
+After that bootstrap release:
+
+1. Merge conventional commits to `main`.
+2. Review and merge the release-plz PR. It updates the workspace version and the
+   root `CHANGELOG.md`.
+3. Release-plz creates the canonical tag and GitHub release.
+4. Approve the `crates-io-release` deployment. The crates workflow verifies the
+   tag, packages both crates, then publishes `timeseries-table-format` before
+   `timeseries-table-cli`.
+5. Approve the `pypi` deployment. The GitHub release event builds, tests, and
+   publishes the Python distributions with the same version.
+6. Verify that the canonical GitHub release, both crates.io packages, and the
+   PyPI package all show that exact version.
+
+Do not create package-specific tags or releases. The retired
+`timeseries-table-core` and `timeseries-table-datafusion` packages remain
+available for existing users, but receive no new releases. See the
+[source migration guide](../crates/timeseries-table-format/README.md#source-migration).
+
+## TestPyPI
+
+Use the `TestPyPI release rehearsal` workflow before a production release when a
+full wheel and sdist rehearsal is useful. Keep its `snapshot` input enabled so
+the build uses a unique development version and cannot collide with a production
+version.
+
+The `TestPyPI snapshot` workflow automatically publishes an Ubuntu wheel after
+relevant changes land on `main`. TestPyPI uploads are disposable and may be
+rerun; production PyPI uploads are immutable.
+
+## Recovering a partial release
+
+Rerun a failed crates.io workflow against the existing canonical tag. It skips
+an exact package version that is already published, waits until the library is
+available from a clean registry client, and then resumes with the CLI.
+
+Rerun PyPI only if no production file was accepted. If PyPI accepted only part
+of the distribution set, do not overwrite or silently skip those files; fix
+forward with a new unified patch version.
+
+Never move or recreate a release tag. If a published artifact is defective,
+prepare a fix and release a new patch version. Do not yank or delete a normal
+release as a rollback mechanism.
