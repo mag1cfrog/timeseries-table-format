@@ -512,7 +512,7 @@ mod tests {
         let bitmap = table.expected_bitmap_for_time_range_checked(start, end)?;
         let first = bucket_id(&table.index_spec().bucket, start);
         let last = bucket_id(&table.index_spec().bucket, end - Duration::nanoseconds(1));
-        assert_eq!(bitmap.len(), (last - first + 1) as u64);
+        assert_eq!(bitmap.len(), last - first + 1);
         for b in first..=last {
             assert!(bitmap.contains(b as Bucket));
         }

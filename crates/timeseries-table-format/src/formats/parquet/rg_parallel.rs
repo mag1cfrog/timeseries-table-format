@@ -1,5 +1,8 @@
 //! Shared row-group parallelism helpers for Parquet scans.
 
+/// Record batch size for projected Parquet inspection scans.
+pub(crate) const INSPECTION_BATCH_SIZE: usize = 8_192;
+
 /// Resolve thread count and row-group chunk size for parallel scans.
 pub fn resolve_rg_settings(num_row_groups: usize) -> (usize, usize) {
     let logical_threads = std::thread::available_parallelism()

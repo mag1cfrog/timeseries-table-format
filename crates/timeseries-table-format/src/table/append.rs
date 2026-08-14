@@ -26,8 +26,7 @@ use crate::{
     },
     formats::parquet::{
         coverage::compute_segment_coverage_from_parquet_bytes, logical_schema_from_parquet_bytes,
-        segment_entity_identity_from_parquet_bytes,
-        segment_meta::segment_meta_from_parquet_bytes_with_report,
+        segment_entity_identity_from_parquet_bytes, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::ensure_schema_exact_match,
     storage::{self, StorageError},
@@ -93,7 +92,8 @@ impl TimeSeriesTable {
         // 1) Segment meta + schema.
         let step_start = Instant::now();
         let (mut segment_meta, meta_report) =
-            segment_meta_from_parquet_bytes_with_report(rel_path, time_column, data.clone())
+            segment_meta_from_parquet(self.location(), rel_path, time_column)
+                .await
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
             let fields = vec![
