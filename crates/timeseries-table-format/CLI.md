@@ -1,6 +1,6 @@
 # tstable
 
-A command-line tool for creating, managing, and querying time-series tables—without writing any Rust code.
+A command-line tool for creating, managing, and querying time-series tables without writing any Rust code.
 
 ## What is this?
 
@@ -17,7 +17,7 @@ Instead of manually managing scattered Parquet files, you get:
 ### From crates.io
 
 ```bash
-cargo install timeseries-table-cli --bin tstable
+cargo install timeseries-table-format --features cli
 ```
 
 ### From a local clone
@@ -25,7 +25,7 @@ cargo install timeseries-table-cli --bin tstable
 ```bash
 git clone https://github.com/mag1cfrog/timeseries-table-format.git
 cd timeseries-table-format
-cargo install --path crates/timeseries-table-cli
+cargo install --path crates/timeseries-table-format --features cli
 ```
 
 ### Verify installation
@@ -275,5 +275,5 @@ AAPL,2024-01-03,186.00,187.10,185.50,186.80,48000000
 
 ## Related
 
-- [timeseries-table-format](../timeseries-table-format/README.md) - Rust library for building on this format
-- [DataFusion integration](../timeseries-table-format/DATAFUSION.md) - SQL integration with time-based pruning
+- [timeseries-table-format](README.md) - Rust library for building on this format
+- [DataFusion integration](DATAFUSION.md) - SQL integration with time-based pruning

@@ -7,17 +7,8 @@ changelog_config = "cliff.toml"
 name = "timeseries-table-format"
 release = true
 changelog_path = "CHANGELOG.md"
-changelog_include = ["timeseries-table-cli", "timeseries-table-python"]
+changelog_include = ["timeseries-table-python"]
 git_tag_name = "timeseries-table-format-v{{ version }}"
-
-[[package]]
-name = "timeseries-table-cli"
-release = true
-git_only = true
-git_tag_name = "timeseries-table-format-v{{ version }}"
-git_tag_enable = false
-git_release_enable = false
-changelog_update = false
 
 [[package]]
 name = "timeseries-table-python"

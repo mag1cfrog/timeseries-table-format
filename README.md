@@ -235,7 +235,7 @@ Python users: see [Install (Python)](#install-python) and [Python Quickstart](#p
 
 ```bash
 # Install
-cargo install timeseries-table-cli --bin tstable
+cargo install timeseries-table-format --features cli
 
 # Create a table with 1-hour buckets
 tstable create --table ./my_table --time-column ts --bucket 1h
@@ -247,7 +247,7 @@ tstable append --table ./my_table --parquet ./data.parquet
 tstable query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
 ```
 
-See the [CLI documentation](crates/timeseries-table-cli/README.md) for the full command reference.
+See the [CLI documentation](crates/timeseries-table-format/CLI.md) for the full command reference.
 
 ### Rust API
 
@@ -381,7 +381,7 @@ Current status and near-term roadmap:
 - [How I built this: design decisions, coverage tracking, and benchmark walkthrough](docs/blog/how-i-built-this/how-i-built-this.md)
 - [Benchmark methodology & results](docs/benchmarks/README.md)
 - [Python docs](https://mag1cfrog.github.io/timeseries-table-format/)
-- [CLI reference](crates/timeseries-table-cli/README.md)
+- [CLI reference](crates/timeseries-table-format/CLI.md)
 - [Rust engine guide](crates/timeseries-table-format/ENGINE.md)
 - [DataFusion integration](crates/timeseries-table-format/DATAFUSION.md)
 

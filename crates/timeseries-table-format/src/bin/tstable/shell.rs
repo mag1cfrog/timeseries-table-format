@@ -1324,6 +1324,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "test-counters")]
     fn explain_sql(table_name: &str) -> String {
         format!(
             "explain SELECT * FROM {} ORDER BY ts",
@@ -1379,6 +1380,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "test-counters")]
     #[tokio::test(flavor = "current_thread")]
     async fn shell_explain_auto_refreshes() -> TestResult<()> {
         use timeseries_table_format::transaction_log::table_state::reset_rebuild_table_state_count;
@@ -1407,6 +1409,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "test-counters")]
     #[tokio::test(flavor = "current_thread")]
     async fn shell_refresh_noop_does_not_rebuild() -> TestResult<()> {
         use timeseries_table_format::transaction_log::table_state::{

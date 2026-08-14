@@ -3217,56 +3217,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "timeseries-table-cli"
-version = "0.3.0"
-dependencies = [
- "arrow",
- "arrow-array",
- "arrow-csv",
- "arrow-json",
- "assert_cmd",
- "async-trait",
- "bytes",
- "chrono",
- "clap",
- "datafusion",
- "futures-util",
- "parquet",
- "predicates",
- "rayon",
- "rustyline",
- "snafu",
- "tabled",
- "tempfile",
- "terminal_size",
- "timeseries-table-format",
- "tokio",
-]
-
-[[package]]
 name = "timeseries-table-format"
 version = "0.3.0"
 dependencies = [
  "arrow",
  "arrow-array",
  "arrow-csv",
+ "arrow-json",
  "arrow-select",
+ "assert_cmd",
  "async-trait",
  "blake3",
  "bytes",
  "chrono",
  "chrono-tz",
+ "clap",
  "datafusion",
  "futures",
+ "futures-util",
  "log",
  "object_store",
  "parquet",
+ "predicates",
  "rayon",
  "roaring",
+ "rustyline",
  "serde",
  "serde_json",
  "snafu",
+ "tabled",
  "tempfile",
+ "terminal_size",
  "tokio",
 ]
 

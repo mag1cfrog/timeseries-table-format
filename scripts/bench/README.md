@@ -1,6 +1,6 @@
 # Benchmark helpers
 
-These scripts run the `coverage_bench` binary with common parameter sweeps.
+These scripts run the `coverage_bench` example with common parameter sweeps.
 
 ## Thread sweep
 
