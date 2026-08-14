@@ -12,7 +12,6 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ACTIVE_PACKAGES = {
     "timeseries-table-format",
-    "timeseries-table-cli",
     "timeseries-table-python",
 }
 TAG_PREFIX = "timeseries-table-format-v"

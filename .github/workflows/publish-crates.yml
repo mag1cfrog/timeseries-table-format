@@ -76,8 +76,8 @@ jobs:
           version="$(python scripts/check_release_version.py --tag "${RELEASE_TAG}")"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify crate archives
-        run: cargo package --locked -p timeseries-table-format -p timeseries-table-cli
+      - name: Verify crate archive
+        run: cargo package --locked -p timeseries-table-format --features cli
 
       - name: Mint crates.io token (OIDC)
         id: cratesio
@@ -123,28 +123,6 @@ jobs:
             done
           }
 
-          wait_for_registry() {
-            local crate="$1"
-            local ver="$2"
-
-            local tmp
-            tmp="$(mktemp -d)"
-            mkdir -p "${tmp}/src"
-            {
-              printf '%s\n' \
-                '[package]' \
-                'name = "registry-probe"' \
-                'version = "0.0.0"' \
-                'edition = "2021"' \
-                '' \
-                '[dependencies]' \
-                "${crate} = { version = \"=${ver}\", default-features = false }"
-            } >"${tmp}/Cargo.toml"
-            echo "fn main() {}" >"${tmp}/src/main.rs"
-
-            retry 10 5 bash -lc "cd '${tmp}' && CARGO_HOME='${tmp}/cargo-home' cargo fetch -q"
-          }
-
           publish_if_missing() {
             local crate="$1"
             local ver="$2"
@@ -163,5 +141,3 @@ jobs:
           }
 
           publish_if_missing "timeseries-table-format" "${RELEASE_VERSION}"
-          wait_for_registry "timeseries-table-format" "${RELEASE_VERSION}"
-          publish_if_missing "timeseries-table-cli" "${RELEASE_VERSION}"
