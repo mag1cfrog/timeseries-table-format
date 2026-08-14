@@ -45,6 +45,8 @@ jobs:
               - '.github/workflows/release-plz.yml'
               - 'scripts/check_release_version.py'
               - 'scripts/test_check_release_version.py'
+              - 'scripts/append_rss_regression.py'
+              - 'scripts/test_append_rss_regression.py'
       - name: Check for skip label
         id: skip
         env:
@@ -147,6 +149,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.10.0"
+
       - name: Configure PyO3
         shell: bash
         run: |
@@ -163,6 +170,19 @@ jobs:
         run: |
           python scripts/test_check_release_version.py
           python scripts/check_release_version.py
+
+      - name: append RSS regression checks
+        run: |
+          uv sync --project crates/timeseries-table-python --locked --no-install-project
+          crates/timeseries-table-python/.venv/bin/ruff check scripts/append_rss_regression.py scripts/test_append_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/append_rss_regression.py scripts/test_append_rss_regression.py
+          (
+            cd crates/timeseries-table-python
+            PYTHONPATH=../../scripts .venv/bin/ty check \
+              ../../scripts/append_rss_regression.py \
+              ../../scripts/test_append_rss_regression.py
+          )
+          crates/timeseries-table-python/.venv/bin/python scripts/test_append_rss_regression.py
 
       - name: fmt
         run: cargo fmt --all -- --check

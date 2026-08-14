@@ -94,7 +94,7 @@ impl TimeSeriesTable {
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
             if let Some(file_size) = segment_meta.file_size {
-                r.set_context("file_size", file_size.to_string());
+                r.set_context("file_size_bytes", file_size.to_string());
             }
             let fields = vec![
                 ("row_groups".to_string(), meta_report.row_groups.to_string()),
@@ -490,17 +490,42 @@ mod tests {
             .await?;
 
         assert_eq!(version, 2);
-        assert!(
-            report
-                .context
-                .contains(&("file_size".to_string(), file_size))
+        assert_eq!(
+            report.context,
+            vec![
+                ("relative_path".to_string(), rel_path.to_string()),
+                ("time_column".to_string(), "ts".to_string()),
+                ("file_size_bytes".to_string(), file_size),
+            ]
         );
-        assert!(
+        assert_eq!(
             report
                 .steps
                 .iter()
-                .all(|step| step.name != "read_parquet_bytes")
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "segment_meta",
+                "logical_schema",
+                "entity_identity",
+                "load_table_snapshot",
+                "segment_coverage",
+                "overlap_check",
+                "write_segment_sidecar",
+                "write_snapshot_sidecar",
+                "commit_log",
+                "state_update",
+            ]
         );
+        assert_eq!(
+            report.steps[0]
+                .fields
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["row_groups", "row_count", "used_stats", "scanned_rows"]
+        );
+        assert!(report.steps[1..].iter().all(|step| step.fields.is_empty()));
         Ok(())
     }
 
