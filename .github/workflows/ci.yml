@@ -40,7 +40,6 @@ jobs:
               - 'clippy.toml'
               - '.github/workflows/cache-warm.yml'
               - '.github/workflows/ci.yml'
-              - '.github/workflows/docs.yml'
               - '.github/workflows/publish-crates.yml'
               - '.github/workflows/release-plz.yml'
 
@@ -69,7 +68,6 @@ jobs:
               - '.cargo/**'
               - '.github/workflows/cache-warm.yml'
               - '.github/workflows/ci.yml'
-              - '.github/workflows/docs.yml'
               - '.github/workflows/publish-pypi.yml'
               - '.github/workflows/publish-testpypi.yml'
               - '.github/workflows/python-dist.yml'
