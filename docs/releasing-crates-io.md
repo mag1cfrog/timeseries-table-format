@@ -15,8 +15,7 @@ Create these approval-gated GitHub environments:
 - `testpypi`
 - `testpypi-snapshot`
 
-Configure a crates.io trusted publisher for `timeseries-table-format` and
-`timeseries-table-cli` with:
+Configure a crates.io trusted publisher for `timeseries-table-format` with:
 
 - Repository: `mag1cfrog/timeseries-table-format`
 - Workflow: `publish-crates.yml`
@@ -39,16 +38,17 @@ After that bootstrap release:
    root `CHANGELOG.md`.
 3. Release-plz creates the canonical tag and GitHub release.
 4. Approve the `crates-io-release` deployment. The crates workflow verifies the
-   tag, packages both crates, then publishes `timeseries-table-format` before
-   `timeseries-table-cli`.
+   tag and package with the CLI enabled, then publishes the canonical
+   `timeseries-table-format` crate.
 5. Approve the `pypi` deployment. The GitHub release event builds, tests, and
    publishes the Python distributions with the same version.
-6. Verify that the canonical GitHub release, both crates.io packages, and the
-   PyPI package all show that exact version.
+6. Verify that the canonical GitHub release, crates.io package, and PyPI package
+   all show that exact version.
 
 Do not create package-specific tags or releases. The retired
-`timeseries-table-core` and `timeseries-table-datafusion` packages remain
-available for existing users, but receive no new releases. See the
+`timeseries-table-core`, `timeseries-table-datafusion`, and
+`timeseries-table-cli` packages remain available for existing users, but
+receive no new releases. See the
 [source migration guide](../crates/timeseries-table-format/README.md#source-migration).
 
 ## TestPyPI
@@ -65,8 +65,7 @@ rerun; production PyPI uploads are immutable.
 ## Recovering a partial release
 
 Rerun a failed crates.io workflow against the existing canonical tag. It skips
-an exact package version that is already published, waits until the library is
-available from a clean registry client, and then resumes with the CLI.
+the canonical package when that exact version is already published.
 
 Rerun PyPI only if no production file was accepted. If PyPI accepted only part
 of the distribution set, do not overwrite or silently skip those files; fix

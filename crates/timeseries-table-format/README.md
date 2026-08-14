@@ -16,6 +16,7 @@ cargo add timeseries-table-format
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `datafusion` | Yes | DataFusion TableProvider for SQL queries |
+| `cli` | No | `tstable` command-line interface |
 | `test-counters` | No | Test-only transaction-log counters |
 
 ## Usage
@@ -36,13 +37,14 @@ timeseries-table-core dependency       -> timeseries-table-format dependency
 timeseries_table_core::<module>        -> timeseries_table_format::<module>
 timeseries-table-datafusion dependency -> timeseries-table-format dependency with the datafusion feature
 timeseries_table_datafusion::<module>  -> timeseries_table_format::datafusion::<module>
+cargo install timeseries-table-cli     -> cargo install timeseries-table-format --features cli --bin tstable
 ```
 
 The `datafusion` feature is enabled by default. The historical split packages
 remain available on crates.io for existing users, but receive no new releases.
 
-See the [engine guide](ENGINE.md) and [DataFusion guide](DATAFUSION.md) for
-the full module and query APIs.
+See the [CLI guide](CLI.md), [engine guide](ENGINE.md), and
+[DataFusion guide](DATAFUSION.md) for the full command, module, and query APIs.
 
 For more documentation and examples, see the repository README:
 https://github.com/mag1cfrog/timeseries-table-format

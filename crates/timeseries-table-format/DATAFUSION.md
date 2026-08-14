@@ -206,5 +206,5 @@ Queries still run correctly; they just won’t be pruned.
 
 ## Related
 
-- `timeseries-table-cli` - Command-line tool for managing and querying tables (no Rust code required)
+- `tstable` - Command-line tool shipped by this crate behind the `cli` feature
 - `timeseries-table-format` - Canonical Rust crate with DataFusion enabled by default
