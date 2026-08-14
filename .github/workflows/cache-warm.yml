@@ -145,7 +145,7 @@ jobs:
       actions: read
       contents: read
     with:
-      max-parallel: 1
+      max-parallel: 4
       run-pytest: false
       upload-artifacts: false
       write-cache: true
