@@ -94,7 +94,7 @@ impl TimeSeriesTable {
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
             if let Some(file_size) = segment_meta.file_size {
-                r.set_context("file_size", file_size.to_string());
+                r.set_context("file_size_bytes", file_size.to_string());
             }
             let fields = vec![
                 ("row_groups".to_string(), meta_report.row_groups.to_string()),
@@ -490,10 +490,13 @@ mod tests {
             .await?;
 
         assert_eq!(version, 2);
-        assert!(
-            report
-                .context
-                .contains(&("file_size".to_string(), file_size))
+        assert_eq!(
+            report.context,
+            vec![
+                ("relative_path".to_string(), rel_path.to_string()),
+                ("time_column".to_string(), "ts".to_string()),
+                ("file_size_bytes".to_string(), file_size),
+            ]
         );
         assert!(
             report
