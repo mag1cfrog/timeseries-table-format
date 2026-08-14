@@ -25,7 +25,7 @@ use crate::{
         },
     },
     formats::parquet::{
-        coverage::compute_segment_coverage_from_parquet_bytes, logical_schema_from_parquet_bytes,
+        coverage::compute_segment_coverage, logical_schema_from_parquet_bytes,
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::ensure_schema_exact_match,
@@ -187,13 +187,10 @@ impl TimeSeriesTable {
 
         // 4) Compute segment coverage.
         let step_start = Instant::now();
-        let segment_cov = compute_segment_coverage_from_parquet_bytes(
-            rel_path,
-            time_column,
-            &bucket_spec,
-            data.clone(),
-        )
-        .context(SegmentCoverageSnafu)?;
+        let segment_cov =
+            compute_segment_coverage(self.location(), rel_path, time_column, &bucket_spec)
+                .await
+                .context(SegmentCoverageSnafu)?;
         if let Some(r) = report.as_mut() {
             r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
         }
@@ -842,9 +839,6 @@ mod tests {
         assert_eq!(v2, 2);
         assert_eq!(v3, 3);
 
-        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
-        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
-
         let seg1 = table.state.segments.get(rel1).expect("segment 1 present");
         let seg2 = table.state.segments.get(rel2).expect("segment 2 present");
         assert_eq!(seg1.path, rel1);
@@ -854,18 +848,8 @@ mod tests {
 
         let bucket_spec = table.index_spec().bucket.clone();
 
-        let cov1 = compute_segment_coverage_from_parquet_bytes(
-            Path::new(rel1),
-            "ts",
-            &bucket_spec,
-            data1.clone(),
-        )?;
-        let cov2 = compute_segment_coverage_from_parquet_bytes(
-            Path::new(rel2),
-            "ts",
-            &bucket_spec,
-            data2.clone(),
-        )?;
+        let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
+        let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
         let expected_snapshot = cov1.union(&cov2);
 
         let ptr = table
@@ -970,21 +954,8 @@ mod tests {
         let bucket_spec = reopened.index_spec().bucket.clone();
         assert_eq!(ptr.bucket_spec, bucket_spec);
 
-        let data1 = Bytes::from(tokio::fs::read(&path1).await?);
-        let data2 = Bytes::from(tokio::fs::read(&path2).await?);
-
-        let cov1 = compute_segment_coverage_from_parquet_bytes(
-            Path::new(rel1),
-            "ts",
-            &bucket_spec,
-            data1,
-        )?;
-        let cov2 = compute_segment_coverage_from_parquet_bytes(
-            Path::new(rel2),
-            "ts",
-            &bucket_spec,
-            data2,
-        )?;
+        let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
+        let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
         let expected = cov1.union(&cov2);
 
         let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;

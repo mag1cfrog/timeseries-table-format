@@ -13,35 +13,33 @@
 
 use std::path::Path;
 
-use arrow::{
-    datatypes::{DataType, TimeUnit},
-    error::ArrowError,
-};
+use arrow::datatypes::{DataType, TimeUnit};
 use arrow_array::{
     Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
 };
-use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use parquet::{
     arrow::{
         ProjectionMask,
-        arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder},
+        arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
+        async_reader::ParquetRecordBatchStreamBuilder,
     },
     errors::ParquetError,
 };
-use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use snafu::{Backtrace, Snafu};
+use tokio::task::JoinSet;
 
 use crate::{
     coverage::Coverage,
     coverage::bucket::bucket_id_from_epoch_secs,
     metadata::table_metadata::TimeBucket,
     metadata::time_column::TimeColumnError,
-    storage::{self, StorageError, TableLocation},
+    storage::{StorageError, TableLocation, open_local_file},
 };
 
-use super::resolve_rg_settings;
+use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 
 /// Errors that can occur when reading or computing segment coverage.
 ///
@@ -49,7 +47,7 @@ use super::resolve_rg_settings;
 /// 1. Reads the Parquet segment file from storage.
 /// 2. Inspects the Parquet schema to locate the timestamp column.
 /// 3. Validates that the timestamp column uses a supported type.
-/// 4. Iterates over row group statistics or raw values to map timestamps to buckets.
+/// 4. Streams projected timestamp values and maps them to buckets.
 /// 5. Stores computed bucket IDs in a RoaringBitmap for efficient serialization.
 ///
 /// Errors at any stage are captured here with context about the segment path,
@@ -59,7 +57,7 @@ pub enum SegmentCoverageError {
     /// Storage layer failed to read the segment file at the given path.
     ///
     /// This may indicate the file is missing, inaccessible, or suffered an I/O error.
-    #[snafu(display("Storage error reading parquet bytes for {path}: {source}"))]
+    #[snafu(display("Storage error reading parquet file {path}: {source}"))]
     Storage {
         /// The path to the segment file that could not be read.
         path: String,
@@ -79,18 +77,6 @@ pub enum SegmentCoverageError {
         /// The underlying Parquet library error.
         #[snafu(source)]
         source: ParquetError,
-        /// The backtrace at the time the error occurred.
-        backtrace: Backtrace,
-    },
-
-    /// Arrow read error.
-    #[snafu(display("Arrow read error for {path}: {source}"))]
-    ArrowRead {
-        /// The path to the segment file with an Arrow format error.
-        path: String,
-        /// The underlying Arrow library error.
-        #[snafu(source)]
-        source: ArrowError,
         /// The backtrace at the time the error occurred.
         backtrace: Backtrace,
     },
@@ -176,8 +162,10 @@ fn add_buckets_from_values(
     Ok(())
 }
 
-fn compute_bitmap_from_reader(
-    reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, ArrowError>>,
+async fn compute_bitmap_from_stream(
+    mut reader: impl Stream<
+        Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
+    > + Unpin,
     path_str: &str,
     time_column: &str,
     bucket_spec: &TimeBucket,
@@ -204,8 +192,8 @@ fn compute_bitmap_from_reader(
         }};
     }
 
-    for batch_res in reader {
-        let batch = batch_res.map_err(|source| SegmentCoverageError::ArrowRead {
+    while let Some(batch_res) = reader.next().await {
+        let batch = batch_res.map_err(|source| SegmentCoverageError::ParquetRead {
             path: path_str.to_string(),
             source,
             backtrace: Backtrace::capture(),
@@ -240,116 +228,11 @@ fn compute_bitmap_from_reader(
                 });
             }
         }
+
+        tokio::task::yield_now().await;
     }
 
     Ok(bitmap)
-}
-
-/// Compute segment coverage from in-memory Parquet bytes.
-///
-/// This mirrors `compute_segment_coverage` but operates on a provided `Bytes`
-/// buffer instead of reading from storage. The caller supplies:
-/// - `rel_path`: relative segment path (for error context).
-/// - `time_column`: name of the timestamp column to analyze.
-/// - `bucket_spec`: time bucket specification used to map timestamps to bucket IDs.
-/// - `data`: complete Parquet file contents.
-///
-/// Behavior:
-/// - Builds an Arrow `RecordBatch` reader over the supplied bytes.
-/// - Projects only the timestamp column for efficiency.
-/// - Validates the column exists and uses a supported timestamp unit.
-/// - Streams batches and maps each timestamp to a bucket ID, inserting into a `RoaringBitmap`.
-/// - Returns a `Coverage` bitmap or a contextual `SegmentCoverageError` on failure.
-pub fn compute_segment_coverage_from_parquet_bytes(
-    rel_path: &Path,
-    time_column: &str,
-    bucket_spec: &TimeBucket,
-    data: Bytes,
-) -> Result<Coverage, SegmentCoverageError> {
-    let path_str = rel_path.display().to_string();
-
-    let metadata =
-        ArrowReaderMetadata::load(&data, ArrowReaderOptions::default()).map_err(|source| {
-            SegmentCoverageError::ParquetRead {
-                path: path_str.clone(),
-                source,
-                backtrace: Backtrace::capture(),
-            }
-        })?;
-
-    // Validate the column exists in the Arrow schema (good error message)
-    metadata
-        .schema()
-        .index_of(time_column)
-        .map_err(|_| SegmentCoverageError::TimeColumn {
-            path: path_str.clone(),
-            source: TimeColumnError::Missing {
-                column: time_column.to_string(),
-            },
-        })?;
-
-    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
-    let row_groups = metadata.metadata().num_row_groups();
-
-    if row_groups <= 1 {
-        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(data, metadata)
-            .with_projection(mask);
-        let reader = builder
-            .build()
-            .map_err(|source| SegmentCoverageError::ParquetRead {
-                path: path_str.clone(),
-                source,
-                backtrace: Backtrace::capture(),
-            })?;
-        let bitmap = compute_bitmap_from_reader(reader, &path_str, time_column, bucket_spec)?;
-        return Ok(Coverage::from_bitmap(bitmap));
-    }
-
-    let (threads_used, rg_chunk) = resolve_rg_settings(row_groups);
-    let rg_indices: Vec<usize> = (0..row_groups).collect();
-    let chunks: Vec<Vec<usize>> = rg_indices
-        .chunks(rg_chunk)
-        .map(|chunk| chunk.to_vec())
-        .collect();
-
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads_used)
-        .build()
-        .map_err(|e| SegmentCoverageError::ParquetRead {
-            path: path_str.clone(),
-            source: ParquetError::General(format!("failed to build rayon thread pool: {e}")),
-            backtrace: Backtrace::capture(),
-        })?;
-
-    let bitmaps: Result<Vec<RoaringBitmap>, SegmentCoverageError> = pool.install(|| {
-        chunks
-            .par_iter()
-            .map(|chunk| {
-                let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
-                    data.clone(),
-                    metadata.clone(),
-                )
-                .with_projection(mask.clone())
-                .with_row_groups(chunk.clone());
-                let reader =
-                    builder
-                        .build()
-                        .map_err(|source| SegmentCoverageError::ParquetRead {
-                            path: path_str.clone(),
-                            source,
-                            backtrace: Backtrace::capture(),
-                        })?;
-                compute_bitmap_from_reader(reader, &path_str, time_column, bucket_spec)
-            })
-            .collect()
-    });
-
-    let mut merged = RoaringBitmap::new();
-    for bm in bitmaps? {
-        merged |= bm;
-    }
-
-    Ok(Coverage::from_bitmap(merged))
 }
 
 /// Computes segment-level time-series coverage by reading a Parquet segment file
@@ -379,33 +262,116 @@ pub async fn compute_segment_coverage(
     time_column: &str,
     bucket_spec: &TimeBucket,
 ) -> Result<Coverage, SegmentCoverageError> {
-    let bytes = storage::read_all_bytes(location.as_ref(), rel_path)
+    let path = rel_path.display().to_string();
+    let mut file = open_local_file(location.as_ref(), rel_path)
         .await
         .map_err(|source| SegmentCoverageError::Storage {
-            path: rel_path.display().to_string(),
+            path: path.clone(),
             source,
         })?;
-    compute_segment_coverage_from_parquet_bytes(
-        rel_path,
-        time_column,
-        bucket_spec,
-        Bytes::from(bytes),
-    )
+    let metadata = ArrowReaderMetadata::load_async(&mut file, ArrowReaderOptions::default())
+        .await
+        .map_err(|source| SegmentCoverageError::ParquetRead {
+            path: path.clone(),
+            source,
+            backtrace: Backtrace::capture(),
+        })?;
+    let field = metadata
+        .schema()
+        .field_with_name(time_column)
+        .map_err(|_| SegmentCoverageError::TimeColumn {
+            path: path.clone(),
+            source: TimeColumnError::Missing {
+                column: time_column.to_string(),
+            },
+        })?;
+    if !matches!(field.data_type(), DataType::Timestamp(_, _)) {
+        return Err(SegmentCoverageError::TimeColumn {
+            path,
+            source: TimeColumnError::UnsupportedArrowType {
+                column: time_column.to_string(),
+                datatype: field.data_type().to_string(),
+            },
+        });
+    }
+    drop(file);
+
+    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
+    let row_groups = metadata.metadata().num_row_groups();
+    let (max_tasks, row_groups_per_task) = resolve_rg_settings(row_groups);
+    let row_groups = (0..row_groups).collect::<Vec<_>>();
+    let chunks = row_groups
+        .chunks(row_groups_per_task)
+        .map(<[usize]>::to_vec)
+        .collect::<Vec<_>>();
+    debug_assert!(chunks.len() <= max_tasks);
+
+    let mut tasks = JoinSet::new();
+    for chunk in chunks {
+        let location = location.clone();
+        let rel_path = rel_path.to_path_buf();
+        let path = path.clone();
+        let time_column = time_column.to_string();
+        let bucket_spec = bucket_spec.clone();
+        let metadata = metadata.clone();
+        let mask = mask.clone();
+
+        tasks.spawn(async move {
+            let file = open_local_file(location.as_ref(), &rel_path)
+                .await
+                .map_err(|source| SegmentCoverageError::Storage {
+                    path: path.clone(),
+                    source,
+                })?;
+            let reader = ParquetRecordBatchStreamBuilder::new_with_metadata(file, metadata)
+                .with_projection(mask)
+                .with_row_groups(chunk)
+                .with_batch_size(INSPECTION_BATCH_SIZE)
+                .build()
+                .map_err(|source| SegmentCoverageError::ParquetRead {
+                    path: path.clone(),
+                    source,
+                    backtrace: Backtrace::capture(),
+                })?;
+            compute_bitmap_from_stream(reader, &path, &time_column, &bucket_spec).await
+        });
+    }
+
+    let mut merged = RoaringBitmap::new();
+    while let Some(result) = tasks.join_next().await {
+        let bitmap = result.map_err(|source| SegmentCoverageError::ParquetRead {
+            path: path.clone(),
+            source: ParquetError::General(format!("row-group scan task failed: {source}")),
+            backtrace: Backtrace::capture(),
+        })??;
+        merged |= bitmap;
+    }
+
+    Ok(Coverage::from_bitmap(merged))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::{fs::File, io::SeekFrom, sync::Arc};
 
     use arrow::{
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
     };
-    use arrow_array::builder::{Int32Builder, StringBuilder, TimestampMillisecondBuilder};
+    use arrow_array::builder::{
+        BinaryBuilder, Int32Builder, StringBuilder, TimestampMillisecondBuilder,
+    };
     use parquet::arrow::ArrowWriter;
-    use parquet::file::properties::WriterProperties;
+    use parquet::{
+        basic::Compression,
+        file::{
+            properties::WriterProperties,
+            reader::{FileReader, SerializedFileReader},
+        },
+    };
     use tempfile::TempDir;
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -414,16 +380,31 @@ mod tests {
         schema: Schema,
         columns: Vec<Arc<dyn Array>>,
     ) -> TestResult {
+        let schema = Arc::new(schema);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns)?;
+        write_parquet_batches(
+            path,
+            schema,
+            vec![batch],
+            WriterProperties::builder().build(),
+        )
+    }
+
+    fn write_parquet_batches(
+        path: &Path,
+        schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+        props: WriterProperties,
+    ) -> TestResult {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
-
-        let file = std::fs::File::create(path)?;
-        let props = WriterProperties::builder().build();
-        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
-        writer.write(&batch)?;
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(props))?;
+        for batch in batches {
+            writer.write(&batch)?;
+            writer.flush()?;
+        }
         writer.close()?;
         Ok(())
     }
@@ -452,6 +433,11 @@ mod tests {
         write_parquet_batch(path, schema, vec![ts_array, val_array])
     }
 
+    fn timestamp_batch(schema: Arc<Schema>, values: &[Option<i64>]) -> RecordBatch {
+        let timestamps = Arc::new(TimestampMillisecondArray::from(values.to_vec()));
+        RecordBatch::try_new(schema, vec![timestamps]).expect("timestamp batch")
+    }
+
     #[tokio::test]
     async fn compute_coverage_supports_nulls_and_dedup_and_multiple_specs() -> TestResult {
         let tmp = TempDir::new()?;
@@ -476,6 +462,198 @@ mod tests {
         let buckets_hr: Vec<u32> = cov_hr.present().iter().collect();
         assert_eq!(buckets_hr, vec![0, 1]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_merges_multiple_row_groups() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/row_groups.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let batches = vec![
+            timestamp_batch(Arc::clone(&schema), &[Some(1_000), Some(61_000)]),
+            timestamp_batch(Arc::clone(&schema), &[Some(121_000), None]),
+            timestamp_batch(Arc::clone(&schema), &[Some(181_000), Some(1_000)]),
+        ];
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            schema,
+            batches,
+            WriterProperties::builder().build(),
+        )?;
+
+        let coverage = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            "ts",
+            &TimeBucket::Minutes(1),
+        )
+        .await?;
+        assert_eq!(
+            coverage.present().iter().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_scans_multiple_bounded_batches() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/batches.parquet");
+        let row_count = INSPECTION_BATCH_SIZE * 2 + 17;
+        let values = (0..row_count)
+            .map(|value| Some(value as i64 * 1_000))
+            .collect::<Vec<_>>();
+        write_parquet_with_timestamps(&tmp.path().join(rel_path), &values)?;
+
+        let coverage = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            "ts",
+            &TimeBucket::Seconds(1),
+        )
+        .await?;
+        assert_eq!(coverage.cardinality(), row_count as u64);
+        assert_eq!(coverage.present().min(), Some(0));
+        assert_eq!(coverage.present().max(), Some(row_count as u32 - 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_supports_every_timestamp_unit() -> TestResult {
+        let tmp = TempDir::new()?;
+        let cases: Vec<(&str, DataType, Arc<dyn Array>)> = vec![
+            (
+                "seconds.parquet",
+                DataType::Timestamp(TimeUnit::Second, None),
+                Arc::new(TimestampSecondArray::from(vec![Some(1), Some(60)])),
+            ),
+            (
+                "milliseconds.parquet",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    Some(1_000),
+                    Some(60_000),
+                ])),
+            ),
+            (
+                "microseconds.parquet",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(1_000_000),
+                    Some(60_000_000),
+                ])),
+            ),
+            (
+                "nanoseconds.parquet",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                Arc::new(TimestampNanosecondArray::from(vec![
+                    Some(1_000_000_000),
+                    Some(60_000_000_000),
+                ])),
+            ),
+        ];
+
+        for (file_name, data_type, array) in cases {
+            let rel_path = Path::new("data").join(file_name);
+            write_parquet_batch(
+                &tmp.path().join(&rel_path),
+                Schema::new(vec![Field::new("ts", data_type, true)]),
+                vec![array],
+            )?;
+            let coverage = compute_segment_coverage(
+                &TableLocation::local(tmp.path()),
+                &rel_path,
+                "ts",
+                &TimeBucket::Seconds(1),
+            )
+            .await?;
+            assert_eq!(coverage.present().iter().collect::<Vec<_>>(), vec![1, 60]);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_returns_empty_for_empty_and_all_null_files() -> TestResult {
+        let tmp = TempDir::new()?;
+        for (file_name, values) in [
+            ("empty.parquet", Vec::new()),
+            ("all_null.parquet", vec![None, None, None]),
+        ] {
+            let rel_path = Path::new("data").join(file_name);
+            write_parquet_with_timestamps(&tmp.path().join(&rel_path), &values)?;
+            let coverage = compute_segment_coverage(
+                &TableLocation::local(tmp.path()),
+                &rel_path,
+                "ts",
+                &TimeBucket::Minutes(1),
+            )
+            .await?;
+            assert!(coverage.present().is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_ignores_large_unprojected_payload() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/payload.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("payload", DataType::Binary, false),
+        ]));
+        let timestamps = Arc::new(TimestampMillisecondArray::from(vec![
+            1_000, 61_000, 121_000, 181_000,
+        ]));
+        let payload = vec![0xA5; 1024 * 1024];
+        let mut payloads = BinaryBuilder::with_capacity(4, 4 * payload.len());
+        for _ in 0..4 {
+            payloads.append_value(&payload);
+        }
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![timestamps, Arc::new(payloads.finish())],
+        )?;
+        let props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .build();
+        write_parquet_batches(&abs_path, schema, vec![batch], props)?;
+
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let payload_page = reader.metadata().row_group(0).column(1).data_page_offset() as u64;
+        drop(reader);
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&abs_path)
+            .await?;
+        file.seek(SeekFrom::Start(payload_page)).await?;
+        file.write_all(&[0xFF; 32]).await?;
+        file.flush().await?;
+        drop(file);
+
+        assert!(tokio::fs::metadata(&abs_path).await?.len() > 4 * 1024 * 1024);
+        let coverage = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            "ts",
+            &TimeBucket::Minutes(1),
+        )
+        .await?;
+        assert_eq!(
+            coverage.present().iter().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
         Ok(())
     }
 
@@ -595,6 +773,53 @@ mod tests {
             .await
             .expect_err("expected parquet read error");
 
+        assert!(matches!(err, SegmentCoverageError::ParquetRead { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_surfaces_projected_column_corruption() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/corrupt_timestamp.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(TimestampMillisecondArray::from(vec![
+                1_000, 2_000,
+            ]))],
+        )?;
+        let props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .build();
+        write_parquet_batches(&abs_path, schema, vec![batch], props)?;
+
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let timestamp_page = reader.metadata().row_group(0).column(0).data_page_offset() as u64;
+        drop(reader);
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&abs_path)
+            .await?;
+        file.seek(SeekFrom::Start(timestamp_page)).await?;
+        file.write_all(&[0xFF; 16]).await?;
+        file.flush().await?;
+        drop(file);
+
+        let err = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            "ts",
+            &TimeBucket::Minutes(1),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, SegmentCoverageError::ParquetRead { .. }));
         Ok(())
     }
