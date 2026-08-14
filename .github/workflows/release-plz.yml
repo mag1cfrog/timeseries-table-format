@@ -4,13 +4,21 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch: {}
 
 permissions: {}
 
 jobs:
   release-plz-release:
     name: Release-plz release
-    if: ${{ github.repository_owner == 'mag1cfrog' }}
+    if: >-
+      github.repository_owner == 'mag1cfrog' &&
+      github.ref == 'refs/heads/main' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        contains(github.event.head_commit.message, 'chore: release v') ||
+        contains(github.event.head_commit.message, 'release-plz-')
+      )
     runs-on: ubuntu-latest
     concurrency:
       group: release-plz-release
@@ -74,7 +82,7 @@ jobs:
         with:
           command: release
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-plz-target
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
 
       - name: Refresh tags after release-plz
@@ -93,8 +101,11 @@ jobs:
 
   release-plz-pr:
     name: Release-plz PR
-    needs: release-plz-release
-    if: ${{ github.repository_owner == 'mag1cfrog' }}
+    if: >-
+      github.event_name == 'push' &&
+      github.repository_owner == 'mag1cfrog' &&
+      !contains(github.event.head_commit.message, 'chore: release v') &&
+      !contains(github.event.head_commit.message, 'release-plz-')
     runs-on: ubuntu-latest
     concurrency:
       group: release-plz-pr
@@ -126,6 +137,19 @@ jobs:
           fetch-tags: true
           persist-credentials: false
           token: ${{ steps.generate-token.outputs.token }}
+      - name: Check unified release baseline
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          tag="timeseries-table-format-v${version}"
+          if git rev-parse --quiet --verify "refs/tags/${tag}" >/dev/null; then
+            echo "ready=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Run the Release-plz workflow manually to bootstrap ${tag}; later release PRs are automatic."
+          fi
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
@@ -155,11 +179,12 @@ jobs:
         with:
           version: "v0.16.0"
       - name: Run release-plz (release-pr)
+        if: ${{ steps.baseline.outputs.ready == 'true' }}
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
         with:
           command: release-pr
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-plz-target
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
       - name: sccache stats
         if: ${{ always() }}

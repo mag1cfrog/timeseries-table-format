@@ -29,12 +29,17 @@ The complete engine remains available through canonical module paths such as
 
 ## Source migration
 
-Direct core users can migrate mechanically:
+Users of the retired split crates can migrate mechanically:
 
 ```text
-timeseries-table-core dependency -> timeseries-table-format dependency
-timeseries_table_core::<module>   -> timeseries_table_format::<module>
+timeseries-table-core dependency       -> timeseries-table-format dependency
+timeseries_table_core::<module>        -> timeseries_table_format::<module>
+timeseries-table-datafusion dependency -> timeseries-table-format dependency with the datafusion feature
+timeseries_table_datafusion::<module>  -> timeseries_table_format::datafusion::<module>
 ```
+
+The `datafusion` feature is enabled by default. The historical split packages
+remain available on crates.io for existing users, but receive no new releases.
 
 See the [engine guide](ENGINE.md) and [DataFusion guide](DATAFUSION.md) for
 the full module and query APIs.
