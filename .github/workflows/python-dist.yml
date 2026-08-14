@@ -3,6 +3,11 @@ name: Python dist (reusable)
 on:
   workflow_call:
     inputs:
+      os-json:
+        description: JSON array of runner labels.
+        required: false
+        type: string
+        default: '["ubuntu-latest","macos-latest","macos-15-intel","windows-latest"]'
       include-sdist:
         description: Build sdist once on ubuntu.
         required: false
@@ -33,6 +38,11 @@ on:
         required: false
         type: string
         default: "dist"
+      artifact-retention-days:
+        description: Number of days to retain uploaded artifacts.
+        required: false
+        type: number
+        default: 90
       dev-prerelease:
         description: Rewrite Cargo package version to a prerelease snapshot (for TestPyPI).
         required: false
@@ -55,7 +65,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ inputs.max-parallel }}
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: ${{ fromJSON(inputs.os-json) }}
     env:
       # Speed up release builds (especially on Windows) by disabling debuginfo.
       CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -130,9 +140,9 @@ jobs:
           if not version:
               raise SystemExit(f"Snapshot base must be a stable major.minor.patch version: {base}")
           major, minor, patch = map(int, version.groups())
-          run_number = int(os.environ["GITHUB_RUN_NUMBER"])
+          run_id = int(os.environ["GITHUB_RUN_ID"])
           run_attempt = int(os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
-          snapshot = run_number * 100 + run_attempt
+          snapshot = run_id * 100 + run_attempt
           new_version = f"{major}.{minor}.{patch + 1}-dev.{snapshot}"
           python_version = f"{major}.{minor}.{patch + 1}.dev{snapshot}"
           text2, n = re.subn(
@@ -494,6 +504,7 @@ jobs:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.os }}
           path: crates/timeseries-table-python/dist/*
           if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
 
       - name: Install wheel + run platform smoke tests
         if: ${{ inputs.run-pytest }}
@@ -604,11 +615,13 @@ jobs:
         id: validate
         shell: bash
         env:
+          BUILD_OSES: ${{ inputs.os-json }}
           INCLUDE_SDIST: ${{ inputs.include-sdist }}
         run: |
           set -euo pipefail
           python - <<'PY'
           import email.parser
+          import json
           import os
           import re
           import tarfile
@@ -618,8 +631,9 @@ jobs:
           dist = Path("dist")
           wheels = sorted(dist.glob("*.whl"))
           sdists = sorted(dist.glob("*.tar.gz"))
-          if len(wheels) != 4:
-              raise SystemExit(f"expected four wheels, found {len(wheels)}")
+          expected_wheels = len(json.loads(os.environ["BUILD_OSES"]))
+          if len(wheels) != expected_wheels:
+              raise SystemExit(f"expected {expected_wheels} wheels, found {len(wheels)}")
           expected_sdists = 1 if os.environ["INCLUDE_SDIST"] == "true" else 0
           if len(sdists) != expected_sdists:
               raise SystemExit(f"expected {expected_sdists} sdist, found {len(sdists)}")
@@ -676,5 +690,5 @@ jobs:
           version = versions.pop()
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"version={version}\n")
-          print(f"Validated four ABI3 wheels and {len(sdists)} sdist for {version}")
+          print(f"Validated {len(wheels)} ABI3 wheels and {len(sdists)} sdist for {version}")
           PY
