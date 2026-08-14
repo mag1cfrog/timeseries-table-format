@@ -37,7 +37,7 @@ timeseries-table-core dependency       -> timeseries-table-format dependency
 timeseries_table_core::<module>        -> timeseries_table_format::<module>
 timeseries-table-datafusion dependency -> timeseries-table-format dependency with the datafusion feature
 timeseries_table_datafusion::<module>  -> timeseries_table_format::datafusion::<module>
-cargo install timeseries-table-cli     -> cargo install timeseries-table-format --features cli --bin tstable
+cargo install timeseries-table-cli     -> cargo install timeseries-table-format --features cli
 ```
 
 The `datafusion` feature is enabled by default. The historical split packages

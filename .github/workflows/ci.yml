@@ -157,6 +157,20 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
 
+      - name: feature isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p timeseries-table-format --no-default-features
+          engine_tree="$(cargo tree --locked -p timeseries-table-format --no-default-features --edges normal,build --prefix none)"
+          for dependency in datafusion clap rustyline tabled terminal_size; do
+            if grep -Eq "^${dependency}([ _-]|$)" <<< "${engine_tree}"; then
+              echo "Engine-only dependency tree contains forbidden dependency: ${dependency}" >&2
+              exit 1
+            fi
+          done
+          cargo check --locked -p timeseries-table-format --no-default-features --features cli --bin tstable
+
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 

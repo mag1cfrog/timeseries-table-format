@@ -9,7 +9,7 @@ step timings. Optional CSV output is supported.
 
 Example:
 ```
-cargo run -p timeseries-table-format --features cli --example append_profile -- \
+cargo run --release -p timeseries-table-format --features cli --example append_profile -- \
   --table ./data/nyc_hvfhv \
   --parquet ./data/fhvhv_2024-04.parquet \
   --time-column pickup_datetime \
@@ -27,7 +27,7 @@ variants. Optional CSV output is supported.
 
 Example:
 ```
-cargo run -p timeseries-table-format --features cli --example segment_meta_bench -- \
+cargo run --release -p timeseries-table-format --features cli --example segment_meta_bench -- \
   --parquet ./data/fhvhv_2024-04.parquet \
   --time-column pickup_datetime \
   --warmup 1 --repeat 3 --threads 20 \
@@ -44,7 +44,7 @@ strategies for Parquet time columns.
 
 Example:
 ```
-cargo run -p timeseries-table-format --example coverage_bench -- \
+cargo run --release -p timeseries-table-format --example coverage_bench -- \
   --file ./data/fhvhv_2024-04.parquet \
   --time-column pickup_datetime \
   --bucket 1s \

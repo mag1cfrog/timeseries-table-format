@@ -6,6 +6,12 @@ PyPI.
 
 The canonical tag format is `timeseries-table-format-v<VERSION>`.
 
+Users install the CLI from the canonical crate:
+
+```bash
+cargo install timeseries-table-format --features cli
+```
+
 ## One-time trusted publisher setup
 
 Create these approval-gated GitHub environments:

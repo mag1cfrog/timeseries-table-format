@@ -235,7 +235,7 @@ Python users: see [Install (Python)](#install-python) and [Python Quickstart](#p
 
 ```bash
 # Install
-cargo install timeseries-table-format --features cli --bin tstable
+cargo install timeseries-table-format --features cli
 
 # Create a table with 1-hour buckets
 tstable create --table ./my_table --time-column ts --bucket 1h

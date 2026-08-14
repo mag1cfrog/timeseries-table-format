@@ -11,7 +11,7 @@ MAX_THREADS=${6:-32}
 
 for t in $(seq 1 "$MAX_THREADS"); do
   if [[ "$BATCH_SIZE" == "default" ]]; then
-    cargo run -p timeseries-table-format --example coverage_bench -- \
+    cargo run --release -p timeseries-table-format --example coverage_bench -- \
       --file "$FILE" \
       --time-column "$TIME_COL" \
       --engine rg-parallel \
@@ -20,7 +20,7 @@ for t in $(seq 1 "$MAX_THREADS"); do
       --iters 20 \
       --csv "$CSV"
   else
-    cargo run -p timeseries-table-format --example coverage_bench -- \
+    cargo run --release -p timeseries-table-format --example coverage_bench -- \
       --file "$FILE" \
       --time-column "$TIME_COL" \
       --engine rg-parallel \

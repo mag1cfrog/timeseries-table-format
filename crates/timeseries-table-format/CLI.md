@@ -17,7 +17,7 @@ Instead of manually managing scattered Parquet files, you get:
 ### From crates.io
 
 ```bash
-cargo install timeseries-table-format --features cli --bin tstable
+cargo install timeseries-table-format --features cli
 ```
 
 ### From a local clone
@@ -25,7 +25,7 @@ cargo install timeseries-table-format --features cli --bin tstable
 ```bash
 git clone https://github.com/mag1cfrog/timeseries-table-format.git
 cd timeseries-table-format
-cargo install --path crates/timeseries-table-format --features cli --bin tstable
+cargo install --path crates/timeseries-table-format --features cli
 ```
 
 ### Verify installation
