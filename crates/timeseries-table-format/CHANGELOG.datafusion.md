@@ -1,5 +1,8 @@
-# Changelog
-All notable changes to timeseries-table-datafusion will be documented in this file.
+# Legacy changelog
+
+This file archives timeseries-table-datafusion releases through 0.1.2. Current
+releases are documented in the [root changelog](../../CHANGELOG.md).
+
 ## 0.1.2
 
 

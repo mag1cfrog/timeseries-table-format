@@ -1,34 +1,31 @@
 [workspace]
 release = false
-release_always = false
-git_only = false
 publish = false
-publish_no_verify = true
-semver_check = true
-changelog_update = false
 changelog_config = "cliff.toml"
-git_release_enable = false
 
 [[package]]
 name = "timeseries-table-format"
 release = true
-changelog_update = true
-changelog_path = "crates/timeseries-table-format/CHANGELOG.md"
-git_release_enable = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["timeseries-table-cli", "timeseries-table-python"]
+git_tag_name = "timeseries-table-format-v{{ version }}"
 
 [[package]]
 name = "timeseries-table-cli"
 release = true
-changelog_update = true
-changelog_path = "crates/timeseries-table-cli/CHANGELOG.md"
-git_release_enable = true
+git_only = true
+git_tag_name = "timeseries-table-format-v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
 
 [[package]]
 name = "timeseries-table-python"
 release = true
+publish = false
 git_only = true
-git_tag_name = "timeseries-table-python-v{{ version }}"
+git_tag_name = "timeseries-table-format-v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
 semver_check = false
-changelog_update = true
-changelog_path = "crates/timeseries-table-python/CHANGELOG.md"
-git_release_enable = true

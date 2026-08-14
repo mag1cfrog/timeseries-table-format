@@ -1,5 +1,8 @@
-# Changelog
-All notable changes to timeseries-table-python will be documented in this file.
+# Legacy changelog
+
+This file archives timeseries-table-python releases through 0.1.4. Current
+releases are documented in the [root changelog](../../CHANGELOG.md).
+
 ## 0.1.4
 
 
