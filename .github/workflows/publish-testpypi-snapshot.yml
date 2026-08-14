@@ -1,13 +1,26 @@
-name: TestPyPI release rehearsal
+name: TestPyPI snapshot
 
 on:
-  workflow_dispatch:
-    inputs:
-      snapshot:
-        description: Publish a unique prerelease snapshot version (recommended).
-        required: true
-        type: boolean
-        default: true
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - ".cargo/config.toml"
+      - "rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/timeseries-table-python/Cargo.toml"
+      - "crates/timeseries-table-python/pyproject.toml"
+      - "crates/timeseries-table-python/build.rs"
+      - "crates/timeseries-table-python/src/**"
+      - "crates/timeseries-table-python/python/**"
+      - "crates/timeseries-table-core/Cargo.toml"
+      - "crates/timeseries-table-core/build.rs"
+      - "crates/timeseries-table-core/src/**"
+      - "crates/timeseries-table-format/Cargo.toml"
+      - "crates/timeseries-table-format/build.rs"
+      - "crates/timeseries-table-format/src/**"
+
 permissions: {}
 
 concurrency:
@@ -21,36 +34,40 @@ jobs:
       actions: read
       contents: read
     with:
-      include-sdist: true
-      run-pytest: true
-      artifact-prefix: dist
-      dev-prerelease: ${{ inputs.snapshot }}
+      os-json: '["ubuntu-latest"]'
+      include-sdist: false
+      run-pytest: false
+      artifact-prefix: timeseries-table-format-testpypi-snapshot-wheel
+      artifact-retention-days: 7
+      dev-prerelease: true
 
   publish:
-    name: publish (TestPyPI)
+    name: publish snapshot (TestPyPI)
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: [build]
-    environment: testpypi
+    environment:
+      name: testpypi-snapshot
+      url: https://test.pypi.org/project/timeseries-table-format/${{ needs.build.outputs.version }}/
     permissions:
       actions: read
       contents: read
       id-token: write
     steps:
-      - name: Download artifacts
+      - name: Download snapshot wheel
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: dist-*
+          name: timeseries-table-format-testpypi-snapshot-wheel-ubuntu-latest
           path: dist
-          merge-multiple: true
 
-      - name: Publish to TestPyPI (Trusted Publishing)
+      - name: Publish snapshot to TestPyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
 
   verify:
-    name: verify TestPyPI (py${{ matrix.python-version }})
+    name: verify snapshot (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     needs: [build, publish]
     permissions:
@@ -65,7 +82,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install the published wheel
+      - name: Install the published snapshot
         shell: bash
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -89,7 +106,7 @@ jobs:
             sleep 15
           done
 
-      - name: Smoke test the published wheel
+      - name: Smoke test the published snapshot
         shell: bash
         env:
           EXPECTED_PYTHON: ${{ matrix.python-version }}
