@@ -5,17 +5,16 @@
 
 use std::path::Path;
 
-use bytes::Bytes;
+use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
 use parquet::file::metadata::FileMetaData;
-use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::schema::types::Type;
 use snafu::Backtrace;
 
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
-use crate::storage::{TableLocation, read_all_bytes};
+use crate::storage::{TableLocation, open_parquet_reader};
 use crate::transaction_log::segments::{
     SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
 };
@@ -378,7 +377,7 @@ fn parquet_type_to_logical_field(
     })
 }
 
-fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
     let root = meta.schema_descr().root_schema_ptr(); // schema tree root (group)
     let fields = root
         .get_fields()
@@ -389,64 +388,53 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
     LogicalSchema::new(fields)
 }
 
-/// Build a `LogicalSchema` from Parquet bytes.
-///
-/// This mirrors `logical_schema_from_parquet_location` but consumes a provided
-/// `Bytes` buffer. The caller supplies the relative path (for error context)
-/// and the full Parquet file contents. On success it returns a `LogicalSchema`
-/// derived from the Parquet physical/logical types; otherwise it returns a
-/// `SegmentMetaError` with contextual path information.
-pub fn logical_schema_from_parquet_bytes(
-    rel_path: &Path,
-    data: Bytes,
-) -> SegmentResult<LogicalSchema> {
-    let path_str = rel_path.display().to_string();
-
-    // Parse Parquet metadata from the in-memory buffer.
-    let reader =
-        SerializedFileReader::new(data).map_err(|source| SegmentMetaError::ParquetRead {
-            path: path_str.clone(),
-            source,
-            backtrace: Backtrace::capture(),
-        })?;
-
-    let file_meta = reader.metadata().file_metadata();
-
-    // Map Parquet physical/logical types into our LogicalSchema representation.
-    logical_schema_from_parquet(file_meta).map_err(|source| {
-        SegmentError::from(SegmentMetaError::LogicalSchemaInvalid {
-            path: path_str,
-            source,
-        })
-    })
-}
-
-/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
-pub async fn logical_schema_from_parquet_location(
+/// Derive a logical schema directly from a local Parquet file footer.
+pub async fn logical_schema_from_parquet(
     location: &TableLocation,
     rel_path: &Path,
 ) -> SegmentResult<LogicalSchema> {
-    let bytes = read_all_bytes(location.as_ref(), rel_path)
+    let path = rel_path.display().to_string();
+    let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
         .map_err(map_storage_error)?;
+    let metadata =
+        file.get_metadata(None)
+            .await
+            .map_err(|source| SegmentMetaError::ParquetRead {
+                path: path.clone(),
+                source,
+                backtrace: Backtrace::capture(),
+            })?;
 
-    logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))
+    logical_schema_from_metadata(metadata.file_metadata()).map_err(|source| {
+        SegmentError::from(SegmentMetaError::LogicalSchemaInvalid { path, source })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transaction_log::segments::SegmentIoError;
     use parquet::basic::{LogicalType, Repetition, TimeUnit};
     use parquet::column::writer::ColumnWriter;
     use parquet::data_type::{ByteArray, FixedLenByteArray, Int96};
     use parquet::file::properties::WriterProperties;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::types::Type;
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
+    use std::io::{Seek, SeekFrom, Write};
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn logical_schema_from_test_file(path: &Path) -> TestResult<LogicalSchema> {
+        let reader = SerializedFileReader::new(File::open(path)?)?;
+        Ok(logical_schema_from_metadata(
+            reader.metadata().file_metadata(),
+        )?)
+    }
 
     enum TestColumnValues {
         Bool(Vec<bool>),
@@ -526,14 +514,90 @@ mod tests {
 
         write_single_column_parquet(&abs, "col", physical, values)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "col");
         assert_eq!(cols[0].data_type, expected);
         assert!(!cols[0].nullable);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_schema_reads_local_parquet_footer() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/schema.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        write_single_column_parquet(
+            &abs_path,
+            "value",
+            PhysicalType::INT64,
+            TestColumnValues::Int64(vec![42]),
+        )?;
+
+        let location = TableLocation::local(tmp.path());
+        let schema = logical_schema_from_parquet(&location, rel_path).await?;
+
+        assert_eq!(schema.columns().len(), 1);
+        assert_eq!(schema.columns()[0].name, "value");
+        assert_eq!(schema.columns()[0].data_type, LogicalDataType::Int64);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_schema_ignores_corrupt_column_data() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/payload.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        let payload = vec![0xA5; 4 * 1024 * 1024];
+        write_byte_array_file(&abs_path, "payload", &[&payload])?;
+
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let data_page = reader.metadata().row_group(0).column(0).data_page_offset() as u64;
+        drop(reader);
+        let mut file = OpenOptions::new().read(true).write(true).open(&abs_path)?;
+        file.seek(SeekFrom::Start(data_page))?;
+        file.write_all(&[0xFF; 32])?;
+        file.flush()?;
+        drop(file);
+
+        let schema =
+            logical_schema_from_parquet(&TableLocation::local(tmp.path()), rel_path).await?;
+        assert_eq!(schema.columns()[0].data_type, LogicalDataType::Binary);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_schema_reports_missing_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/missing.parquet");
+        let result = logical_schema_from_parquet(&TableLocation::local(tmp.path()), rel_path).await;
+
+        assert!(matches!(
+            result,
+            Err(SegmentError::Io {
+                source: SegmentIoError::MissingFile { path, .. }
+            }) if path == "data/missing.parquet"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_schema_reports_corrupt_footer() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/corrupt.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        std::fs::create_dir_all(abs_path.parent().ok_or("parent directory")?)?;
+        std::fs::write(abs_path, b"not parquet")?;
+
+        let result = logical_schema_from_parquet(&TableLocation::local(tmp.path()), rel_path).await;
+        assert!(matches!(
+            result,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::ParquetRead { .. }
+            })
+        ));
         Ok(())
     }
 
@@ -730,15 +794,13 @@ mod tests {
         let abs = tmp.path().join(rel_path);
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        match logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes)) {
-            Err(SegmentError::Meta {
-                source: SegmentMetaError::LogicalSchemaInvalid { source, .. },
-            }) => {
+        let reader = SerializedFileReader::new(File::open(abs)?)?;
+        match logical_schema_from_metadata(reader.metadata().file_metadata()) {
+            Err(source) => {
                 assert_eq!(source, expected);
                 Ok(())
             }
-            other => Err(format!("expected LogicalSchemaInvalid, got {other:?}").into()),
+            Ok(other) => Err(format!("expected schema error, got {other:?}").into()),
         }
     }
 
@@ -898,8 +960,7 @@ mod tests {
 
         write_fixed_len_byte_array_file(&abs, "bin", 4, &[vec![0, 1, 2, 3], vec![4, 5, 6, 7]])?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -920,8 +981,7 @@ mod tests {
 
         write_byte_array_file(&abs, "bin", &[b"a", b"bc"])?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -944,8 +1004,7 @@ mod tests {
             &[b"alpha", b"beta"],
         )?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -963,8 +1022,7 @@ mod tests {
 
         write_byte_array_file_with_logical(&abs, "kind", Some(LogicalType::Enum), &[b"A", b"B"])?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -985,8 +1043,7 @@ mod tests {
 
         write_decimal_int64_file(&abs, "dec", 10, 2, &[1234, 5678])?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1016,8 +1073,7 @@ mod tests {
             &[vec![0; 16], vec![1; 16]],
         )?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1044,8 +1100,7 @@ mod tests {
             &[vec![0, 0], vec![0x3c, 0x00]],
         )?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1071,8 +1126,7 @@ mod tests {
             &[br#"{"a":1}"#, br#"{"b":2}"#],
         )?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1095,8 +1149,7 @@ mod tests {
             &[b"\x05\x00\x00\x00\x00", b"\x05\x00\x00\x00\x01"],
         )?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1152,8 +1205,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1199,8 +1251,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1249,8 +1300,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1289,8 +1339,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1344,8 +1393,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1407,8 +1455,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1475,8 +1522,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1553,8 +1599,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1639,8 +1684,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1717,8 +1761,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1877,8 +1920,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);
@@ -1927,8 +1969,7 @@ mod tests {
 
         write_schema_only_parquet(&abs, schema)?;
 
-        let bytes = std::fs::read(&abs)?;
-        let schema = logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))?;
+        let schema = logical_schema_from_test_file(&abs)?;
         let cols = schema.columns();
 
         assert_eq!(cols.len(), 1);

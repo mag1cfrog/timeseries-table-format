@@ -5,7 +5,6 @@
 //! must live outside `metadata/` (for example under `transaction_log` or
 //! format-specific helpers).
 
-use arrow::error::ArrowError;
 use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
@@ -89,17 +88,6 @@ pub enum SegmentMetaError {
         path: String,
         /// Underlying parquet error that caused this failure.
         source: ParquetError,
-        /// Diagnostic backtrace for this error.
-        backtrace: Backtrace,
-    },
-
-    /// Arrow decode failure while reading Parquet data.
-    #[snafu(display("Arrow read error for segment at {path}: {source}"))]
-    ArrowRead {
-        /// The path to the file that caused the Arrow read failure.
-        path: String,
-        /// Underlying Arrow error that caused this failure.
-        source: ArrowError,
         /// Diagnostic backtrace for this error.
         backtrace: Backtrace,
     },

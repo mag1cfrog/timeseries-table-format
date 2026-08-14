@@ -73,11 +73,11 @@ fn csv_escape(raw: &str) -> String {
 
 fn write_csv(report: &AppendReport, out_path: &Path) -> std::io::Result<()> {
     let mut out = String::new();
-    out.push_str("relative_path,time_column,bytes_len,step,elapsed_ms,percent,total_ms,fields\n");
+    out.push_str("relative_path,time_column,file_size,step,elapsed_ms,percent,total_ms,fields\n");
 
     let rel = get_context_value(report, "relative_path");
     let time_column = get_context_value(report, "time_column");
-    let bytes_len = get_context_value(report, "bytes_len");
+    let file_size = get_context_value(report, "file_size");
 
     for step in &report.steps {
         let percent = if report.total_ms == 0 {
@@ -91,7 +91,7 @@ fn write_csv(report: &AppendReport, out_path: &Path) -> std::io::Result<()> {
             "{},{},{},{},{},{:.2},{},{}\n",
             csv_escape(rel),
             csv_escape(time_column),
-            csv_escape(bytes_len),
+            csv_escape(file_size),
             csv_escape(&step.name),
             step.elapsed_ms,
             percent,
@@ -106,9 +106,9 @@ fn write_csv(report: &AppendReport, out_path: &Path) -> std::io::Result<()> {
 
 fn print_report(report: &AppendReport) {
     let rel = get_context_value(report, "relative_path");
-    let bytes_len = get_context_value(report, "bytes_len");
+    let file_size = get_context_value(report, "file_size");
     println!(
-        "Append profile: {rel} (bytes: {bytes_len}, total_ms: {})",
+        "Append profile: {rel} (file size: {file_size} bytes, total_ms: {})",
         report.total_ms
     );
 
@@ -191,7 +191,7 @@ mod tests {
             context: vec![
                 ("relative_path".to_string(), "data/seg.parquet".to_string()),
                 ("time_column".to_string(), "ts".to_string()),
-                ("bytes_len".to_string(), "42".to_string()),
+                ("file_size".to_string(), "42".to_string()),
             ],
             steps: vec![AppendStep {
                 name: "segment_meta".to_string(),
@@ -206,7 +206,7 @@ mod tests {
 
         assert_eq!(
             csv,
-            "relative_path,time_column,bytes_len,step,elapsed_ms,percent,total_ms,fields\n\
+            "relative_path,time_column,file_size,step,elapsed_ms,percent,total_ms,fields\n\
              data/seg.parquet,ts,42,segment_meta,1,50.00,2,\n"
         );
     }

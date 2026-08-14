@@ -1,3 +1,4 @@
+use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
 use std::{
     io,
@@ -46,6 +47,24 @@ impl Drop for TempFileGuard {
 pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
     match location {
         StorageLocation::Local(root) => root.join(rel),
+    }
+}
+
+/// Open a stored Parquet file for asynchronous range reads.
+pub(crate) async fn open_parquet_reader(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<Box<dyn AsyncFileReader>> {
+    let path = rel_path.display().to_string();
+
+    match location {
+        StorageLocation::Local(root) => match fs::File::open(root.join(rel_path)).await {
+            Ok(file) => Ok(Box::new(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(BackendError::Local(error)).context(NotFoundSnafu { path })
+            }
+            Err(error) => Err(BackendError::Local(error)).context(OtherIoSnafu { path }),
+        },
     }
 }
 
@@ -254,7 +273,7 @@ pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageRe
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
-            let path_str = abs.display().to_string();
+            let path_str = rel_path.display().to_string();
 
             let meta = fs::metadata(&abs).await;
             match meta {
