@@ -44,10 +44,15 @@ on:
         type: number
         default: 90
       dev-prerelease:
-        description: Rewrite Cargo package version to a prerelease snapshot (for TestPyPI).
+        description: Rewrite the workspace version to a prerelease snapshot (for TestPyPI).
         required: false
         type: boolean
         default: false
+      expected-version:
+        description: Exact workspace version required for release artifacts.
+        required: false
+        type: string
+        default: ""
     outputs:
       version:
         description: Validated Python distribution version when artifacts are uploaded.
@@ -120,6 +125,22 @@ jobs:
         with:
           version: "v0.16.0"
 
+      - name: Verify workspace version
+        shell: bash
+        env:
+          DEV_PRERELEASE: ${{ inputs.dev-prerelease }}
+          EXPECTED_VERSION: ${{ inputs.expected-version }}
+        run: |
+          set -euo pipefail
+          version="$(python scripts/check_release_version.py)"
+          if [[ -n "${EXPECTED_VERSION}" && "${version}" != "${EXPECTED_VERSION}" ]]; then
+            echo "Expected workspace version ${EXPECTED_VERSION}, found ${version}" >&2
+            exit 1
+          fi
+          if [[ "${DEV_PRERELEASE}" != "true" ]]; then
+            echo "EXPECTED_PYTHON_VERSION=${version}" >> "${GITHUB_ENV}"
+          fi
+
       - name: Set snapshot version (Cargo)
         if: ${{ inputs.dev-prerelease }}
         shell: bash
@@ -129,35 +150,55 @@ jobs:
           import os
           import pathlib
           import re
-          
-          cargo_toml = pathlib.Path("crates/timeseries-table-python/Cargo.toml")
+
+          import tomllib
+
+          cargo_toml = pathlib.Path("Cargo.toml")
           text = cargo_toml.read_text(encoding="utf-8")
-          m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
-          if not m:
-              raise SystemExit("Could not find version in crates/timeseries-table-python/Cargo.toml")
-          base = m.group(1)
+          base = tomllib.loads(text)["workspace"]["package"]["version"]
           version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", base)
           if not version:
               raise SystemExit(f"Snapshot base must be a stable major.minor.patch version: {base}")
           major, minor, patch = map(int, version.groups())
           run_id = int(os.environ["GITHUB_RUN_ID"])
           run_attempt = int(os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
-          snapshot = run_id * 100 + run_attempt
+          snapshot = run_id * 1_000_000 + run_attempt
           new_version = f"{major}.{minor}.{patch + 1}-dev.{snapshot}"
           python_version = f"{major}.{minor}.{patch + 1}.dev{snapshot}"
-          text2, n = re.subn(
-              r'(?m)^version\s*=\s*"([^"]+)"',
-              f'version = "{new_version}"',
-              text,
-              count=1,
-          )
-          if n != 1:
-              raise SystemExit("Failed to rewrite version in Cargo.toml")
-          cargo_toml.write_text(text2, encoding="utf-8")
+
+          section = ""
+          workspace_versions = 0
+          dependency_versions = 0
+          lines = text.splitlines(keepends=True)
+          for index, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped.startswith("[") and stripped.endswith("]"):
+                  section = stripped
+              elif section == "[workspace.package]" and re.match(r"^version\s*=", stripped):
+                  lines[index], count = re.subn(
+                      r'^(\s*version\s*=\s*)"[^"]+"',
+                      rf'\1"{new_version}"',
+                      line,
+                      count=1,
+                  )
+                  workspace_versions += count
+              elif section == "[workspace.dependencies]" and stripped.startswith("timeseries-table-format ="):
+                  lines[index], count = re.subn(
+                      r'(version\s*=\s*)"[^"]+"',
+                      rf'\1"{new_version}"',
+                      line,
+                      count=1,
+                  )
+                  dependency_versions += count
+          if workspace_versions != 1 or dependency_versions != 1:
+              raise SystemExit("Failed to rewrite workspace and internal dependency versions")
+          cargo_toml.write_text("".join(lines), encoding="utf-8")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               env.write(f"EXPECTED_PYTHON_VERSION={python_version}\n")
           print(f"Using snapshot version: {base} -> {new_version}")
           PY
+          cargo update --workspace --offline
+          python scripts/check_release_version.py
 
       - name: Build wheel (maturin)
         id: wheel-build
@@ -191,7 +232,7 @@ jobs:
           args: >-
             --release -o dist
             --compatibility pypi
-            ${{ !inputs.dev-prerelease && '--locked' || '' }}
+            --locked
             -i ${{ startsWith(matrix.os, 'ubuntu') && 'python3.10' || 'python' }}
 
       - name: Check sccache writes
@@ -242,7 +283,7 @@ jobs:
           args: >-
             --release -o dist
             --compatibility pypi
-            ${{ !inputs.dev-prerelease && '--locked' || '' }}
+            --locked
             -i ${{ startsWith(matrix.os, 'ubuntu') && 'python3.10' || 'python' }}
 
       - name: Verify retried sccache writes
@@ -259,7 +300,6 @@ jobs:
           python - <<'PY'
           import email.parser
           import os
-          import re
           import zipfile
           from pathlib import Path
 
@@ -269,11 +309,7 @@ jobs:
           if "-cp310-abi3-" not in wheels[0].name:
               raise SystemExit(f"expected a cp310-abi3 wheel, found {wheels[0].name}")
 
-          cargo_toml = Path("crates/timeseries-table-python/Cargo.toml").read_text()
-          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_toml)
-          if not match:
-              raise SystemExit("could not read the Python package version")
-          expected_version = os.environ.get("EXPECTED_PYTHON_VERSION", match.group(1))
+          expected_version = os.environ["EXPECTED_PYTHON_VERSION"]
 
           required = {
               "timeseries_table_format/__init__.py",
@@ -399,7 +435,6 @@ jobs:
           python - <<'PY'
           import email.parser
           import os
-          import re
           import tarfile
           from pathlib import Path, PurePosixPath
 
@@ -407,11 +442,7 @@ jobs:
           if len(sdists) != 1:
               raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
 
-          cargo_toml = Path("crates/timeseries-table-python/Cargo.toml").read_text()
-          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_toml)
-          if not match:
-              raise SystemExit("could not read the Python package version")
-          expected_version = os.environ.get("EXPECTED_PYTHON_VERSION", match.group(1))
+          expected_version = os.environ["EXPECTED_PYTHON_VERSION"]
 
           required = {
               "Cargo.lock",
@@ -514,6 +545,7 @@ jobs:
           python -m pip install crates/timeseries-table-python/dist/*.whl
           python - <<'PY'
           import importlib.metadata
+          import os
           import sys
 
           import pyarrow
@@ -522,6 +554,10 @@ jobs:
           if sys.version_info[:2] != (3, 10):
               raise SystemExit(f"expected Python 3.10, found {sys.version}")
           installed = importlib.metadata.version("timeseries-table-format")
+          if installed != os.environ["EXPECTED_PYTHON_VERSION"]:
+              raise SystemExit(
+                  f"expected version {os.environ['EXPECTED_PYTHON_VERSION']}, found {installed}"
+              )
           if ttf.__version__.replace("-dev.", ".dev") != installed:
               raise SystemExit(f"package version {ttf.__version__} != metadata {installed}")
           if not ttf._native.__file__.endswith((".so", ".pyd")):
@@ -616,6 +652,7 @@ jobs:
         shell: bash
         env:
           BUILD_OSES: ${{ inputs.os-json }}
+          EXPECTED_VERSION: ${{ inputs.expected-version }}
           INCLUDE_SDIST: ${{ inputs.include-sdist }}
         run: |
           set -euo pipefail
@@ -688,6 +725,9 @@ jobs:
           if len(versions) != 1 or None in versions:
               raise SystemExit(f"artifact versions do not match: {versions}")
           version = versions.pop()
+          expected = os.environ["EXPECTED_VERSION"]
+          if expected and version != expected:
+              raise SystemExit(f"expected artifact version {expected}, found {version}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"version={version}\n")
           print(f"Validated {len(wheels)} ABI3 wheels and {len(sdists)} sdist for {version}")
