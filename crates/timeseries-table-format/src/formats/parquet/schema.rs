@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
+use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
 use parquet::file::metadata::FileMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -15,7 +16,7 @@ use snafu::Backtrace;
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
-use crate::storage::{TableLocation, read_all_bytes};
+use crate::storage::{TableLocation, open_local_file};
 use crate::transaction_log::segments::{
     SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
 };
@@ -378,7 +379,7 @@ fn parquet_type_to_logical_field(
     })
 }
 
-fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
     let root = meta.schema_descr().root_schema_ptr(); // schema tree root (group)
     let fields = root
         .get_fields()
@@ -389,13 +390,7 @@ fn logical_schema_from_parquet(meta: &FileMetaData) -> Result<LogicalSchema, Log
     LogicalSchema::new(fields)
 }
 
-/// Build a `LogicalSchema` from Parquet bytes.
-///
-/// This mirrors `logical_schema_from_parquet_location` but consumes a provided
-/// `Bytes` buffer. The caller supplies the relative path (for error context)
-/// and the full Parquet file contents. On success it returns a `LogicalSchema`
-/// derived from the Parquet physical/logical types; otherwise it returns a
-/// `SegmentMetaError` with contextual path information.
+/// Build a `LogicalSchema` from a complete in-memory Parquet payload.
 pub fn logical_schema_from_parquet_bytes(
     rel_path: &Path,
     data: Bytes,
@@ -413,7 +408,7 @@ pub fn logical_schema_from_parquet_bytes(
     let file_meta = reader.metadata().file_metadata();
 
     // Map Parquet physical/logical types into our LogicalSchema representation.
-    logical_schema_from_parquet(file_meta).map_err(|source| {
+    logical_schema_from_metadata(file_meta).map_err(|source| {
         SegmentError::from(SegmentMetaError::LogicalSchemaInvalid {
             path: path_str,
             source,
@@ -421,16 +416,27 @@ pub fn logical_schema_from_parquet_bytes(
     })
 }
 
-/// Reads the Parquet file at `rel_path` from `location` and returns the inferred logical schema.
-pub async fn logical_schema_from_parquet_location(
+/// Derive a logical schema directly from a local Parquet file footer.
+pub async fn logical_schema_from_parquet(
     location: &TableLocation,
     rel_path: &Path,
 ) -> SegmentResult<LogicalSchema> {
-    let bytes = read_all_bytes(location.as_ref(), rel_path)
+    let path = rel_path.display().to_string();
+    let mut file = open_local_file(location.as_ref(), rel_path)
         .await
         .map_err(map_storage_error)?;
+    let metadata =
+        file.get_metadata(None)
+            .await
+            .map_err(|source| SegmentMetaError::ParquetRead {
+                path: path.clone(),
+                source,
+                backtrace: Backtrace::capture(),
+            })?;
 
-    logical_schema_from_parquet_bytes(rel_path, Bytes::from(bytes))
+    logical_schema_from_metadata(metadata.file_metadata()).map_err(|source| {
+        SegmentError::from(SegmentMetaError::LogicalSchemaInvalid { path, source })
+    })
 }
 
 #[cfg(test)]
@@ -534,6 +540,27 @@ mod tests {
         assert_eq!(cols[0].name, "col");
         assert_eq!(cols[0].data_type, expected);
         assert!(!cols[0].nullable);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_schema_reads_local_parquet_footer() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/schema.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        write_single_column_parquet(
+            &abs_path,
+            "value",
+            PhysicalType::INT64,
+            TestColumnValues::Int64(vec![42]),
+        )?;
+
+        let location = TableLocation::local(tmp.path());
+        let schema = logical_schema_from_parquet(&location, rel_path).await?;
+
+        assert_eq!(schema.columns().len(), 1);
+        assert_eq!(schema.columns()[0].name, "value");
+        assert_eq!(schema.columns()[0].data_type, LogicalDataType::Int64);
         Ok(())
     }
 

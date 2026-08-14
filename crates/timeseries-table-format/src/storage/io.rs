@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::AsyncWriteExt,
 };
 
@@ -46,6 +46,23 @@ impl Drop for TempFileGuard {
 pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
     match location {
         StorageLocation::Local(root) => root.join(rel),
+    }
+}
+
+/// Open a local file without reading its contents into memory.
+pub(crate) async fn open_local_file(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<File> {
+    let abs = join_local(location, rel_path);
+    let path = rel_path.display().to_string();
+
+    match File::open(abs).await {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(BackendError::Local(error)).context(NotFoundSnafu { path })
+        }
+        Err(error) => Err(BackendError::Local(error)).context(OtherIoSnafu { path }),
     }
 }
 
