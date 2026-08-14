@@ -2,7 +2,6 @@
 
 This repo publishes these crates to crates.io:
 
-- `timeseries-table-core`
 - `timeseries-table-format`
 - `timeseries-table-cli`
 
@@ -23,7 +22,7 @@ Publishing is done from GitHub Actions using crates.io Trusted Publishing (OIDC)
 ## Release flow
 
 1) Merge the `release-plz` PR(s) that bump versions.
-2) `release-plz` creates tags like `timeseries-table-core-v0.2.1`.
+2) `release-plz` creates tags like `timeseries-table-format-v0.1.5`.
 3) The tag triggers the GitHub Actions workflow `Publish (crates.io)` (`.github/workflows/publish-crates.yml`).
 4) Approve the `crates-io-release` environment deployment when prompted.
 5) The workflow publishes any missing crate versions in dependency order and skips versions that already exist on crates.io.

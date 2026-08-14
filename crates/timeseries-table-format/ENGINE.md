@@ -1,4 +1,4 @@
-# timeseries-table-core
+# timeseries-table-format engine
 
 Core engine for a log-structured time-series table format. It owns table metadata,
 append rules, coverage math, storage IO, and the `TimeSeriesTable` API that
@@ -18,9 +18,6 @@ time-based segment pruning.
 - `datafusion` (optional): DataFusion `TableProvider` and pruning integration.
 
 See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
-
-During the refactor, older module paths remain available as compatibility
-re-exports (for example, `transaction_log`, `time_series_table`, `helpers`).
 
 ## Responsibilities
 - **Transaction log + metadata**: versioned commits, optimistic concurrency, table schema.
@@ -108,4 +105,4 @@ Log actions:
 ## Extension points
 - **Storage**: extend `TableLocation` and `storage` for new backends.
 - **Segment formats**: extend `FileFormat` and `SegmentMeta::new_validated`.
-- **Schema evolution**: rules live in `helpers::schema`.
+- **Schema evolution**: rules live in `metadata::schema_compat`.

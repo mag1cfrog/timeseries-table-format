@@ -22,8 +22,8 @@ use arrow_array::{
 
 use roaring::RoaringBitmap;
 
-use timeseries_table_core::coverage::bucket::bucket_id_from_epoch_secs;
-use timeseries_table_core::metadata::table_metadata::TimeBucket;
+use timeseries_table_format::coverage::bucket::bucket_id_from_epoch_secs;
+use timeseries_table_format::metadata::table_metadata::TimeBucket;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {
@@ -359,7 +359,7 @@ fn compute_arrow_coverage(
     time_column: &str,
     bucket: &TimeBucket,
     batch_size: Option<usize>,
-) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
+) -> Result<timeseries_table_format::coverage::Coverage, Box<dyn std::error::Error>> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())?;
     builder
         .schema()
@@ -374,7 +374,7 @@ fn compute_arrow_coverage(
     };
     let reader = builder.build()?;
     let bitmap = compute_bitmap_from_reader(reader, time_column, bucket)?;
-    Ok(timeseries_table_core::coverage::Coverage::from_bitmap(
+    Ok(timeseries_table_format::coverage::Coverage::from_bitmap(
         bitmap,
     ))
 }
@@ -444,7 +444,7 @@ fn compute_rg_parallel_coverage(
     batch_size: Option<usize>,
     rg_chunk_used: usize,
     threads_used: usize,
-) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
+) -> Result<timeseries_table_format::coverage::Coverage, Box<dyn std::error::Error>> {
     let metadata = ArrowReaderMetadata::load(bytes, ArrowReaderOptions::default())?;
     let schema = metadata.schema();
     schema
@@ -491,7 +491,7 @@ fn compute_rg_parallel_coverage(
         merged |= bm;
     }
 
-    Ok(timeseries_table_core::coverage::Coverage::from_bitmap(
+    Ok(timeseries_table_format::coverage::Coverage::from_bitmap(
         merged,
     ))
 }
@@ -575,7 +575,7 @@ fn compute_parquet_direct_coverage_with_batch(
     time_column: &str,
     bucket: &TimeBucket,
     batch_size: Option<usize>,
-) -> Result<timeseries_table_core::coverage::Coverage, Box<dyn std::error::Error>> {
+) -> Result<timeseries_table_format::coverage::Coverage, Box<dyn std::error::Error>> {
     let reader = SerializedFileReader::new(bytes.clone())?;
     let schema = reader.metadata().file_metadata().schema_descr();
     let time_idx = find_parquet_column_index(schema, time_column)?;
@@ -625,7 +625,7 @@ fn compute_parquet_direct_coverage_with_batch(
         }
     }
 
-    Ok(timeseries_table_core::coverage::Coverage::from_bitmap(
+    Ok(timeseries_table_format::coverage::Coverage::from_bitmap(
         bitmap,
     ))
 }

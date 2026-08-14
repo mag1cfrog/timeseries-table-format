@@ -38,13 +38,13 @@ Notes:
 - `--threads 0` means “auto” for parallel strategies.
 - Benchmarks validate correctness by comparing min/max across strategies.
 
-## Coverage bitmap benchmark (core crate)
-The core crate includes `coverage_bench`, which compares coverage computation
+## Coverage bitmap benchmark
+The canonical Rust crate includes `coverage_bench`, which compares coverage computation
 strategies for Parquet time columns.
 
 Example:
 ```
-cargo run -p timeseries-table-core --bin coverage_bench -- \
+cargo run -p timeseries-table-format --bin coverage_bench -- \
   --file ./data/fhvhv_2024-04.parquet \
   --time-column pickup_datetime \
   --bucket 1s \

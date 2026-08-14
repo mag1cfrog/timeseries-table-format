@@ -7,7 +7,7 @@ use arrow_csv::ReaderBuilder;
 use arrow_csv::reader::Format;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use timeseries_table_core::{
+use timeseries_table_format::{
     metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
     table::TimeSeriesTable,
@@ -20,7 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("..")
         .join("..")
         .canonicalize()?;
-    let csv_path = workspace_root.join("examples/data/nvda_1h_sample.csv");
+    let csv_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/assets/nvda_1h_sample.csv");
     let table_root = workspace_root.join("examples/nvda_table");
     let parquet_path = table_root.join("data/nvda_1h.parquet");
 

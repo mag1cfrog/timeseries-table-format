@@ -3,10 +3,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use datafusion::prelude::*;
-use timeseries_table_core::datafusion::{
+use timeseries_table_format::datafusion::{
     TsTableProvider, pretty::pretty_format_batches_compact_floats,
 };
-use timeseries_table_core::{storage::TableLocation, table::TimeSeriesTable};
+use timeseries_table_format::{storage::TableLocation, table::TimeSeriesTable};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

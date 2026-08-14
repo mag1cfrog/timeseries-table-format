@@ -1,8 +1,7 @@
-//! Wrapper prelude.
+//! Convenience prelude.
 //!
 //! The `timeseries-table-format` crate is the supported public entry point.
-//! Downstream code should prefer importing from this prelude instead of
-//! depending on internal core module paths.
+//! Downstream code can import its common types from this module.
 
 pub use crate::coverage;
 pub use crate::{

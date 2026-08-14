@@ -200,13 +200,13 @@ Fastest way to see the format end-to-end (no external services needed):
 1) Ingest sample data (creates `examples/nvda_table/`):
 
 ```bash
-cargo run -p timeseries-table-core --example ingest_nvda
+cargo run -p timeseries-table-format --example ingest_nvda
 ```
 
 2) Query with DataFusion + moving average window:
 
 ```bash
-cargo run -p timeseries-table-core --features datafusion --example query_nvda_ma
+cargo run -p timeseries-table-format --features datafusion --example query_nvda_ma
 ```
 
 Example output:
@@ -223,7 +223,7 @@ Example output:
 +---------------------+--------+------------+
 ```
 
-Sample data lives at `examples/data/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
+Sample data lives at `crates/timeseries-table-format/examples/assets/nvda_1h_sample.csv` (240 rows of NVDA 1h bars). The ingestion step writes a Parquet segment and appends it via the transaction log using optimistic concurrency.
 
 ---
 
@@ -281,7 +281,7 @@ async fn main() -> Result<(), TableError> {
 ```
 
 
-See [timeseries-table-core](crates/timeseries-table-core/README.md) for full API docs.
+See the [Rust engine guide](crates/timeseries-table-format/ENGINE.md) for full API details.
 
 ### DataFusion Integration
 
@@ -290,7 +290,7 @@ See [timeseries-table-core](crates/timeseries-table-core/README.md) for full API
 timeseries-table-format = "0.1"
 ```
 
-See the [DataFusion integration guide](crates/timeseries-table-core/DATAFUSION.md) for SQL query examples.
+See the [DataFusion integration guide](crates/timeseries-table-format/DATAFUSION.md) for SQL query examples.
 
 ---
 
@@ -382,8 +382,8 @@ Current status and near-term roadmap:
 - [Benchmark methodology & results](docs/benchmarks/README.md)
 - [Python docs](https://mag1cfrog.github.io/timeseries-table-format/)
 - [CLI reference](crates/timeseries-table-cli/README.md)
-- [Core library API](crates/timeseries-table-core/README.md)
-- [DataFusion integration](crates/timeseries-table-core/DATAFUSION.md)
+- [Rust engine guide](crates/timeseries-table-format/ENGINE.md)
+- [DataFusion integration](crates/timeseries-table-format/DATAFUSION.md)
 
 ---
 

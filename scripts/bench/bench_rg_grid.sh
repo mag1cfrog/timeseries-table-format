@@ -12,7 +12,7 @@ BATCH_LIST=(8192 32768 65536 131072)
 for t in "${THREADS_LIST[@]}"; do
   for c in "${RG_CHUNK_LIST[@]}"; do
     for b in "${BATCH_LIST[@]}"; do
-      cargo run -p timeseries-table-core --bin coverage_bench -- \
+      cargo run -p timeseries-table-format --bin coverage_bench -- \
         --file "$FILE" \
         --time-column "$TIME_COL" \
         --engine rg-parallel \

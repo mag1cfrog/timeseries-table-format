@@ -2,7 +2,7 @@
 
 use std::{process::Stdio, time::Duration};
 use tempfile::TempDir;
-use timeseries_table_core::{
+use timeseries_table_format::{
     metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
     storage::TableLocation,
     table::TimeSeriesTable,
