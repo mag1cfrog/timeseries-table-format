@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 import sys
-import tomllib
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -18,13 +18,23 @@ ACTIVE_PACKAGES = {
 TAG_PREFIX = "timeseries-table-format-v"
 
 
+def parse_workspace_version(manifest: str) -> str:
+    section = ""
+    for line in manifest.splitlines():
+        value = line.partition("#")[0].strip()
+        if value.startswith("[") and value.endswith("]"):
+            section = value
+        elif section == "[workspace.package]":
+            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', value)
+            if match:
+                return match.group(1)
+    raise RuntimeError("[workspace.package].version is missing")
+
+
 def workspace_version() -> str:
-    root_manifest = tomllib.loads(
+    version = parse_workspace_version(
         (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
     )
-    version = root_manifest.get("workspace", {}).get("package", {}).get("version")
-    if not isinstance(version, str) or not version:
-        raise RuntimeError("[workspace.package].version is missing")
 
     metadata = json.loads(
         subprocess.check_output(

@@ -137,6 +137,7 @@ jobs:
             echo "Expected workspace version ${EXPECTED_VERSION}, found ${version}" >&2
             exit 1
           fi
+          echo "WORKSPACE_VERSION=${version}" >> "${GITHUB_ENV}"
           if [[ "${DEV_PRERELEASE}" != "true" ]]; then
             echo "EXPECTED_PYTHON_VERSION=${version}" >> "${GITHUB_ENV}"
           fi
@@ -151,11 +152,9 @@ jobs:
           import pathlib
           import re
 
-          import tomllib
-
           cargo_toml = pathlib.Path("Cargo.toml")
           text = cargo_toml.read_text(encoding="utf-8")
-          base = tomllib.loads(text)["workspace"]["package"]["version"]
+          base = os.environ["WORKSPACE_VERSION"]
           version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", base)
           if not version:
               raise SystemExit(f"Snapshot base must be a stable major.minor.patch version: {base}")
