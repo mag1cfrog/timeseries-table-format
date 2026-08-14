@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-python"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version.workspace = true
 publish = false
@@ -17,7 +17,7 @@ futures-util = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
-timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.4", default-features = false, features = ["datafusion"] }
+timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.5", default-features = false, features = ["datafusion"] }
 
 
 [lints]
