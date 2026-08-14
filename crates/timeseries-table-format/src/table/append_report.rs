@@ -17,7 +17,7 @@ pub struct AppendStep {
 /// Full append profiling report.
 #[derive(Debug, Clone)]
 pub struct AppendReport {
-    /// Context-level metadata (table, segment, bytes, etc.).
+    /// Context-level metadata such as the segment path and file size.
     pub context: Vec<(String, String)>,
     /// Per-step timing breakdown.
     pub steps: Vec<AppendStep>,

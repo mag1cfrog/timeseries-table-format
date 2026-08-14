@@ -11,8 +11,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use bytes::Bytes;
-
 use snafu::prelude::*;
 
 use crate::{
@@ -25,7 +23,7 @@ use crate::{
         },
     },
     formats::parquet::{
-        coverage::compute_segment_coverage, logical_schema_from_parquet_bytes,
+        coverage::compute_segment_coverage, logical_schema_from_parquet,
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::ensure_schema_exact_match,
@@ -75,11 +73,10 @@ impl TimeSeriesTable {
         Ok(normalized)
     }
 
-    async fn append_parquet_segment_bytes(
+    async fn append_parquet_segment_file(
         &mut self,
         relative_path: &str,
         time_column: &str,
-        data: Bytes,
         mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
@@ -96,6 +93,9 @@ impl TimeSeriesTable {
                 .await
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
+            if let Some(file_size) = segment_meta.file_size {
+                r.set_context("file_size", file_size.to_string());
+            }
             let fields = vec![
                 ("row_groups".to_string(), meta_report.row_groups.to_string()),
                 ("row_count".to_string(), meta_report.row_count.to_string()),
@@ -109,8 +109,9 @@ impl TimeSeriesTable {
         }
 
         let step_start = Instant::now();
-        let segment_schema =
-            logical_schema_from_parquet_bytes(rel_path, data.clone()).context(SegmentMetaSnafu)?;
+        let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
+            .await
+            .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
             r.push_step("logical_schema", step_start.elapsed(), Vec::new());
         }
@@ -336,13 +337,7 @@ impl TimeSeriesTable {
         time_column: &str,
     ) -> Result<u64, TableError> {
         let relative_path = self.normalize_new_segment_path(relative_path).await?;
-        let rel_path = Path::new(&relative_path);
-        let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
-            .await
-            .context(StorageSnafu)?;
-        let data = Bytes::from(bytes);
-
-        self.append_parquet_segment_bytes(&relative_path, time_column, data, None)
+        self.append_parquet_segment_file(&relative_path, time_column, None)
             .await
     }
 
@@ -357,18 +352,8 @@ impl TimeSeriesTable {
         report.set_context("relative_path", &relative_path);
         report.set_context("time_column", time_column);
 
-        let rel_path = Path::new(&relative_path);
-        let read_start = Instant::now();
-        let bytes = storage::read_all_bytes(self.location().as_ref(), rel_path)
-            .await
-            .context(StorageSnafu)?;
-        report.push_step("read_parquet_bytes", read_start.elapsed(), Vec::new());
-
-        report.set_context("bytes_len", bytes.len().to_string());
-        let data = Bytes::from(bytes);
-
         let version = self
-            .append_parquet_segment_bytes(&relative_path, time_column, data, Some(&mut report))
+            .append_parquet_segment_file(&relative_path, time_column, Some(&mut report))
             .await?;
 
         Ok((version, report.finish()))
@@ -390,7 +375,10 @@ mod tests {
     use crate::transaction_log::{
         Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
     };
+    use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::collections::BTreeMap;
+    use std::fs::{File, OpenOptions};
+    use std::io::{Seek, SeekFrom, Write};
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -466,6 +454,53 @@ mod tests {
 
         let reopened = TimeSeriesTable::open(location).await?;
         assert!(reopened.state.segments.contains_key(rel_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_inspects_file_without_reading_unrelated_column_data() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let rel_path = "data/corrupt-price.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        write_test_parquet(
+            &abs_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+
+        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
+        let price_page = reader.metadata().row_group(0).column(2).data_page_offset() as u64;
+        drop(reader);
+        let mut file = OpenOptions::new().read(true).write(true).open(&abs_path)?;
+        file.seek(SeekFrom::Start(price_page))?;
+        file.write_all(&[0xFF; 16])?;
+        file.flush()?;
+        drop(file);
+
+        let file_size = std::fs::metadata(&abs_path)?.len().to_string();
+        let (version, report) = table
+            .append_parquet_segment_with_report(rel_path, "ts")
+            .await?;
+
+        assert_eq!(version, 2);
+        assert!(
+            report
+                .context
+                .contains(&("file_size".to_string(), file_size))
+        );
+        assert!(
+            report
+                .steps
+                .iter()
+                .all(|step| step.name != "read_parquet_bytes")
+        );
         Ok(())
     }
 
