@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.code }}
+      skip: ${{ steps.skip.outputs.skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -42,6 +43,14 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish-crates.yml'
               - '.github/workflows/release-plz.yml'
+      - name: Check for skip label
+        id: skip
+        env:
+          SKIP_HEAVY: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:skip-heavy') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "skip=${SKIP_HEAVY}" >> "$GITHUB_OUTPUT"
 
   detect-python-changes:
     permissions:
@@ -71,10 +80,10 @@ jobs:
               - '.github/workflows/publish-pypi.yml'
               - '.github/workflows/publish-testpypi.yml'
               - '.github/workflows/python-dist.yml'
-      - name: Check for skip label
+      - name: Check for skip labels
         id: skip
         env:
-          SKIP_PYTHON: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:skip-python') }}
+          SKIP_PYTHON: ${{ github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci:skip-python') || contains(github.event.pull_request.labels.*.name, 'ci:skip-heavy')) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -83,7 +92,7 @@ jobs:
   rust-quality-gate:
     runs-on: ubuntu-latest
     needs: [detect-rust-changes]
-    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' }}
+    if: ${{ needs['detect-rust-changes'].outputs.code == 'true' && needs['detect-rust-changes'].outputs.skip != 'true' }}
     defaults:
       run:
         working-directory: .
@@ -260,11 +269,11 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ needs['detect-rust-changes'].outputs.code }}" = "true" ]; then
+          if [ "${{ needs['detect-rust-changes'].outputs.code }}" = "true" ] && [ "${{ needs['detect-rust-changes'].outputs.skip }}" != "true" ]; then
             echo "Code changed; heavy job result: ${{ needs['rust-quality-gate'].result }}"
             [ "${{ needs['rust-quality-gate'].result }}" = "success" ] || exit 1
           else
-            echo "No code changes; skipping heavy checks."
+            echo "No Rust changes or heavy CI skipped."
           fi
 
           if [ "${{ needs['detect-python-changes'].outputs.code }}" = "true" ] && [ "${{ needs['detect-python-changes'].outputs.skip }}" != "true" ]; then
@@ -273,5 +282,5 @@ jobs:
             echo "Python/binding changed; distribution result: ${{ needs['python-distribution'].result }}"
             [ "${{ needs['python-distribution'].result }}" = "success" ] || exit 1
           else
-            echo "No Python/binding changes; skipping python checks."
+            echo "No Python/binding changes or Python CI skipped."
           fi
