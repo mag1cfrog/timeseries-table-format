@@ -83,6 +83,16 @@ fn plan_timestamp_scan(
             }
         };
 
+        if group_min > group_max {
+            return Err(SegmentMetaError::ParquetStatsShape {
+                path: path.to_string(),
+                column: column.to_string(),
+                detail: format!(
+                    "timestamp statistics minimum {group_min} exceeds maximum {group_max}"
+                ),
+            });
+        }
+
         merge_min_max(&mut min_max, (group_min, group_max));
     }
 
@@ -627,6 +637,36 @@ mod tests {
         Ok(())
     }
 
+    fn metadata_with_timestamp_statistics(
+        stats: Statistics,
+    ) -> Result<ParquetMetaData, Box<dyn std::error::Error>> {
+        let column = Arc::new(
+            Type::primitive_type_builder("ts", PhysicalType::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .with_logical_type(Some(LogicalType::Timestamp {
+                    is_adjusted_to_u_t_c: true,
+                    unit: TimeUnit::MILLIS,
+                }))
+                .build()?,
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![column])
+                .build()?,
+        );
+        let schema = Arc::new(SchemaDescriptor::new(schema));
+        let column = ColumnChunkMetaData::builder(schema.column(0))
+            .set_num_values(2)
+            .set_statistics(stats)
+            .build()?;
+        let row_group = RowGroupMetaData::builder(Arc::clone(&schema))
+            .set_num_rows(2)
+            .add_column_metadata(column)
+            .build()?;
+        let file = FileMetaData::new(1, 2, None, None, schema, None);
+        Ok(ParquetMetaData::new(file, vec![row_group]))
+    }
+
     #[test]
     fn ts_from_i64_out_of_range_is_error() {
         let err = ts_from_i64("path", "ts", TimestampUnit::Millis, i64::MAX).unwrap_err();
@@ -659,39 +699,37 @@ mod tests {
 
     #[test]
     fn inexact_statistics_force_fallback() -> TestResult {
-        let column = Arc::new(
-            Type::primitive_type_builder("ts", PhysicalType::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .with_logical_type(Some(LogicalType::Timestamp {
-                    is_adjusted_to_u_t_c: true,
-                    unit: TimeUnit::MILLIS,
-                }))
-                .build()?,
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![column])
-                .build()?,
-        );
-        let schema = Arc::new(SchemaDescriptor::new(schema));
         let stats = match Statistics::int64(Some(10), Some(20), None, Some(0), false) {
             Statistics::Int64(stats) => Statistics::Int64(stats.with_min_is_exact(false)),
             _ => unreachable!(),
         };
-        let column = ColumnChunkMetaData::builder(schema.column(0))
-            .set_num_values(2)
-            .set_statistics(stats)
-            .build()?;
-        let row_group = RowGroupMetaData::builder(Arc::clone(&schema))
-            .set_num_rows(2)
-            .add_column_metadata(column)
-            .build()?;
-        let file = FileMetaData::new(1, 2, None, None, schema, None);
-        let metadata = ParquetMetaData::new(file, vec![row_group]);
+        let metadata = metadata_with_timestamp_statistics(stats)?;
 
         let plan = plan_timestamp_scan("path", "ts", 0, &metadata)?;
         assert_eq!(plan.min_max, None);
         assert_eq!(plan.row_groups_to_scan, vec![0]);
+        Ok(())
+    }
+
+    #[test]
+    fn inverted_statistics_are_rejected() -> TestResult {
+        let stats = Statistics::int64(Some(20), Some(10), None, Some(0), false);
+        let metadata = metadata_with_timestamp_statistics(stats)?;
+
+        let err = plan_timestamp_scan("data/inverted.parquet", "ts", 0, &metadata)
+            .err()
+            .expect("inverted statistics must fail");
+
+        assert!(matches!(
+            err,
+            SegmentMetaError::ParquetStatsShape {
+                path,
+                column,
+                detail,
+            } if path == "data/inverted.parquet"
+                && column == "ts"
+                && detail == "timestamp statistics minimum 20 exceeds maximum 10"
+        ));
         Ok(())
     }
 
