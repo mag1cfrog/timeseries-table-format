@@ -45,6 +45,8 @@ jobs:
               - '.github/workflows/release-plz.yml'
               - 'scripts/check_release_version.py'
               - 'scripts/test_check_release_version.py'
+              - 'scripts/append_rss_regression.py'
+              - 'scripts/test_append_rss_regression.py'
       - name: Check for skip label
         id: skip
         env:
@@ -163,6 +165,9 @@ jobs:
         run: |
           python scripts/test_check_release_version.py
           python scripts/check_release_version.py
+
+      - name: append RSS regression checks
+        run: python scripts/test_append_rss_regression.py
 
       - name: fmt
         run: cargo fmt --all -- --check
