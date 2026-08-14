@@ -1,6 +1,6 @@
 [package]
 name = "timeseries-table-cli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version.workspace = true
 default-run = "tstable"
@@ -26,7 +26,7 @@ rayon = "1.11.0"
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "process"] }
 
-timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.4", default-features = false, features = ["datafusion"] }
+timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.5", default-features = false, features = ["datafusion"] }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 tabled = { workspace = true }
@@ -40,7 +40,7 @@ parquet = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.4", default-features = false, features = ["test-counters"] }
+timeseries-table-format = { path = "../timeseries-table-format", version = "0.1.5", default-features = false, features = ["test-counters"] }
 
 [lints]
 workspace = true
