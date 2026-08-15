@@ -15,7 +15,7 @@ use std::path::PathBuf;
 // and to keep older imports compiling.
 pub use crate::coverage::layout::{
     COVERAGE_EXT, COVERAGE_ROOT_DIR, CoverageLayoutError, SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR,
-    segment_coverage_id_v2, segment_coverage_path, table_coverage_id_v2, table_snapshot_path,
+    segment_coverage_id_v2, segment_coverage_key, table_coverage_id_v2, table_snapshot_key,
     validate_coverage_id,
 };
 

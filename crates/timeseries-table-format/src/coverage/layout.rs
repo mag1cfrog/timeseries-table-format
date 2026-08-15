@@ -2,13 +2,11 @@
 //!
 //! These helpers define:
 //! - how coverage ids are validated
-//! - how coverage sidecar paths are constructed (relative to the table root)
+//! - how coverage sidecar keys are constructed (relative to the table root)
 //! - deterministic id derivation helpers for per-segment and table snapshots
 //!
-//! Note: these functions return *relative* paths (under a table root). Callers
-//! should join them with the table root / storage backend before doing IO.
-
-use std::path::PathBuf;
+//! Note: these functions return canonical slash-separated object keys. The
+//! storage backend is responsible for resolving them under its table root.
 
 use snafu::Snafu;
 use uuid::Uuid;
@@ -83,25 +81,20 @@ pub fn validate_coverage_id(coverage_id: &str) -> Result<(), CoverageLayoutError
     Ok(())
 }
 
-/// Relative path: `_coverage/segments/<coverage_id>.roar`
-pub fn segment_coverage_path(coverage_id: &str) -> Result<PathBuf, CoverageLayoutError> {
+/// Relative object key: `_coverage/segments/<coverage_id>.roar`
+pub fn segment_coverage_key(coverage_id: &str) -> Result<String, CoverageLayoutError> {
     validate_coverage_id(coverage_id)?;
-    let mut p = PathBuf::from(COVERAGE_ROOT_DIR);
-    p.push("segments");
-    p.push(format!("{coverage_id}.{COVERAGE_EXT}"));
-    Ok(p)
+    Ok(format!(
+        "{SEGMENT_COVERAGE_DIR}/{coverage_id}.{COVERAGE_EXT}"
+    ))
 }
 
-/// Relative path: `_coverage/table/<version>-<snapshot_id>.roar`
-pub fn table_snapshot_path(
-    version: u64,
-    snapshot_id: &str,
-) -> Result<PathBuf, CoverageLayoutError> {
+/// Relative object key: `_coverage/table/<version>-<snapshot_id>.roar`
+pub fn table_snapshot_key(version: u64, snapshot_id: &str) -> Result<String, CoverageLayoutError> {
     validate_coverage_id(snapshot_id)?;
-    let mut p = PathBuf::from(COVERAGE_ROOT_DIR);
-    p.push("table");
-    p.push(format!("{version}-{snapshot_id}.{COVERAGE_EXT}"));
-    Ok(p)
+    Ok(format!(
+        "{TABLE_SNAPSHOT_DIR}/{version}-{snapshot_id}.{COVERAGE_EXT}"
+    ))
 }
 
 fn coverage_id_v2(
@@ -266,19 +259,19 @@ mod tests {
     }
 
     #[test]
-    fn segment_coverage_path_formats_and_validates() {
+    fn segment_coverage_key_formats_and_validates() {
         let id = "seg-001";
-        let path = segment_coverage_path(id).expect("valid id");
-        assert_eq!(path, PathBuf::from("_coverage/segments/seg-001.roar"));
+        let key = segment_coverage_key(id).expect("valid id");
+        assert_eq!(key, "_coverage/segments/seg-001.roar");
 
         // Ensure validation runs
-        assert!(segment_coverage_path("bad/id").is_err());
+        assert!(segment_coverage_key("bad/id").is_err());
     }
 
     #[test]
-    fn table_snapshot_path_formats() {
-        let path = table_snapshot_path(42, "snap-001").expect("valid snapshot id");
-        assert_eq!(path, PathBuf::from("_coverage/table/42-snap-001.roar"));
+    fn table_snapshot_key_formats() {
+        let key = table_snapshot_key(42, "snap-001").expect("valid snapshot id");
+        assert_eq!(key, "_coverage/table/42-snap-001.roar");
     }
 
     #[test]

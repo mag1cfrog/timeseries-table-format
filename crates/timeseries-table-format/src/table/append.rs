@@ -8,7 +8,7 @@
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use snafu::prelude::*;
@@ -19,8 +19,8 @@ use crate::{
     coverage::{
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
-            coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_path,
-            table_coverage_id_v2, table_snapshot_path,
+            coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
+            table_coverage_id_v2, table_snapshot_key,
         },
     },
     formats::parquet::{
@@ -62,13 +62,15 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
 impl TimeSeriesTable {
     async fn rollback_created_sidecars(
         &self,
-        created_sidecars: &[PathBuf],
+        created_sidecars: &[String],
         source: TableError,
     ) -> TableError {
         let mut cleanup_errors = Vec::new();
         for path in created_sidecars.iter().rev() {
-            if let Err(error) = storage::remove_file(self.location().as_ref(), path).await {
-                cleanup_errors.push(format!("{}: {error}", path.display()));
+            if let Err(error) =
+                storage::remove_file(self.location().as_ref(), Path::new(path)).await
+            {
+                cleanup_errors.push(format!("{path}: {error}"));
             }
         }
 
@@ -306,7 +308,7 @@ impl TimeSeriesTable {
         let attempt_id = Uuid::new_v4();
         let segment_content_id = segment_coverage_id_v2(&self.index, &seg_cov_bytes);
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
-        let seg_cov_path = segment_coverage_path(&segment_file_id).map_err(|source| {
+        let seg_cov_path = segment_coverage_key(&segment_file_id).map_err(|source| {
             TableError::CoverageSidecar {
                 source: CoverageError::Layout { source },
             }
@@ -321,7 +323,7 @@ impl TimeSeriesTable {
         let snapshot_content_id = table_coverage_id_v2(&self.index, &new_snap_cov_bytes);
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
         let snapshot_path =
-            table_snapshot_path(new_version_guess, &snapshot_file_id).map_err(|source| {
+            table_snapshot_key(new_version_guess, &snapshot_file_id).map_err(|source| {
                 TableError::CoverageSidecar {
                     source: CoverageError::Layout { source },
                 }
@@ -329,7 +331,7 @@ impl TimeSeriesTable {
 
         let step_start = Instant::now();
         let mut created_sidecars = Vec::new();
-        write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes)
+        write_coverage_sidecar_new_bytes(self.location(), Path::new(&seg_cov_path), &seg_cov_bytes)
             .await
             .map_err(|source| TableError::CoverageSidecar { source })?;
         created_sidecars.push(seg_cov_path.clone());
@@ -338,9 +340,12 @@ impl TimeSeriesTable {
         }
 
         let step_start = Instant::now();
-        if let Err(source) =
-            write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
-                .await
+        if let Err(source) = write_coverage_sidecar_new_bytes(
+            self.location(),
+            Path::new(&snapshot_path),
+            &new_snap_cov_bytes,
+        )
+        .await
         {
             let error = TableError::CoverageSidecar { source };
             return Err(self
@@ -353,7 +358,7 @@ impl TimeSeriesTable {
         }
 
         // 7) Build actions and atomically publish the commit.
-        segment_meta.coverage_path = Some(seg_cov_path.to_string_lossy().to_string());
+        segment_meta.coverage_path = Some(seg_cov_path);
 
         let mut actions = Vec::new();
         if let Some(updated_meta) = maybe_updated_meta.clone() {
@@ -363,7 +368,7 @@ impl TimeSeriesTable {
         actions.push(LogAction::AddSegment(segment_meta.clone()));
         actions.push(LogAction::UpdateTableCoverage {
             index_kind: self.index.kind.clone(),
-            coverage_path: snapshot_path.to_string_lossy().to_string(),
+            coverage_path: snapshot_path.clone(),
         });
 
         let step_start = Instant::now();
@@ -413,7 +418,7 @@ impl TimeSeriesTable {
         // Also update the snapshot pointer in state.
         self.state.table_coverage = Some(TableCoveragePointer {
             index_kind: self.index.kind.clone(),
-            coverage_path: snapshot_path.to_string_lossy().to_string(),
+            coverage_path: snapshot_path,
             version: new_version,
         });
         if let Some(r) = report.as_mut() {
@@ -491,6 +496,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn timestamp_bucket(index: &IndexSpec) -> &TimeBucket {
@@ -1772,7 +1778,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let sidecar = PathBuf::from(layout::SEGMENT_COVERAGE_DIR).join("stuck.roar");
+        let sidecar = format!("{}/stuck.roar", layout::SEGMENT_COVERAGE_DIR);
         tokio::fs::create_dir_all(tmp.path().join(&sidecar)).await?;
         let source = TableError::CoverageOverlap {
             segment_path: "data/failed.parquet".to_string(),
