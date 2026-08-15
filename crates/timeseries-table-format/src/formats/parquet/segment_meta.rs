@@ -1,7 +1,7 @@
 //! Parquet segment metadata derivation.
 //!
 //! This module extracts per-segment metadata (index bounds, row count, etc.)
-//! directly from local Parquet files.
+//! from stored Parquet segments through the storage abstraction.
 
 use std::path::Path;
 
@@ -404,7 +404,7 @@ pub(crate) struct SegmentMetaReport {
     pub(crate) scanned_rows: u64,
 }
 
-/// Build segment metadata and profiling data directly from a local Parquet file.
+/// Build segment metadata and profiling data from a stored Parquet segment.
 pub(crate) async fn segment_meta_from_parquet(
     location: &TableLocation,
     rel_path: &Path,

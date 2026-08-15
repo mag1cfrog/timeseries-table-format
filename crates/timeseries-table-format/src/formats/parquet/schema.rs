@@ -541,7 +541,7 @@ fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, Lo
     LogicalSchema::new(fields)
 }
 
-/// Derive a logical schema directly from a local Parquet file footer.
+/// Derive a logical schema from a stored Parquet segment footer.
 pub async fn logical_schema_from_parquet(
     location: &TableLocation,
     rel_path: &Path,

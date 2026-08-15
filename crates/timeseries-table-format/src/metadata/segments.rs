@@ -34,7 +34,7 @@ pub enum FileFormat {
 
 /// Metadata about a single physical segment.
 ///
-/// In v0.1, a "segment" corresponds to a single data file on disk.
+/// In v0.1, a "segment" corresponds to one stored data object.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SegmentMeta {
     /// Canonical file path relative to the table root and the segment identity.

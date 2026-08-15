@@ -10,7 +10,6 @@ pub mod logical_schema;
 pub mod schema_compat;
 pub mod segments;
 pub mod table_metadata;
-pub mod time_column;
 
 /// Convenience re-exports for the metadata "model" surface.
 pub mod model;

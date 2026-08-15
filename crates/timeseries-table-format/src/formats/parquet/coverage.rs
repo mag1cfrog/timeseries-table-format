@@ -1,14 +1,14 @@
-//! Helpers for reading and computing segment-level time-series coverage.
+//! Helpers for reading and computing segment-level ordered-index coverage.
 //!
 //! This module provides utilities for analyzing Parquet segments to extract
-//! time-series coverage metadata: bucket assignments for timestamps within each
+//! coverage metadata: bucket assignments for ordered-index values within each
 //! segment. Coverage data is persisted in a RoaringTreemap sidecar
 //! file and referenced by the transaction log for efficient time-range queries.
 //!
 //! The error types in this module cover common failure points:
 //! - Storage I/O errors when accessing segment files.
 //! - Parquet format violations or missing/malformed metadata.
-//! - Unsupported or out-of-range timestamp values.
+//! - Unsupported or out-of-range ordered-index values.
 
 use std::path::Path;
 
@@ -48,9 +48,9 @@ use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 ///
 /// Coverage computation typically:
 /// 1. Reads the Parquet segment file from storage.
-/// 2. Inspects the Parquet schema to locate the timestamp column.
-/// 3. Validates that the timestamp column uses a supported type.
-/// 4. Streams projected timestamp values and maps them to buckets.
+/// 2. Inspects the Parquet schema to locate the registered index column.
+/// 3. Validates that the column matches the registered index domain.
+/// 4. Streams projected index values and maps them to buckets.
 /// 5. Stores computed bucket IDs in a RoaringTreemap for efficient serialization.
 ///
 /// Errors at any stage are captured here with context about the segment path,
@@ -284,8 +284,8 @@ async fn compute_bitmap_from_stream(
 ///
 /// # Returns
 ///
-/// A `Coverage` bitmap containing the bucket IDs of all timestamps in the segment,
-/// or a `SegmentCoverageError` if any stage of the process fails.
+/// A `Coverage` bitmap containing the bucket IDs of all observed index values in
+/// the segment, or a `SegmentCoverageError` if any stage of the process fails.
 pub async fn compute_segment_coverage(
     location: &TableLocation,
     rel_path: &Path,
