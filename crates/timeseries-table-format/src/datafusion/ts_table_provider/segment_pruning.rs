@@ -129,7 +129,7 @@ fn index_scalar(
     }
 }
 
-fn timestamp_scalar(
+pub(super) fn timestamp_scalar(
     value: DateTime<Utc>,
     unit: &TimeUnit,
     timezone: Option<Arc<str>>,

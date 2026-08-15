@@ -175,8 +175,9 @@ impl TsTableProvider {
         &self,
         segments: Vec<&'a SegmentMeta>,
         filters: &[Expr],
-    ) -> Vec<&'a SegmentMeta> {
+    ) -> DFResult<Vec<&'a SegmentMeta>> {
         let ts_col = self.index_column_name();
+        let ts_type = self.schema.field_with_name(ts_col)?.data_type();
         let tz_opt = self.ts_timezone();
         let parsed_tz = tz_opt.as_deref().and_then(parse_tz);
 
@@ -186,16 +187,21 @@ impl TsTableProvider {
         for f in filters {
             if expr_mentions_ts(f, ts_col) {
                 saw_any_ts = true;
-                compiled = TimePred::and(compiled, compile_time_pred(f, ts_col, parsed_tz.as_ref()))
+                let normalized =
+                    timestamp_pruning::normalize_timestamp_predicate(f.clone(), ts_col, ts_type)?;
+                compiled = TimePred::and(
+                    compiled,
+                    compile_time_pred(&normalized, ts_col, parsed_tz.as_ref()),
+                )
             }
         }
 
         if !saw_any_ts {
-            return segments;
+            return Ok(segments);
         }
 
         // Prune only if definitely false for that segment.
-        segments
+        Ok(segments
             .into_iter()
             .filter(|seg| match (&seg.index_min, &seg.index_max) {
                 (IndexValue::Timestamp(min), IndexValue::Timestamp(max)) => {
@@ -203,7 +209,7 @@ impl TsTableProvider {
                 }
                 _ => true,
             })
-            .collect()
+            .collect())
     }
 
     fn prune_segments_by_index<'a>(
@@ -213,7 +219,7 @@ impl TsTableProvider {
         predicate: &Arc<dyn PhysicalExpr>,
     ) -> DFResult<Vec<&'a SegmentMeta>> {
         match &self.table.index_spec().kind {
-            IndexKind::Timestamp { .. } => Ok(self.prune_segments_by_time(segments, filters)),
+            IndexKind::Timestamp { .. } => self.prune_segments_by_time(segments, filters),
             IndexKind::Int64 { .. } | IndexKind::UInt64 { .. } => {
                 let mut columns = HashSet::new();
                 for filter in filters {
