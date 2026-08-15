@@ -20,13 +20,6 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn timestamp_kind(bucket: TimeBucket) -> IndexKind {
-    IndexKind::Timestamp {
-        bucket,
-        timezone: None,
-    }
-}
-
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -684,7 +677,7 @@ async fn table_coverage_pointer_is_replayed() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
     let meta = sample_table_meta();
-    let coverage_bucket = TimeBucket::Minutes(5);
+    let coverage_kind = sample_time_index_spec().kind;
     let coverage_path = "coverage/0000000002.bitmap".to_string();
 
     let v1 = store
@@ -695,7 +688,7 @@ async fn table_coverage_pointer_is_replayed() -> TestResult {
         .commit_with_expected_version(
             v1,
             vec![LogAction::UpdateTableCoverage {
-                index_kind: timestamp_kind(coverage_bucket.clone()),
+                index_kind: coverage_kind.clone(),
                 coverage_path: coverage_path.clone(),
             }],
         )
@@ -708,7 +701,7 @@ async fn table_coverage_pointer_is_replayed() -> TestResult {
         .table_coverage
         .as_ref()
         .expect("table coverage pointer should be present");
-    assert_eq!(pointer.index_kind, timestamp_kind(coverage_bucket));
+    assert_eq!(pointer.index_kind, coverage_kind);
     assert_eq!(pointer.coverage_path, coverage_path);
     assert_eq!(pointer.version, v2);
 
@@ -721,8 +714,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
     let meta = sample_table_meta();
-    let coverage_bucket_v1 = TimeBucket::Minutes(5);
-    let coverage_bucket_v2 = TimeBucket::Hours(1);
+    let coverage_kind = sample_time_index_spec().kind;
     let coverage_path_v1 = "coverage/0000000002.bitmap".to_string();
     let coverage_path_v2 = "coverage/0000000003.bitmap".to_string();
 
@@ -734,7 +726,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
         .commit_with_expected_version(
             v1,
             vec![LogAction::UpdateTableCoverage {
-                index_kind: timestamp_kind(coverage_bucket_v1.clone()),
+                index_kind: coverage_kind.clone(),
                 coverage_path: coverage_path_v1.clone(),
             }],
         )
@@ -744,7 +736,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
         .commit_with_expected_version(
             v2,
             vec![LogAction::UpdateTableCoverage {
-                index_kind: timestamp_kind(coverage_bucket_v2.clone()),
+                index_kind: coverage_kind.clone(),
                 coverage_path: coverage_path_v2.clone(),
             }],
         )
@@ -757,7 +749,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
         .table_coverage
         .as_ref()
         .expect("table coverage pointer should be present");
-    assert_eq!(pointer.index_kind, timestamp_kind(coverage_bucket_v2));
+    assert_eq!(pointer.index_kind, coverage_kind);
     assert_eq!(pointer.coverage_path, coverage_path_v2);
     assert_eq!(pointer.version, v3);
 
@@ -793,7 +785,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
     let meta = sample_table_meta();
-    let coverage_bucket = TimeBucket::Minutes(5);
+    let coverage_kind = sample_time_index_spec().kind;
     let segment_cov_path = "coverage/seg-001.roar".to_string();
     let snapshot_cov_path = "coverage/table/0000000002.roar".to_string();
 
@@ -810,7 +802,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
         .commit_with_expected_version(
             v2,
             vec![LogAction::UpdateTableCoverage {
-                index_kind: timestamp_kind(coverage_bucket.clone()),
+                index_kind: coverage_kind.clone(),
                 coverage_path: snapshot_cov_path.clone(),
             }],
         )
@@ -832,7 +824,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
         .table_coverage
         .as_ref()
         .expect("table coverage pointer should be present");
-    assert_eq!(pointer.index_kind, timestamp_kind(coverage_bucket));
+    assert_eq!(pointer.index_kind, coverage_kind);
     assert_eq!(pointer.coverage_path, snapshot_cov_path);
     assert_eq!(pointer.version, v3);
 

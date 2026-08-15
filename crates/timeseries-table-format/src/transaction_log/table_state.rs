@@ -202,6 +202,17 @@ impl TransactionLogStore {
                 msg: format!("Invalid ordered index specification: {source}"),
                 backtrace: snafu::Backtrace::capture(),
             })?;
+        if let Some(pointer) = &table_coverage
+            && pointer.index_kind != index.kind
+        {
+            return CorruptStateSnafu {
+                msg: format!(
+                    "Table coverage index kind does not match table index: expected {:?}, found {:?} in pointer from version {}",
+                    index.kind, pointer.index_kind, pointer.version
+                ),
+            }
+            .fail();
+        }
         if let Some(schema) = &table_meta.logical_schema {
             ensure_index_matches_schema(schema, index).map_err(|source| {
                 CommitError::CorruptState {
@@ -557,6 +568,33 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_mismatched_table_coverage_index() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        store
+            .commit_with_expected_version(
+                0,
+                vec![
+                    LogAction::UpdateTableMeta(sample_table_meta()),
+                    LogAction::UpdateTableCoverage {
+                        index_kind: IndexKind::Int64 {
+                            bucket_width: std::num::NonZeroU64::new(1).unwrap(),
+                        },
+                        coverage_path: "_coverage/table/1-mismatched.roar".to_string(),
+                    },
+                ],
+            )
+            .await?;
+
+        let err = store
+            .rebuild_table_state()
+            .await
+            .expect_err("mismatched coverage index should be rejected during replay");
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(err.to_string().contains("Table coverage index kind"));
         Ok(())
     }
 
