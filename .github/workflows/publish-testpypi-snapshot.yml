@@ -30,7 +30,7 @@ jobs:
       actions: read
       contents: read
     with:
-      os-json: '["ubuntu-latest"]'
+      os-json: '["ubuntu-latest","windows-latest"]'
       include-sdist: false
       run-pytest: false
       artifact-prefix: timeseries-table-format-testpypi-snapshot-wheel
@@ -50,11 +50,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Download snapshot wheel
+      - name: Download snapshot wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: timeseries-table-format-testpypi-snapshot-wheel-ubuntu-latest
+          pattern: timeseries-table-format-testpypi-snapshot-wheel-*
           path: dist
+          merge-multiple: true
 
       - name: Publish snapshot to TestPyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
@@ -64,14 +65,15 @@ jobs:
           skip-existing: true
 
   verify:
-    name: verify snapshot (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: verify snapshot (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     needs: [build, publish]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.14"]
 
     steps:
@@ -126,7 +128,7 @@ jobs:
               raise SystemExit(f"expected version {os.environ['EXPECTED_VERSION']}, found {installed}")
           if ttf.__version__.replace("-dev.", ".dev") != installed:
               raise SystemExit(f"package version {ttf.__version__} != metadata {installed}")
-          if not ttf._native.__file__.endswith(".abi3.so"):
+          if not ttf._native.__file__.endswith((".abi3.so", ".pyd")):
               raise SystemExit(f"unexpected native extension: {ttf._native.__file__}")
           result = ttf.Session().sql("select 1 as value")
           if not isinstance(result, pyarrow.Table) or result.to_pydict() != {"value": [1]}:
