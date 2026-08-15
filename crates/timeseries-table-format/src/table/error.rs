@@ -108,15 +108,6 @@ pub enum TableError {
         source: BucketError,
     },
 
-    /// A timestamp-only operation was requested for another ordered domain.
-    #[snafu(display("Operation {operation} requires a timestamp index, found {actual}"))]
-    UnsupportedIndexKind {
-        /// Timestamp-only operation name.
-        operation: &'static str,
-        /// Actual registered ordered domain.
-        actual: &'static str,
-    },
-
     /// Segment bounds cannot be ordered in one native index domain.
     #[snafu(display("Invalid segment ordered-index bounds: {source}"))]
     InvalidSegmentBounds {
