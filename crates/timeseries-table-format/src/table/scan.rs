@@ -30,7 +30,7 @@ use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuil
 use snafu::prelude::*;
 
 use crate::metadata::{
-    segments::{SegmentMeta, sort_segment_meta_by_index},
+    segments::SegmentMeta,
     table_metadata::{IndexValue, IndexValueError, validate_index_range},
 };
 use crate::storage::{self, TableLocation};
@@ -46,13 +46,10 @@ fn segments_for_range(
     start: &IndexValue,
     end: &IndexValue,
 ) -> Result<Vec<SegmentMeta>, IndexValueError> {
-    let mut segments = state.segments.values().cloned().collect::<Vec<_>>();
-    sort_segment_meta_by_index(&mut segments)?;
-
     let mut candidates = Vec::new();
-    for segment in segments {
+    for segment in state.segments_sorted_by_index()? {
         if !segment.index_max.compare(start)?.is_lt() && segment.index_min.compare(end)?.is_lt() {
-            candidates.push(segment);
+            candidates.push(segment.clone());
         }
     }
     Ok(candidates)
@@ -538,7 +535,10 @@ mod tests {
             values.null_count() > 0,
         )]));
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values])?;
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
+        let properties = WriterProperties::builder()
+            .set_max_row_group_size(1)
+            .build();
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(properties))?;
         writer.write(&batch)?;
         writer.close()?;
         Ok(())
@@ -762,10 +762,10 @@ mod tests {
         let path = tmp.path().join("int64-stream.parquet");
         write_index_parquet(
             &path,
-            Arc::new(Int64Array::from(vec![Some(-1), None, Some(0), Some(1)])),
+            Arc::new(Int64Array::from(vec![Some(0), Some(1), Some(-1), None])),
         )?;
         let data = bytes::Bytes::from(std::fs::read(path)?);
-        let (reader, stats) = TrackingReader::new(data);
+        let (reader, stats) = TrackingReader::new(data.clone());
         let mut stream = segment_range_stream(
             reader,
             "data/int64-stream.parquet".to_string(),
@@ -787,10 +787,80 @@ mod tests {
                 .iter()
                 .flatten()
                 .collect::<Vec<_>>(),
-            [0, 1]
+            [0]
         );
         drop(stream);
         assert!(stats.dropped.load(Ordering::SeqCst));
+
+        let (reader, stats, release) = TrackingReader::with_gate(data, 2);
+        let mut stream = segment_range_stream(
+            reader,
+            "data/int64-stream.parquet".to_string(),
+            "ts",
+            0i64,
+            2i64,
+        )
+        .await?;
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .transpose()?
+                .expect("first integer batch")
+                .num_rows(),
+            1
+        );
+        let second = stream.next();
+        futures::pin_mut!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 2);
+        release.send(()).expect("release second row-group read");
+        assert_eq!(
+            second
+                .await
+                .transpose()?
+                .expect("second integer batch")
+                .num_rows(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integer_scan_skips_non_candidates_and_stops_after_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        let wrong_type = "data/wrong-type.parquet";
+        write_index_parquet(
+            &tmp.path().join(wrong_type),
+            Arc::new(UInt64Array::from(vec![1, 2])),
+        )?;
+        for segment in [
+            indexed_segment(
+                "data/non-candidate.parquet",
+                (-10i64).into(),
+                (-5i64).into(),
+            ),
+            indexed_segment(wrong_type, 1i64.into(), 2i64.into()),
+            indexed_segment("data/later.parquet", 3i64.into(), 4i64.into()),
+        ] {
+            table.state.segments.insert(segment.path.clone(), segment);
+        }
+
+        let mut empty = table.scan_range(-20i64, -15i64).await?;
+        assert!(empty.next().await.is_none());
+
+        let mut failed = table.scan_range(0i64, 10i64).await?;
+        assert!(matches!(
+            failed.next().await,
+            Some(Err(TableError::IndexColumnTypeMismatch { .. }))
+        ));
+        assert!(failed.next().await.is_none());
         Ok(())
     }
 
