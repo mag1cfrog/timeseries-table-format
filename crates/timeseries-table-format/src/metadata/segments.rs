@@ -221,10 +221,19 @@ where
         }
     }
 
-    // Every comparison is now guaranteed to be same-domain and valid.
-    segments.sort_unstable_by(|a, b| {
-        cmp_segment_meta_by_index(a.borrow(), b.borrow()).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let mut sort_error = None;
+    segments.sort_unstable_by(
+        |a, b| match cmp_segment_meta_by_index(a.borrow(), b.borrow()) {
+            Ok(order) => order,
+            Err(error) => {
+                sort_error.get_or_insert(error);
+                std::cmp::Ordering::Equal
+            }
+        },
+    );
+    if let Some(error) = sort_error {
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -392,6 +401,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["data/a.parquet", "data/b.parquet", "data/z.parquet"]
         );
+    }
+
+    #[test]
+    fn sorting_rejects_cross_domain_segments() {
+        let mut segments = vec![
+            seg("timestamp", 0, 1),
+            SegmentMeta {
+                path: "data/integer.parquet".to_string(),
+                format: FileFormat::Parquet,
+                index_min: IndexValue::Int64(0),
+                index_max: IndexValue::Int64(1),
+                row_count: 1,
+                file_size: None,
+                coverage_path: None,
+            },
+        ];
+
+        assert!(matches!(
+            sort_segment_meta_by_index(&mut segments),
+            Err(IndexValueError::DomainMismatch { .. })
+        ));
     }
 
     #[test]
