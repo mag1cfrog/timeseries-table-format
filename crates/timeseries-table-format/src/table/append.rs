@@ -27,10 +27,7 @@ use crate::{
         coverage::compute_segment_coverage, logical_schema_from_parquet,
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
-    metadata::{
-        schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
-        table_metadata::IndexKind,
-    },
+    metadata::schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
     storage,
     transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
 };
@@ -153,19 +150,9 @@ impl TimeSeriesTable {
         mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
-        let index_column = self.index.column.clone();
         let expected_version = self.state.version;
-        match &self.index.kind {
-            IndexKind::Timestamp { .. } => {}
-            kind => {
-                return Err(TableError::UnsupportedIndexKind {
-                    operation: "timestamp Parquet append",
-                    actual: kind.name(),
-                });
-            }
-        };
         if let Some(r) = report.as_mut() {
-            r.set_context("time_column", &index_column);
+            r.set_context("index_column", self.index.column.as_str());
         }
 
         // 0) Coverage readiness checks.
@@ -495,6 +482,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
+    use std::num::NonZeroU64;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -758,6 +746,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_parquet_segment_supports_registered_int64_index() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(10).unwrap(),
+            },
+        };
+        let mut table =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
+                .await?;
+        let rel_path = "data/int64.parquet";
+        write_arrow_parquet_int_time(
+            &tmp.path().join(rel_path),
+            &[i64::MIN, -1, 0, i64::MAX],
+            &["A", "A", "A", "A"],
+            &[1.0, 2.0, 3.0, 4.0],
+        )?;
+
+        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
+
+        let segment = table.state.segments.get(rel_path).expect("segment present");
+        assert_eq!(segment.index_min, IndexValue::Int64(i64::MIN));
+        assert_eq!(segment.index_max, IndexValue::Int64(i64::MAX));
+        assert_eq!(
+            table
+                .state
+                .table_coverage
+                .as_ref()
+                .expect("table coverage")
+                .index_kind,
+            index.kind
+        );
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state, table.state);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_inspects_file_without_reading_unrelated_column_data() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -792,7 +821,7 @@ mod tests {
             report.context,
             vec![
                 ("relative_path".to_string(), rel_path.to_string()),
-                ("time_column".to_string(), "ts".to_string()),
+                ("index_column".to_string(), "ts".to_string()),
                 ("file_size_bytes".to_string(), file_size),
             ]
         );
