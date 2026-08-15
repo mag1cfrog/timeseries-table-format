@@ -99,6 +99,16 @@ pub fn coverage_to_bytes(cov: &Coverage) -> Result<Vec<u8>, CoverageSerdeError> 
 pub fn coverage_from_bytes(bytes: &[u8]) -> Result<Coverage, CoverageSerdeError> {
     let mut r = Cursor::new(bytes);
     let present = RoaringTreemap::deserialize_from(&mut r).context(DeserializeSnafu)?;
+
+    if r.position() != bytes.len() as u64 {
+        return Err(CoverageSerdeError::Deserialize {
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "trailing bytes after roaring bitmap",
+            ),
+        });
+    }
+
     Ok(Coverage::from_treemap(present))
 }
 
@@ -129,6 +139,15 @@ mod tests {
             CoverageSerdeError::Deserialize { .. } => {}
             _ => panic!("expected deserialize error"),
         }
+    }
+
+    #[test]
+    fn deserialize_rejects_trailing_valid_payload() {
+        let mut bytes = coverage_to_bytes(&Coverage::empty()).unwrap();
+        bytes.extend_from_slice(&coverage_to_bytes(&Coverage::from_iter([1u64])).unwrap());
+
+        let err = coverage_from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, CoverageSerdeError::Deserialize { .. }));
     }
 
     #[test]
