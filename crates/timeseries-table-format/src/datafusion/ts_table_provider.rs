@@ -3,7 +3,6 @@ mod segment_pruning;
 mod tests;
 mod time_predicate;
 mod timestamp_pruning;
-use arrow::datatypes::DataType;
 
 use chrono::FixedOffset;
 
@@ -37,7 +36,7 @@ use datafusion::logical_expr::Expr;
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
-use crate::metadata::table_metadata::{IndexKind, IndexValue};
+use crate::metadata::table_metadata::IndexKind;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -162,83 +161,24 @@ impl TsTableProvider {
         self.table.index_spec().column.as_str()
     }
 
-    fn ts_timezone(&self) -> Option<String> {
-        let ts_col = self.index_column_name();
-        let field = self.schema.field_with_name(ts_col).ok()?;
-        match field.data_type() {
-            DataType::Timestamp(_, Some(tz)) => Some(tz.to_string()),
-            _ => None,
-        }
-    }
-
-    fn prune_segments_by_time<'a>(
-        &self,
-        segments: Vec<&'a SegmentMeta>,
-        filters: &[Expr],
-    ) -> DFResult<Vec<&'a SegmentMeta>> {
-        let ts_col = self.index_column_name();
-        let ts_type = self.schema.field_with_name(ts_col)?.data_type();
-        let tz_opt = self.ts_timezone();
-        let parsed_tz = tz_opt.as_deref().and_then(parse_tz);
-
-        let mut saw_any_ts = false;
-        let mut compiled = TimePred::True;
-
-        for f in filters {
-            if expr_mentions_ts(f, ts_col) {
-                saw_any_ts = true;
-                let normalized =
-                    timestamp_pruning::normalize_timestamp_predicate(f.clone(), ts_col, ts_type)?;
-                compiled = TimePred::and(
-                    compiled,
-                    compile_time_pred(&normalized, ts_col, parsed_tz.as_ref()),
-                )
-            }
-        }
-
-        if !saw_any_ts {
-            return Ok(segments);
-        }
-
-        // Prune only if definitely false for that segment.
-        Ok(segments
-            .into_iter()
-            .filter(|seg| match (&seg.index_min, &seg.index_max) {
-                (IndexValue::Timestamp(min), IndexValue::Timestamp(max)) => {
-                    eval_time_pred_on_segment(&compiled, *min, *max) != IntervalTruth::AlwaysFalse
-                }
-                _ => true,
-            })
-            .collect())
-    }
-
     fn prune_segments_by_index<'a>(
         &self,
         segments: Vec<&'a SegmentMeta>,
         filters: &[Expr],
         predicate: &Arc<dyn PhysicalExpr>,
     ) -> DFResult<Vec<&'a SegmentMeta>> {
-        match &self.table.index_spec().kind {
-            IndexKind::Timestamp { .. } => self.prune_segments_by_time(segments, filters),
-            IndexKind::Int64 { .. } | IndexKind::UInt64 { .. } => {
-                let mut columns = HashSet::new();
-                for filter in filters {
-                    expr_to_columns(filter, &mut columns)?;
-                }
-                if !columns
-                    .iter()
-                    .any(|column| column.name == self.index_column_name())
-                {
-                    return Ok(segments);
-                }
-                segment_pruning::prune_segments(
-                    &self.schema,
-                    self.table.index_spec(),
-                    segments,
-                    predicate,
-                )
-            }
+        let mut columns = HashSet::new();
+        for filter in filters {
+            expr_to_columns(filter, &mut columns)?;
         }
+        if !columns
+            .iter()
+            .any(|column| column.name == self.index_column_name())
+        {
+            return Ok(segments);
+        }
+
+        segment_pruning::prune_segments(&self.schema, self.table.index_spec(), segments, predicate)
     }
 }
 
@@ -284,11 +224,38 @@ impl TableProvider for TsTableProvider {
         let segments = snapshot.segments_sorted_by_index().map_err(df_external)?;
 
         let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
-        let predicate = conjunction(filters.to_vec());
-        let predicate = predicate
+        let predicate = conjunction(filters.to_vec())
             .map(|p| state.create_physical_expr(p, &df_schema))
             .transpose()?
             .unwrap_or_else(|| lit(true));
+
+        let pruning_predicate =
+            if matches!(self.table.index_spec().kind, IndexKind::Timestamp { .. }) {
+                let index_column = self.index_column_name();
+                let index_type = self.schema.field_with_name(index_column)?.data_type();
+                let normalized_filters = filters
+                    .iter()
+                    .cloned()
+                    .map(|filter| {
+                        timestamp_pruning::normalize_timestamp_predicate(
+                            filter,
+                            index_column,
+                            index_type,
+                        )
+                    })
+                    .collect::<DFResult<Vec<_>>>()?;
+
+                if normalized_filters.as_slice() == filters {
+                    Arc::clone(&predicate)
+                } else {
+                    conjunction(normalized_filters)
+                        .map(|p| state.create_physical_expr(p, &df_schema))
+                        .transpose()?
+                        .unwrap_or_else(|| lit(true))
+                }
+            } else {
+                Arc::clone(&predicate)
+            };
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
         let parquet_source =
@@ -302,7 +269,7 @@ impl TableProvider for TsTableProvider {
         .with_projection_indices(projection.cloned())
         .with_limit(limit);
 
-        let selected = self.prune_segments_by_index(segments, filters, &predicate)?;
+        let selected = self.prune_segments_by_index(segments, filters, &pruning_predicate)?;
         for seg in selected {
             let file_size = self.segment_file_size(seg).await?;
             let location = self

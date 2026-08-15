@@ -540,7 +540,7 @@ fn normalize_date_trunc_comparison(
     index_column: &str,
     index_type: &DataType,
 ) -> Option<Expr> {
-    if let Some((column, unit)) = date_trunc_index(&comparison.left, index_column) {
+    if let Some((column, unit)) = date_trunc_index(&comparison.left, index_column, index_type) {
         return date_trunc_comparison(
             column,
             unit,
@@ -550,7 +550,7 @@ fn normalize_date_trunc_comparison(
         );
     }
 
-    let (column, unit) = date_trunc_index(&comparison.right, index_column)?;
+    let (column, unit) = date_trunc_index(&comparison.right, index_column, index_type)?;
     date_trunc_comparison(
         column,
         unit,
@@ -560,7 +560,11 @@ fn normalize_date_trunc_comparison(
     )
 }
 
-fn date_trunc_index(expr: &Expr, index_column: &str) -> Option<(Expr, TruncUnit)> {
+fn date_trunc_index(
+    expr: &Expr,
+    index_column: &str,
+    index_type: &DataType,
+) -> Option<(Expr, TruncUnit)> {
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
@@ -579,10 +583,42 @@ fn date_trunc_index(expr: &Expr, index_column: &str) -> Option<(Expr, TruncUnit)
         }
         _ => return None,
     };
-    let Expr::Column(column) = &function.args[1] else {
+    Some((
+        timestamp_index_column(&function.args[1], index_column, index_type)?,
+        unit,
+    ))
+}
+
+fn timestamp_index_column(expr: &Expr, index_column: &str, index_type: &DataType) -> Option<Expr> {
+    if let Expr::Column(column) = expr {
+        return (column.name == index_column).then(|| expr.clone());
+    }
+
+    let Expr::Cast(cast) = expr else {
         return None;
     };
-    (column.name == index_column).then(|| (function.args[1].clone(), unit))
+    let Expr::Column(column) = cast.expr.as_ref() else {
+        return None;
+    };
+    let DataType::Timestamp(index_unit, index_timezone) = index_type else {
+        return None;
+    };
+    let DataType::Timestamp(cast_unit, cast_timezone) = &cast.data_type else {
+        return None;
+    };
+    (column.name == index_column
+        && index_timezone == cast_timezone
+        && timestamp_unit_rank(cast_unit) >= timestamp_unit_rank(index_unit))
+    .then(|| cast.expr.as_ref().clone())
+}
+
+fn timestamp_unit_rank(unit: &TimeUnit) -> u8 {
+    match unit {
+        TimeUnit::Second => 0,
+        TimeUnit::Millisecond => 1,
+        TimeUnit::Microsecond => 2,
+        TimeUnit::Nanosecond => 3,
+    }
 }
 
 fn date_trunc_comparison(
@@ -726,7 +762,9 @@ fn normalize_date_bin_comparison(
     index_column: &str,
     index_type: &DataType,
 ) -> Option<Expr> {
-    if let Some((column, stride, origin)) = date_bin_index(&comparison.left, index_column) {
+    if let Some((column, stride, origin)) =
+        date_bin_index(&comparison.left, index_column, index_type)
+    {
         return date_bin_comparison(
             column,
             stride,
@@ -737,7 +775,7 @@ fn normalize_date_bin_comparison(
         );
     }
 
-    let (column, stride, origin) = date_bin_index(&comparison.right, index_column)?;
+    let (column, stride, origin) = date_bin_index(&comparison.right, index_column, index_type)?;
     date_bin_comparison(
         column,
         stride,
@@ -748,7 +786,11 @@ fn normalize_date_bin_comparison(
     )
 }
 
-fn date_bin_index(expr: &Expr, index_column: &str) -> Option<(Expr, BinStride, DateTime<Utc>)> {
+fn date_bin_index(
+    expr: &Expr,
+    index_column: &str,
+    index_type: &DataType,
+) -> Option<(Expr, BinStride, DateTime<Utc>)> {
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
@@ -756,18 +798,13 @@ fn date_bin_index(expr: &Expr, index_column: &str) -> Option<(Expr, BinStride, D
         return None;
     }
     let stride = date_bin_stride(&function.args[0])?;
-    let Expr::Column(column) = &function.args[1] else {
-        return None;
-    };
-    if column.name != index_column {
-        return None;
-    }
+    let column = timestamp_index_column(&function.args[1], index_column, index_type)?;
     let origin = if function.args.len() == 3 {
         date_bin_origin(&function.args[2])?
     } else {
         Utc.timestamp_opt(0, 0).single()?
     };
-    Some((function.args[1].clone(), stride, origin))
+    Some((column, stride, origin))
 }
 
 fn date_bin_stride(expr: &Expr) -> Option<BinStride> {
