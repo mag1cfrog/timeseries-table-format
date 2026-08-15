@@ -155,8 +155,8 @@ impl TimeSeriesTable {
         let rel_path = Path::new(relative_path);
         let index_column = self.index.column.clone();
         let expected_version = self.state.version;
-        let bucket_spec = match &self.index.kind {
-            IndexKind::Timestamp { bucket, .. } => bucket.clone(),
+        match &self.index.kind {
+            IndexKind::Timestamp { .. } => {}
             kind => {
                 return Err(TableError::UnsupportedIndexKind {
                     operation: "timestamp Parquet append",
@@ -275,10 +275,9 @@ impl TimeSeriesTable {
 
         // 4) Compute segment coverage.
         let step_start = Instant::now();
-        let segment_cov =
-            compute_segment_coverage(self.location(), rel_path, &index_column, &bucket_spec)
-                .await
-                .context(SegmentCoverageSnafu)?;
+        let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
+            .await
+            .context(SegmentCoverageSnafu)?;
         if let Some(r) = report.as_mut() {
             r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
         }
@@ -498,13 +497,6 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
     use tempfile::TempDir;
-
-    fn timestamp_bucket(index: &IndexSpec) -> &TimeBucket {
-        match &index.kind {
-            IndexKind::Timestamp { bucket, .. } => bucket,
-            other => panic!("expected timestamp index, found {other:?}"),
-        }
-    }
 
     fn coverage_files(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
         let mut files = BTreeMap::new();
@@ -1214,10 +1206,8 @@ mod tests {
         assert!(seg1.coverage_path.is_some());
         assert!(seg2.coverage_path.is_some());
 
-        let bucket_spec = timestamp_bucket(table.index_spec()).clone();
-
-        let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
-        let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
+        let cov1 = compute_segment_coverage(&location, Path::new(rel1), table.index_spec()).await?;
+        let cov2 = compute_segment_coverage(&location, Path::new(rel2), table.index_spec()).await?;
         let expected_snapshot = cov1.union(&cov2);
 
         let ptr = table
@@ -1319,11 +1309,12 @@ mod tests {
             .as_ref()
             .expect("table snapshot pointer present after reopen");
 
-        let bucket_spec = timestamp_bucket(reopened.index_spec()).clone();
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
-        let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
-        let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
+        let cov1 =
+            compute_segment_coverage(&location, Path::new(rel1), reopened.index_spec()).await?;
+        let cov2 =
+            compute_segment_coverage(&location, Path::new(rel2), reopened.index_spec()).await?;
         let expected = cov1.union(&cov2);
 
         let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;

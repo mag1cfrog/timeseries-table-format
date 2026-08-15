@@ -14,9 +14,10 @@ use std::path::Path;
 
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow_array::{
-    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
+    Array, Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
 };
+use chrono::{TimeZone, Utc};
 use futures::{Stream, StreamExt};
 use parquet::{
     arrow::{
@@ -32,12 +33,15 @@ use tokio::task::JoinSet;
 
 use crate::{
     coverage::Coverage,
-    coverage::bucket::{BucketError, bucket_id_from_epoch_secs},
-    metadata::table_metadata::TimeBucket,
-    metadata::time_column::TimeColumnError,
+    coverage::bucket::{BucketError, bucket_id},
+    metadata::{
+        segments::ParquetIndexColumnError,
+        table_metadata::{IndexKind, IndexSpec, IndexValue},
+    },
     storage::{StorageError, TableLocation, open_parquet_reader},
 };
 
+use super::schema::validate_parquet_index;
 use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 
 /// Errors that can occur when reading or computing segment coverage.
@@ -80,19 +84,29 @@ pub enum SegmentCoverageError {
         backtrace: Backtrace,
     },
 
-    /// Time column validation or metadata error.
-    ///
-    /// This may occur when the timestamp column is missing, has an unsupported type,
-    /// or fails validation during coverage computation.
-    #[snafu(display("Time column error in segment at {path}: {source}"))]
-    TimeColumn {
-        /// The path to the segment file with a time column error.
-        path: String,
-        /// The underlying time column error.
-        source: TimeColumnError,
+    /// The registered ordered-index column is missing or incompatible.
+    #[snafu(transparent)]
+    OrderedIndexColumn {
+        /// Exact registered and observed Parquet column details.
+        source: ParquetIndexColumnError,
     },
 
-    /// Ordered timestamp bucket mapping failed.
+    /// A projected ordered-index value cannot be represented in its registered domain.
+    #[snafu(display(
+        "Invalid {expected_domain} value for ordered-index column {column} in segment at {path}: {detail}"
+    ))]
+    IndexValue {
+        /// Path to the segment file.
+        path: String,
+        /// Registered ordered-index column.
+        column: String,
+        /// Registered ordered-index domain.
+        expected_domain: &'static str,
+        /// Value decoding failure.
+        detail: String,
+    },
+
+    /// Ordered-index bucket mapping failed.
     #[snafu(display("Bucket mapping failed for segment {path}: {source}"))]
     Bucket {
         /// The path to the segment file.
@@ -102,51 +116,77 @@ pub enum SegmentCoverageError {
     },
 }
 
-fn secs_from_raw(unit: TimeUnit, raw: i64) -> i64 {
-    match unit {
-        TimeUnit::Second => raw,
-        TimeUnit::Millisecond => raw.div_euclid(1_000),
-        TimeUnit::Microsecond => raw.div_euclid(1_000_000),
-        TimeUnit::Nanosecond => raw.div_euclid(1_000_000_000),
+fn arrow_index_error(path: &str, index: &IndexSpec, observed_type: String) -> SegmentCoverageError {
+    SegmentCoverageError::OrderedIndexColumn {
+        source: ParquetIndexColumnError {
+            path: path.to_string(),
+            column: index.column.clone(),
+            expected_domain: index.kind.name(),
+            observed_type,
+        },
     }
 }
 
-fn add_buckets_from_iter(
+fn timestamp_value(
+    path: &str,
+    index: &IndexSpec,
+    unit: TimeUnit,
+    raw: i64,
+) -> Result<IndexValue, SegmentCoverageError> {
+    let value = match unit {
+        TimeUnit::Second => Utc.timestamp_opt(raw, 0),
+        TimeUnit::Millisecond => Utc.timestamp_millis_opt(raw),
+        TimeUnit::Microsecond => Utc.timestamp_micros(raw),
+        TimeUnit::Nanosecond => {
+            let seconds = raw.div_euclid(1_000_000_000);
+            let nanos = raw.rem_euclid(1_000_000_000) as u32;
+            Utc.timestamp_opt(seconds, nanos)
+        }
+    };
+    value
+        .single()
+        .map(IndexValue::Timestamp)
+        .ok_or_else(|| SegmentCoverageError::IndexValue {
+            path: path.to_string(),
+            column: index.column.clone(),
+            expected_domain: index.kind.name(),
+            detail: format!("timestamp value {raw} is out of range for {unit:?}"),
+        })
+}
+
+fn insert_bucket(
     bitmap: &mut RoaringTreemap,
     path: &str,
-    spec: &TimeBucket,
-    unit: TimeUnit,
-    iter: impl Iterator<Item = Option<i64>>,
+    index: &IndexSpec,
+    value: IndexValue,
 ) -> Result<(), SegmentCoverageError> {
-    for raw in iter.flatten() {
-        let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|source| {
-            SegmentCoverageError::Bucket {
-                path: path.to_string(),
-                source,
-            }
-        })?;
-        bitmap.insert(bucket);
-    }
+    let bucket = bucket_id(&index.kind, &value).map_err(|source| SegmentCoverageError::Bucket {
+        path: path.to_string(),
+        source,
+    })?;
+    bitmap.insert(bucket);
     Ok(())
 }
 
-fn add_buckets_from_values(
+fn add_array_buckets<T, F>(
     bitmap: &mut RoaringTreemap,
     path: &str,
-    spec: &TimeBucket,
-    unit: TimeUnit,
-    values: &[i64],
-) -> Result<(), SegmentCoverageError> {
-    for &raw in values {
-        let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|source| {
-            SegmentCoverageError::Bucket {
-                path: path.to_string(),
-                source,
-            }
-        })?;
-        bitmap.insert(bucket);
+    index: &IndexSpec,
+    array: &arrow_array::PrimitiveArray<T>,
+    mut to_value: F,
+) -> Result<(), SegmentCoverageError>
+where
+    T: arrow_array::types::ArrowPrimitiveType,
+    F: FnMut(T::Native) -> Result<IndexValue, SegmentCoverageError>,
+{
+    if array.null_count() == 0 {
+        for &raw in array.values() {
+            insert_bucket(bitmap, path, index, to_value(raw)?)?;
+        }
+    } else {
+        for raw in array.iter().flatten() {
+            insert_bucket(bitmap, path, index, to_value(raw)?)?;
+        }
     }
     Ok(())
 }
@@ -156,30 +196,9 @@ async fn compute_bitmap_from_stream(
         Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
     > + Unpin,
     path_str: &str,
-    time_column: &str,
-    bucket_spec: &TimeBucket,
+    index: &IndexSpec,
 ) -> Result<RoaringTreemap, SegmentCoverageError> {
     let mut bitmap = RoaringTreemap::new();
-
-    macro_rules! process_timestamp_array {
-        ($array_type: ty, $col: expr, $unit: expr) => {{
-            let arr = $col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
-                SegmentCoverageError::TimeColumn {
-                    path: path_str.to_string(),
-                    source: TimeColumnError::UnsupportedArrowType {
-                        column: time_column.to_string(),
-                        datatype: $col.data_type().to_string(),
-                    },
-                }
-            })?;
-
-            if arr.null_count() == 0 {
-                add_buckets_from_values(&mut bitmap, path_str, bucket_spec, $unit, arr.values())
-            } else {
-                add_buckets_from_iter(&mut bitmap, path_str, bucket_spec, $unit, arr.iter())
-            }
-        }};
-    }
 
     while let Some(batch_res) = reader.next().await {
         let batch = batch_res.map_err(|source| SegmentCoverageError::ParquetRead {
@@ -190,31 +209,56 @@ async fn compute_bitmap_from_stream(
 
         let col = batch.column(0);
 
-        match col.data_type() {
-            DataType::Timestamp(unit, _) => match unit {
-                TimeUnit::Second => process_timestamp_array!(TimestampSecondArray, col, *unit)?,
-
-                TimeUnit::Millisecond => {
-                    process_timestamp_array!(TimestampMillisecondArray, col, *unit)?
+        match (&index.kind, col.data_type()) {
+            (IndexKind::Timestamp { .. }, DataType::Timestamp(unit, _)) => {
+                macro_rules! process_timestamp_array {
+                    ($array_type:ty) => {{
+                        let array =
+                            col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
+                                arrow_index_error(
+                                    path_str,
+                                    index,
+                                    format!("Arrow {}", col.data_type()),
+                                )
+                            })?;
+                        add_array_buckets(&mut bitmap, path_str, index, array, |raw| {
+                            timestamp_value(path_str, index, unit.clone(), raw)
+                        })?;
+                    }};
                 }
-
-                TimeUnit::Microsecond => {
-                    process_timestamp_array!(TimestampMicrosecondArray, col, *unit)?
+                match unit {
+                    TimeUnit::Second => process_timestamp_array!(TimestampSecondArray),
+                    TimeUnit::Millisecond => {
+                        process_timestamp_array!(TimestampMillisecondArray)
+                    }
+                    TimeUnit::Microsecond => {
+                        process_timestamp_array!(TimestampMicrosecondArray)
+                    }
+                    TimeUnit::Nanosecond => process_timestamp_array!(TimestampNanosecondArray),
                 }
-
-                TimeUnit::Nanosecond => {
-                    process_timestamp_array!(TimestampNanosecondArray, col, *unit)?
-                }
-            },
-
+            }
+            (IndexKind::Int64 { .. }, DataType::Int64) => {
+                let array = col.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                    arrow_index_error(path_str, index, format!("Arrow {}", col.data_type()))
+                })?;
+                add_array_buckets(&mut bitmap, path_str, index, array, |raw| {
+                    Ok(IndexValue::Int64(raw))
+                })?;
+            }
+            (IndexKind::UInt64 { .. }, DataType::UInt64) => {
+                let array = col.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
+                    arrow_index_error(path_str, index, format!("Arrow {}", col.data_type()))
+                })?;
+                add_array_buckets(&mut bitmap, path_str, index, array, |raw| {
+                    Ok(IndexValue::UInt64(raw))
+                })?;
+            }
             other => {
-                return Err(SegmentCoverageError::TimeColumn {
-                    path: path_str.to_string(),
-                    source: TimeColumnError::UnsupportedArrowType {
-                        column: time_column.to_string(),
-                        datatype: other.to_string(),
-                    },
-                });
+                return Err(arrow_index_error(
+                    path_str,
+                    index,
+                    format!("Arrow {other:?}"),
+                ));
             }
         }
 
@@ -224,22 +268,19 @@ async fn compute_bitmap_from_stream(
     Ok(bitmap)
 }
 
-/// Computes segment-level time-series coverage by reading a Parquet segment file
-/// and mapping timestamps to bucket IDs based on the provided time bucket specification.
+/// Computes segment-level ordered-index coverage from a Parquet segment file.
 ///
 /// This function:
 /// 1. Reads the Parquet segment file from storage.
-/// 2. Extracts the specified timestamp column.
-/// 3. Validates that the timestamp column uses a supported time unit.
-/// 4. Iterates over timestamp values and maps each to a bucket ID.
-/// 5. Returns a Coverage bitmap containing all bucket IDs found in the segment.
+/// 2. Validates and projects the registered ordered-index column.
+/// 3. Iterates over non-null values and maps each through the shared bucket helper.
+/// 4. Returns a Coverage bitmap containing all bucket IDs found in the segment.
 ///
 /// # Arguments
 ///
 /// * `location` - The table location for accessing the storage layer.
 /// * `rel_path` - The relative path to the Parquet segment file.
-/// * `time_column` - The name of the timestamp column to analyze.
-/// * `bucket_spec` - The time bucket specification for mapping timestamps to bucket IDs.
+/// * `index` - The registered ordered-index column, domain, and bucket configuration.
 ///
 /// # Returns
 ///
@@ -248,8 +289,7 @@ async fn compute_bitmap_from_stream(
 pub async fn compute_segment_coverage(
     location: &TableLocation,
     rel_path: &Path,
-    time_column: &str,
-    bucket_spec: &TimeBucket,
+    index: &IndexSpec,
 ) -> Result<Coverage, SegmentCoverageError> {
     let path = rel_path.display().to_string();
     let mut file = open_parquet_reader(location.as_ref(), rel_path)
@@ -265,27 +305,11 @@ pub async fn compute_segment_coverage(
             source,
             backtrace: Backtrace::capture(),
         })?;
-    let field = metadata
-        .schema()
-        .field_with_name(time_column)
-        .map_err(|_| SegmentCoverageError::TimeColumn {
-            path: path.clone(),
-            source: TimeColumnError::Missing {
-                column: time_column.to_string(),
-            },
-        })?;
-    if !matches!(field.data_type(), DataType::Timestamp(_, _)) {
-        return Err(SegmentCoverageError::TimeColumn {
-            path,
-            source: TimeColumnError::UnsupportedArrowType {
-                column: time_column.to_string(),
-                datatype: field.data_type().to_string(),
-            },
-        });
-    }
+    validate_parquet_index(&path, metadata.parquet_schema(), index)
+        .map_err(|source| SegmentCoverageError::OrderedIndexColumn { source })?;
     drop(file);
 
-    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
+    let mask = ProjectionMask::columns(metadata.parquet_schema(), [index.column.as_str()]);
     let row_groups = metadata.metadata().num_row_groups();
     let (max_tasks, row_groups_per_task) = resolve_rg_settings(row_groups);
     let row_groups = (0..row_groups).collect::<Vec<_>>();
@@ -300,8 +324,7 @@ pub async fn compute_segment_coverage(
         let location = location.clone();
         let rel_path = rel_path.to_path_buf();
         let path = path.clone();
-        let time_column = time_column.to_string();
-        let bucket_spec = bucket_spec.clone();
+        let index = index.clone();
         let metadata = metadata.clone();
         let mask = mask.clone();
 
@@ -322,7 +345,7 @@ pub async fn compute_segment_coverage(
                     source,
                     backtrace: Backtrace::capture(),
                 })?;
-            compute_bitmap_from_stream(reader, &path, &time_column, &bucket_spec).await
+            compute_bitmap_from_stream(reader, &path, &index).await
         });
     }
 
@@ -342,8 +365,9 @@ pub async fn compute_segment_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, io::SeekFrom, sync::Arc};
+    use std::{fs::File, io::SeekFrom, num::NonZeroU64, sync::Arc};
 
+    use crate::metadata::table_metadata::TimeBucket;
     use arrow::{
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
@@ -364,6 +388,37 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const EPOCH_BUCKET: u64 = 0x8000_0000_0000_0000;
+
+    fn timestamp_index(column: &str, bucket: TimeBucket) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Timestamp {
+                bucket,
+                timezone: None,
+            },
+        }
+    }
+
+    fn int64_index(column: &str, bucket_width: u64) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(bucket_width).expect("nonzero test bucket"),
+            },
+        }
+    }
+
+    fn uint64_index(column: &str, bucket_width: u64) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(bucket_width).expect("nonzero test bucket"),
+            },
+        }
+    }
 
     fn write_parquet_batch(
         path: &Path,
@@ -428,6 +483,29 @@ mod tests {
         RecordBatch::try_new(schema, vec![timestamps]).expect("timestamp batch")
     }
 
+    fn int64_batch(schema: Arc<Schema>, values: &[Option<i64>]) -> RecordBatch {
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values.to_vec()))])
+            .expect("int64 batch")
+    }
+
+    fn uint64_batch(schema: Arc<Schema>, values: &[Option<u64>]) -> RecordBatch {
+        RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(values.to_vec()))])
+            .expect("uint64 batch")
+    }
+
+    fn expected_buckets(
+        index: &IndexSpec,
+        values: impl IntoIterator<Item = IndexValue>,
+    ) -> Vec<u64> {
+        let mut buckets = values
+            .into_iter()
+            .map(|value| bucket_id(&index.kind, &value).expect("valid test index value"))
+            .collect::<Vec<_>>();
+        buckets.sort_unstable();
+        buckets.dedup();
+        buckets
+    }
+
     #[tokio::test]
     async fn compute_coverage_supports_nulls_and_dedup_and_multiple_specs() -> TestResult {
         let tmp = TempDir::new()?;
@@ -441,14 +519,22 @@ mod tests {
         let location = TableLocation::local(tmp.path());
 
         // Minutes bucket: 1 second and 30 seconds map to bucket 0; 3600s -> bucket 60.
-        let cov_min =
-            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1)).await?;
+        let cov_min = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await?;
         let buckets_min: Vec<u64> = cov_min.present().iter().collect();
         assert_eq!(buckets_min, vec![EPOCH_BUCKET, EPOCH_BUCKET + 60]);
 
         // Hours bucket: 1 second -> bucket 0; 3600s -> bucket 1.
-        let cov_hr =
-            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Hours(1)).await?;
+        let cov_hr = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Hours(1)),
+        )
+        .await?;
         let buckets_hr: Vec<u64> = cov_hr.present().iter().collect();
         assert_eq!(buckets_hr, vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]);
 
@@ -479,8 +565,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            "ts",
-            &TimeBucket::Minutes(1),
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
         )
         .await?;
         assert_eq!(
@@ -491,6 +576,73 @@ mod tests {
                 EPOCH_BUCKET + 2,
                 EPOCH_BUCKET + 3
             ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_supports_integer_indexes_across_row_groups() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let signed_path = Path::new("data/int64-row-groups.parquet");
+        let signed_schema = Arc::new(Schema::new(vec![Field::new(
+            "index",
+            DataType::Int64,
+            true,
+        )]));
+        let signed_values = [i64::MIN, -11, -1, 0, 9, 10, i64::MAX];
+        write_parquet_batches(
+            &tmp.path().join(signed_path),
+            Arc::clone(&signed_schema),
+            vec![
+                int64_batch(Arc::clone(&signed_schema), &[Some(i64::MIN), Some(-11)]),
+                int64_batch(Arc::clone(&signed_schema), &[None, Some(-1), Some(0)]),
+                int64_batch(
+                    Arc::clone(&signed_schema),
+                    &[Some(9), Some(10), Some(i64::MAX)],
+                ),
+            ],
+            WriterProperties::builder().build(),
+        )?;
+        let signed_index = int64_index("index", 10);
+        let signed = compute_segment_coverage(&location, signed_path, &signed_index).await?;
+        assert_eq!(
+            signed.present().iter().collect::<Vec<_>>(),
+            expected_buckets(
+                &signed_index,
+                signed_values.into_iter().map(IndexValue::Int64)
+            )
+        );
+
+        let unsigned_path = Path::new("data/uint64-row-groups.parquet");
+        let unsigned_schema = Arc::new(Schema::new(vec![Field::new(
+            "index",
+            DataType::UInt64,
+            true,
+        )]));
+        let unsigned_values = [0, 9, 10, i64::MAX as u64 + 1, u64::MAX];
+        write_parquet_batches(
+            &tmp.path().join(unsigned_path),
+            Arc::clone(&unsigned_schema),
+            vec![
+                uint64_batch(Arc::clone(&unsigned_schema), &[Some(0), Some(9)]),
+                uint64_batch(Arc::clone(&unsigned_schema), &[None, Some(10)]),
+                uint64_batch(
+                    Arc::clone(&unsigned_schema),
+                    &[Some(i64::MAX as u64 + 1), Some(u64::MAX)],
+                ),
+            ],
+            WriterProperties::builder().build(),
+        )?;
+        let unsigned_index = uint64_index("index", 10);
+        let unsigned = compute_segment_coverage(&location, unsigned_path, &unsigned_index).await?;
+        assert_eq!(
+            unsigned.present().iter().collect::<Vec<_>>(),
+            expected_buckets(
+                &unsigned_index,
+                unsigned_values.into_iter().map(IndexValue::UInt64)
+            )
         );
         Ok(())
     }
@@ -508,8 +660,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            "ts",
-            &TimeBucket::Seconds(1),
+            &timestamp_index("ts", TimeBucket::Seconds(1)),
         )
         .await?;
         assert_eq!(coverage.cardinality(), row_count as u64);
@@ -522,14 +673,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_coverage_supports_every_timestamp_unit() -> TestResult {
+    async fn compute_coverage_supports_every_parquet_timestamp_unit() -> TestResult {
         let tmp = TempDir::new()?;
         let cases: Vec<(&str, DataType, Arc<dyn Array>)> = vec![
-            (
-                "seconds.parquet",
-                DataType::Timestamp(TimeUnit::Second, None),
-                Arc::new(TimestampSecondArray::from(vec![Some(1), Some(60)])),
-            ),
             (
                 "milliseconds.parquet",
                 DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -566,8 +712,7 @@ mod tests {
             let coverage = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                "ts",
-                &TimeBucket::Seconds(1),
+                &timestamp_index("ts", TimeBucket::Seconds(1)),
             )
             .await?;
             assert_eq!(
@@ -590,8 +735,7 @@ mod tests {
             let coverage = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                "ts",
-                &TimeBucket::Minutes(1),
+                &timestamp_index("ts", TimeBucket::Minutes(1)),
             )
             .await?;
             assert!(coverage.present().is_empty());
@@ -647,8 +791,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            "ts",
-            &TimeBucket::Minutes(1),
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
         )
         .await?;
         assert_eq!(
@@ -671,17 +814,24 @@ mod tests {
         write_parquet_with_timestamps(&abs_path, &[Some(1_000)])?;
 
         let location = TableLocation::local(tmp.path());
-        let err =
-            compute_segment_coverage(&location, rel_path, "missing_ts", &TimeBucket::Minutes(1))
-                .await
-                .expect_err("expected missing column error");
+        let err = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("missing_ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("expected missing column error");
 
         assert!(matches!(
             err,
-            SegmentCoverageError::TimeColumn {
-                source: TimeColumnError::Missing { ref column },
-                ..
-            } if column == "missing_ts"
+            SegmentCoverageError::OrderedIndexColumn {
+                source: ParquetIndexColumnError {
+                    ref column,
+                    expected_domain: "timestamp",
+                    ref observed_type,
+                    ..
+                }
+            } if column == "missing_ts" && observed_type == "missing"
         ));
         Ok(())
     }
@@ -709,16 +859,54 @@ mod tests {
         write_parquet_batch(&abs_path, schema, vec![ts_array, val_array])?;
 
         let location = TableLocation::local(tmp.path());
-        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
-            .await
-            .expect_err("expected unsupported arrow type");
+        let err = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("expected unsupported arrow type");
 
         assert!(matches!(
             err,
-            SegmentCoverageError::TimeColumn {
-                source: TimeColumnError::UnsupportedArrowType { ref datatype, .. },
-                ..
-            } if datatype == "Utf8"
+            SegmentCoverageError::OrderedIndexColumn {
+                source: ParquetIndexColumnError {
+                    expected_domain: "timestamp",
+                    ref observed_type,
+                    ..
+                }
+            } if observed_type.contains("BYTE_ARRAY")
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_rejects_signed_unsigned_mismatch() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/signed.parquet");
+        write_parquet_batch(
+            &tmp.path().join(rel_path),
+            Schema::new(vec![Field::new("index", DataType::Int64, false)]),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )?;
+
+        let error = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            &uint64_index("index", 1),
+        )
+        .await
+        .expect_err("signed column must not be read as uint64");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::OrderedIndexColumn {
+                source: ParquetIndexColumnError {
+                    expected_domain: "uint64",
+                    observed_type,
+                    ..
+                }
+            } if observed_type.contains("logical=None")
         ));
         Ok(())
     }
@@ -732,8 +920,12 @@ mod tests {
         write_parquet_with_timestamps(&abs_path, &[Some(overflow_ms)])?;
 
         let location = TableLocation::local(tmp.path());
-        let coverage =
-            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Seconds(1)).await?;
+        let coverage = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Seconds(1)),
+        )
+        .await?;
 
         assert!(
             coverage
@@ -749,9 +941,13 @@ mod tests {
         let rel_path = Path::new("missing/seg.parquet");
         let location = TableLocation::local(tmp.path());
 
-        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
-            .await
-            .expect_err("expected storage error");
+        let err = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("expected storage error");
 
         assert!(matches!(
             err,
@@ -774,9 +970,13 @@ mod tests {
         std::fs::write(&abs_path, b"not a parquet file")?;
 
         let location = TableLocation::local(tmp.path());
-        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1))
-            .await
-            .expect_err("expected parquet read error");
+        let err = compute_segment_coverage(
+            &location,
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("expected parquet read error");
 
         assert!(matches!(err, SegmentCoverageError::ParquetRead { .. }));
         Ok(())
@@ -820,8 +1020,7 @@ mod tests {
         let err = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            "ts",
-            &TimeBucket::Minutes(1),
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
         )
         .await
         .unwrap_err();
