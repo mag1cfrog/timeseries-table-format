@@ -24,9 +24,9 @@ from append_rss_regression import (
 )
 
 
-DEFAULT_SMALL_ROW_GROUPS = 16
-DEFAULT_LARGE_ROW_GROUPS = 128
-DEFAULT_ROWS_PER_GROUP = 8_000
+DEFAULT_SMALL_ROW_GROUPS = 32
+DEFAULT_LARGE_ROW_GROUPS = 256
+DEFAULT_ROWS_PER_GROUP = 4_096
 DEFAULT_PAYLOAD_BYTES = 1_024
 SCAN_BATCH_SIZE = 8_192
 MAX_BATCH_BYTES = 8 * MIB
@@ -47,6 +47,16 @@ def require_linux_dependencies() -> None:
         raise RuntimeError("scan RSS regression requires Linux")
     if not GNU_TIME.is_file():
         raise RuntimeError("scan RSS regression requires /usr/bin/time")
+
+
+def repository_state() -> tuple[str, bool]:
+    commit_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+    ).strip()
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=REPO_ROOT, text=True
+    )
+    return commit_sha, bool(status.strip())
 
 
 def resolve_benchmark(explicit_path: Path | None) -> tuple[Path, str, str]:
@@ -253,6 +263,15 @@ def run_benchmark(args: argparse.Namespace) -> None:
         raise ValueError("--large-row-groups must be at least twice --small-row-groups")
     if args.rows_per_group > SCAN_BATCH_SIZE:
         raise ValueError(f"--rows-per-group must not exceed {SCAN_BATCH_SIZE}")
+    if args.rows_per_group * args.payload_bytes > MAX_BATCH_BYTES:
+        raise ValueError("requested row-group payload exceeds the 8 MiB limit")
+
+    commit_sha, worktree_dirty = repository_state()
+    benchmark_provenance = (
+        "prebuilt" if args.benchmark is not None else "repository_release_build"
+    )
+    if benchmark_provenance == "repository_release_build" and worktree_dirty:
+        raise RuntimeError("default recorded comparison requires a clean Git worktree")
 
     binary, build_profile, build_command = resolve_benchmark(args.benchmark)
     work_dir = Path(tempfile.mkdtemp(prefix="tstable-scan-rss-"))
@@ -276,14 +295,17 @@ def run_benchmark(args: argparse.Namespace) -> None:
         large_rss = measurements["large"]["peak_rss_bytes"]
         delta_bytes = large_rss - small_rss
         passed = delta_bytes <= MAX_RSS_DELTA_BYTES
-        commit_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
-        ).strip()
+        if benchmark_provenance == "repository_release_build":
+            final_commit_sha, final_worktree_dirty = repository_state()
+            if final_commit_sha != commit_sha or final_worktree_dirty:
+                raise RuntimeError("Git worktree changed during recorded comparison")
         summary: dict[str, object] = {
             "schema_version": 1,
             "git_commit_sha": commit_sha,
+            "git_worktree_dirty": worktree_dirty,
             "operating_system": platform.platform(),
             "architecture": platform.machine(),
+            "benchmark_provenance": benchmark_provenance,
             "build_profile": build_profile,
             "build_command": build_command,
             "benchmark_binary": str(binary),

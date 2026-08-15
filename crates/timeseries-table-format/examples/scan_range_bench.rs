@@ -222,6 +222,9 @@ async fn scan(table_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut max_batch_memory_bytes = 0_usize;
 
     while let Some(batch) = batches.next().await.transpose()? {
+        if batch.num_rows() == 0 {
+            return Err(invalid_data("scan returned an empty batch").into());
+        }
         first_batch_ns.get_or_insert_with(|| started.elapsed().as_nanos());
         batch_count += 1;
         row_count = row_count

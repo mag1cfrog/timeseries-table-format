@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from append_rss_regression import GNU_TIME, REPO_ROOT
+from scan_range_rss_regression import MAX_BATCH_BYTES, SCAN_BATCH_SIZE
 
 
 RUNNER = REPO_ROOT / "scripts" / "scan_range_rss_regression.py"
@@ -42,16 +43,18 @@ def benchmark_binary() -> Path:
     )
 
 
-@unittest.skipUnless(
-    sys.platform.startswith("linux") and GNU_TIME.is_file(),
-    "GNU time is unavailable",
-)
 class ScanRangeRssRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.benchmark = benchmark_binary()
 
-    def runner_command(self, benchmark: Path, output: Path) -> list[str]:
+    def runner_command(
+        self,
+        benchmark: Path,
+        output: Path,
+        rows_per_group: int = 16,
+        payload_bytes: int = 32,
+    ) -> list[str]:
         return [
             sys.executable,
             str(RUNNER),
@@ -62,9 +65,9 @@ class ScanRangeRssRegressionTests(unittest.TestCase):
             "--large-row-groups",
             "4",
             "--rows-per-group",
-            "16",
+            str(rows_per_group),
             "--payload-bytes",
-            "32",
+            str(payload_bytes),
             "--json-out",
             str(output),
         ]
@@ -72,38 +75,71 @@ class ScanRangeRssRegressionTests(unittest.TestCase):
     def test_small_process_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            scratch = root / "scratch"
-            scratch.mkdir()
-            output = root / "summary.json"
-            env = os.environ.copy()
-            env["TMPDIR"] = str(scratch)
+            table = root / "table"
+            row_groups = 2
+            rows_per_group = SCAN_BATCH_SIZE + 1
+            preparation = json.loads(
+                subprocess.check_output(
+                    [
+                        str(self.benchmark),
+                        "prepare",
+                        "--table",
+                        str(table),
+                        "--row-groups",
+                        str(row_groups),
+                        "--rows-per-group",
+                        str(rows_per_group),
+                        "--payload-bytes",
+                        "32",
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                )
+            )
+            scan = json.loads(
+                subprocess.check_output(
+                    [str(self.benchmark), "scan", "--table", str(table)],
+                    cwd=REPO_ROOT,
+                    text=True,
+                )
+            )
 
+            self.assertEqual(preparation["mode"], "prepare")
+            self.assertEqual(scan["mode"], "scan")
+            self.assertEqual(preparation["row_group_count"], row_groups)
+            self.assertEqual(scan["scan_batch_size"], SCAN_BATCH_SIZE)
+            self.assertEqual(scan["returned_batch_count"], row_groups * 2)
+            self.assertEqual(scan["returned_row_count"], row_groups * rows_per_group)
+            self.assertGreater(scan["time_to_first_batch_ns"], 0)
+            self.assertLess(scan["time_to_first_batch_ns"], scan["total_elapsed_ns"])
+            self.assertNotEqual(preparation["process_id"], scan["process_id"])
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and GNU_TIME.is_file(),
+        "GNU time is unavailable",
+    )
+    def test_rejects_oversized_row_group_before_running_benchmark(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "summary.json"
             result = subprocess.run(
-                self.runner_command(self.benchmark, output),
+                self.runner_command(
+                    self.benchmark,
+                    output,
+                    payload_bytes=MAX_BATCH_BYTES,
+                ),
                 cwd=REPO_ROOT,
-                env=env,
                 text=True,
                 capture_output=True,
-                check=True,
             )
-            summary = json.loads(result.stdout)
 
-            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), summary)
-            self.assertTrue(summary["passed"])
-            for name, row_groups in (("small", 2), ("large", 4)):
-                measurement = summary["measurements"][name]
-                preparation = measurement["preparation"]
-                scan = measurement["scan"]
-                self.assertEqual(preparation["row_group_count"], row_groups)
-                self.assertEqual(scan["returned_batch_count"], row_groups)
-                self.assertEqual(scan["returned_row_count"], row_groups * 16)
-                self.assertGreater(scan["time_to_first_batch_ns"], 0)
-                self.assertLess(
-                    scan["time_to_first_batch_ns"], scan["total_elapsed_ns"]
-                )
-                self.assertNotEqual(preparation["process_id"], scan["process_id"])
-            self.assertEqual(list(scratch.iterdir()), [])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requested row-group payload exceeds", result.stderr)
+            self.assertFalse(output.exists())
 
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and GNU_TIME.is_file(),
+        "GNU time is unavailable",
+    )
     def test_cleans_up_after_scan_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
