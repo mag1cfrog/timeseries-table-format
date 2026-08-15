@@ -51,18 +51,29 @@ impl TransactionLogStore {
         storage::layout::commit_rel_path(version)
     }
 
-    async fn write_atomic_rel(&self, rel: &Path, contents: &[u8]) -> Result<(), CommitError> {
-        storage::write_atomic(self.location.as_ref(), rel, contents)
-            .await
-            .context(StorageSnafu)?;
-        Ok(())
-    }
-
     /// Helper: read a log-relative file and map storage errors into CommitError.
     async fn read_to_string_rel(&self, rel: &Path) -> Result<String, CommitError> {
         match storage::read_to_string(self.location.as_ref(), rel).await {
             Ok(s) => Ok(s),
             Err(source) => Err(CommitError::Storage { source }),
+        }
+    }
+
+    async fn rollback_unpublished_commit(
+        &self,
+        commit_rel: &Path,
+        publish_error: StorageError,
+    ) -> CommitError {
+        match storage::remove_file(self.location.as_ref(), commit_rel).await {
+            Ok(()) => CommitError::Storage {
+                source: publish_error,
+            },
+            Err(cleanup_error) => CommitError::AmbiguousOutcome {
+                commit_path: commit_rel.display().to_string(),
+                publish_error: Box::new(publish_error),
+                cleanup_error: Box::new(cleanup_error),
+                backtrace: Backtrace::capture(),
+            },
         }
     }
 
@@ -126,23 +137,9 @@ impl TransactionLogStore {
     /// - Callers must be prepared to handle `StorageError::AlreadyExists` and
     ///   implement retry logic (e.g., reload CURRENT and retry the commit).
     ///
-    /// ## Crash recovery
-    ///
-    /// If this method succeeds in creating the commit file but fails while
-    /// updating CURRENT (e.g., due to a crash or I/O error), the system will
-    /// be left in a state where:
-    /// - The commit file `_timeseries_log/<version>.json` exists.
-    /// - CURRENT still points to the previous version.
-    ///
-    /// This is a known edge case. The orphaned commit file is harmless because
-    /// readers only consider commits up to the version in CURRENT. Recovery
-    /// can detect this situation by scanning for commit files with versions
-    /// higher than CURRENT and either:
-    /// - Completing the commit by updating CURRENT, or
-    /// - Treating the orphaned file as an incomplete transaction to ignore.
-    ///
-    /// A future version may implement automatic recovery during table
-    /// initialization.
+    /// If updating CURRENT fails, this method removes the commit file created
+    /// by this invocation. A cleanup failure returns
+    /// [`CommitError::AmbiguousOutcome`] so callers do not assume rollback.
     ///
     /// ## Steps
     ///
@@ -200,8 +197,17 @@ impl TransactionLogStore {
         // 5) Update CURRENT via atomic write (temp + rename).
         let current_rel = storage::layout::current_rel_path();
         let current_contents = format!("{version}\n");
-        self.write_atomic_rel(&current_rel, current_contents.as_bytes())
-            .await?;
+        if let Err(publish_error) = storage::write_atomic(
+            self.location.as_ref(),
+            &current_rel,
+            current_contents.as_bytes(),
+        )
+        .await
+        {
+            return Err(self
+                .rollback_unpublished_commit(&commit_rel, publish_error)
+                .await);
+        }
 
         Ok(version)
     }
@@ -429,6 +435,46 @@ mod tests {
             "expected Storage(AlreadyExists) error, got: {result:?}",
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_update_failure_removes_owned_commit_file() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let current_tmp = tmp
+            .path()
+            .join(layout::current_rel_path().with_extension("tmp"));
+        tokio::fs::create_dir_all(&current_tmp).await?;
+
+        let err = store
+            .commit_with_expected_version(0, vec![])
+            .await
+            .expect_err("CURRENT update should fail");
+
+        assert!(matches!(err, CommitError::Storage { .. }));
+        assert!(!tmp.path().join(layout::commit_rel_path(1)).exists());
+        assert_eq!(store.load_current_version().await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_returns_ambiguous_outcome() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let commit_rel = layout::commit_rel_path(1);
+        tokio::fs::create_dir_all(tmp.path().join(&commit_rel)).await?;
+        let publish_error =
+            storage::read_to_string(store.location.as_ref(), Path::new("missing-current.tmp"))
+                .await
+                .expect_err("missing path should fail");
+
+        let err = store
+            .rollback_unpublished_commit(&commit_rel, publish_error)
+            .await;
+        let message = err.to_string();
+
+        assert!(matches!(err, CommitError::AmbiguousOutcome { .. }));
+        assert!(message.contains("missing-current.tmp"));
+        assert!(message.contains(&commit_rel.display().to_string()));
         Ok(())
     }
 }

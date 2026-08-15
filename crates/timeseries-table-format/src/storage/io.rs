@@ -255,6 +255,20 @@ pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> Stor
     }
 }
 
+pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> StorageResult<()> {
+    match location {
+        StorageLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+            fs::remove_file(&abs)
+                .await
+                .map_err(BackendError::Local)
+                .context(OtherIoSnafu {
+                    path: abs.display().to_string(),
+                })
+        }
+    }
+}
+
 /// Create a *new* file at `rel_path` and write `contents`, failing if the file
 /// already exists.
 ///
