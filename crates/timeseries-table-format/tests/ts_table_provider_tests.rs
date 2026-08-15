@@ -1766,6 +1766,87 @@ async fn timestamp_direct_predicates_select_expected_files_and_rows() -> TestRes
 }
 
 #[tokio::test]
+async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_utc_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let cases = [
+        (
+            "ts + interval '1 minute' = '1970-01-01T00:02:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000],
+        ),
+        (
+            "ts - interval '1 minute' >= '1970-01-01T00:01:00Z'",
+            vec!["time-after.parquet"],
+            vec![120_000, 179_999],
+        ),
+        (
+            "to_timestamp('1970-01-01T00:02:00Z') <= ts + interval '1 minute'",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![60_000, 119_999, 120_000, 179_999],
+        ),
+        (
+            "ts + interval '1 month' = '1970-02-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000],
+        ),
+        (
+            "ts + interval '1 millisecond' <= '1970-01-01T00:02:00Z'",
+            vec!["time-before.parquet", "time-target.parquet"],
+            vec![0, 59_999, 60_000, 119_999],
+        ),
+        (
+            "ts - ts < interval '1 second'",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 60_000, 119_999, 120_000, 179_999],
+        ),
+        (
+            "to_unixtime(ts) < 60",
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
+        ),
+        (
+            "to_unixtime(ts) < '60'",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 119_999, 120_000, 179_999],
+        ),
+        (
+            "date_trunc('minute', ts) = '1970-01-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "date_bin(interval '1 minute', ts) = '1970-01-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "date_bin(interval '1 minute', ts, to_timestamp('1970-01-01T00:00:30Z')) = '1970-01-01T00:01:30Z'",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![119_999, 120_000],
+        ),
+        (
+            "date_trunc('minute', ts) < '1970-01-01T00:01:30Z'",
+            vec!["time-before.parquet", "time-target.parquet"],
+            vec![0, 59_999, 60_000, 119_999],
+        ),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+        assert_eq!(files, expected_files, "wrong files for {predicate}");
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong rows for {predicate}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn int64_queries_prune_planned_files_and_return_exact_rows() -> TestResult {
     const FILES: &[&str] = &[
         "int-a.parquet",
