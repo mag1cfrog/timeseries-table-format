@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::offset::LocalResult;
 use chrono::{
-    DateTime, Duration, Months, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+    DateTime, Datelike, Duration, Months, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -27,6 +27,12 @@ enum TruncUnit {
     Minute,
     Hour,
     Day,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BinStride {
+    FixedNanos(i64),
+    Months(i64),
 }
 
 impl UnifiedInterval {
@@ -124,6 +130,7 @@ fn normalize_comparison(expr: &Expr, index_column: &str, index_type: &DataType) 
         .or_else(|| normalize_to_unixtime_comparison(comparison, index_column, index_type))
         .or_else(|| normalize_to_date_comparison(comparison, index_column, index_type))
         .or_else(|| normalize_date_trunc_comparison(comparison, index_column, index_type))
+        .or_else(|| normalize_date_bin_comparison(comparison, index_column, index_type))
 }
 
 fn normalize_interval_comparison(
@@ -714,6 +721,166 @@ fn resolve_nonexistent(timezone: Tz, value: NaiveDateTime) -> Option<DateTime<Tz
         .checked_add_signed(adjustment)
 }
 
+fn normalize_date_bin_comparison(
+    comparison: &BinaryExpr,
+    index_column: &str,
+    index_type: &DataType,
+) -> Option<Expr> {
+    if let Some((column, stride, origin)) = date_bin_index(&comparison.left, index_column) {
+        return date_bin_comparison(
+            column,
+            stride,
+            origin,
+            comparison.op,
+            timestamp_literal(&comparison.right)?,
+            index_type,
+        );
+    }
+
+    let (column, stride, origin) = date_bin_index(&comparison.right, index_column)?;
+    date_bin_comparison(
+        column,
+        stride,
+        origin,
+        flip_comparison(comparison.op)?,
+        timestamp_literal(&comparison.left)?,
+        index_type,
+    )
+}
+
+fn date_bin_index(expr: &Expr, index_column: &str) -> Option<(Expr, BinStride, DateTime<Utc>)> {
+    let Expr::ScalarFunction(function) = expr else {
+        return None;
+    };
+    if !function.name().eq_ignore_ascii_case("date_bin") || !matches!(function.args.len(), 2 | 3) {
+        return None;
+    }
+    let stride = date_bin_stride(&function.args[0])?;
+    let Expr::Column(column) = &function.args[1] else {
+        return None;
+    };
+    if column.name != index_column {
+        return None;
+    }
+    let origin = if function.args.len() == 3 {
+        date_bin_origin(&function.args[2])?
+    } else {
+        Utc.timestamp_opt(0, 0).single()?
+    };
+    Some((function.args[1].clone(), stride, origin))
+}
+
+fn date_bin_stride(expr: &Expr) -> Option<BinStride> {
+    let Expr::Literal(value, _) = expr else {
+        return None;
+    };
+    let interval = match value {
+        ScalarValue::IntervalDayTime(Some(_)) | ScalarValue::IntervalMonthDayNano(Some(_)) => {
+            interval_from_scalar(value)?
+        }
+        _ => return None,
+    };
+
+    if interval.months != 0 {
+        if interval.months < 0 || interval.days != 0 || interval.nanos != 0 {
+            return None;
+        }
+        return Some(BinStride::Months(i64::from(interval.months)));
+    }
+
+    let nanos = i64::from(interval.days)
+        .checked_mul(86_400_000_000_000)?
+        .checked_add(interval.nanos)?;
+    (nanos > 0).then_some(BinStride::FixedNanos(nanos))
+}
+
+fn date_bin_origin(expr: &Expr) -> Option<DateTime<Utc>> {
+    if let Some(origin) = timestamp_literal(expr) {
+        return Some(origin);
+    }
+    let Expr::ScalarFunction(function) = expr else {
+        return None;
+    };
+    if !function.name().eq_ignore_ascii_case("to_timestamp") || function.args.len() != 1 {
+        return None;
+    }
+    timestamp_literal(&function.args[0])
+}
+
+fn date_bin_comparison(
+    column: Expr,
+    stride: BinStride,
+    origin: DateTime<Utc>,
+    operator: Operator,
+    literal: DateTime<Utc>,
+    index_type: &DataType,
+) -> Option<Expr> {
+    let DataType::Timestamp(unit, timezone) = index_type else {
+        return None;
+    };
+    timestamp_scalar(literal, unit, timezone.clone())?;
+    let (start, end) = date_bin_bucket(literal, stride, origin)?;
+    let aligned = start == literal;
+    let start = Expr::Literal(timestamp_scalar(start, unit, timezone.clone())?, None);
+    let end = Expr::Literal(timestamp_scalar(end, unit, timezone.clone())?, None);
+    bucket_comparison(column, operator, start, end, aligned)
+}
+
+fn date_bin_bucket(
+    literal: DateTime<Utc>,
+    stride: BinStride,
+    origin: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    match stride {
+        BinStride::FixedNanos(stride) => {
+            let literal = literal.timestamp_nanos_opt()?;
+            let origin = origin.timestamp_nanos_opt()?;
+            let distance = literal.checked_sub(origin)?.div_euclid(stride);
+            let start = origin.checked_add(distance.checked_mul(stride)?)?;
+            let end = start.checked_add(stride)?;
+            Some((datetime_from_nanos(start)?, datetime_from_nanos(end)?))
+        }
+        BinStride::Months(stride) => month_bin_bucket(literal, origin, stride),
+    }
+}
+
+fn month_bin_bucket(
+    literal: DateTime<Utc>,
+    origin: DateTime<Utc>,
+    stride: i64,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let year_months = i64::from(literal.year())
+        .checked_sub(i64::from(origin.year()))?
+        .checked_mul(12)?;
+    let month_diff = year_months
+        .checked_add(i64::from(literal.month()))?
+        .checked_sub(i64::from(origin.month()))?;
+    let mut month_delta = month_diff.div_euclid(stride).checked_mul(stride)?;
+    let mut start = add_months(origin, month_delta)?;
+    if start > literal {
+        month_delta = month_delta.checked_sub(stride)?;
+        start = add_months(origin, month_delta)?;
+    }
+    let end = add_months(origin, month_delta.checked_add(stride)?)?;
+    Some((start, end))
+}
+
+fn add_months(value: DateTime<Utc>, months: i64) -> Option<DateTime<Utc>> {
+    if months < 0 {
+        value.checked_sub_months(Months::new(u32::try_from(months.unsigned_abs()).ok()?))
+    } else {
+        value.checked_add_months(Months::new(u32::try_from(months).ok()?))
+    }
+}
+
+fn datetime_from_nanos(value: i64) -> Option<DateTime<Utc>> {
+    Utc.timestamp_opt(
+        value.div_euclid(1_000_000_000),
+        value.rem_euclid(1_000_000_000) as u32,
+    )
+    .single()
+}
+
 fn is_comparison(operator: Operator) -> bool {
     matches!(
         operator,
@@ -805,6 +972,24 @@ mod tests {
             "date_trunc",
             vec![unit, index],
             DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+    }
+
+    fn date_bin(stride: Expr, index: Expr, origin: Option<Expr>) -> Expr {
+        let mut args = vec![stride, index];
+        args.extend(origin);
+        scalar_function(
+            "date_bin",
+            args,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+    }
+
+    fn to_timestamp(value: Expr) -> Expr {
+        scalar_function(
+            "to_timestamp",
+            vec![value],
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
         )
     }
 
@@ -1299,6 +1484,235 @@ mod tests {
             .unwrap(),
             fixed_offset
         );
+    }
+
+    #[test]
+    fn normalizes_fixed_date_bin_buckets_with_origins_and_timezones() {
+        let cases = [
+            (
+                interval(0, 0, 60_000_000_000),
+                None,
+                "1970-01-01T00:01:00Z",
+                "1970-01-01T00:01:00Z",
+                "1970-01-01T00:02:00Z",
+                "UTC",
+            ),
+            (
+                interval(0, 0, 60_000_000_000),
+                None,
+                "1969-12-31T23:59:00Z",
+                "1969-12-31T23:59:00Z",
+                "1970-01-01T00:00:00Z",
+                "UTC",
+            ),
+            (
+                interval(0, 0, 60_000_000_000),
+                Some(to_timestamp(string_literal("1970-01-01T00:00:30Z"))),
+                "1970-01-01T00:01:30Z",
+                "1970-01-01T00:01:30Z",
+                "1970-01-01T00:02:30Z",
+                "UTC",
+            ),
+            (
+                interval(0, 0, 7_200_000_000_000),
+                None,
+                "2024-03-10T01:00:00-05:00",
+                "2024-03-10T06:00:00Z",
+                "2024-03-10T08:00:00Z",
+                "America/New_York",
+            ),
+        ];
+
+        for (stride, origin, literal, start, end, timezone) in cases {
+            let timezone: Arc<str> = timezone.into();
+            let predicate = binary(
+                date_bin(stride, column("ts"), origin),
+                Operator::Eq,
+                string_literal(literal),
+            );
+            assert_eq!(
+                normalize_timestamp_predicate(
+                    predicate,
+                    "ts",
+                    &timestamp_type(Some(timezone.clone())),
+                )
+                .unwrap(),
+                timestamp_range(start, end, timezone),
+                "wrong date_bin bucket at {literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_month_date_bin_from_the_original_anchor() {
+        let cases = [
+            (
+                3,
+                "2020-01-01T00:00:00Z",
+                "2020-04-01T00:00:00Z",
+                "2020-04-01T00:00:00Z",
+                "2020-07-01T00:00:00Z",
+            ),
+            (
+                1,
+                "2024-01-31T00:00:00Z",
+                "2024-02-29T00:00:00Z",
+                "2024-02-29T00:00:00Z",
+                "2024-03-31T00:00:00Z",
+            ),
+        ];
+
+        for (months, origin, literal, start, end) in cases {
+            let timezone: Arc<str> = "UTC".into();
+            let predicate = binary(
+                date_bin(
+                    interval(months, 0, 0),
+                    column("ts"),
+                    Some(to_timestamp(string_literal(origin))),
+                ),
+                Operator::Eq,
+                string_literal(literal),
+            );
+            assert_eq!(
+                normalize_timestamp_predicate(
+                    predicate,
+                    "ts",
+                    &timestamp_type(Some(timezone.clone())),
+                )
+                .unwrap(),
+                timestamp_range(start, end, timezone),
+                "wrong month bucket from {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_date_bin_alignment_and_operand_reversal() {
+        let timezone: Arc<str> = "UTC".into();
+        let non_aligned = binary(
+            date_bin(interval(0, 0, 60_000_000_000), column("ts"), None),
+            Operator::Eq,
+            string_literal("1970-01-01T00:01:30Z"),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(
+                non_aligned,
+                "ts",
+                &timestamp_type(Some(timezone.clone())),
+            )
+            .unwrap(),
+            Expr::Literal(ScalarValue::Boolean(Some(false)), None)
+        );
+
+        let reversed = binary(
+            string_literal("1970-01-01T00:01:00Z"),
+            Operator::Lt,
+            date_bin(interval(0, 0, 60_000_000_000), column("ts"), None),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(reversed, "ts", &timestamp_type(Some(timezone.clone())),)
+                .unwrap(),
+            binary(
+                column("ts"),
+                Operator::GtEq,
+                timestamp_millis(120_000, Some(timezone)),
+            )
+        );
+    }
+
+    #[test]
+    fn leaves_unsupported_date_bin_forms_unchanged() {
+        let minute = || interval(0, 0, 60_000_000_000);
+        let literal = || string_literal("1970-01-01T00:01:00Z");
+        let predicates = [
+            binary(
+                scalar_function(
+                    "date_bin",
+                    vec![minute()],
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                ),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(column("stride"), column("ts"), None),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(interval(0, 0, 0), column("ts"), None),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(interval(0, 0, -1), column("ts"), None),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(interval(1, 1, 0), column("ts"), None),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(minute(), column("other"), None),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(minute(), column("ts"), Some(column("origin"))),
+                Operator::Eq,
+                literal(),
+            ),
+            binary(
+                date_bin(minute(), column("ts"), None),
+                Operator::Eq,
+                string_literal("not-a-timestamp"),
+            ),
+        ];
+        let index_type = timestamp_type(Some("UTC".into()));
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &index_type).unwrap(),
+                predicate
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_overflowing_date_bin_boundaries_unchanged() {
+        let timezone: Arc<str> = "UTC".into();
+        let timestamp = |value| {
+            Expr::Literal(
+                ScalarValue::TimestampNanosecond(Some(value), Some(timezone.clone())),
+                None,
+            )
+        };
+        let cases = [
+            binary(
+                date_bin(interval(0, 0, 1_000_000_000), column("ts"), None),
+                Operator::Eq,
+                timestamp(i64::MAX),
+            ),
+            binary(
+                date_bin(
+                    interval(0, 0, 1_000_000_000),
+                    column("ts"),
+                    Some(timestamp(i64::MAX)),
+                ),
+                Operator::Eq,
+                timestamp(i64::MIN),
+            ),
+        ];
+        let index_type = DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone));
+
+        for predicate in cases {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &index_type).unwrap(),
+                predicate
+            );
+        }
     }
 
     #[test]
