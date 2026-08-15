@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, TimeUnit};
-use chrono::{DateTime, Duration, Months, NaiveDate, TimeZone, Utc};
+use chrono::offset::LocalResult;
+use chrono::{
+    DateTime, Duration, Months, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+};
+use chrono_tz::Tz;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
@@ -15,6 +19,14 @@ pub(crate) struct UnifiedInterval {
     pub(crate) months: i32,
     pub(crate) days: i32,
     pub(crate) nanos: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TruncUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
 }
 
 impl UnifiedInterval {
@@ -111,6 +123,7 @@ fn normalize_comparison(expr: &Expr, index_column: &str, index_type: &DataType) 
     normalize_interval_comparison(comparison, index_column, index_type)
         .or_else(|| normalize_to_unixtime_comparison(comparison, index_column, index_type))
         .or_else(|| normalize_to_date_comparison(comparison, index_column, index_type))
+        .or_else(|| normalize_date_trunc_comparison(comparison, index_column, index_type))
 }
 
 fn normalize_interval_comparison(
@@ -232,6 +245,11 @@ fn timestamp_literal(expr: &Expr) -> Option<DateTime<Utc>> {
                 value.rem_euclid(1_000_000_000) as u32,
             )
             .single(),
+        ScalarValue::Utf8(Some(value))
+        | ScalarValue::LargeUtf8(Some(value))
+        | ScalarValue::Utf8View(Some(value)) => DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|value| value.with_timezone(&Utc)),
         _ => None,
     }
 }
@@ -430,21 +448,41 @@ fn date_comparison(
     index_type: &DataType,
 ) -> Option<Expr> {
     let (start, end) = date_bounds(date, index_type)?;
+    bucket_comparison(column, operator, start, end, true)
+}
+
+fn bucket_comparison(
+    column: Expr,
+    operator: Operator,
+    start: Expr,
+    end: Expr,
+    aligned: bool,
+) -> Option<Expr> {
     match operator {
+        Operator::Eq if !aligned => Some(Expr::Literal(ScalarValue::Boolean(Some(false)), None)),
         Operator::Eq => Some(binary(
             binary(column.clone(), Operator::GtEq, start),
             Operator::And,
             binary(column, Operator::Lt, end),
         )),
+        Operator::NotEq if !aligned => Some(Expr::Literal(ScalarValue::Boolean(Some(true)), None)),
         Operator::NotEq => Some(binary(
             binary(column.clone(), Operator::Lt, start),
             Operator::Or,
             binary(column, Operator::GtEq, end),
         )),
-        Operator::Lt => Some(binary(column, Operator::Lt, start)),
+        Operator::Lt => Some(binary(
+            column,
+            Operator::Lt,
+            if aligned { start } else { end },
+        )),
         Operator::LtEq => Some(binary(column, Operator::Lt, end)),
         Operator::Gt => Some(binary(column, Operator::GtEq, end)),
-        Operator::GtEq => Some(binary(column, Operator::GtEq, start)),
+        Operator::GtEq => Some(binary(
+            column,
+            Operator::GtEq,
+            if aligned { start } else { end },
+        )),
         _ => None,
     }
 }
@@ -488,6 +526,192 @@ fn date_bounds(date: NaiveDate, index_type: &DataType) -> Option<(Expr, Expr)> {
         ),
         Expr::Literal(timestamp_scalar(end, unit, Some(timezone_name))?, None),
     ))
+}
+
+fn normalize_date_trunc_comparison(
+    comparison: &BinaryExpr,
+    index_column: &str,
+    index_type: &DataType,
+) -> Option<Expr> {
+    if let Some((column, unit)) = date_trunc_index(&comparison.left, index_column) {
+        return date_trunc_comparison(
+            column,
+            unit,
+            comparison.op,
+            timestamp_literal(&comparison.right)?,
+            index_type,
+        );
+    }
+
+    let (column, unit) = date_trunc_index(&comparison.right, index_column)?;
+    date_trunc_comparison(
+        column,
+        unit,
+        flip_comparison(comparison.op)?,
+        timestamp_literal(&comparison.left)?,
+        index_type,
+    )
+}
+
+fn date_trunc_index(expr: &Expr, index_column: &str) -> Option<(Expr, TruncUnit)> {
+    let Expr::ScalarFunction(function) = expr else {
+        return None;
+    };
+    if !function.name().eq_ignore_ascii_case("date_trunc") || function.args.len() != 2 {
+        return None;
+    }
+    let unit = match &function.args[0] {
+        Expr::Literal(ScalarValue::Utf8(Some(unit)) | ScalarValue::Utf8View(Some(unit)), _) => {
+            match unit.to_ascii_lowercase().as_str() {
+                "second" => TruncUnit::Second,
+                "minute" => TruncUnit::Minute,
+                "hour" => TruncUnit::Hour,
+                "day" => TruncUnit::Day,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let Expr::Column(column) = &function.args[1] else {
+        return None;
+    };
+    (column.name == index_column).then(|| (function.args[1].clone(), unit))
+}
+
+fn date_trunc_comparison(
+    column: Expr,
+    unit: TruncUnit,
+    operator: Operator,
+    literal: DateTime<Utc>,
+    index_type: &DataType,
+) -> Option<Expr> {
+    let DataType::Timestamp(timestamp_unit, timezone) = index_type else {
+        return None;
+    };
+    timestamp_scalar(literal, timestamp_unit, timezone.clone())?;
+    let (start, end) = truncation_bucket(literal, unit, timezone.as_deref())?;
+    let aligned = start == literal;
+    let start = Expr::Literal(
+        timestamp_scalar(start, timestamp_unit, timezone.clone())?,
+        None,
+    );
+    let end = Expr::Literal(
+        timestamp_scalar(end, timestamp_unit, timezone.clone())?,
+        None,
+    );
+    bucket_comparison(column, operator, start, end, aligned)
+}
+
+fn truncation_bucket(
+    literal: DateTime<Utc>,
+    unit: TruncUnit,
+    timezone: Option<&str>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let Some(timezone) = timezone else {
+        return utc_truncation_bucket(literal, unit);
+    };
+    match parse_tz(timezone)? {
+        ParsedTz::Utc => utc_truncation_bucket(literal, unit),
+        ParsedTz::Olson(_) if matches!(unit, TruncUnit::Second | TruncUnit::Minute) => {
+            utc_truncation_bucket(literal, unit)
+        }
+        ParsedTz::Olson(timezone) => local_truncation_bucket(literal, unit, timezone),
+        ParsedTz::Fixed(_) => None,
+    }
+}
+
+fn utc_truncation_bucket(
+    literal: DateTime<Utc>,
+    unit: TruncUnit,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let seconds = match unit {
+        TruncUnit::Second => 1,
+        TruncUnit::Minute => 60,
+        TruncUnit::Hour => 3_600,
+        TruncUnit::Day => 86_400,
+    };
+    let floor_seconds = literal
+        .timestamp()
+        .div_euclid(seconds)
+        .checked_mul(seconds)?;
+    let start = Utc.timestamp_opt(floor_seconds, 0).single()?;
+    let end = start.checked_add_signed(Duration::seconds(seconds))?;
+    Some((start, end))
+}
+
+fn local_truncation_bucket(
+    literal: DateTime<Utc>,
+    unit: TruncUnit,
+    timezone: Tz,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let local = literal.with_timezone(&timezone);
+    let floor_local = truncate_local(local.naive_local(), unit)?;
+    // Match DataFusion 51: an ambiguous floor keeps the input's UTC offset.
+    // The second occurrence of that local boundary ends the first bucket.
+    let (start, repeated_end) = match floor_local.and_local_timezone(timezone) {
+        LocalResult::Single(start) => (start, None),
+        LocalResult::Ambiguous(first, second) => {
+            let start = if first.offset().fix() == local.offset().fix() {
+                first
+            } else {
+                second
+            };
+            let (earlier, later) = if first <= second {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            (start, (start == earlier).then_some(later))
+        }
+        LocalResult::None => (resolve_nonexistent(timezone, floor_local)?, None),
+    };
+
+    let end = if let Some(end) = repeated_end {
+        end
+    } else {
+        resolve_boundary(timezone, next_local_boundary(floor_local, unit)?)?
+    };
+    Some((start.with_timezone(&Utc), end.with_timezone(&Utc)))
+}
+
+fn truncate_local(value: NaiveDateTime, unit: TruncUnit) -> Option<NaiveDateTime> {
+    match unit {
+        TruncUnit::Second => value.with_nanosecond(0),
+        TruncUnit::Minute => value.with_nanosecond(0)?.with_second(0),
+        TruncUnit::Hour => value.with_nanosecond(0)?.with_second(0)?.with_minute(0),
+        TruncUnit::Day => value
+            .with_nanosecond(0)?
+            .with_second(0)?
+            .with_minute(0)?
+            .with_hour(0),
+    }
+}
+
+fn next_local_boundary(value: NaiveDateTime, unit: TruncUnit) -> Option<NaiveDateTime> {
+    match unit {
+        TruncUnit::Second => value.checked_add_signed(Duration::seconds(1)),
+        TruncUnit::Minute => value.checked_add_signed(Duration::minutes(1)),
+        TruncUnit::Hour => value.checked_add_signed(Duration::hours(1)),
+        TruncUnit::Day => value.date().succ_opt()?.and_hms_opt(0, 0, 0),
+    }
+}
+
+fn resolve_boundary(timezone: Tz, value: NaiveDateTime) -> Option<DateTime<Tz>> {
+    match value.and_local_timezone(timezone) {
+        LocalResult::Single(value) => Some(value),
+        LocalResult::Ambiguous(first, second) => Some(first.min(second)),
+        LocalResult::None => resolve_nonexistent(timezone, value),
+    }
+}
+
+fn resolve_nonexistent(timezone: Tz, value: NaiveDateTime) -> Option<DateTime<Tz>> {
+    // DataFusion resolves DST gaps by moving to a valid time and back.
+    let adjustment = Duration::hours(3);
+    value
+        .checked_sub_signed(adjustment)?
+        .and_local_timezone(timezone)
+        .single()?
+        .checked_add_signed(adjustment)
 }
 
 fn is_comparison(operator: Operator) -> bool {
@@ -576,11 +800,44 @@ mod tests {
         scalar_function("to_date", args, DataType::Date32)
     }
 
+    fn date_trunc(unit: Expr, index: Expr) -> Expr {
+        scalar_function(
+            "date_trunc",
+            vec![unit, index],
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+    }
+
     fn string_cast(expr: Expr) -> Expr {
         Expr::Cast(Cast {
             expr: Box::new(expr),
             data_type: DataType::Utf8View,
         })
+    }
+
+    fn string_literal(value: &str) -> Expr {
+        Expr::Literal(ScalarValue::Utf8(Some(value.to_string())), None)
+    }
+
+    fn timestamp_range(start: &str, end: &str, timezone: Arc<str>) -> Expr {
+        let millis = |value: &str| {
+            DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .timestamp_millis()
+        };
+        binary(
+            binary(
+                column("ts"),
+                Operator::GtEq,
+                timestamp_millis(millis(start), Some(timezone.clone())),
+            ),
+            Operator::And,
+            binary(
+                column("ts"),
+                Operator::Lt,
+                timestamp_millis(millis(end), Some(timezone)),
+            ),
+        )
     }
 
     #[test]
@@ -867,6 +1124,180 @@ mod tests {
             normalize_timestamp_predicate(missing_timezone.clone(), "ts", &timestamp_type(None),)
                 .unwrap(),
             missing_timezone
+        );
+    }
+
+    #[test]
+    fn normalizes_date_trunc_buckets_across_epoch_and_dst_boundaries() {
+        let cases = [
+            (
+                "minute",
+                "1970-01-01T00:01:00Z",
+                "1970-01-01T00:01:00Z",
+                "1970-01-01T00:02:00Z",
+                "UTC",
+            ),
+            (
+                "hour",
+                "1969-12-31T23:00:00Z",
+                "1969-12-31T23:00:00Z",
+                "1970-01-01T00:00:00Z",
+                "UTC",
+            ),
+            (
+                "day",
+                "2024-03-10T00:00:00-05:00",
+                "2024-03-10T05:00:00Z",
+                "2024-03-11T04:00:00Z",
+                "America/New_York",
+            ),
+            (
+                "hour",
+                "2024-03-10T01:00:00-05:00",
+                "2024-03-10T06:00:00Z",
+                "2024-03-10T07:00:00Z",
+                "America/New_York",
+            ),
+            (
+                "hour",
+                "2024-11-03T01:00:00-04:00",
+                "2024-11-03T05:00:00Z",
+                "2024-11-03T06:00:00Z",
+                "America/New_York",
+            ),
+            (
+                "hour",
+                "2024-11-03T01:00:00-05:00",
+                "2024-11-03T06:00:00Z",
+                "2024-11-03T07:00:00Z",
+                "America/New_York",
+            ),
+        ];
+
+        for (unit, literal, start, end, timezone) in cases {
+            let timezone: Arc<str> = timezone.into();
+            let predicate = binary(
+                date_trunc(string_literal(unit), column("ts")),
+                Operator::Eq,
+                string_literal(literal),
+            );
+            assert_eq!(
+                normalize_timestamp_predicate(
+                    predicate,
+                    "ts",
+                    &timestamp_type(Some(timezone.clone())),
+                )
+                .unwrap(),
+                timestamp_range(start, end, timezone),
+                "wrong bucket for {unit} at {literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_date_trunc_alignment_and_operand_reversal() {
+        let timezone: Arc<str> = "UTC".into();
+        let non_aligned = binary(
+            date_trunc(string_literal("minute"), column("ts")),
+            Operator::Eq,
+            string_literal("1970-01-01T00:01:30Z"),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(
+                non_aligned,
+                "ts",
+                &timestamp_type(Some(timezone.clone())),
+            )
+            .unwrap(),
+            Expr::Literal(ScalarValue::Boolean(Some(false)), None)
+        );
+
+        let reversed = binary(
+            string_literal("1970-01-01T00:01:00Z"),
+            Operator::Lt,
+            date_trunc(string_literal("minute"), column("ts")),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(reversed, "ts", &timestamp_type(Some(timezone.clone())),)
+                .unwrap(),
+            binary(
+                column("ts"),
+                Operator::GtEq,
+                timestamp_millis(120_000, Some(timezone)),
+            )
+        );
+    }
+
+    #[test]
+    fn leaves_unsupported_date_trunc_forms_unchanged() {
+        let predicates = [
+            binary(
+                scalar_function(
+                    "date_trunc",
+                    vec![string_literal("minute")],
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                ),
+                Operator::Eq,
+                string_literal("1970-01-01T00:01:00Z"),
+            ),
+            binary(
+                date_trunc(column("unit"), column("ts")),
+                Operator::Eq,
+                string_literal("1970-01-01T00:01:00Z"),
+            ),
+            binary(
+                date_trunc(string_literal("week"), column("ts")),
+                Operator::Eq,
+                string_literal("1970-01-01T00:00:00Z"),
+            ),
+            binary(
+                date_trunc(string_literal("minute"), column("other")),
+                Operator::Eq,
+                string_literal("1970-01-01T00:01:00Z"),
+            ),
+            binary(
+                date_trunc(string_literal("minute"), column("ts")),
+                Operator::Eq,
+                string_literal("not-a-timestamp"),
+            ),
+        ];
+        let index_type = timestamp_type(Some("UTC".into()));
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &index_type).unwrap(),
+                predicate
+            );
+        }
+
+        let timezone: Arc<str> = "UTC".into();
+        let overflow = binary(
+            date_trunc(string_literal("hour"), column("ts")),
+            Operator::Eq,
+            Expr::Literal(
+                ScalarValue::TimestampNanosecond(Some(i64::MAX), Some(timezone.clone())),
+                None,
+            ),
+        );
+        let nanosecond_type = DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone));
+        assert_eq!(
+            normalize_timestamp_predicate(overflow.clone(), "ts", &nanosecond_type).unwrap(),
+            overflow
+        );
+
+        let fixed_offset = binary(
+            date_trunc(string_literal("hour"), column("ts")),
+            Operator::Eq,
+            string_literal("1970-01-01T00:00:00+07:00"),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(
+                fixed_offset.clone(),
+                "ts",
+                &timestamp_type(Some("+07:00".into())),
+            )
+            .unwrap(),
+            fixed_offset
         );
     }
 
