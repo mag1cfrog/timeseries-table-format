@@ -426,6 +426,7 @@ impl TimeSeriesTable {
     /// A copy created by this operation is removed when append fails before
     /// publication. Files already under the table root and copies involved in
     /// an ambiguous commit outcome are preserved.
+    /// Returns the committed version and normalized table-relative segment path.
     pub async fn append_parquet_from_path(
         &mut self,
         parquet_path: &Path,
@@ -436,6 +437,7 @@ impl TimeSeriesTable {
     }
 
     /// Copy and append a Parquet file while collecting a profiling report.
+    /// Returns the committed version, normalized table-relative path, and report.
     pub async fn append_parquet_from_path_with_report(
         &mut self,
         parquet_path: &Path,

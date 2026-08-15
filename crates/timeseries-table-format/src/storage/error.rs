@@ -82,15 +82,4 @@ pub enum StorageError {
         /// The backtrace at the time the cleanup failure was reported.
         backtrace: Backtrace,
     },
-
-    /// The specified path already exists when creation was requested with
-    /// create-new semantics.
-    #[snafu(display("Path already exists: {path}"))]
-    AlreadyExistsNoSource {
-        /// The path that was found to already exist.
-        path: String,
-
-        /// The backtrace captured when the error occurred.
-        backtrace: Backtrace,
-    },
 }
