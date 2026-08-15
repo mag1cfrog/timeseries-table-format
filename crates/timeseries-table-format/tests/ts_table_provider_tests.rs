@@ -14,6 +14,7 @@ use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
+use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::logical_expr::{Expr, Operator};
@@ -43,6 +44,12 @@ struct TestRow {
     symbol: &'static str,
     price: Option<f64>,
 }
+
+const UTC_PRUNING_FILES: &[&str] = &[
+    "time-before.parquet",
+    "time-target.parquet",
+    "time-after.parquet",
+];
 
 fn make_index_spec() -> IndexSpec {
     IndexSpec {
@@ -690,6 +697,35 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     Ok(table)
 }
 
+async fn create_utc_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
+    let mut table = create_table(tmp, false).await?;
+    let segments = [
+        (UTC_PRUNING_FILES[0], 0, 59_999, 10.0),
+        (UTC_PRUNING_FILES[1], 60_000, 119_999, 20.0),
+        (UTC_PRUNING_FILES[2], 120_000, 179_999, 30.0),
+    ];
+
+    for (file, min, max, price) in segments {
+        let path = format!("data/{file}");
+        let rows = [
+            TestRow {
+                ts_millis: min,
+                symbol: "A",
+                price: Some(price),
+            },
+            TestRow {
+                ts_millis: max,
+                symbol: "A",
+                price: Some(price + 1.0),
+            },
+        ];
+        write_segment(tmp.path(), &path, &rows, false)?;
+        table.append_parquet_segment(&path).await?;
+    }
+
+    Ok(table)
+}
+
 async fn create_single_segment_table_with_props(
     tmp: &TempDir,
     rel_path: &str,
@@ -787,6 +823,39 @@ fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str])
         positions.windows(2).all(|pair| pair[0] < pair[1]),
         "selected files are not in deterministic index order; plan:\n{plan}"
     );
+}
+
+fn planned_file_names(plan: &dyn ExecutionPlan) -> TestResult<Vec<String>> {
+    let exec = find_data_source_exec(plan).ok_or("expected DataSourceExec in physical plan")?;
+    let scan = exec
+        .data_source()
+        .as_any()
+        .downcast_ref::<FileScanConfig>()
+        .ok_or("expected FileScanConfig in DataSourceExec")?;
+
+    scan.file_groups
+        .iter()
+        .flat_map(|group| group.files())
+        .map(|file| {
+            file.object_meta
+                .location
+                .filename()
+                .map(str::to_string)
+                .ok_or_else(|| "planned file path has no filename".into())
+        })
+        .collect()
+}
+
+async fn run_timestamp_query(
+    ctx: &SessionContext,
+    predicate: &str,
+) -> TestResult<(Vec<String>, Vec<RecordBatch>)> {
+    let query = format!("SELECT ts FROM t WHERE {predicate} ORDER BY ts");
+    let dataframe = ctx.sql(&query).await?;
+    let plan = dataframe.create_physical_plan().await?;
+    let files = planned_file_names(plan.as_ref())?;
+    let batches = collect(plan, ctx.task_ctx()).await?;
+    Ok((files, batches))
 }
 
 fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
@@ -1591,6 +1660,108 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
     let max_ts = scalar_i64_from_array(batch.column(1).as_ref())?;
     assert_eq!(min_ts, minutes_to_millis(1));
     assert_eq!(max_ts, minutes_to_millis(3) + 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn timestamp_direct_predicates_select_expected_files_and_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_utc_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let cases = [
+        (
+            "ts = '1970-01-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000],
+        ),
+        (
+            "ts < '1970-01-01T00:01:00Z'",
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
+        ),
+        (
+            "ts <= '1970-01-01T00:01:00Z'",
+            vec!["time-before.parquet", "time-target.parquet"],
+            vec![0, 59_999, 60_000],
+        ),
+        (
+            "ts > '1970-01-01T00:01:59.999Z'",
+            vec!["time-after.parquet"],
+            vec![120_000, 179_999],
+        ),
+        (
+            "ts >= '1970-01-01T00:01:59.999Z'",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![119_999, 120_000, 179_999],
+        ),
+        (
+            "to_timestamp('1970-01-01T00:01:00Z') > ts",
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
+        ),
+        (
+            "ts BETWEEN '1970-01-01T00:01:00Z' AND '1970-01-01T00:01:59.999Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "ts NOT BETWEEN '1970-01-01T00:01:00Z' AND '1970-01-01T00:01:59.999Z'",
+            vec!["time-before.parquet", "time-after.parquet"],
+            vec![0, 59_999, 120_000, 179_999],
+        ),
+        (
+            "ts IN ('1970-01-01T00:01:00Z', '1970-01-01T00:01:59.999Z')",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "ts NOT IN ('1970-01-01T00:01:00Z')",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 119_999, 120_000, 179_999],
+        ),
+        (
+            "ts >= '1970-01-01T00:01:00Z' AND ts <= '1970-01-01T00:01:59.999Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "ts <= '1970-01-01T00:00:59.999Z' OR ts >= '1970-01-01T00:02:00Z'",
+            vec!["time-before.parquet", "time-after.parquet"],
+            vec![0, 59_999, 120_000, 179_999],
+        ),
+        (
+            "NOT (ts < '1970-01-01T00:01:00Z')",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![60_000, 119_999, 120_000, 179_999],
+        ),
+        (
+            "ts != '1970-01-01T00:01:00Z'",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 119_999, 120_000, 179_999],
+        ),
+        (
+            "price BETWEEN 20.0 AND 21.0",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![60_000, 119_999],
+        ),
+        (
+            "date_part('minute', ts) = 1",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![60_000, 119_999],
+        ),
+        ("ts < '1969-12-31T23:59:59Z'", vec![], vec![]),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+        assert_eq!(files, expected_files, "wrong files for {predicate}");
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong rows for {predicate}"
+        );
+    }
     Ok(())
 }
 
