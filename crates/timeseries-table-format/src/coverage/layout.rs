@@ -175,36 +175,6 @@ pub fn table_coverage_id_v2(index: &IndexSpec, coverage_bytes: &[u8]) -> String 
     coverage_id_v2(b"tblcov-v2", "tblcov", index, coverage_bytes)
 }
 
-/// Compatibility helper for timestamp-only callers during the format migration.
-pub fn segment_coverage_id_v1(bucket: &TimeBucket, column: &str, coverage_bytes: &[u8]) -> String {
-    segment_coverage_id_v2(
-        &IndexSpec {
-            column: column.to_string(),
-            entity_columns: Vec::new(),
-            kind: IndexKind::Timestamp {
-                bucket: bucket.clone(),
-                timezone: None,
-            },
-        },
-        coverage_bytes,
-    )
-}
-
-/// Compatibility helper for timestamp-only callers during the format migration.
-pub fn table_coverage_id_v1(bucket: &TimeBucket, column: &str, coverage_bytes: &[u8]) -> String {
-    table_coverage_id_v2(
-        &IndexSpec {
-            column: column.to_string(),
-            entity_columns: Vec::new(),
-            kind: IndexKind::Timestamp {
-                bucket: bucket.clone(),
-                timezone: None,
-            },
-        },
-        coverage_bytes,
-    )
-}
-
 /// Add a writer-owned suffix to a deterministic coverage content id.
 pub(crate) fn coverage_file_id_for_attempt(content_id: &str, attempt_id: &Uuid) -> String {
     format!("{content_id}-{attempt_id}")
