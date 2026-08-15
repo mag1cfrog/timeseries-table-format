@@ -478,13 +478,35 @@ mod tests {
     use crate::transaction_log::{
         Commit, CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
     };
+    use arrow::{
+        array::UInt64Array,
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use parquet::arrow::ArrowWriter;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
     use std::num::NonZeroU64;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn write_uint64_index_parquet(path: &Path, values: &[u64]) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::UInt64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(UInt64Array::from(values.to_vec()))],
+        )?;
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    }
 
     fn coverage_files(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
         let mut files = BTreeMap::new();
@@ -783,6 +805,99 @@ mod tests {
         );
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state, table.state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_supports_registered_uint64_index() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(10).unwrap(),
+            },
+        };
+        let mut table =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
+                .await?;
+        let rel_path = "data/uint64.parquet";
+        write_uint64_index_parquet(
+            &tmp.path().join(rel_path),
+            &[0, i64::MAX as u64 + 1, u64::MAX],
+        )?;
+
+        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
+
+        let segment = table.state.segments.get(rel_path).expect("segment present");
+        assert_eq!(segment.index_min, IndexValue::UInt64(0));
+        assert_eq!(segment.index_max, IndexValue::UInt64(u64::MAX));
+        assert_eq!(
+            table
+                .state
+                .table_meta
+                .logical_schema
+                .as_ref()
+                .expect("schema adopted")
+                .columns()[0]
+                .data_type,
+            LogicalDataType::UInt64
+        );
+        assert_eq!(
+            table
+                .state
+                .table_coverage
+                .as_ref()
+                .expect("table coverage")
+                .index_kind,
+            index.kind
+        );
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state, table.state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_signed_data_for_uint64_index_without_mutation() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let mut table =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(tmp.path())?;
+        let rel_path = "data/signed.parquet";
+        write_arrow_parquet_int_time(&tmp.path().join(rel_path), &[1], &["A"], &[1.0])?;
+
+        let error = table
+            .append_parquet_segment(rel_path)
+            .await
+            .expect_err("signed data must not append to a uint64 index");
+
+        assert!(matches!(
+            error,
+            TableError::SegmentMeta {
+                source: SegmentError::Meta {
+                    source: SegmentMetaError::OrderedIndexColumn {
+                        source: ParquetIndexColumnError {
+                            expected_domain: "uint64",
+                            observed_type,
+                            ..
+                        }
+                    }
+                }
+            } if observed_type.contains("logical=None")
+        ));
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert_eq!(coverage_files(tmp.path())?, coverage_before);
         Ok(())
     }
 
