@@ -24,8 +24,7 @@ use arrow::array::{
 };
 use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
-use arrow::datatypes::DataType;
-use arrow::datatypes::{Field, TimeUnit};
+use arrow::datatypes::{DataType, Field, TimeUnit};
 use chrono::{DateTime, Utc};
 use futures::{StreamExt, TryStreamExt, future};
 use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder};
@@ -146,12 +145,14 @@ macro_rules! filter_ts_batch {
         let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar).map_err(|source| {
             TableError::Arrow {
                 path: $path.to_string(),
+                column: $time_col.to_string(),
                 source,
             }
         })?;
         let lt_mask = cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| {
             TableError::Arrow {
                 path: $path.to_string(),
+                column: $time_col.to_string(),
                 source,
             }
         })?;
@@ -160,6 +161,7 @@ macro_rules! filter_ts_batch {
         let mask = boolean_kernels::and(&ge_mask, &lt_mask).map_err(|source| {
             TableError::Arrow {
                 path: $path.to_string(),
+                column: $time_col.to_string(),
                 source,
             }
         })?;
@@ -173,6 +175,7 @@ macro_rules! filter_ts_batch {
         let filtered = filter_record_batch(&$batch, &mask).map_err(|source| {
             TableError::Arrow {
                 path: $path.to_string(),
+                column: $time_col.to_string(),
                 source,
             }
         })?;
@@ -238,16 +241,13 @@ fn to_bounds_i64(
     }
 }
 
-async fn segment_range_stream<T>(
-    reader: T,
+async fn segment_range_stream(
+    reader: impl AsyncFileReader + Unpin + 'static,
     path: String,
     time_column: &str,
     ts_start: DateTime<Utc>,
     ts_end: DateTime<Utc>,
-) -> Result<TimeSeriesScan, TableError>
-where
-    T: AsyncFileReader + Unpin + Send + 'static,
-{
+) -> Result<TimeSeriesScan, TableError> {
     let builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .map_err(|source| TableError::ParquetRead {
@@ -466,26 +466,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
 
+    #[derive(Default)]
+    struct TrackingStats {
+        read_calls: AtomicUsize,
+        bytes_read: AtomicUsize,
+        dropped: AtomicBool,
+    }
+
     struct TrackingReader {
         data: bytes::Bytes,
-        read_calls: Arc<AtomicUsize>,
-        bytes_read: Arc<AtomicUsize>,
+        stats: Arc<TrackingStats>,
         gate: Option<(usize, futures::channel::oneshot::Receiver<()>)>,
     }
 
     impl TrackingReader {
-        fn new(data: bytes::Bytes) -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-            let read_calls = Arc::new(AtomicUsize::new(0));
-            let bytes_read = Arc::new(AtomicUsize::new(0));
+        fn new(data: bytes::Bytes) -> (Self, Arc<TrackingStats>) {
+            let stats = Arc::new(TrackingStats::default());
             (
                 Self {
                     data,
-                    read_calls: Arc::clone(&read_calls),
-                    bytes_read: Arc::clone(&bytes_read),
+                    stats: Arc::clone(&stats),
                     gate: None,
                 },
-                read_calls,
-                bytes_read,
+                stats,
             )
         }
 
@@ -494,19 +497,18 @@ mod tests {
             gated_call: usize,
         ) -> (
             Self,
-            Arc<AtomicUsize>,
-            Arc<AtomicUsize>,
+            Arc<TrackingStats>,
             futures::channel::oneshot::Sender<()>,
         ) {
-            let (mut reader, read_calls, bytes_read) = Self::new(data);
+            let (mut reader, stats) = Self::new(data);
             let (release, gate) = futures::channel::oneshot::channel();
             reader.gate = Some((gated_call, gate));
-            (reader, read_calls, bytes_read, release)
+            (reader, stats, release)
         }
 
         fn read_ranges(&self, ranges: Vec<Range<u64>>) -> (usize, Vec<bytes::Bytes>) {
-            let call = self.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
-            self.bytes_read.fetch_add(
+            let call = self.stats.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.stats.bytes_read.fetch_add(
                 ranges
                     .iter()
                     .map(|range| (range.end - range.start) as usize)
@@ -520,6 +522,12 @@ mod tests {
                     .map(|range| self.data.slice(range.start as usize..range.end as usize))
                     .collect(),
             )
+        }
+    }
+
+    impl Drop for TrackingReader {
+        fn drop(&mut self) {
+            self.stats.dropped.store(true, Ordering::SeqCst);
         }
     }
 
@@ -601,6 +609,75 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn timestamp_bounds_round_up_to_column_precision() {
+        let timestamp = |seconds, nanos| Utc.timestamp_opt(seconds, nanos).single().unwrap();
+        let cases = [
+            (
+                ArrowTimeUnit::Second,
+                timestamp(1, 500_000_000),
+                timestamp(2, 500_000_000),
+                (2, 3),
+            ),
+            (
+                ArrowTimeUnit::Second,
+                timestamp(-2, 500_000_000),
+                timestamp(-1, 500_000_000),
+                (-1, 0),
+            ),
+            (
+                ArrowTimeUnit::Second,
+                timestamp(1, 0),
+                timestamp(2, 0),
+                (1, 2),
+            ),
+            (
+                ArrowTimeUnit::Millisecond,
+                timestamp(1, 500_000),
+                timestamp(2, 500_000),
+                (1_001, 2_001),
+            ),
+            (
+                ArrowTimeUnit::Millisecond,
+                timestamp(-1, 999_500_000),
+                timestamp(0, 500_000),
+                (0, 1),
+            ),
+            (
+                ArrowTimeUnit::Millisecond,
+                timestamp(1, 0),
+                timestamp(2, 0),
+                (1_000, 2_000),
+            ),
+            (
+                ArrowTimeUnit::Microsecond,
+                timestamp(1, 500),
+                timestamp(2, 500),
+                (1_000_001, 2_000_001),
+            ),
+            (
+                ArrowTimeUnit::Microsecond,
+                timestamp(-1, 999_999_500),
+                timestamp(0, 500),
+                (0, 1),
+            ),
+            (
+                ArrowTimeUnit::Microsecond,
+                timestamp(1, 0),
+                timestamp(2, 0),
+                (1_000_000, 2_000_000),
+            ),
+        ];
+
+        for (unit, start, end, expected) in cases {
+            let field = Field::new("ts", DataType::Timestamp(unit, None), false);
+            assert_eq!(
+                to_bounds_i64(&field, "data/segment.parquet", "ts", start, end).unwrap(),
+                expected
+            );
+        }
+    }
+
     #[tokio::test]
     async fn segment_stream_reads_on_demand_and_preserves_schema() -> TestResult {
         let tmp = TempDir::new()?;
@@ -609,7 +686,7 @@ mod tests {
         let data = bytes::Bytes::from(std::fs::read(path)?);
         let file_size = data.len();
 
-        let (reader, read_calls, bytes_read) = TrackingReader::new(data.clone());
+        let (reader, stats) = TrackingReader::new(data.clone());
         let mut stream = segment_range_stream(
             reader,
             "data/multi-row-group.parquet".to_string(),
@@ -619,10 +696,10 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(read_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
         let first = stream.next().await.transpose()?.expect("first batch");
-        assert_eq!(read_calls.load(Ordering::SeqCst), 1);
-        assert!(bytes_read.load(Ordering::SeqCst) < file_size);
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+        assert!(stats.bytes_read.load(Ordering::SeqCst) < file_size);
         assert_eq!(
             first.schema().field(0).data_type(),
             &DataType::Timestamp(ArrowTimeUnit::Millisecond, Some(Arc::<str>::from("UTC")))
@@ -633,12 +710,12 @@ mod tests {
         );
 
         tokio::task::yield_now().await;
-        assert_eq!(read_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
         drop(stream);
-        tokio::task::yield_now().await;
-        assert_eq!(read_calls.load(Ordering::SeqCst), 1);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
 
-        let (reader, gated_calls, _, release) = TrackingReader::with_gate(data, 2);
+        let (reader, gated_stats, release) = TrackingReader::with_gate(data, 2);
         let mut stream = segment_range_stream(
             reader,
             "data/multi-row-group.parquet".to_string(),
@@ -659,12 +736,12 @@ mod tests {
                 .iter()
                 .copied(),
         );
-        assert_eq!(gated_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gated_stats.read_calls.load(Ordering::SeqCst), 1);
 
         let second = stream.next();
         futures::pin_mut!(second);
         assert!(futures::poll!(&mut second).is_pending());
-        assert_eq!(gated_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(gated_stats.read_calls.load(Ordering::SeqCst), 2);
         release.send(()).expect("release second row-group read");
         let second = second.await.transpose()?.expect("second batch");
         timestamps.extend(
@@ -695,23 +772,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fully_filtered_segment_stream_yields_to_runtime() -> TestResult {
+    async fn fully_filtered_segment_stream_yields_and_cancels() -> TestResult {
         let tmp = TempDir::new()?;
         let path = tmp.path().join("filtered-row-groups.parquet");
         write_multi_row_group_parquet(&path, &[&[1_000], &[2_000], &[3_000]])?;
         let data = bytes::Bytes::from(std::fs::read(path)?);
-        let (reader, read_calls, _) = TrackingReader::new(data);
-        let observer_ran = Arc::new(AtomicBool::new(false));
-        let observer = tokio::spawn({
-            let read_calls = Arc::clone(&read_calls);
-            let observer_ran = Arc::clone(&observer_ran);
-            async move {
-                while read_calls.load(Ordering::SeqCst) == 0 {
-                    tokio::task::yield_now().await;
-                }
-                observer_ran.store(true, Ordering::SeqCst);
-            }
-        });
+        let (reader, stats, release) = TrackingReader::with_gate(data, 2);
 
         let mut stream = segment_range_stream(
             reader,
@@ -721,9 +787,19 @@ mod tests {
             Utc.timestamp_millis_opt(20_000).single().unwrap(),
         )
         .await?;
-        assert!(stream.next().await.is_none());
-        assert!(observer_ran.load(Ordering::SeqCst));
-        observer.await?;
+
+        {
+            let next = stream.next();
+            futures::pin_mut!(next);
+            assert!(futures::poll!(&mut next).is_pending());
+            assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+            assert!(futures::poll!(&mut next).is_pending());
+            assert_eq!(stats.read_calls.load(Ordering::SeqCst), 2);
+        }
+
+        drop(stream);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+        assert!(release.send(()).is_err());
         Ok(())
     }
 

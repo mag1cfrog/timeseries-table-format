@@ -115,10 +115,12 @@ pub enum TableError {
     },
 
     /// Arrow compute or conversion error while materializing or filtering batches.
-    #[snafu(display("Arrow error while filtering segment {path}: {source}"))]
+    #[snafu(display("Arrow error while filtering column {column} in segment {path}: {source}"))]
     Arrow {
         /// Normalized table-relative path of the segment being scanned.
         path: String,
+        /// Configured time column being filtered.
+        column: String,
         /// Underlying Arrow error raised during batch conversion or filtering.
         source: ArrowError,
     },
