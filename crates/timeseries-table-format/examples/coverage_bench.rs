@@ -20,7 +20,7 @@ use arrow_array::{
     TimestampSecondArray,
 };
 
-use roaring::RoaringBitmap;
+use roaring::RoaringTreemap;
 
 use timeseries_table_format::coverage::bucket::bucket_id_from_epoch_secs;
 use timeseries_table_format::metadata::table_metadata::TimeBucket;
@@ -254,39 +254,34 @@ fn secs_from_parquet_unit(unit: ParquetTimeUnit, raw: i64) -> i64 {
     }
 }
 
-fn insert_bucket(bitmap: &mut RoaringBitmap, bucket: u64) -> Result<(), String> {
-    if bucket > u32::MAX as u64 {
-        return Err(format!(
-            "bucket id {bucket} does not fit into u32 bucket domain"
-        ));
-    }
-    bitmap.insert(bucket as u32);
+fn insert_bucket(bitmap: &mut RoaringTreemap, bucket: u64) -> Result<(), String> {
+    bitmap.insert(bucket);
     Ok(())
 }
 
 fn add_buckets_from_iter(
-    bitmap: &mut RoaringBitmap,
+    bitmap: &mut RoaringTreemap,
     spec: &TimeBucket,
     unit: TimeUnit,
     iter: impl Iterator<Item = Option<i64>>,
 ) -> Result<(), String> {
     for raw in iter.flatten() {
         let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs);
+        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|error| error.to_string())?;
         insert_bucket(bitmap, bucket)?;
     }
     Ok(())
 }
 
 fn add_buckets_from_values(
-    bitmap: &mut RoaringBitmap,
+    bitmap: &mut RoaringTreemap,
     spec: &TimeBucket,
     unit: TimeUnit,
     values: &[i64],
 ) -> Result<(), String> {
     for &raw in values {
         let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs);
+        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|error| error.to_string())?;
         insert_bucket(bitmap, bucket)?;
     }
     Ok(())
@@ -296,8 +291,8 @@ fn compute_bitmap_from_reader(
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
     time_column: &str,
     bucket_spec: &TimeBucket,
-) -> Result<RoaringBitmap, String> {
-    let mut bitmap = RoaringBitmap::new();
+) -> Result<RoaringTreemap, String> {
+    let mut bitmap = RoaringTreemap::new();
 
     macro_rules! process_timestamp_array {
         ($array_type: ty, $col: expr, $unit: expr) => {{
@@ -374,7 +369,7 @@ fn compute_arrow_coverage(
     };
     let reader = builder.build()?;
     let bitmap = compute_bitmap_from_reader(reader, time_column, bucket)?;
-    Ok(timeseries_table_format::coverage::Coverage::from_bitmap(
+    Ok(timeseries_table_format::coverage::Coverage::from_treemap(
         bitmap,
     ))
 }
@@ -457,7 +452,7 @@ fn compute_rg_parallel_coverage(
         .map(|chunk| chunk.to_vec())
         .collect();
 
-    let execute = || -> Result<Vec<RoaringBitmap>, String> {
+    let execute = || -> Result<Vec<RoaringTreemap>, String> {
         chunks
             .par_iter()
             .map(|chunk| {
@@ -486,12 +481,12 @@ fn compute_rg_parallel_coverage(
         .map_err(|e| format!("failed to build rayon thread pool: {e}"))?;
     let bitmaps = pool.install(execute);
 
-    let mut merged = RoaringBitmap::new();
+    let mut merged = RoaringTreemap::new();
     for bm in bitmaps? {
         merged |= bm;
     }
 
-    Ok(timeseries_table_format::coverage::Coverage::from_bitmap(
+    Ok(timeseries_table_format::coverage::Coverage::from_treemap(
         merged,
     ))
 }
@@ -520,7 +515,7 @@ fn read_int64_column_into_bitmap(
     max_def_level: i16,
     unit: ParquetTimeUnit,
     bucket: &TimeBucket,
-    bitmap: &mut RoaringBitmap,
+    bitmap: &mut RoaringTreemap,
     batch_size: usize,
 ) -> Result<(), String> {
     let mut values: Vec<i64> = Vec::with_capacity(batch_size);
@@ -547,7 +542,8 @@ fn read_int64_column_into_bitmap(
         if max_def_level == 0 {
             for &raw in &values[..values_read] {
                 let secs = secs_from_parquet_unit(unit, raw);
-                let bucket_id = bucket_id_from_epoch_secs(bucket, secs);
+                let bucket_id =
+                    bucket_id_from_epoch_secs(bucket, secs).map_err(|error| error.to_string())?;
                 insert_bucket(bitmap, bucket_id)?;
             }
         } else {
@@ -560,7 +556,8 @@ fn read_int64_column_into_bitmap(
                     let raw = values[value_idx];
                     value_idx += 1;
                     let secs = secs_from_parquet_unit(unit, raw);
-                    let bucket_id = bucket_id_from_epoch_secs(bucket, secs);
+                    let bucket_id = bucket_id_from_epoch_secs(bucket, secs)
+                        .map_err(|error| error.to_string())?;
                     insert_bucket(bitmap, bucket_id)?;
                 }
             }
@@ -601,7 +598,7 @@ fn compute_parquet_direct_coverage_with_batch(
         }
     };
 
-    let mut bitmap = RoaringBitmap::new();
+    let mut bitmap = RoaringTreemap::new();
     let max_def_level = col_descr.max_def_level();
     let batch_size = batch_size.unwrap_or(8192);
 
@@ -625,7 +622,7 @@ fn compute_parquet_direct_coverage_with_batch(
         }
     }
 
-    Ok(timeseries_table_format::coverage::Coverage::from_bitmap(
+    Ok(timeseries_table_format::coverage::Coverage::from_treemap(
         bitmap,
     ))
 }

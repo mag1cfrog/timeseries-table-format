@@ -2,14 +2,13 @@
 //!
 //! This module provides utilities for analyzing Parquet segments to extract
 //! time-series coverage metadata: bucket assignments for timestamps within each
-//! segment. Coverage data is typically persisted in a RoaringBitmap sidecar
+//! segment. Coverage data is persisted in a RoaringTreemap sidecar
 //! file and referenced by the transaction log for efficient time-range queries.
 //!
 //! The error types in this module cover common failure points:
 //! - Storage I/O errors when accessing segment files.
 //! - Parquet format violations or missing/malformed metadata.
 //! - Unsupported or out-of-range timestamp values.
-//! - Bucket ID overflow (when a bucket index exceeds u32 range).
 
 use std::path::Path;
 
@@ -27,13 +26,13 @@ use parquet::{
     },
     errors::ParquetError,
 };
-use roaring::RoaringBitmap;
+use roaring::RoaringTreemap;
 use snafu::{Backtrace, Snafu};
 use tokio::task::JoinSet;
 
 use crate::{
     coverage::Coverage,
-    coverage::bucket::bucket_id_from_epoch_secs,
+    coverage::bucket::{BucketError, bucket_id_from_epoch_secs},
     metadata::table_metadata::TimeBucket,
     metadata::time_column::TimeColumnError,
     storage::{StorageError, TableLocation, open_parquet_reader},
@@ -48,7 +47,7 @@ use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 /// 2. Inspects the Parquet schema to locate the timestamp column.
 /// 3. Validates that the timestamp column uses a supported type.
 /// 4. Streams projected timestamp values and maps them to buckets.
-/// 5. Stores computed bucket IDs in a RoaringBitmap for efficient serialization.
+/// 5. Stores computed bucket IDs in a RoaringTreemap for efficient serialization.
 ///
 /// Errors at any stage are captured here with context about the segment path,
 /// column name, and raw values involved.
@@ -93,17 +92,13 @@ pub enum SegmentCoverageError {
         source: TimeColumnError,
     },
 
-    /// A computed bucket ID exceeds u32 range and cannot be stored in the coverage bitmap.
-    ///
-    /// RoaringBitmap uses u32 bucket IDs; bucket computations that yield larger
-    /// values indicate a mismatch between segment data and the configured time bucket
-    /// specification.
-    #[snafu(display("Bucket id {bucket_id} does not fit into u32 bucket domain in {path}"))]
-    BucketOverflow {
+    /// Ordered timestamp bucket mapping failed.
+    #[snafu(display("Bucket mapping failed for segment {path}: {source}"))]
+    Bucket {
         /// The path to the segment file.
         path: String,
-        /// The computed bucket ID that exceeded u32::MAX.
-        bucket_id: u64,
+        /// Bucket mapping failure.
+        source: BucketError,
     },
 }
 
@@ -116,23 +111,8 @@ fn secs_from_raw(unit: TimeUnit, raw: i64) -> i64 {
     }
 }
 
-fn insert_bucket(
-    bitmap: &mut RoaringBitmap,
-    path: &str,
-    bucket: u64,
-) -> Result<(), SegmentCoverageError> {
-    if bucket > u32::MAX as u64 {
-        return Err(SegmentCoverageError::BucketOverflow {
-            path: path.to_string(),
-            bucket_id: bucket,
-        });
-    }
-    bitmap.insert(bucket as u32);
-    Ok(())
-}
-
 fn add_buckets_from_iter(
-    bitmap: &mut RoaringBitmap,
+    bitmap: &mut RoaringTreemap,
     path: &str,
     spec: &TimeBucket,
     unit: TimeUnit,
@@ -140,15 +120,19 @@ fn add_buckets_from_iter(
 ) -> Result<(), SegmentCoverageError> {
     for raw in iter.flatten() {
         let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs);
-
-        insert_bucket(bitmap, path, bucket)?;
+        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|source| {
+            SegmentCoverageError::Bucket {
+                path: path.to_string(),
+                source,
+            }
+        })?;
+        bitmap.insert(bucket);
     }
     Ok(())
 }
 
 fn add_buckets_from_values(
-    bitmap: &mut RoaringBitmap,
+    bitmap: &mut RoaringTreemap,
     path: &str,
     spec: &TimeBucket,
     unit: TimeUnit,
@@ -156,8 +140,13 @@ fn add_buckets_from_values(
 ) -> Result<(), SegmentCoverageError> {
     for &raw in values {
         let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs);
-        insert_bucket(bitmap, path, bucket)?;
+        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|source| {
+            SegmentCoverageError::Bucket {
+                path: path.to_string(),
+                source,
+            }
+        })?;
+        bitmap.insert(bucket);
     }
     Ok(())
 }
@@ -169,8 +158,8 @@ async fn compute_bitmap_from_stream(
     path_str: &str,
     time_column: &str,
     bucket_spec: &TimeBucket,
-) -> Result<RoaringBitmap, SegmentCoverageError> {
-    let mut bitmap = RoaringBitmap::new();
+) -> Result<RoaringTreemap, SegmentCoverageError> {
+    let mut bitmap = RoaringTreemap::new();
 
     macro_rules! process_timestamp_array {
         ($array_type: ty, $col: expr, $unit: expr) => {{
@@ -337,7 +326,7 @@ pub async fn compute_segment_coverage(
         });
     }
 
-    let mut merged = RoaringBitmap::new();
+    let mut merged = RoaringTreemap::new();
     while let Some(result) = tasks.join_next().await {
         let bitmap = result.map_err(|source| SegmentCoverageError::ParquetRead {
             path: path.clone(),
@@ -347,7 +336,7 @@ pub async fn compute_segment_coverage(
         merged |= bitmap;
     }
 
-    Ok(Coverage::from_bitmap(merged))
+    Ok(Coverage::from_treemap(merged))
 }
 
 #[cfg(test)]
@@ -374,6 +363,7 @@ mod tests {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+    const EPOCH_BUCKET: u64 = 0x8000_0000_0000_0000;
 
     fn write_parquet_batch(
         path: &Path,
@@ -453,14 +443,14 @@ mod tests {
         // Minutes bucket: 1 second and 30 seconds map to bucket 0; 3600s -> bucket 60.
         let cov_min =
             compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Minutes(1)).await?;
-        let buckets_min: Vec<u32> = cov_min.present().iter().collect();
-        assert_eq!(buckets_min, vec![0, 60]);
+        let buckets_min: Vec<u64> = cov_min.present().iter().collect();
+        assert_eq!(buckets_min, vec![EPOCH_BUCKET, EPOCH_BUCKET + 60]);
 
         // Hours bucket: 1 second -> bucket 0; 3600s -> bucket 1.
         let cov_hr =
             compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Hours(1)).await?;
-        let buckets_hr: Vec<u32> = cov_hr.present().iter().collect();
-        assert_eq!(buckets_hr, vec![0, 1]);
+        let buckets_hr: Vec<u64> = cov_hr.present().iter().collect();
+        assert_eq!(buckets_hr, vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]);
 
         Ok(())
     }
@@ -495,7 +485,12 @@ mod tests {
         .await?;
         assert_eq!(
             coverage.present().iter().collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
+            vec![
+                EPOCH_BUCKET,
+                EPOCH_BUCKET + 1,
+                EPOCH_BUCKET + 2,
+                EPOCH_BUCKET + 3
+            ]
         );
         Ok(())
     }
@@ -518,8 +513,11 @@ mod tests {
         )
         .await?;
         assert_eq!(coverage.cardinality(), row_count as u64);
-        assert_eq!(coverage.present().min(), Some(0));
-        assert_eq!(coverage.present().max(), Some(row_count as u32 - 1));
+        assert_eq!(coverage.present().min(), Some(EPOCH_BUCKET));
+        assert_eq!(
+            coverage.present().max(),
+            Some(EPOCH_BUCKET + row_count as u64 - 1)
+        );
         Ok(())
     }
 
@@ -572,7 +570,10 @@ mod tests {
                 &TimeBucket::Seconds(1),
             )
             .await?;
-            assert_eq!(coverage.present().iter().collect::<Vec<_>>(), vec![1, 60]);
+            assert_eq!(
+                coverage.present().iter().collect::<Vec<_>>(),
+                vec![EPOCH_BUCKET + 1, EPOCH_BUCKET + 60]
+            );
         }
         Ok(())
     }
@@ -652,7 +653,12 @@ mod tests {
         .await?;
         assert_eq!(
             coverage.present().iter().collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
+            vec![
+                EPOCH_BUCKET,
+                EPOCH_BUCKET + 1,
+                EPOCH_BUCKET + 2,
+                EPOCH_BUCKET + 3
+            ]
         );
         Ok(())
     }
@@ -718,7 +724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_coverage_errors_on_bucket_overflow() -> TestResult {
+    async fn compute_coverage_supports_buckets_above_u32() -> TestResult {
         let tmp = TempDir::new()?;
         let rel_path = Path::new("data/overflow.parquet");
         let abs_path = tmp.path().join(rel_path);
@@ -726,15 +732,14 @@ mod tests {
         write_parquet_with_timestamps(&abs_path, &[Some(overflow_ms)])?;
 
         let location = TableLocation::local(tmp.path());
-        let err = compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Seconds(1))
-            .await
-            .expect_err("expected bucket overflow error");
+        let coverage =
+            compute_segment_coverage(&location, rel_path, "ts", &TimeBucket::Seconds(1)).await?;
 
-        assert!(matches!(
-            err,
-            SegmentCoverageError::BucketOverflow { bucket_id, .. }
-            if bucket_id == (u32::MAX as u64 + 1)
-        ));
+        assert!(
+            coverage
+                .present()
+                .contains(0x8000_0000_0000_0000 + u64::from(u32::MAX) + 1)
+        );
         Ok(())
     }
 

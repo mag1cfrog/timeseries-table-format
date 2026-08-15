@@ -9,7 +9,7 @@
 //! Coverage sidecars are stored alongside table data and segments to track which
 //! time buckets have been observed. This module abstracts the I/O details:
 //!
-//! - Serializes [`Coverage`] instances to bytes using the RoaringBitmap format.
+//! - Serializes [`Coverage`] instances to bytes using the RoaringTreemap format.
 //! - Writes bytes to the table storage with atomic or new-only semantics.
 //! - Handles errors from layout validation, serialization, and storage layers.
 //!
@@ -209,13 +209,13 @@ mod tests {
         let (_tmp, loc) = temp_location();
         let rel = Path::new("_coverage/table/1.roar");
 
-        let cov1 = Coverage::from_iter(vec![1u32, 2, 3]);
+        let cov1 = Coverage::from_iter(vec![1u64, 2, 3]);
         write_coverage_sidecar_atomic(&loc, rel, &cov1)
             .await
             .expect("first write");
 
         // Overwrite with different coverage
-        let cov2 = Coverage::from_iter(vec![10u32, 11]);
+        let cov2 = Coverage::from_iter(vec![10u64, 11]);
         write_coverage_sidecar_atomic(&loc, rel, &cov2)
             .await
             .expect("overwrite");
@@ -234,7 +234,7 @@ mod tests {
         let (_tmp, loc) = temp_location();
         let rel = Path::new("_coverage/segments/seg-1.roar");
 
-        let cov = Coverage::from_iter(vec![5u32]);
+        let cov = Coverage::from_iter(vec![5u64]);
         write_coverage_sidecar_new(&loc, rel, &cov)
             .await
             .expect("first write");
@@ -257,7 +257,7 @@ mod tests {
         let (_tmp, loc) = temp_location();
         let rel = Path::new("_coverage/table/2.roar");
 
-        let cov = Coverage::from_iter(vec![1u32, 3, 5, 7]);
+        let cov = Coverage::from_iter(vec![1u64, 3, 5, 7]);
         write_coverage_sidecar_atomic(&loc, rel, &cov)
             .await
             .expect("write sidecar");

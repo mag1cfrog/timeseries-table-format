@@ -162,7 +162,7 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         .last_fully_covered_window(end, 2)
         .await?
         .expect("should find contiguous window");
-    assert_eq!(last_window, 4u32..=5u32);
+    assert_eq!(last_window, 4u64..=5u64);
 
     // Check a shorter range that ends on a bucket boundary to exercise half-open logic.
     let short_end = ts_from_secs(180)?; // start of bucket 3; expected buckets 0,1,2 (covered: 0,1)
@@ -173,7 +173,7 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     assert_eq!(short_gap, 1);
 
     let short_window = table.last_fully_covered_window(short_end, 2).await?;
-    assert_eq!(short_window, Some(0u32..=1u32));
+    assert_eq!(short_window, Some(0u64..=1u64));
 
     // With a trailing single-bucket run (bucket 8), len should skip the short tail
     // and return the last contiguous run of sufficient length.
@@ -183,14 +183,14 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         .last_fully_covered_window(later_end, window_len)
         .await?
         .expect("window of len >=2 should be found");
-    assert_eq!(window, 4u32..=5u32);
+    assert_eq!(window, 4u64..=5u64);
 
     let window_len_three = 3;
     let window_three = table
         .last_fully_covered_window(later_end, window_len_three)
         .await?
         .expect("window of len >=3 should be found");
-    assert_eq!(window_three, 3u32..=5u32);
+    assert_eq!(window_three, 3u64..=5u64);
 
     Ok(())
 }
