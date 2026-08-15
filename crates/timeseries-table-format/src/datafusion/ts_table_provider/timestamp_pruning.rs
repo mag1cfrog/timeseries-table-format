@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, TimeUnit};
-use chrono::{DateTime, Duration, Months, TimeZone, Utc};
+use chrono::{DateTime, Duration, Months, NaiveDate, TimeZone, Utc};
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::scalar::ScalarValue;
 
 use super::segment_pruning::timestamp_scalar;
+use super::{ParsedTz, parse_tz};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UnifiedInterval {
@@ -109,6 +110,7 @@ fn normalize_comparison(expr: &Expr, index_column: &str, index_type: &DataType) 
 
     normalize_interval_comparison(comparison, index_column, index_type)
         .or_else(|| normalize_to_unixtime_comparison(comparison, index_column, index_type))
+        .or_else(|| normalize_to_date_comparison(comparison, index_column, index_type))
 }
 
 fn normalize_interval_comparison(
@@ -361,6 +363,133 @@ fn timestamp_raw_literal(value: i64, unit: &TimeUnit, timezone: Option<Arc<str>>
     Expr::Literal(value, None)
 }
 
+fn normalize_to_date_comparison(
+    comparison: &BinaryExpr,
+    index_column: &str,
+    index_type: &DataType,
+) -> Option<Expr> {
+    if let Some(column) = to_date_index(&comparison.left, index_column) {
+        return date_comparison(
+            column,
+            comparison.op,
+            date_literal(&comparison.right)?,
+            index_type,
+        );
+    }
+
+    let column = to_date_index(&comparison.right, index_column)?;
+    date_comparison(
+        column,
+        flip_comparison(comparison.op)?,
+        date_literal(&comparison.left)?,
+        index_type,
+    )
+}
+
+fn to_date_index(expr: &Expr, index_column: &str) -> Option<Expr> {
+    let Expr::ScalarFunction(function) = expr else {
+        return None;
+    };
+    if !function.name().eq_ignore_ascii_case("to_date") || function.args.len() != 1 {
+        return None;
+    }
+
+    let Expr::Cast(cast) = &function.args[0] else {
+        return None;
+    };
+    if !matches!(
+        cast.data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    ) {
+        return None;
+    }
+    let Expr::Column(column) = cast.expr.as_ref() else {
+        return None;
+    };
+    (column.name == index_column).then(|| cast.expr.as_ref().clone())
+}
+
+fn date_literal(expr: &Expr) -> Option<NaiveDate> {
+    let Expr::Literal(value, _) = expr else {
+        return None;
+    };
+    match value {
+        ScalarValue::Date32(Some(days)) => NaiveDate::from_ymd_opt(1970, 1, 1)?
+            .checked_add_signed(Duration::days(i64::from(*days))),
+        ScalarValue::Utf8(Some(value))
+        | ScalarValue::LargeUtf8(Some(value))
+        | ScalarValue::Utf8View(Some(value)) => NaiveDate::parse_from_str(value, "%Y-%m-%d").ok(),
+        _ => None,
+    }
+}
+
+fn date_comparison(
+    column: Expr,
+    operator: Operator,
+    date: NaiveDate,
+    index_type: &DataType,
+) -> Option<Expr> {
+    let (start, end) = date_bounds(date, index_type)?;
+    match operator {
+        Operator::Eq => Some(binary(
+            binary(column.clone(), Operator::GtEq, start),
+            Operator::And,
+            binary(column, Operator::Lt, end),
+        )),
+        Operator::NotEq => Some(binary(
+            binary(column.clone(), Operator::Lt, start),
+            Operator::Or,
+            binary(column, Operator::GtEq, end),
+        )),
+        Operator::Lt => Some(binary(column, Operator::Lt, start)),
+        Operator::LtEq => Some(binary(column, Operator::Lt, end)),
+        Operator::Gt => Some(binary(column, Operator::GtEq, end)),
+        Operator::GtEq => Some(binary(column, Operator::GtEq, start)),
+        _ => None,
+    }
+}
+
+fn date_bounds(date: NaiveDate, index_type: &DataType) -> Option<(Expr, Expr)> {
+    let DataType::Timestamp(unit, Some(timezone)) = index_type else {
+        return None;
+    };
+    let timezone_name = timezone.clone();
+    let timezone = parse_tz(timezone)?;
+    let start = date.and_hms_opt(0, 0, 0)?;
+    let end = date.succ_opt()?.and_hms_opt(0, 0, 0)?;
+    let (start, end) = match timezone {
+        ParsedTz::Utc => (Utc.from_utc_datetime(&start), Utc.from_utc_datetime(&end)),
+        ParsedTz::Fixed(offset) => (
+            offset
+                .from_local_datetime(&start)
+                .single()?
+                .with_timezone(&Utc),
+            offset
+                .from_local_datetime(&end)
+                .single()?
+                .with_timezone(&Utc),
+        ),
+        ParsedTz::Olson(timezone) => (
+            timezone
+                .from_local_datetime(&start)
+                .single()?
+                .with_timezone(&Utc),
+            timezone
+                .from_local_datetime(&end)
+                .single()?
+                .with_timezone(&Utc),
+        ),
+    };
+
+    Some((
+        Expr::Literal(
+            timestamp_scalar(start, unit, Some(timezone_name.clone()))?,
+            None,
+        ),
+        Expr::Literal(timestamp_scalar(end, unit, Some(timezone_name))?, None),
+    ))
+}
+
 fn is_comparison(operator: Operator) -> bool {
     matches!(
         operator,
@@ -393,7 +522,7 @@ mod tests {
     use arrow::array::types::IntervalMonthDayNano;
     use chrono::TimeZone;
     use datafusion::common::Column;
-    use datafusion::logical_expr::expr::ScalarFunction;
+    use datafusion::logical_expr::expr::{Cast, ScalarFunction};
     use datafusion::logical_expr::expr_fn::create_udf;
     use datafusion::logical_expr::{Expr, Volatility};
     use datafusion::logical_expr_common::columnar_value::ColumnarValue;
@@ -426,17 +555,32 @@ mod tests {
         DataType::Timestamp(TimeUnit::Millisecond, timezone)
     }
 
-    fn to_unixtime(args: Vec<Expr>) -> Expr {
+    fn scalar_function(name: &str, args: Vec<Expr>, return_type: DataType) -> Expr {
         let udf = create_udf(
-            "to_unixtime",
+            name,
             vec![],
-            DataType::Int64,
+            return_type,
             Volatility::Immutable,
             Arc::new(|_: &[ColumnarValue]| -> DFResult<ColumnarValue> {
                 unreachable!("UDF is not evaluated by normalizer tests")
             }),
         );
         Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(udf), args))
+    }
+
+    fn to_unixtime(args: Vec<Expr>) -> Expr {
+        scalar_function("to_unixtime", args, DataType::Int64)
+    }
+
+    fn to_date(args: Vec<Expr>) -> Expr {
+        scalar_function("to_date", args, DataType::Date32)
+    }
+
+    fn string_cast(expr: Expr) -> Expr {
+        Expr::Cast(Cast {
+            expr: Box::new(expr),
+            data_type: DataType::Utf8View,
+        })
     }
 
     #[test]
@@ -638,6 +782,92 @@ mod tests {
                 predicate
             );
         }
+    }
+
+    #[test]
+    fn normalizes_to_date_ranges_and_reversed_comparisons() {
+        let utc: Arc<str> = "UTC".into();
+        let equality = binary(
+            to_date(vec![string_cast(column("ts"))]),
+            Operator::Eq,
+            Expr::Literal(ScalarValue::Utf8(Some("2024-01-08".to_string())), None),
+        );
+        let expected = binary(
+            binary(
+                column("ts"),
+                Operator::GtEq,
+                timestamp_millis(1_704_672_000_000, Some(utc.clone())),
+            ),
+            Operator::And,
+            binary(
+                column("ts"),
+                Operator::Lt,
+                timestamp_millis(1_704_758_400_000, Some(utc.clone())),
+            ),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(equality, "ts", &timestamp_type(Some(utc))).unwrap(),
+            expected
+        );
+
+        let new_york: Arc<str> = "America/New_York".into();
+        let reversed = binary(
+            Expr::Literal(ScalarValue::Utf8(Some("2024-03-10".to_string())), None),
+            Operator::Lt,
+            to_date(vec![string_cast(column("ts"))]),
+        );
+        let expected = binary(
+            column("ts"),
+            Operator::GtEq,
+            timestamp_millis(1_710_129_600_000, Some(new_york.clone())),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(reversed, "ts", &timestamp_type(Some(new_york)),)
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn leaves_unsupported_to_date_forms_unchanged() {
+        let date = || Expr::Literal(ScalarValue::Utf8(Some("2024-01-08".to_string())), None);
+        let predicates = [
+            binary(to_date(vec![column("ts")]), Operator::Eq, date()),
+            binary(
+                to_date(vec![string_cast(column("ts")), date()]),
+                Operator::Eq,
+                date(),
+            ),
+            binary(
+                to_date(vec![string_cast(column("other"))]),
+                Operator::Eq,
+                date(),
+            ),
+            binary(
+                to_date(vec![string_cast(column("ts"))]),
+                Operator::Eq,
+                Expr::Literal(ScalarValue::Utf8(Some("not-a-date".to_string())), None),
+            ),
+        ];
+        let index_type = timestamp_type(Some("UTC".into()));
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &index_type).unwrap(),
+                predicate
+            );
+        }
+
+        let missing_timezone = binary(
+            to_date(vec![string_cast(column("ts"))]),
+            Operator::Eq,
+            date(),
+        );
+        assert_eq!(
+            normalize_timestamp_predicate(missing_timezone.clone(), "ts", &timestamp_type(None),)
+                .unwrap(),
+            missing_timezone
+        );
     }
 
     #[test]
