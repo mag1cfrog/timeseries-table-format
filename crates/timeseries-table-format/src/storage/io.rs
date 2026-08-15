@@ -2,7 +2,7 @@ use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
 #[cfg(test)]
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     sync::{LazyLock, Mutex},
 };
 use std::{
@@ -36,6 +36,12 @@ impl TempFileGuard {
     }
 
     async fn cleanup(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if take_cleanup_failure(&self.path) {
+            self.disarm();
+            return Err(io::Error::other("injected cleanup failure"));
+        }
+
         let result = fs::remove_file(&self.path).await;
         self.disarm();
         result
@@ -67,20 +73,38 @@ fn cleanup_failure(path: &Path, operation: StorageError, cleanup: io::Error) -> 
 }
 
 #[cfg(test)]
-static WRITE_NEW_FAILURES: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WRITE_NEW_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
 pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
+    if cleanup_fails {
+        CLEANUP_FAILURES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.clone());
+    }
     WRITE_NEW_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(path, cleanup_fails);
+        .insert(path);
 }
 
 #[cfg(test)]
-fn take_write_new_failure(path: &Path) -> Option<bool> {
+fn take_write_new_failure(path: &Path) -> bool {
     WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+}
+
+#[cfg(test)]
+fn take_cleanup_failure(path: &Path) -> bool {
+    CLEANUP_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(path)
@@ -109,10 +133,10 @@ async fn cleanup_created_file(
 async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
     let mut guard = TempFileGuard::new(path.to_owned());
     #[cfg(test)]
-    let injected_cleanup_failure = take_write_new_failure(path);
+    let injected_write_failure = take_write_new_failure(path);
     let result = async {
         #[cfg(test)]
-        if injected_cleanup_failure.is_some() {
+        if injected_write_failure {
             return Err(write_failure(path));
         }
 
@@ -141,15 +165,6 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
         }
         Err(operation) => {
             drop(file);
-            #[cfg(test)]
-            if injected_cleanup_failure == Some(true) {
-                guard.disarm();
-                return Err(cleanup_failure(
-                    path,
-                    operation,
-                    io::Error::other("injected cleanup failure"),
-                ));
-            }
             Err(cleanup_created_file(&mut guard, path, operation).await)
         }
     }

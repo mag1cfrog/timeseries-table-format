@@ -1482,6 +1482,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_commit_retains_writer_owned_sidecars() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(tmp.path())?;
+        let segment_path = "data/ambiguous.parquet";
+
+        write_test_parquet(
+            &tmp.path().join(segment_path),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+
+        let commit_path = tmp.path().join(layout::commit_rel_path(2));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
+
+        let err = table
+            .append_parquet_segment(segment_path, "ts")
+            .await
+            .expect_err("failed commit cleanup should make the outcome ambiguous");
+
+        assert!(matches!(
+            err,
+            TableError::TransactionLog {
+                source: CommitError::AmbiguousOutcome { .. }
+            }
+        ));
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(commit_path.exists());
+        assert_eq!(coverage_files(tmp.path())?.len(), coverage_before.len() + 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sidecar_cleanup_failure_preserves_original_append_error() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
