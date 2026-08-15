@@ -215,6 +215,7 @@ jobs:
           before-script-linux: |
             printf 'sccache==0.16.0\n' > /tmp/sccache-constraints.txt
             export UV_CONSTRAINT=/tmp/sccache-constraints.txt
+            export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
             export SCCACHE_ERROR_LOG=/tmp/sccache.log
             verify_sccache_writes() {
               status=$?
@@ -268,6 +269,7 @@ jobs:
           before-script-linux: |
             printf 'sccache==0.16.0\n' > /tmp/sccache-constraints.txt
             export UV_CONSTRAINT=/tmp/sccache-constraints.txt
+            export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
             export SCCACHE_ERROR_LOG=/tmp/sccache.log
             verify_sccache_writes() {
               status=$?
@@ -425,6 +427,7 @@ jobs:
           before-script-linux: |
             printf 'sccache==0.16.0\n' > /tmp/sccache-constraints.txt
             export UV_CONSTRAINT=/tmp/sccache-constraints.txt
+            export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE:$PWD"
           args: >-
             --release -o sdist-wheel
             --compatibility pypi
