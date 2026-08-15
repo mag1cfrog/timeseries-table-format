@@ -1,21 +1,18 @@
 //! Coverage state helpers for `TimeSeriesTable`.
 //!
-//! This module reads and repairs table coverage bitmaps persisted alongside
+//! This module reads table coverage bitmaps persisted alongside
 //! the table. It is responsible for:
 //! - Loading coverage snapshots via the transaction log pointer and enforcing
 //!   bucket compatibility.
 //! - Falling back to unioning segment coverage sidecars when the snapshot
 //!   pointer is missing or unreadable (strict vs recovery modes).
-//! - Optionally healing the snapshot file on disk after a successful recovery
-//!   without touching the transaction log.
 
 use std::path::Path;
 
 use log::warn;
 
 use crate::{
-    coverage::Coverage,
-    coverage::io::{read_coverage_sidecar, write_coverage_sidecar_atomic},
+    coverage::Coverage, coverage::io::read_coverage_sidecar,
     transaction_log::table_state::TableCoveragePointer,
 };
 
@@ -120,59 +117,6 @@ impl TimeSeriesTable {
                             ptr.coverage_path, ptr.version, snapshot_err
                         );
                         self.recover_table_coverage_from_segments().await
-                    }
-                }
-            }
-        }
-    }
-
-    /// Load table coverage and (optionally) heal the snapshot best-effort.
-    ///
-    /// Same as readonly, but if recovery succeeds and a snapshot pointer exists,
-    /// attempts to overwrite the snapshot file with the recovered bitmap.
-    ///
-    /// IMPORTANT: This does NOT update the transaction log; it only rewrites the
-    /// referenced snapshot path best-effort.
-    pub(crate) async fn load_table_snapshot_coverage_with_heal(
-        &self,
-    ) -> Result<Coverage, TableError> {
-        match &self.state().table_coverage {
-            None => {
-                // If there are no segments, treat as empty (first append case).
-                // If there are segments, this is suspicious in v0.1: fail.
-                if self.state().segments.is_empty() {
-                    return Ok(Coverage::empty());
-                }
-
-                // No snapshot pointer, but segments exist -> recover from segments.
-                self.recover_table_coverage_from_segments().await
-            }
-
-            Some(ptr) => {
-                self.ensure_table_coverage_bucket_matches(ptr)?;
-
-                match read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path)).await {
-                    Ok(cov) => Ok(cov),
-
-                    Err(snapshot_err) => {
-                        warn!(
-                            "Failed to read table coverage snapshot at {} (version {}): {snapshot_err:?}. \
-                         Attempting recovery from segment sidecars.",
-                            ptr.coverage_path, ptr.version
-                        );
-
-                        // Try recovery from segments.
-                        let recovered = self.recover_table_coverage_from_segments().await?;
-
-                        // Optional: heal snapshot best-effort (do not fail open if this fails)
-                        let _ = write_coverage_sidecar_atomic(
-                            self.location(),
-                            Path::new(&ptr.coverage_path),
-                            &recovered,
-                        )
-                        .await;
-
-                        Ok(recovered)
                     }
                 }
             }

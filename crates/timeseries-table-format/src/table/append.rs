@@ -181,7 +181,7 @@ impl TimeSeriesTable {
 
         // 3) Load current table snapshot coverage (or empty if first append).
         let step_start = Instant::now();
-        let table_cov = self.load_table_snapshot_coverage_with_heal().await?;
+        let table_cov = self.load_table_snapshot_coverage_readonly().await?;
         if let Some(r) = report.as_mut() {
             r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
         }
@@ -1069,7 +1069,7 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered = table.load_table_snapshot_coverage_with_heal().await?;
+        let recovered = table.load_table_snapshot_coverage_readonly().await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
@@ -1127,7 +1127,7 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered = table.load_table_snapshot_coverage_with_heal().await?;
+        let recovered = table.load_table_snapshot_coverage_readonly().await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
@@ -1137,6 +1137,56 @@ mod tests {
         }
 
         assert_eq!(recovered.present(), expected.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_append_does_not_heal_corrupt_snapshot() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let existing = "data/existing.parquet";
+        write_test_parquet(
+            &tmp.path().join(existing),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        table.append_parquet_segment(existing, "ts").await?;
+
+        let snapshot_path = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer present")
+            .coverage_path
+            .clone();
+        let snapshot_abs = tmp.path().join(snapshot_path);
+        tokio::fs::write(&snapshot_abs, b"garbage").await?;
+
+        let overlapping = "data/overlapping.parquet";
+        write_test_parquet(
+            &tmp.path().join(overlapping),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 20.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment(overlapping, "ts")
+            .await
+            .expect_err("overlap must be rejected");
+        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        assert_eq!(tokio::fs::read(snapshot_abs).await?, b"garbage");
         Ok(())
     }
 
@@ -1180,7 +1230,7 @@ mod tests {
         table.state = state;
 
         let err = table
-            .load_table_snapshot_coverage_with_heal()
+            .load_table_snapshot_coverage_readonly()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -1246,7 +1296,7 @@ mod tests {
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
         let err = table
-            .load_table_snapshot_coverage_with_heal()
+            .load_table_snapshot_coverage_readonly()
             .await
             .expect_err("corrupt sidecar should error");
 
