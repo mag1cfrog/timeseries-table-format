@@ -58,6 +58,16 @@ fn map_parquet_col_to_logical_type(
                     scale: *scale,
                 });
             }
+            LogicalType::Integer {
+                bit_width: 64,
+                is_signed,
+            } if physical == PhysicalType::INT64 => {
+                return Ok(if *is_signed {
+                    LogicalDataType::Int64
+                } else {
+                    LogicalDataType::UInt64
+                });
+            }
 
             _ => {}
         }
@@ -832,6 +842,25 @@ mod tests {
     }
 
     #[test]
+    fn map_parquet_col_to_logical_type_maps_64_bit_integer_annotations() {
+        for (is_signed, expected) in [
+            (true, LogicalDataType::Int64),
+            (false, LogicalDataType::UInt64),
+        ] {
+            let logical = LogicalType::Integer {
+                bit_width: 64,
+                is_signed,
+            };
+
+            let mapped =
+                map_parquet_col_to_logical_type("index", PhysicalType::INT64, Some(&logical), None)
+                    .unwrap();
+
+            assert_eq!(mapped, expected);
+        }
+    }
+
+    #[test]
     fn map_parquet_col_to_logical_type_maps_string_logical() {
         let mapped = map_parquet_col_to_logical_type(
             "text",
@@ -1575,6 +1604,10 @@ mod tests {
             .build()?;
         let value = Type::primitive_type_builder("value", PhysicalType::INT64)
             .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Integer {
+                bit_width: 64,
+                is_signed: false,
+            }))
             .build()?;
         let key_value = Type::group_type_builder("key_value")
             .with_repetition(Repetition::REPEATED)
@@ -1628,7 +1661,7 @@ mod tests {
                             }),
                             value: Some(Box::new(LogicalField {
                                 name: "value".to_string(),
-                                data_type: LogicalDataType::Int64,
+                                data_type: LogicalDataType::UInt64,
                                 nullable: true,
                             })),
                             keys_sorted: false,
@@ -2168,6 +2201,29 @@ mod tests {
             LogicalDataType::Int64,
             TestColumnValues::Int64(vec![1, 2, 3]),
         )
+    }
+
+    #[test]
+    fn logical_schema_maps_annotated_uint64() -> TestResult {
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("uint64.parquet");
+        let field = Type::primitive_type_builder("index", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Integer {
+                bit_width: 64,
+                is_signed: false,
+            }))
+            .build()?;
+        let parquet_schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(field)])
+                .build()?,
+        );
+        write_schema_only_parquet(&path, parquet_schema)?;
+
+        let schema = logical_schema_from_test_file(&path)?;
+        assert_eq!(schema.columns()[0].data_type, LogicalDataType::UInt64);
+        Ok(())
     }
 
     #[test]
