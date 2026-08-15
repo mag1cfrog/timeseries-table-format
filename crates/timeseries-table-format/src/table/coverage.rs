@@ -132,12 +132,12 @@ impl TimeSeriesTable {
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Duration, Utc};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 
 use crate::{
     coverage::Bucket,
     coverage::bucket::{bucket_id, bucket_range},
-    metadata::table_metadata::{IndexKind, IndexValue},
+    metadata::table_metadata::{IndexKind, IndexValue, IndexValueError, validate_index_range},
     table::error::{CoverageBucketSnafu, InvalidRangeSnafu},
 };
 
@@ -147,8 +147,13 @@ impl TimeSeriesTable {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<RangeInclusive<Bucket>, TableError> {
-        ensure!(start < end, InvalidRangeSnafu { start, end });
         self.ensure_timestamp_index("time coverage query")?;
+        validate_index_range(
+            &self.index_spec().kind,
+            &IndexValue::Timestamp(start),
+            &IndexValue::Timestamp(end),
+        )
+        .context(InvalidRangeSnafu)?;
         bucket_range(
             &self.index_spec().kind,
             &IndexValue::Timestamp(start),
@@ -162,12 +167,14 @@ impl TimeSeriesTable {
 
         // For half-open semantics [.., ts_end), subtract 1ns so we pick the
         // last bucket that still intersects the interval.
-        let end_adj = ts_end.checked_sub_signed(Duration::nanoseconds(1)).ok_or(
-            TableError::InvalidRange {
-                start: ts_end,
-                end: ts_end,
-            },
-        )?;
+        let end_adj = ts_end
+            .checked_sub_signed(Duration::nanoseconds(1))
+            .ok_or_else(|| TableError::InvalidRange {
+                source: IndexValueError::InvalidRange {
+                    start: IndexValue::Timestamp(ts_end),
+                    end: IndexValue::Timestamp(ts_end),
+                },
+            })?;
         bucket_id(&self.index_spec().kind, &IndexValue::Timestamp(end_adj))
             .context(CoverageBucketSnafu)
     }
