@@ -11,8 +11,7 @@ use crate::storage::{
 /// Table root location with table-scoped semantics.
 ///
 /// This wraps `StorageLocation` and is used when callers need to treat the
-/// location as a table root (e.g. log layout, segment paths, and helpers like
-/// `ensure_parquet_under_root`).
+/// location as a table root (e.g. log layout and segment paths).
 #[derive(Debug, Clone)]
 pub struct TableLocation(StorageLocation);
 
@@ -105,15 +104,6 @@ impl TableLocation {
                 Ok(())
             }
         }
-    }
-
-    /// Ensure `parquet_path` is under this table root.
-    /// If not, copy it into `data/<filename>` and return the relative path.
-    pub async fn ensure_parquet_under_root(&self, parquet_path: &Path) -> StorageResult<PathBuf> {
-        Ok(self
-            .prepare_parquet_under_root(parquet_path)
-            .await?
-            .relative_path)
     }
 
     pub(crate) async fn prepare_parquet_under_root(
@@ -274,7 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_parquet_under_root_refuses_overwrite() -> TestResult {
+    async fn prepare_parquet_under_root_refuses_overwrite() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         tokio::fs::create_dir_all(&table_root).await?;
@@ -289,7 +279,7 @@ mod tests {
         tokio::fs::write(&src_path, b"new").await?;
 
         let err = location
-            .ensure_parquet_under_root(&src_path)
+            .prepare_parquet_under_root(&src_path)
             .await
             .expect_err("expected AlreadyExists");
 
