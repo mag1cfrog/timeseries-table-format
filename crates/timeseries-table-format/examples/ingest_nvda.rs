@@ -77,14 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let meta = TableMeta::new_time_series(index);
     let location = TableLocation::local(&table_root);
-    let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+    let mut table = TimeSeriesTable::create(location, meta).await?;
 
     // 4) Append the segment via the transaction log (OCC).
-    let relative_path = location.ensure_parquet_under_root(&parquet_path).await?;
-    let relative_str = relative_path
-        .to_str()
-        .ok_or("relative Parquet path is not valid UTF-8")?;
-    let version = table.append_parquet_segment(relative_str, "ts").await?;
+    let (version, _) = table.append_parquet_from_path(&parquet_path, "ts").await?;
 
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!("Table root     : {}", table_root.display());

@@ -234,29 +234,19 @@ async fn cmd_append(
     let start = Instant::now();
     let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
     // Open first so we can read metadata for default ts column.
-    let mut t = open_table(location.clone(), table).await?;
+    let mut t = open_table(location, table).await?;
 
     let ts_col = match time_column {
         Some(c) => c,
         None => t.index_spec().timestamp_column.clone(),
     };
 
-    let rel = location
-        .ensure_parquet_under_root(parquet)
-        .await
-        .context(StorageSnafu)?;
-
-    let rel_str = if cfg!(windows) {
-        rel.to_string_lossy().replace('\\', "/")
-    } else {
-        rel.to_string_lossy().to_string()
-    };
-
-    t.append_parquet_segment(&rel_str, &ts_col)
-        .await
-        .context(AppendSegmentSnafu {
-            table: table.display().to_string(),
-        })?;
+    let (_, rel_str) =
+        t.append_parquet_from_path(parquet, &ts_col)
+            .await
+            .context(AppendSegmentSnafu {
+                table: table.display().to_string(),
+            })?;
 
     if timing {
         println!(
