@@ -1244,7 +1244,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             use timeseries_table_format::storage::TableLocation;
             use timeseries_table_format::table::TableError;
-            use timeseries_table_format::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
+            use timeseries_table_format::transaction_log::{
+                IndexKind, IndexSpec, TableMeta, TimeBucket,
+            };
 
             let bucket = TimeBucket::parse(&bucket).map_err(|e| {
                 let msg = format!("invalid bucket spec {bucket:?} (table_root={table_root}): {e}");
@@ -1254,11 +1256,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 py_err
             })?;
 
-            let index = TimeIndexSpec {
-                timestamp_column: time_column,
-                bucket,
-                timezone,
+            let index = IndexSpec {
+                column: time_column,
                 entity_columns: entity_columns.unwrap_or_default(),
+                kind: IndexKind::Timestamp { bucket, timezone },
             };
             let meta = TableMeta::new_time_series(index);
 
@@ -1339,11 +1340,17 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///
         /// Keys: `timestamp_column`, `entity_columns`, `bucket`, `timezone`.
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            use timeseries_table_format::transaction_log::TimeBucket;
+            use timeseries_table_format::transaction_log::{IndexKind, TimeBucket};
 
             let spec = self.inner.index_spec();
 
-            let bucket = match spec.bucket {
+            let IndexKind::Timestamp { bucket, timezone } = &spec.kind else {
+                return Err(TimeseriesTableError::new_err(format!(
+                    "Python timestamp index_spec does not support {} indexes",
+                    spec.kind.name()
+                )));
+            };
+            let bucket = match bucket {
                 TimeBucket::Seconds(n) => format!("{n}s"),
                 TimeBucket::Minutes(n) => format!("{n}m"),
                 TimeBucket::Hours(n) => format!("{n}h"),
@@ -1351,10 +1358,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             };
 
             let d = PyDict::new(py);
-            d.set_item("timestamp_column", spec.timestamp_column.clone())?;
+            d.set_item("timestamp_column", spec.column.clone())?;
             d.set_item("entity_columns", spec.entity_columns.clone())?;
             d.set_item("bucket", bucket)?;
-            d.set_item("timezone", spec.timezone.clone())?;
+            d.set_item("timezone", timezone.clone())?;
 
             Ok(d)
         }
@@ -1401,7 +1408,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             let rt = tokio_runner::global_runtime()?;
 
             let effective_time_column =
-                time_column.unwrap_or_else(|| self.inner.index_spec().timestamp_column.clone());
+                time_column.unwrap_or_else(|| self.inner.index_spec().column.clone());
 
             let table_root_for_err = self.table_root.clone();
             let table_root_for_err_cp = table_root_for_err.clone();
@@ -1519,14 +1526,16 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 use timeseries_table_format::{
                     storage::TableLocation,
                     table::TableError,
-                    transaction_log::{TableMeta, TimeBucket, TimeIndexSpec},
+                    transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket},
                 };
 
-                let index = TimeIndexSpec {
-                    timestamp_column: "ts".to_string(),
-                    bucket: TimeBucket::Minutes(60),
-                    timezone: None,
+                let index = IndexSpec {
+                    column: "ts".to_string(),
                     entity_columns: Vec::new(),
+                    kind: IndexKind::Timestamp {
+                        bucket: TimeBucket::Minutes(60),
+                        timezone: None,
+                    },
                 };
 
                 let meta = TableMeta::new_time_series(index);

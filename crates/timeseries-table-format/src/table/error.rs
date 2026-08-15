@@ -18,7 +18,7 @@ use crate::{
     formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
     metadata::{
         schema_compat::SchemaCompatibilityError,
-        table_metadata::{IndexKind, IndexSpecError, IndexValueError, TimeBucket},
+        table_metadata::{IndexKind, IndexSpecError, IndexValueError},
     },
     storage::StorageError,
     transaction_log::{CommitError, TableKind, segments::SegmentError},
@@ -234,19 +234,6 @@ pub enum TableError {
         expected: IndexKind,
         /// Index descriptor recorded in the table coverage pointer.
         actual: IndexKind,
-        /// Log version where the mismatching coverage pointer was recorded.
-        pointer_version: u64,
-    },
-
-    /// Compatibility error for timestamp-only coverage pointers.
-    #[snafu(display(
-        "Table coverage bucket spec mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    TableCoverageBucketMismatch {
-        /// Bucket spec defined by table metadata.
-        expected: TimeBucket,
-        /// Bucket spec recorded in the table coverage pointer.
-        actual: TimeBucket,
         /// Log version where the mismatching coverage pointer was recorded.
         pointer_version: u64,
     },

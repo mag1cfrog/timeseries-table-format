@@ -22,7 +22,7 @@ use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 /// Current table metadata / log format version.
 ///
 /// Bumped only when we make a breaking change to the on-disk JSON format.
-pub const TABLE_FORMAT_VERSION: u32 = 2;
+pub const TABLE_FORMAT_VERSION: u32 = 3;
 
 /// The high-level "kind" of table.
 ///
@@ -31,8 +31,8 @@ pub const TABLE_FORMAT_VERSION: u32 = 2;
 /// existing JSON.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TableKind {
-    /// A time-series table with an explicit time index specification.
-    TimeSeries(TimeIndexSpec),
+    /// A time-series table with an explicit ordered index specification.
+    TimeSeries(IndexSpec),
 
     /// Placeholder for future basic tables that do not have a time index.
     /// Not used in v0.1.
@@ -62,7 +62,7 @@ pub struct TableMeta {
     /// Writers set this to [`TABLE_FORMAT_VERSION`].
     pub(crate) format_version: u32,
 
-    /// If TimeIndexSpec.entity_columns is non-empty, we pin a single entity identity
+    /// If IndexSpec.entity_columns is non-empty, we pin a single entity identity
     /// per table (map keyed by column name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_identity: Option<BTreeMap<String, String>>,
@@ -110,7 +110,7 @@ impl TableMeta {
     /// - Fills `format_version` with `TABLE_FORMAT_VERSION`.
     /// - Leaves `logical_schema` as `None`; it will be adopted from the
     ///   first appended segment in v0.1.
-    pub fn new_time_series(index: TimeIndexSpec) -> Self {
+    pub fn new_time_series(index: IndexSpec) -> Self {
         TableMeta {
             kind: TableKind::TimeSeries(index),
             logical_schema: None,
@@ -121,10 +121,7 @@ impl TableMeta {
     }
 
     /// Variant that lets you explicitly pass a logical schema up front.
-    pub fn new_time_series_with_schema(
-        index: TimeIndexSpec,
-        logical_schema: LogicalSchema,
-    ) -> Self {
+    pub fn new_time_series_with_schema(index: IndexSpec, logical_schema: LogicalSchema) -> Self {
         TableMeta {
             kind: TableKind::TimeSeries(index),
             logical_schema: Some(logical_schema),
@@ -361,21 +358,6 @@ impl IndexSpec {
 
         self.kind.validate()
     }
-}
-
-/// Configuration for the legacy timestamp-only table index.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TimeIndexSpec {
-    /// Name of the timestamp column.
-    pub timestamp_column: String,
-    /// Optional entity columns.
-    #[serde(default)]
-    pub entity_columns: Vec<String>,
-    /// Logical coverage bucket size.
-    pub bucket: TimeBucket,
-    /// Optional IANA timezone identifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
 }
 
 /// Ordered value domain and its coverage bucket configuration.
@@ -620,7 +602,7 @@ mod tests {
             .expect("valid UTC timestamp")
     }
 
-    fn sample_index_spec() -> IndexSpec {
+    fn sample_time_index_spec() -> IndexSpec {
         IndexSpec {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
@@ -634,7 +616,7 @@ mod tests {
     #[test]
     fn index_spec_json_roundtrips_all_domains() {
         let specs = [
-            sample_index_spec(),
+            sample_time_index_spec(),
             IndexSpec {
                 column: "sequence".to_string(),
                 entity_columns: Vec::new(),
@@ -677,18 +659,18 @@ mod tests {
 
     #[test]
     fn index_spec_validation_rejects_invalid_structure_and_time_bucket() {
-        let mut spec = sample_index_spec();
+        let mut spec = sample_time_index_spec();
         spec.column.clear();
         assert_eq!(spec.validate(), Err(IndexSpecError::EmptyColumn));
 
-        let mut spec = sample_index_spec();
+        let mut spec = sample_time_index_spec();
         spec.entity_columns.push("symbol".to_string());
         assert!(matches!(
             spec.validate(),
             Err(IndexSpecError::DuplicateEntityColumn { .. })
         ));
 
-        let mut spec = sample_index_spec();
+        let mut spec = sample_time_index_spec();
         spec.kind = IndexKind::Timestamp {
             bucket: TimeBucket::Seconds(0),
             timezone: None,
@@ -747,15 +729,6 @@ mod tests {
             validate_index_range(&kind, &IndexValue::UInt64(1), &IndexValue::UInt64(1)),
             Err(IndexValueError::InvalidRange { .. })
         ));
-    }
-
-    fn sample_time_index_spec() -> TimeIndexSpec {
-        TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
-            entity_columns: vec!["symbol".to_string()],
-            bucket: TimeBucket::Minutes(1),
-            timezone: None,
-        }
     }
 
     #[test]

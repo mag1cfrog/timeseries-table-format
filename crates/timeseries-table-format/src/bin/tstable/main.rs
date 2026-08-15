@@ -11,7 +11,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -203,11 +203,10 @@ async fn cmd_create(
 ) -> CliResult<()> {
     let bucket = parse_time_bucket(&bucket)?;
 
-    let index = TimeIndexSpec {
-        timestamp_column: time_column,
-        bucket,
-        timezone,
+    let index = IndexSpec {
+        column: time_column,
         entity_columns,
+        kind: IndexKind::Timestamp { bucket, timezone },
     };
 
     let meta = TableMeta::new_time_series(index);
@@ -238,7 +237,7 @@ async fn cmd_append(
 
     let ts_col = match time_column {
         Some(c) => c,
-        None => t.index_spec().timestamp_column.clone(),
+        None => t.index_spec().column.clone(),
     };
 
     let (_, rel_str) =

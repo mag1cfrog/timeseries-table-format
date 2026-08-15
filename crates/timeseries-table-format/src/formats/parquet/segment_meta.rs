@@ -1,6 +1,6 @@
 //! Parquet segment metadata derivation.
 //!
-//! This module extracts per-segment metadata (ts_min/ts_max/row_count, etc.)
+//! This module extracts per-segment metadata (index bounds, row count, etc.)
 //! directly from local Parquet files.
 
 use std::path::Path;
@@ -417,8 +417,8 @@ pub(crate) async fn segment_meta_from_parquet(
     let meta_out = SegmentMeta {
         path: path_str,
         format: FileFormat::Parquet,
-        ts_min,
-        ts_max,
+        index_min: ts_min.into(),
+        index_max: ts_max.into(),
         row_count,
         file_size: Some(file_size),
         coverage_path: None,
@@ -437,6 +437,7 @@ pub(crate) async fn segment_meta_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::table_metadata::IndexValue;
     use crate::transaction_log::segments::{SegmentError, SegmentIoError};
     use arrow::array::{ArrayRef, BinaryBuilder, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -459,6 +460,13 @@ mod tests {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn timestamp(value: &IndexValue) -> &DateTime<Utc> {
+        match value {
+            IndexValue::Timestamp(value) => value,
+            other => panic!("expected timestamp bound, found {other}"),
+        }
+    }
 
     fn write_parquet_file(
         path: &Path,
@@ -746,8 +754,8 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), 10);
-        assert_eq!(meta.ts_max.timestamp_millis(), 30);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), 10);
+        assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 30);
         assert_eq!(meta.row_count, 3);
         let len = fs::metadata(&abs).await?.len();
         assert_eq!(meta.file_size, Some(len));
@@ -776,8 +784,8 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), -50);
-        assert_eq!(meta.ts_max.timestamp_millis(), 400);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -50);
+        assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 400);
         assert_eq!(meta.row_count, 6);
         assert_eq!(report.row_groups, 3);
         assert!(report.used_stats);
@@ -803,8 +811,8 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), 5);
-        assert_eq!(meta.ts_max.timestamp_millis(), 7);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), 5);
+        assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 7);
         assert_eq!(meta.row_count, 2);
         assert!(!report.used_stats);
         assert_eq!(report.scanned_rows, 2);
@@ -831,8 +839,8 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), -100);
-        assert_eq!(meta.ts_max.timestamp_millis(), 300);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -100);
+        assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 300);
         assert_eq!(meta.row_count, 6);
         assert_eq!(report.row_groups, 3);
         assert!(!report.used_stats);
@@ -858,8 +866,8 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), -5);
-        assert_eq!(meta.ts_max.timestamp_millis(), 30);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -5);
+        assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 30);
         assert_eq!(meta.row_count, 4);
         assert_eq!(report.row_groups, 3);
         assert!(report.used_stats);
@@ -886,8 +894,11 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), 0);
-        assert_eq!(meta.ts_max.timestamp_millis(), row_count as i64 - 1);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), 0);
+        assert_eq!(
+            timestamp(&meta.index_max).timestamp_millis(),
+            row_count as i64 - 1
+        );
         assert_eq!(meta.row_count, row_count as u64);
         assert!(!report.used_stats);
         assert_eq!(report.scanned_rows, row_count as u64);
@@ -908,8 +919,8 @@ mod tests {
 
         let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
 
-        assert_eq!(meta.ts_min.timestamp_millis(), -10);
-        assert_eq!(meta.ts_max.timestamp_millis(), 20);
+        assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -10);
+        assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 20);
         assert_eq!(meta.row_count, 5);
         assert!(!report.used_stats);
         assert_eq!(report.scanned_rows, 5);
@@ -984,8 +995,8 @@ mod tests {
             segment_meta_from_parquet(&location, payload_path, "ts").await?;
 
         assert!(with_payload.file_size.unwrap() > 4 * 1024 * 1024);
-        assert_eq!(with_payload.ts_min, plain.ts_min);
-        assert_eq!(with_payload.ts_max, plain.ts_max);
+        assert_eq!(with_payload.index_min, plain.index_min);
+        assert_eq!(with_payload.index_max, plain.index_max);
         assert_eq!(with_payload.row_count, plain.row_count);
         assert!(!plain_report.used_stats);
         assert!(!payload_report.used_stats);
@@ -1039,11 +1050,15 @@ mod tests {
 
         let (meta_micro, _) = segment_meta_from_parquet(&location, rel_micro, "ts").await?;
         assert_eq!(
-            meta_micro.ts_min.timestamp_nanos_opt().map(|n| n / 1_000),
+            timestamp(&meta_micro.index_min)
+                .timestamp_nanos_opt()
+                .map(|n| n / 1_000),
             Some(1_000)
         );
         assert_eq!(
-            meta_micro.ts_max.timestamp_nanos_opt().map(|n| n / 1_000),
+            timestamp(&meta_micro.index_max)
+                .timestamp_nanos_opt()
+                .map(|n| n / 1_000),
             Some(2_000)
         );
 
@@ -1060,8 +1075,14 @@ mod tests {
         )?;
 
         let (meta_nano, _) = segment_meta_from_parquet(&location, rel_nano, "ts").await?;
-        assert_eq!(meta_nano.ts_min.timestamp_nanos_opt(), Some(3_000));
-        assert_eq!(meta_nano.ts_max.timestamp_nanos_opt(), Some(9_000));
+        assert_eq!(
+            timestamp(&meta_nano.index_min).timestamp_nanos_opt(),
+            Some(3_000)
+        );
+        assert_eq!(
+            timestamp(&meta_nano.index_max).timestamp_nanos_opt(),
+            Some(9_000)
+        );
 
         Ok(())
     }

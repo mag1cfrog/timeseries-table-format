@@ -37,6 +37,7 @@ use datafusion::logical_expr::Expr;
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
+use crate::metadata::table_metadata::IndexValue;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -168,7 +169,7 @@ impl TsTableProvider {
 
     /// Return the time column name from the table's index spec.
     fn time_column_name(&self) -> &str {
-        self.table.index_spec().timestamp_column.as_str()
+        self.table.index_spec().column.as_str()
     }
 
     fn ts_timezone(&self) -> Option<String> {
@@ -206,9 +207,11 @@ impl TsTableProvider {
         // Prune only if definitely false for that segment.
         segments
             .into_iter()
-            .filter(|seg| {
-                eval_time_pred_on_segment(&compiled, seg.ts_min, seg.ts_max)
-                    != IntervalTruth::AlwaysFalse
+            .filter(|seg| match (&seg.index_min, &seg.index_max) {
+                (IndexValue::Timestamp(min), IndexValue::Timestamp(max)) => {
+                    eval_time_pred_on_segment(&compiled, *min, *max) != IntervalTruth::AlwaysFalse
+                }
+                _ => true,
             })
             .collect()
     }
@@ -247,7 +250,7 @@ impl TableProvider for TsTableProvider {
         // 1) Get a snapshot (TableState) from core table
         let snapshot = self.latest_state().await?;
 
-        let segments = snapshot.segments_sorted_by_time();
+        let segments = snapshot.segments_sorted_by_index().map_err(df_external)?;
 
         let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
         let predicate = conjunction(filters.to_vec());

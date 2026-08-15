@@ -39,7 +39,7 @@ pub mod transaction_log;
 pub use metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
 pub use metadata::table_metadata::{
     IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError, ParseTimeBucketError,
-    TableMeta, TimeBucket, TimeIndexSpec, validate_index_range,
+    TableMeta, TimeBucket, validate_index_range,
 };
 pub use storage::TableLocation;
 pub use table::{TableError, TimeSeriesTable};

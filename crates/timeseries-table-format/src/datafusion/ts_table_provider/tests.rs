@@ -124,13 +124,15 @@ fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
-    use crate::metadata::table_metadata::{TimeBucket, TimeIndexSpec};
+    use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeBucket};
 
-    let index = TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let index = IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     };
 
     let logical_schema = LogicalSchema::new(vec![

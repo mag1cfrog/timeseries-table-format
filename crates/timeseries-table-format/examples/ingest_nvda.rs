@@ -8,7 +8,7 @@ use arrow_csv::reader::Format;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -69,11 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     writer.close()?;
 
     // 3) Create a time-series table.
-    let index = TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let index = IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Hours(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Hours(1),
+            timezone: None,
+        },
     };
     let meta = TableMeta::new_time_series(index);
     let location = TableLocation::local(&table_root);

@@ -11,7 +11,9 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_format::{
-    metadata::table_metadata::TimeBucket, storage::TableLocation, table::TimeSeriesTable,
+    metadata::table_metadata::{IndexKind, TimeBucket},
+    storage::TableLocation,
+    table::TimeSeriesTable,
 };
 
 fn cli_bin() -> &'static str {
@@ -125,9 +127,14 @@ fn cli_create_creates_table() -> StdResult<(), Box<dyn std::error::Error>> {
 
     let table = open_table_blocking(&table_root)?;
     let index = table.index_spec();
-    assert_eq!(index.timestamp_column, "ts");
-    assert_eq!(index.bucket, TimeBucket::Minutes(15));
-    assert_eq!(index.timezone.as_deref(), Some("America/New_York"));
+    assert_eq!(index.column, "ts");
+    assert_eq!(
+        index.kind,
+        IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(15),
+            timezone: Some("America/New_York".to_string())
+        }
+    );
     assert_eq!(
         index.entity_columns,
         vec!["symbol".to_string(), "venue".to_string()]

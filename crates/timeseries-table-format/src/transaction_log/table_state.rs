@@ -29,7 +29,10 @@ pub fn reset_rebuild_table_state_count() {
 }
 
 use crate::{
-    metadata::{segments::cmp_segment_meta_by_time, table_metadata::TABLE_FORMAT_VERSION},
+    metadata::{
+        schema_compat::ensure_index_matches_schema, segments::sort_segment_meta_by_index,
+        table_metadata::TABLE_FORMAT_VERSION,
+    },
     storage::normalize_relative_segment_path,
     transaction_log::*,
 };
@@ -57,11 +60,11 @@ fn validate_persisted_segment_path(path: &str) -> Result<(), CommitError> {
     Ok(())
 }
 
-/// Pointer to table coverage metadata including bucket specification, path, and version.
+/// Pointer to table coverage metadata including index descriptor, path, and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableCoveragePointer {
-    /// Time bucket specification for the coverage metadata.
-    pub bucket_spec: TimeBucket,
+    /// Canonical ordered-index coverage descriptor.
+    pub index_kind: IndexKind,
     /// Path to the coverage metadata file.
     pub coverage_path: String,
     /// Version number associated with this coverage pointer.
@@ -88,14 +91,16 @@ pub struct TableState {
 }
 
 impl TableState {
-    /// Return live segments sorted deterministically by time.
+    /// Return live segments sorted deterministically by ordered-index bounds.
     ///
-    /// Ordering is by `ts_min`, then `ts_max`, and finally `path` as a
+    /// Ordering is by `index_min`, then `index_max`, and finally `path` as a
     /// stable tie-breaker.
-    pub fn segments_sorted_by_time(&self) -> Vec<&SegmentMeta> {
+    pub fn segments_sorted_by_index(
+        &self,
+    ) -> Result<Vec<&SegmentMeta>, crate::metadata::table_metadata::IndexValueError> {
         let mut v: Vec<&SegmentMeta> = self.segments.values().collect();
-        v.sort_unstable_by(|a, b| cmp_segment_meta_by_time(a, b));
-        v
+        sort_segment_meta_by_index(&mut v)?;
+        Ok(v)
     }
 }
 
@@ -170,11 +175,11 @@ impl TransactionLogStore {
                         table_meta = Some(delta);
                     }
                     LogAction::UpdateTableCoverage {
-                        bucket_spec,
+                        index_kind,
                         coverage_path,
                     } => {
                         table_coverage = Some(TableCoveragePointer {
-                            bucket_spec,
+                            index_kind,
                             coverage_path,
                             version: v,
                         })
@@ -186,6 +191,38 @@ impl TransactionLogStore {
         let table_meta = table_meta.context(CorruptStateSnafu {
             msg: format!("No TableMeta found in commits up to version {current_version}",),
         })?;
+
+        let index = match &table_meta.kind {
+            TableKind::TimeSeries(index) => index,
+            TableKind::Generic => {
+                return CorruptStateSnafu {
+                    msg: "Generic tables are not supported by the current format".to_string(),
+                }
+                .fail();
+            }
+        };
+        index
+            .validate()
+            .map_err(|source| CommitError::CorruptState {
+                msg: format!("Invalid ordered index specification: {source}"),
+                backtrace: snafu::Backtrace::capture(),
+            })?;
+        if let Some(schema) = &table_meta.logical_schema {
+            ensure_index_matches_schema(schema, index).map_err(|source| {
+                CommitError::CorruptState {
+                    msg: format!("Ordered index does not match logical schema: {source}"),
+                    backtrace: snafu::Backtrace::capture(),
+                }
+            })?;
+        }
+        for segment in segments.values() {
+            segment
+                .validate_bounds(&index.kind)
+                .map_err(|source| CommitError::CorruptState {
+                    msg: source.to_string(),
+                    backtrace: snafu::Backtrace::capture(),
+                })?;
+        }
 
         Ok(TableState {
             version: current_version,
@@ -202,7 +239,7 @@ mod tests {
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
-        FileFormat, LogAction, SegmentMeta, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        FileFormat, IndexKind, IndexSpec, LogAction, SegmentMeta, TableKind, TableMeta, TimeBucket,
         TransactionLogStore,
     };
     use chrono::TimeZone;
@@ -219,11 +256,13 @@ mod tests {
 
     fn sample_table_meta() -> TableMeta {
         TableMeta {
-            kind: TableKind::TimeSeries(TimeIndexSpec {
-                timestamp_column: "ts".to_string(),
+            kind: TableKind::TimeSeries(IndexSpec {
+                column: "ts".to_string(),
                 entity_columns: vec!["symbol".to_string()],
-                bucket: TimeBucket::Minutes(1),
-                timezone: None,
+                kind: IndexKind::Timestamp {
+                    bucket: TimeBucket::Minutes(1),
+                    timezone: None,
+                },
             }),
             logical_schema: None,
             created_at: chrono::Utc
@@ -239,14 +278,18 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
-            ts_min: chrono::Utc
-                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
-                .single()
-                .expect("valid sample segment ts_min"),
-            ts_max: chrono::Utc
-                .with_ymd_and_hms(2025, 1, 1, 1, 0, 0)
-                .single()
-                .expect("valid sample segment ts_max"),
+            index_min: IndexValue::Timestamp(
+                chrono::Utc
+                    .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid sample segment index_min"),
+            ),
+            index_max: IndexValue::Timestamp(
+                chrono::Utc
+                    .with_ymd_and_hms(2025, 1, 1, 1, 0, 0)
+                    .single()
+                    .expect("valid sample segment index_max"),
+            ),
             row_count: 42,
             file_size: None,
             coverage_path: None,
@@ -257,8 +300,8 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
-            ts_min: chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap(),
-            ts_max: chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap(),
+            index_min: (chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap()).into(),
+            index_max: (chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap()).into(),
             row_count: 1,
             file_size: None,
             coverage_path: None,
@@ -266,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn segments_sorted_by_time_orders_hashmap_deterministically() {
+    fn segments_sorted_by_index_orders_hashmap_deterministically() {
         let mut segments = HashMap::new();
         let seg_c = segment_with_ts("c", 10, 30);
         let seg_a = segment_with_ts("a", 10, 20);
@@ -286,14 +329,14 @@ mod tests {
         };
 
         let ordered: Vec<(i64, i64, String)> = state
-            .segments_sorted_by_time()
+            .segments_sorted_by_index()
+            .unwrap()
             .iter()
-            .map(|seg| {
-                (
-                    seg.ts_min.timestamp(),
-                    seg.ts_max.timestamp(),
-                    seg.path.clone(),
-                )
+            .map(|seg| match (&seg.index_min, &seg.index_max) {
+                (IndexValue::Timestamp(min), IndexValue::Timestamp(max)) => {
+                    (min.timestamp(), max.timestamp(), seg.path.clone())
+                }
+                _ => panic!("expected timestamp test bounds"),
             })
             .collect();
 
@@ -385,6 +428,31 @@ mod tests {
             "expected {TABLE_FORMAT_VERSION}, found {}",
             TABLE_FORMAT_VERSION - 1
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_invalid_persisted_segment_bounds() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut segment = sample_segment("reversed");
+        segment.index_min =
+            IndexValue::Timestamp(chrono::Utc.timestamp_opt(2, 0).single().unwrap());
+        segment.index_max =
+            IndexValue::Timestamp(chrono::Utc.timestamp_opt(1, 0).single().unwrap());
+
+        store
+            .commit_with_expected_version(
+                0,
+                vec![
+                    LogAction::UpdateTableMeta(sample_table_meta()),
+                    LogAction::AddSegment(segment),
+                ],
+            )
+            .await?;
+
+        let error = store.rebuild_table_state().await.unwrap_err();
+        assert!(matches!(error, CommitError::CorruptState { .. }));
+        assert!(error.to_string().contains("Invalid ordered-index bounds"));
         Ok(())
     }
 

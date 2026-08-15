@@ -32,7 +32,7 @@ use timeseries_table_format::metadata::logical_schema::{
 };
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::TimeSeriesTable;
-use timeseries_table_format::transaction_log::{TableMeta, TimeBucket, TimeIndexSpec};
+use timeseries_table_format::transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -43,12 +43,14 @@ struct TestRow {
     price: Option<f64>,
 }
 
-fn make_index_spec() -> TimeIndexSpec {
-    TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+fn make_index_spec() -> IndexSpec {
+    IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     }
 }
 

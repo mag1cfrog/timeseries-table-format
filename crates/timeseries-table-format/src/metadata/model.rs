@@ -10,7 +10,7 @@ pub use crate::metadata::{
     segments::{FileFormat, SegmentMeta, SegmentMetaError},
     table_metadata::{
         IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError, ParseTimeBucketError,
-        TABLE_FORMAT_VERSION, TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,
+        TABLE_FORMAT_VERSION, TableKind, TableMeta, TableMetaDelta, TimeBucket,
         validate_index_range,
     },
     time_column::TimeColumnError,

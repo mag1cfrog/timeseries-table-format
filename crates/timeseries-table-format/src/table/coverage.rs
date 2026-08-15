@@ -12,20 +12,11 @@ use std::path::Path;
 use log::warn;
 
 use crate::{
-    coverage::Coverage,
-    coverage::io::read_coverage_sidecar,
-    metadata::table_metadata::{IndexKind, TimeIndexSpec},
+    coverage::Coverage, coverage::io::read_coverage_sidecar,
     transaction_log::table_state::TableCoveragePointer,
 };
 
 use super::{TimeSeriesTable, error::TableError};
-
-fn ordered_timestamp_index(index: &TimeIndexSpec) -> IndexKind {
-    IndexKind::Timestamp {
-        bucket: index.bucket.clone(),
-        timezone: index.timezone.clone(),
-    }
-}
 
 impl TimeSeriesTable {
     /// Rebuild table coverage by reading each segment's coverage sidecar.
@@ -63,15 +54,11 @@ impl TimeSeriesTable {
         &self,
         ptr: &TableCoveragePointer,
     ) -> Result<(), TableError> {
-        let expected = ordered_timestamp_index(self.index_spec());
-        let actual = IndexKind::Timestamp {
-            bucket: ptr.bucket_spec.clone(),
-            timezone: self.index_spec().timezone.clone(),
-        };
-        if actual != expected {
+        let expected = self.index_spec().kind.clone();
+        if ptr.index_kind != expected {
             return Err(TableError::TableCoverageIndexKindMismatch {
                 expected,
-                actual,
+                actual: ptr.index_kind.clone(),
                 pointer_version: ptr.version,
             });
         }
@@ -150,7 +137,7 @@ use snafu::{ResultExt, ensure};
 use crate::{
     coverage::Bucket,
     coverage::bucket::{bucket_id, bucket_range},
-    metadata::table_metadata::IndexValue,
+    metadata::table_metadata::{IndexKind, IndexValue},
     table::error::{CoverageBucketSnafu, InvalidRangeSnafu},
 };
 
@@ -163,7 +150,7 @@ impl TimeSeriesTable {
         ensure!(start < end, InvalidRangeSnafu { start, end });
         self.ensure_timestamp_index("time coverage query")?;
         bucket_range(
-            &ordered_timestamp_index(self.index_spec()),
+            &self.index_spec().kind,
             &IndexValue::Timestamp(start),
             &IndexValue::Timestamp(end),
         )
@@ -181,23 +168,17 @@ impl TimeSeriesTable {
                 end: ts_end,
             },
         )?;
-        bucket_id(
-            &ordered_timestamp_index(self.index_spec()),
-            &IndexValue::Timestamp(end_adj),
-        )
-        .context(CoverageBucketSnafu)
+        bucket_id(&self.index_spec().kind, &IndexValue::Timestamp(end_adj))
+            .context(CoverageBucketSnafu)
     }
 
     fn ensure_timestamp_index(&self, operation: &'static str) -> Result<(), TableError> {
-        if matches!(
-            ordered_timestamp_index(self.index_spec()),
-            IndexKind::Timestamp { .. }
-        ) {
+        if matches!(self.index_spec().kind, IndexKind::Timestamp { .. }) {
             Ok(())
         } else {
             Err(TableError::UnsupportedIndexKind {
                 operation,
-                actual: ordered_timestamp_index(self.index_spec()).name(),
+                actual: self.index_spec().kind.name(),
             })
         }
     }
@@ -297,9 +278,11 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
     use crate::{
-        metadata::table_metadata::{IndexKind, TimeBucket},
+        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
         storage::TableLocation,
         table::test_util::{
             TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
@@ -466,7 +449,10 @@ mod tests {
             .table_coverage
             .clone()
             .expect("snapshot pointer present");
-        ptr.bucket_spec = TimeBucket::Hours(1);
+        ptr.index_kind = IndexKind::Timestamp {
+            bucket: TimeBucket::Hours(1),
+            timezone: None,
+        };
         table.state_mut().table_coverage = Some(ptr.clone());
 
         let err = table
@@ -478,20 +464,8 @@ mod tests {
             TableError::TableCoverageIndexKindMismatch {
                 expected, actual, ..
             } => {
-                assert_eq!(
-                    expected,
-                    IndexKind::Timestamp {
-                        bucket: table.index_spec().bucket.clone(),
-                        timezone: table.index_spec().timezone.clone(),
-                    }
-                );
-                assert_eq!(
-                    actual,
-                    IndexKind::Timestamp {
-                        bucket: ptr.bucket_spec,
-                        timezone: table.index_spec().timezone.clone(),
-                    }
-                );
+                assert_eq!(expected, table.index_spec().kind);
+                assert_eq!(actual, ptr.index_kind);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -550,6 +524,33 @@ mod tests {
 
         let none = table.last_fully_covered_window(ts_end, 3).await?;
         assert!(none.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn last_window_rejects_integer_index_before_reading_coverage() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::UInt64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let meta = TableMeta::new_time_series(IndexSpec {
+            column: "offset".to_string(),
+            entity_columns: Vec::new(),
+            kind: kind.clone(),
+        });
+        let mut table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
+        let version = table.state().version;
+        table.state_mut().table_coverage = Some(TableCoveragePointer {
+            index_kind: kind,
+            coverage_path: "_coverage/table/missing.roar".to_string(),
+            version,
+        });
+
+        let error = table
+            .last_fully_covered_window(ts_from_secs(1), 1)
+            .await
+            .expect_err("integer indexes are unsupported by the timestamp API");
+        assert!(matches!(error, TableError::UnsupportedIndexKind { .. }));
         Ok(())
     }
 

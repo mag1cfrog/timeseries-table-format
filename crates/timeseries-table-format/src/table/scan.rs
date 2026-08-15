@@ -2,7 +2,7 @@
 //!
 //! This module wires the public `scan_range` entry point to the underlying
 //! segment metadata and Parquet readers:
-//! - Pick candidate segments whose `[ts_min, ts_max]` intersects the requested
+//! - Pick candidate segments whose timestamp `index_min`/`index_max` intersects the requested
 //!   half-open window `[ts_start, ts_end)`.
 //! - Stream those segments in timestamp order with Parquet's native async,
 //!   file-backed reader.
@@ -14,7 +14,7 @@
 //! allocating full-length bound arrays, and treats null timestamp values as
 //! “drop row” via `filter_record_batch`. The implementation assumes v0.1
 //! invariants (non-overlapping segments) so chronological ordering is a simple
-//! sort by `ts_min`.
+//! sort by typed index bounds.
 use std::path::Path;
 
 use arrow::array::Scalar;
@@ -30,13 +30,15 @@ use futures::{StreamExt, TryStreamExt, future};
 use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder};
 use snafu::prelude::*;
 
-use crate::metadata::segments::SegmentMeta;
+use crate::metadata::{
+    segments::{SegmentMeta, sort_segment_meta_by_index},
+    table_metadata::{IndexKind, IndexValue},
+};
 use crate::storage::{self, TableLocation};
 use crate::transaction_log::TableState;
 
-use super::error::{InvalidRangeSnafu, StorageSnafu, TableError};
+use super::error::{InvalidRangeSnafu, InvalidSegmentBoundsSnafu, StorageSnafu, TableError};
 use super::{TimeSeriesScan, TimeSeriesTable};
-use crate::metadata::segments::cmp_segment_meta_by_time;
 
 const SCAN_BATCH_SIZE: usize = 8_192;
 
@@ -50,9 +52,13 @@ fn segments_for_range(
         .values()
         .filter(|seg| {
             // half-open query [ts_start, ts_end)
-            // intersection with segment's [ts_min, ts_max] (closed) is:
-            // seg.ts_max >= ts_start && seg.ts_min < ts_end
-            seg.ts_max >= ts_start && seg.ts_min < ts_end
+            // Intersection with the segment's closed timestamp index bounds is:
+            // index_max >= ts_start && index_min < ts_end.
+            matches!(
+                (&seg.index_min, &seg.index_max),
+                (IndexValue::Timestamp(min), IndexValue::Timestamp(max))
+                    if *max >= ts_start && *min < ts_end
+            )
         })
         .cloned()
         .collect()
@@ -390,13 +396,19 @@ impl TimeSeriesTable {
             .fail();
         }
 
-        let ts_column = self.index.timestamp_column.clone();
+        if !matches!(self.index.kind, IndexKind::Timestamp { .. }) {
+            return Err(TableError::UnsupportedIndexKind {
+                operation: "timestamp range scan",
+                actual: self.index.kind.name(),
+            });
+        }
+        let ts_column = self.index.column.clone();
 
         // 1) Pick candidate segments.
         let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
 
-        // 2) Sort deterministically by ts_min, ts_max, and path.
-        candidates.sort_unstable_by(cmp_segment_meta_by_time);
+        // 2) Sort deterministically by index_min, index_max, and path.
+        sort_segment_meta_by_index(&mut candidates).context(InvalidSegmentBoundsSnafu)?;
 
         let state = ScanState {
             candidates: candidates.into_iter(),
@@ -815,8 +827,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
-            ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             row_count: 1,
             file_size: None,
             coverage_path: None,
@@ -848,8 +860,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
-            ts_max: utc_datetime(2024, 1, 1, 0, 0, 2),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 0, 2)).into(),
             row_count: ts_vals.len() as u64,
             file_size: None,
             coverage_path: None,
@@ -880,8 +892,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
-            ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             row_count: 0,
             file_size: None,
             coverage_path: None,
@@ -1044,8 +1056,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: Utc.timestamp_opt(1, 0).single().unwrap(),
-            ts_max: Utc.timestamp_opt(3, 0).single().unwrap(),
+            index_min: (Utc.timestamp_opt(1, 0).single().unwrap()).into(),
+            index_max: (Utc.timestamp_opt(3, 0).single().unwrap()).into(),
             row_count: 3,
             file_size: None,
             coverage_path: None,
@@ -1189,8 +1201,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
-            ts_max: utc_datetime(2024, 1, 1, 0, 0, 0),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             row_count: 0,
             file_size: None,
             coverage_path: None,
@@ -1226,8 +1238,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
-            ts_max: utc_datetime(2024, 1, 1, 0, 0, 1),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
             row_count: 2,
             file_size: None,
             coverage_path: None,
@@ -1257,8 +1269,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 0),
-            ts_max: utc_datetime(2024, 1, 1, 0, 1, 0),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 1, 0)).into(),
             row_count: 1,
             file_size: None,
             coverage_path: None,
@@ -1268,8 +1280,8 @@ mod tests {
         let unopened = SegmentMeta {
             path: "data/should-not-open.parquet".to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 1, 30),
-            ts_max: utc_datetime(2024, 1, 1, 0, 1, 31),
+            index_min: (utc_datetime(2024, 1, 1, 0, 1, 30)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 1, 31)).into(),
             row_count: 1,
             file_size: None,
             coverage_path: None,
@@ -1301,8 +1313,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2024, 1, 1, 0, 0, 1),
-            ts_max: utc_datetime(2024, 1, 1, 0, 0, 1),
+            index_min: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
+            index_max: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
             row_count: 1,
             file_size: None,
             coverage_path: None,
@@ -1353,7 +1365,7 @@ mod tests {
             }],
         )?;
 
-        // Append in reverse ts_min order to exercise the segment comparator.
+        // Append in reverse index_min order to exercise the segment comparator.
         table.append_parquet_segment(rel_b, "ts").await?;
         table.append_parquet_segment(rel_a, "ts").await?;
 
@@ -1425,8 +1437,8 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
-            ts_min: Utc.timestamp_millis_opt(1_000).single().unwrap(),
-            ts_max: Utc.timestamp_millis_opt(2_000).single().unwrap(),
+            index_min: (Utc.timestamp_millis_opt(1_000).single().unwrap()).into(),
+            index_max: (Utc.timestamp_millis_opt(2_000).single().unwrap()).into(),
             row_count: 1,
             file_size: None,
             coverage_path: None,

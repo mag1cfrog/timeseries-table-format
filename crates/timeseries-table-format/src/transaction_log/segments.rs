@@ -105,8 +105,8 @@ mod tests {
         SegmentMeta {
             path: "data/seg-001.parquet".to_string(),
             format: FileFormat::Parquet,
-            ts_min: utc_datetime(2025, 1, 1, 0, 0, 0),
-            ts_max: utc_datetime(2025, 1, 1, 1, 0, 0),
+            index_min: (utc_datetime(2025, 1, 1, 0, 0, 0)).into(),
+            index_max: (utc_datetime(2025, 1, 1, 1, 0, 0)).into(),
             row_count: 123,
             file_size: None,
             coverage_path: None,

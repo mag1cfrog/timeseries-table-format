@@ -19,8 +19,8 @@ use crate::{
     coverage::{
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
-            coverage_file_id_for_attempt, segment_coverage_id_v1, segment_coverage_path,
-            table_coverage_id_v1, table_snapshot_path,
+            coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_path,
+            table_coverage_id_v2, table_snapshot_path,
         },
     },
     formats::parquet::{
@@ -28,8 +28,8 @@ use crate::{
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::{
-        schema_compat::ensure_schema_exact_match,
-        table_metadata::{IndexKind, IndexSpec},
+        schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
+        table_metadata::IndexKind,
     },
     storage,
     transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
@@ -155,7 +155,15 @@ impl TimeSeriesTable {
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
-        let bucket_spec = self.index.bucket.clone();
+        let bucket_spec = match &self.index.kind {
+            IndexKind::Timestamp { bucket, .. } => bucket.clone(),
+            kind => {
+                return Err(TableError::UnsupportedIndexKind {
+                    operation: "timestamp Parquet append",
+                    actual: kind.name(),
+                });
+            }
+        };
 
         // 0) Coverage readiness checks.
         ensure_existing_segments_have_coverage(&self.state)?;
@@ -186,6 +194,8 @@ impl TimeSeriesTable {
         let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
             .context(SegmentMetaSnafu)?;
+        ensure_index_matches_schema(&segment_schema, &self.index)
+            .context(SchemaCompatibilitySnafu)?;
         if let Some(r) = report.as_mut() {
             r.push_step("logical_schema", step_start.elapsed(), Vec::new());
         }
@@ -213,19 +223,8 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(
-                    table_schema,
-                    &segment_schema,
-                    &IndexSpec {
-                        column: self.index.timestamp_column.clone(),
-                        entity_columns: self.index.entity_columns.clone(),
-                        kind: IndexKind::Timestamp {
-                            bucket: self.index.bucket.clone(),
-                            timezone: self.index.timezone.clone(),
-                        },
-                    },
-                )
-                .context(SchemaCompatibilitySnafu)?;
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)?;
                 None
             }
         };
@@ -304,7 +303,7 @@ impl TimeSeriesTable {
 
         // 6) Give this append private sidecar paths, then write them before commit.
         let attempt_id = Uuid::new_v4();
-        let segment_content_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
+        let segment_content_id = segment_coverage_id_v2(&self.index, &seg_cov_bytes);
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
         let seg_cov_path = segment_coverage_path(&segment_file_id).map_err(|source| {
             TableError::CoverageSidecar {
@@ -318,8 +317,7 @@ impl TimeSeriesTable {
             coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
                 source: CoverageError::Serde { source },
             })?;
-        let snapshot_content_id =
-            table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
+        let snapshot_content_id = table_coverage_id_v2(&self.index, &new_snap_cov_bytes);
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
         let snapshot_path =
             table_snapshot_path(new_version_guess, &snapshot_file_id).map_err(|source| {
@@ -363,7 +361,7 @@ impl TimeSeriesTable {
 
         actions.push(LogAction::AddSegment(segment_meta.clone()));
         actions.push(LogAction::UpdateTableCoverage {
-            bucket_spec: bucket_spec.clone(),
+            index_kind: self.index.kind.clone(),
             coverage_path: snapshot_path.to_string_lossy().to_string(),
         });
 
@@ -413,7 +411,7 @@ impl TimeSeriesTable {
 
         // Also update the snapshot pointer in state.
         self.state.table_coverage = Some(TableCoveragePointer {
-            bucket_spec,
+            index_kind: self.index.kind.clone(),
             coverage_path: snapshot_path.to_string_lossy().to_string(),
             version: new_version,
         });
@@ -490,19 +488,26 @@ mod tests {
     use crate::coverage::Coverage;
     use crate::coverage::io::read_coverage_sidecar;
     use crate::metadata::logical_schema::{LogicalDataType, LogicalTimestampUnit};
-    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
+    use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
     use crate::metadata::time_column::TimeColumnError;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
-        Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+        Commit, CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
     };
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
     use tempfile::TempDir;
+
+    fn timestamp_bucket(index: &IndexSpec) -> &TimeBucket {
+        match &index.kind {
+            IndexKind::Timestamp { bucket, .. } => bucket,
+            other => panic!("expected timestamp index, found {other:?}"),
+        }
+    }
 
     fn coverage_files(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
         let mut files = BTreeMap::new();
@@ -740,8 +745,14 @@ mod tests {
         let seg = table.state.segments.get(rel_path).expect("segment present");
         assert_eq!(seg.path, rel_path);
         assert_eq!(seg.row_count, 1);
-        assert_eq!(seg.ts_min.timestamp_millis(), 1_000);
-        assert_eq!(seg.ts_max.timestamp_millis(), 1_000);
+        assert!(matches!(
+            &seg.index_min,
+            IndexValue::Timestamp(value) if value.timestamp_millis() == 1_000
+        ));
+        assert!(matches!(
+            &seg.index_max,
+            IndexValue::Timestamp(value) if value.timestamp_millis() == 1_000
+        ));
 
         let commit_path = tmp.path().join(layout::commit_rel_path(2));
         assert!(commit_path.is_file());
@@ -995,11 +1006,13 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
-        let index = TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
+        let index = IndexSpec {
+            column: "ts".to_string(),
             entity_columns: vec![],
-            bucket: TimeBucket::Minutes(1),
-            timezone: None,
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
         };
         let meta = TableMeta {
             kind: TableKind::TimeSeries(index),
@@ -1203,7 +1216,7 @@ mod tests {
         assert!(seg1.coverage_path.is_some());
         assert!(seg2.coverage_path.is_some());
 
-        let bucket_spec = table.index_spec().bucket.clone();
+        let bucket_spec = timestamp_bucket(table.index_spec()).clone();
 
         let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
         let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
@@ -1215,7 +1228,7 @@ mod tests {
             .as_ref()
             .expect("table snapshot pointer present after append");
         assert_eq!(ptr.version, v3);
-        assert_eq!(ptr.bucket_spec, bucket_spec);
+        assert_eq!(ptr.index_kind, table.index_spec().kind);
 
         let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
 
@@ -1308,8 +1321,8 @@ mod tests {
             .as_ref()
             .expect("table snapshot pointer present after reopen");
 
-        let bucket_spec = reopened.index_spec().bucket.clone();
-        assert_eq!(ptr.bucket_spec, bucket_spec);
+        let bucket_spec = timestamp_bucket(reopened.index_spec()).clone();
+        assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
         let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
         let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
@@ -1951,7 +1964,10 @@ mod tests {
             .expect("pointer present")
             .clone();
         table.state.table_coverage = Some(TableCoveragePointer {
-            bucket_spec: bad_bucket.clone(),
+            index_kind: IndexKind::Timestamp {
+                bucket: bad_bucket.clone(),
+                timezone: None,
+            },
             coverage_path: ptr.coverage_path.clone(),
             version: ptr.version,
         });
@@ -1963,7 +1979,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::TableCoverageBucketMismatch { .. }
+            TableError::TableCoverageIndexKindMismatch { .. }
         ));
         Ok(())
     }

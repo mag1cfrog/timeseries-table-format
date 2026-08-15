@@ -9,7 +9,7 @@ use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
 use terminal_size::terminal_size;
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -276,11 +276,10 @@ async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
         })
         .unwrap_or_default();
 
-    let index = TimeIndexSpec {
-        timestamp_column: time_column,
-        bucket,
-        timezone,
+    let index = IndexSpec {
+        column: time_column,
         entity_columns: entities,
+        kind: IndexKind::Timestamp { bucket, timezone },
     };
     let meta = TableMeta::new_time_series(index);
     let location =
@@ -307,7 +306,7 @@ async fn append_first_segment(table_root: &Path, table: &mut TimeSeriesTable) ->
             continue;
         }
 
-        let ts_col = table.index_spec().timestamp_column.clone();
+        let ts_col = table.index_spec().column.clone();
         match table.append_parquet_from_path(&parquet_path, &ts_col).await {
             Ok((s, rel_str)) => {
                 println!("appended: {rel_str}, size: {s}.");
@@ -829,7 +828,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         }
 
         let parquet_path = PathBuf::from(rest.trim());
-        let ts_col = ctx.table.index_spec().timestamp_column.clone();
+        let ts_col = ctx.table.index_spec().column.clone();
         match ctx
             .table
             .append_parquet_from_path(&parquet_path, &ts_col)
@@ -1184,7 +1183,7 @@ mod tests {
         metadata::logical_schema::{
             LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
-        metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
         storage::TableLocation,
         table::TimeSeriesTable,
     };
@@ -1216,11 +1215,13 @@ mod tests {
     }
 
     fn make_table_meta() -> TestResult<TableMeta> {
-        let index = TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
+        let index = IndexSpec {
+            column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
-            bucket: TimeBucket::Minutes(1),
-            timezone: None,
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
         };
 
         let logical_schema = LogicalSchema::new(vec![

@@ -11,7 +11,7 @@ use crate::metadata::logical_schema::{
 };
 use crate::metadata::segments::{FileFormat, SegmentMeta};
 use crate::metadata::table_metadata::{
-    TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket,
 };
 use crate::storage::{StorageError, TableLocation, layout};
 use crate::transaction_log::{CommitError, LogAction, TransactionLogStore};
@@ -19,6 +19,13 @@ use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn timestamp_kind(bucket: TimeBucket) -> IndexKind {
+    IndexKind::Timestamp {
+        bucket,
+        timezone: None,
+    }
+}
 
 // =============================================================================
 // Test Helpers
@@ -31,12 +38,14 @@ fn create_test_log_store() -> (TempDir, TransactionLogStore) {
     (tmp, store)
 }
 
-fn sample_time_index_spec() -> TimeIndexSpec {
-    TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+fn sample_time_index_spec() -> IndexSpec {
+    IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     }
 }
 
@@ -70,8 +79,8 @@ fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
     SegmentMeta {
         path: format!("data/{id}.parquet"),
         format: FileFormat::Parquet,
-        ts_min: utc_datetime(2025, 1, 1, ts_hour, 0, 0),
-        ts_max: utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0),
+        index_min: (utc_datetime(2025, 1, 1, ts_hour, 0, 0)).into(),
+        index_max: (utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0)).into(),
         row_count: 1000,
         file_size: None,
         coverage_path: None,
@@ -158,7 +167,7 @@ async fn happy_path_commit_and_rebuild_table_state() -> TestResult {
     // Verify table_meta.kind is TableKind::TimeSeries
     match state.table_meta.kind() {
         TableKind::TimeSeries(spec) => {
-            assert_eq!(spec.timestamp_column, "ts");
+            assert_eq!(spec.column, "ts");
             assert_eq!(spec.entity_columns, vec!["symbol".to_string()]);
         }
         TableKind::Generic => panic!("expected TimeSeries, got Generic"),
@@ -546,18 +555,22 @@ async fn rebuild_without_table_meta_returns_corrupt_state() -> TestResult {
 async fn update_table_meta_last_one_wins() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
-    let meta1 = TableMeta::new_time_series(TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let meta1 = TableMeta::new_time_series(IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec![],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     });
 
-    let meta2 = TableMeta::new_time_series(TimeIndexSpec {
-        timestamp_column: "event_time".to_string(), // Changed!
+    let meta2 = TableMeta::new_time_series(IndexSpec {
+        column: "event_time".to_string(), // Changed!
         entity_columns: vec!["user_id".to_string()],
-        bucket: TimeBucket::Hours(1),
-        timezone: Some("UTC".to_string()),
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Hours(1),
+            timezone: Some("UTC".to_string()),
+        },
     });
 
     // Commit 1: First TableMeta
@@ -575,9 +588,15 @@ async fn update_table_meta_last_one_wins() -> TestResult {
     // meta2 should win
     match state.table_meta.kind() {
         TableKind::TimeSeries(spec) => {
-            assert_eq!(spec.timestamp_column, "event_time");
+            assert_eq!(spec.column, "event_time");
             assert_eq!(spec.entity_columns, vec!["user_id".to_string()]);
-            assert_eq!(spec.bucket, TimeBucket::Hours(1));
+            assert_eq!(
+                spec.kind,
+                IndexKind::Timestamp {
+                    bucket: TimeBucket::Hours(1),
+                    timezone: Some("UTC".to_string())
+                }
+            );
         }
         _ => panic!("expected TimeSeries"),
     }
@@ -676,7 +695,7 @@ async fn table_coverage_pointer_is_replayed() -> TestResult {
         .commit_with_expected_version(
             v1,
             vec![LogAction::UpdateTableCoverage {
-                bucket_spec: coverage_bucket.clone(),
+                index_kind: timestamp_kind(coverage_bucket.clone()),
                 coverage_path: coverage_path.clone(),
             }],
         )
@@ -689,7 +708,7 @@ async fn table_coverage_pointer_is_replayed() -> TestResult {
         .table_coverage
         .as_ref()
         .expect("table coverage pointer should be present");
-    assert_eq!(pointer.bucket_spec, coverage_bucket);
+    assert_eq!(pointer.index_kind, timestamp_kind(coverage_bucket));
     assert_eq!(pointer.coverage_path, coverage_path);
     assert_eq!(pointer.version, v2);
 
@@ -715,7 +734,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
         .commit_with_expected_version(
             v1,
             vec![LogAction::UpdateTableCoverage {
-                bucket_spec: coverage_bucket_v1.clone(),
+                index_kind: timestamp_kind(coverage_bucket_v1.clone()),
                 coverage_path: coverage_path_v1.clone(),
             }],
         )
@@ -725,7 +744,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
         .commit_with_expected_version(
             v2,
             vec![LogAction::UpdateTableCoverage {
-                bucket_spec: coverage_bucket_v2.clone(),
+                index_kind: timestamp_kind(coverage_bucket_v2.clone()),
                 coverage_path: coverage_path_v2.clone(),
             }],
         )
@@ -738,7 +757,7 @@ async fn table_coverage_last_one_wins() -> TestResult {
         .table_coverage
         .as_ref()
         .expect("table coverage pointer should be present");
-    assert_eq!(pointer.bucket_spec, coverage_bucket_v2);
+    assert_eq!(pointer.index_kind, timestamp_kind(coverage_bucket_v2));
     assert_eq!(pointer.coverage_path, coverage_path_v2);
     assert_eq!(pointer.version, v3);
 
@@ -791,7 +810,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
         .commit_with_expected_version(
             v2,
             vec![LogAction::UpdateTableCoverage {
-                bucket_spec: coverage_bucket.clone(),
+                index_kind: timestamp_kind(coverage_bucket.clone()),
                 coverage_path: snapshot_cov_path.clone(),
             }],
         )
@@ -813,7 +832,7 @@ async fn table_coverage_rebuilds_with_segment_coverage_paths() -> TestResult {
         .table_coverage
         .as_ref()
         .expect("table coverage pointer should be present");
-    assert_eq!(pointer.bucket_spec, coverage_bucket);
+    assert_eq!(pointer.index_kind, timestamp_kind(coverage_bucket));
     assert_eq!(pointer.coverage_path, snapshot_cov_path);
     assert_eq!(pointer.version, v3);
 

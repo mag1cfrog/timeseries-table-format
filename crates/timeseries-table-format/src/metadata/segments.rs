@@ -5,12 +5,15 @@
 //! must live outside `metadata/` (for example under `transaction_log` or
 //! format-specific helpers).
 
-use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
-use crate::metadata::{logical_schema::LogicalSchemaError, time_column::TimeColumnError};
+use crate::metadata::{
+    logical_schema::LogicalSchemaError,
+    table_metadata::{IndexKind, IndexValue, IndexValueError},
+    time_column::TimeColumnError,
+};
 
 /// Supported on-disk file formats for segments.
 ///
@@ -41,11 +44,11 @@ pub struct SegmentMeta {
     /// File format for this segment.
     pub format: FileFormat,
 
-    /// Minimum timestamp contained in this segment (inclusive), in RFC3339 UTC.
-    pub ts_min: DateTime<Utc>,
+    /// Minimum observed ordered-index value in this segment (inclusive).
+    pub index_min: IndexValue,
 
-    /// Maximum timestamp contained in this segment (inclusive), in RFC3339 UTC.
-    pub ts_max: DateTime<Utc>,
+    /// Maximum observed ordered-index value in this segment (inclusive).
+    pub index_max: IndexValue,
 
     /// Number of rows in this segment.
     pub row_count: u64,
@@ -65,6 +68,44 @@ impl SegmentMeta {
         self.coverage_path = Some(path.into());
         self
     }
+
+    /// Validate the segment's inclusive ordered-index bounds.
+    ///
+    /// # Errors
+    /// Returns [`SegmentMetaError::InvalidIndexBounds`] when either bound has
+    /// the wrong domain or the minimum is greater than the maximum.
+    pub fn validate_bounds(&self, kind: &IndexKind) -> Result<(), SegmentMetaError> {
+        self.index_min.validate_kind(kind).map_err(|source| {
+            SegmentMetaError::InvalidIndexBounds {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+        self.index_max.validate_kind(kind).map_err(|source| {
+            SegmentMetaError::InvalidIndexBounds {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+        if self
+            .index_min
+            .compare(&self.index_max)
+            .map_err(|source| SegmentMetaError::InvalidIndexBounds {
+                path: self.path.clone(),
+                source,
+            })?
+            .is_gt()
+        {
+            return Err(SegmentMetaError::InvalidIndexBounds {
+                path: self.path.clone(),
+                source: IndexValueError::InvalidBounds {
+                    min: self.index_min.clone(),
+                    max: self.index_max.clone(),
+                },
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Errors that can occur while validating or decoding segment metadata.
@@ -74,6 +115,15 @@ impl SegmentMeta {
 /// `transaction_log::segments::SegmentError`).
 #[derive(Debug, Snafu)]
 pub enum SegmentMetaError {
+    /// Persisted segment bounds violate the table's ordered-index domain.
+    #[snafu(display("Invalid ordered-index bounds in segment at {path}: {source}"))]
+    InvalidIndexBounds {
+        /// Segment path containing invalid bounds.
+        path: String,
+        /// Domain or ordering failure.
+        source: IndexValueError,
+    },
+
     /// The file is too short to be a valid Parquet file.
     #[snafu(display("Segment file too short to be valid Parquet: {path}"))]
     TooShort {
@@ -134,19 +184,54 @@ pub enum SegmentMetaError {
     },
 }
 
-/// Deterministic ordering for segments by time.
+/// Deterministic ordering for segments by ordered-index bounds.
 ///
-/// Ordering is by `ts_min`, then `ts_max`, and finally `path` as a stable
+/// Ordering is by `index_min`, then `index_max`, and finally `path` as a stable
 /// tie-breaker.
-pub(crate) fn cmp_segment_meta_by_time(a: &SegmentMeta, b: &SegmentMeta) -> std::cmp::Ordering {
-    a.ts_min
-        .cmp(&b.ts_min)
-        .then_with(|| a.ts_max.cmp(&b.ts_max))
-        .then_with(|| a.path.cmp(&b.path))
+pub(crate) fn cmp_segment_meta_by_index(
+    a: &SegmentMeta,
+    b: &SegmentMeta,
+) -> Result<std::cmp::Ordering, IndexValueError> {
+    let min_order = a.index_min.compare(&b.index_min)?;
+    if !min_order.is_eq() {
+        return Ok(min_order);
+    }
+    let max_order = a.index_max.compare(&b.index_max)?;
+    Ok(max_order.then_with(|| a.path.cmp(&b.path)))
+}
+
+/// Sort segment metadata by typed bounds, rejecting cross-domain values first.
+pub(crate) fn sort_segment_meta_by_index<T>(segments: &mut [T]) -> Result<(), IndexValueError>
+where
+    T: std::borrow::Borrow<SegmentMeta>,
+{
+    let mut domain: Option<&IndexValue> = None;
+    for segment in segments.iter().map(std::borrow::Borrow::borrow) {
+        if segment.index_min.compare(&segment.index_max)?.is_gt() {
+            return Err(IndexValueError::InvalidBounds {
+                min: segment.index_min.clone(),
+                max: segment.index_max.clone(),
+            });
+        }
+        if let Some(domain) = domain {
+            domain.compare(&segment.index_min)?;
+            domain.compare(&segment.index_max)?;
+        } else {
+            domain = Some(&segment.index_min);
+        }
+    }
+
+    // Every comparison is now guaranteed to be same-domain and valid.
+    segments.sort_unstable_by(|a, b| {
+        cmp_segment_meta_by_index(a.borrow(), b.borrow()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
     use chrono::{TimeZone, Utc};
 
@@ -154,8 +239,8 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
-            ts_min: Utc.timestamp_opt(ts_min, 0).single().unwrap(),
-            ts_max: Utc.timestamp_opt(ts_max, 0).single().unwrap(),
+            index_min: IndexValue::Timestamp(Utc.timestamp_opt(ts_min, 0).single().unwrap()),
+            index_max: IndexValue::Timestamp(Utc.timestamp_opt(ts_max, 0).single().unwrap()),
             row_count: 1,
             file_size: None,
             coverage_path: None,
@@ -171,7 +256,7 @@ mod tests {
             seg("d", 5, 7),
         ];
 
-        v.sort_unstable_by(cmp_segment_meta_by_time);
+        v.sort_unstable_by(|a, b| cmp_segment_meta_by_index(a, b).expect("matching domains"));
 
         let paths: Vec<String> = v.into_iter().map(|s| s.path).collect();
         assert_eq!(
@@ -189,15 +274,21 @@ mod tests {
     fn ordering_is_equal_for_identical_segments() {
         let a = seg("same", 10, 20);
         let b = seg("same", 10, 20);
-        assert_eq!(cmp_segment_meta_by_time(&a, &b), std::cmp::Ordering::Equal);
-        assert_eq!(cmp_segment_meta_by_time(&b, &a), std::cmp::Ordering::Equal);
+        assert_eq!(
+            cmp_segment_meta_by_index(&a, &b).unwrap(),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            cmp_segment_meta_by_index(&b, &a).unwrap(),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
     fn ordering_primary_key_ts_min_dominates() {
         let mut v = vec![seg("z", 20, 30), seg("a", 10, 50), seg("m", 15, 10)];
 
-        v.sort_unstable_by(cmp_segment_meta_by_time);
+        v.sort_unstable_by(|a, b| cmp_segment_meta_by_index(a, b).expect("matching domains"));
 
         let paths: Vec<String> = v.into_iter().map(|s| s.path).collect();
         assert_eq!(
@@ -210,12 +301,116 @@ mod tests {
     fn ordering_uses_path_as_final_tie_breaker() {
         let mut v = vec![seg("b", 10, 20), seg("a", 10, 20), seg("c", 10, 20)];
 
-        v.sort_unstable_by(cmp_segment_meta_by_time);
+        v.sort_unstable_by(|a, b| cmp_segment_meta_by_index(a, b).expect("matching domains"));
 
         let paths: Vec<String> = v.into_iter().map(|s| s.path).collect();
         assert_eq!(
             paths,
             vec!["data/a.parquet", "data/b.parquet", "data/c.parquet"]
         );
+    }
+
+    #[test]
+    fn segment_bounds_validate_domain_and_native_order() {
+        let signed = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let valid = SegmentMeta {
+            path: "data/valid.parquet".to_string(),
+            format: FileFormat::Parquet,
+            index_min: IndexValue::Int64(i64::MIN),
+            index_max: IndexValue::Int64(i64::MAX),
+            row_count: 1,
+            file_size: None,
+            coverage_path: None,
+        };
+        valid.validate_bounds(&signed).unwrap();
+
+        let reversed = SegmentMeta {
+            index_min: IndexValue::Int64(1),
+            index_max: IndexValue::Int64(0),
+            ..valid.clone()
+        };
+        assert!(matches!(
+            reversed.validate_bounds(&signed),
+            Err(SegmentMetaError::InvalidIndexBounds {
+                source: IndexValueError::InvalidBounds { .. },
+                ..
+            })
+        ));
+
+        let wrong_domain = SegmentMeta {
+            index_min: IndexValue::UInt64(0),
+            index_max: IndexValue::UInt64(u64::MAX),
+            ..valid
+        };
+        assert!(matches!(
+            wrong_domain.validate_bounds(&signed),
+            Err(SegmentMetaError::InvalidIndexBounds {
+                source: IndexValueError::KindMismatch { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn integer_segment_ordering_uses_native_bounds_then_path() {
+        let mut segments = vec![
+            SegmentMeta {
+                path: "data/z.parquet".to_string(),
+                format: FileFormat::Parquet,
+                index_min: IndexValue::UInt64(u64::MAX),
+                index_max: IndexValue::UInt64(u64::MAX),
+                row_count: 1,
+                file_size: None,
+                coverage_path: None,
+            },
+            SegmentMeta {
+                path: "data/b.parquet".to_string(),
+                format: FileFormat::Parquet,
+                index_min: IndexValue::UInt64(0),
+                index_max: IndexValue::UInt64(7),
+                row_count: 1,
+                file_size: None,
+                coverage_path: None,
+            },
+            SegmentMeta {
+                path: "data/a.parquet".to_string(),
+                format: FileFormat::Parquet,
+                index_min: IndexValue::UInt64(0),
+                index_max: IndexValue::UInt64(7),
+                row_count: 1,
+                file_size: None,
+                coverage_path: None,
+            },
+        ];
+        segments.sort_unstable_by(|a, b| cmp_segment_meta_by_index(a, b).unwrap());
+        assert_eq!(
+            segments
+                .into_iter()
+                .map(|segment| segment.path)
+                .collect::<Vec<_>>(),
+            vec!["data/a.parquet", "data/b.parquet", "data/z.parquet"]
+        );
+    }
+
+    #[test]
+    fn segment_json_preserves_integer_bound_extremes() {
+        for (minimum, maximum) in [
+            (IndexValue::Int64(i64::MIN), IndexValue::Int64(i64::MAX)),
+            (IndexValue::UInt64(0), IndexValue::UInt64(u64::MAX)),
+        ] {
+            let segment = SegmentMeta {
+                path: "data/extremes.parquet".to_string(),
+                format: FileFormat::Parquet,
+                index_min: minimum,
+                index_max: maximum,
+                row_count: 2,
+                file_size: Some(42),
+                coverage_path: Some("_coverage/segments/extremes.roar".to_string()),
+            };
+            let json = serde_json::to_string(&segment).unwrap();
+            assert_eq!(serde_json::from_str::<SegmentMeta>(&json).unwrap(), segment);
+        }
     }
 }

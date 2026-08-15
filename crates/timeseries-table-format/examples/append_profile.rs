@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::{
         TimeSeriesTable,
@@ -149,11 +149,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let location = TableLocation::parse(benchmark_root.to_string_lossy().as_ref())?;
 
     let bucket = args.bucket.parse::<TimeBucket>()?;
-    let index = TimeIndexSpec {
-        timestamp_column: args.time_column.clone(),
-        bucket,
-        timezone: args.timezone.clone(),
+    let index = IndexSpec {
+        column: args.time_column.clone(),
         entity_columns: args.entity.clone(),
+        kind: IndexKind::Timestamp {
+            bucket,
+            timezone: args.timezone.clone(),
+        },
     };
     let meta = TableMeta::new_time_series(index);
     TimeSeriesTable::create(location.clone(), meta).await?;

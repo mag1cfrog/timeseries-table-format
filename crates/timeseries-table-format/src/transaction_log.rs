@@ -8,7 +8,7 @@
 //!   `_timeseries_log/` directory (for example, `_timeseries_log/0000000000.json`).
 //! - A `CURRENT` pointer that tracks the latest committed table version.
 //! - Strongly-typed metadata structures such as `TableMeta`,
-//!   `TableKind`, `TimeIndexSpec`, `SegmentMeta`, and `LogAction`.
+//!   `TableKind`, `IndexSpec`, `SegmentMeta`, and `LogAction`.
 //! - An optimistic concurrency model based on version guards, so that
 //!   commits fail cleanly with a conflict error when the expected
 //!   version does not match the current version.
@@ -47,8 +47,8 @@
 //!     {
 //!       "AddSegment": {
 //!         "path": "data/nvda_1h_0001.parquet",
-//!         "ts_min": "2020-01-01T00:00:00Z",
-//!         "ts_max": "2020-01-02T00:00:00Z",
+//!         "index_min": {"type": "timestamp", "value": "2020-01-01T00:00:00Z"},
+//!         "index_max": {"type": "timestamp", "value": "2020-01-02T00:00:00Z"},
 //!         "row_count": 1024,
 //!         "format": "parquet"
 //!       }
@@ -70,7 +70,7 @@ pub mod table_state;
 mod log_integration_tests;
 
 pub use crate::metadata::table_metadata::{
-    TableKind, TableMeta, TableMetaDelta, TimeBucket, TimeIndexSpec,
+    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TimeBucket,
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
@@ -162,11 +162,13 @@ mod tests {
         let ts0 = utc_datetime(2025, 1, 1, 0, 0, 0);
         let ts1 = utc_datetime(2025, 1, 1, 1, 0, 0);
 
-        let time_index = TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
+        let time_index = IndexSpec {
+            column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
-            bucket: TimeBucket::Minutes(60),
-            timezone: Some("UTC".to_string()),
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(60),
+                timezone: Some("UTC".to_string()),
+            },
         };
 
         let table_meta = TableMeta {
@@ -197,8 +199,8 @@ mod tests {
         let seg_meta = SegmentMeta {
             path: "data/nvda_1h_0001.parquet".to_string(),
             format: FileFormat::Parquet,
-            ts_min: ts0,
-            ts_max: ts1,
+            index_min: (ts0).into(),
+            index_max: (ts1).into(),
             row_count: 1024,
             file_size: None,
             coverage_path: None,
@@ -216,6 +218,7 @@ mod tests {
 
         // Serialize to JSON.
         let json = serde_json::to_string_pretty(&commit).expect("serialize commit");
+        assert!(json.contains("\"format_version\": 3"));
         // println!("{json}");
 
         // Deserialize back.
@@ -254,25 +257,32 @@ mod tests {
     fn time_index_spec_defaults() {
         // JSON with optional fields omitted.
         let json = r#"{
-            "timestamp_column": "ts",
-            "bucket": { "Hours": 1 }
+            "column": "ts",
+            "kind": { "type": "timestamp", "bucket": { "Hours": 1 } }
         }"#;
 
-        let spec: TimeIndexSpec = serde_json::from_str(json).expect("deserialize");
+        let spec: IndexSpec = serde_json::from_str(json).expect("deserialize");
 
-        assert_eq!(spec.timestamp_column, "ts");
+        assert_eq!(spec.column, "ts");
         assert_eq!(spec.entity_columns, Vec::<String>::new()); // default
-        assert_eq!(spec.bucket, TimeBucket::Hours(1));
-        assert_eq!(spec.timezone, None); // default
+        assert_eq!(
+            spec.kind,
+            IndexKind::Timestamp {
+                bucket: TimeBucket::Hours(1),
+                timezone: None
+            }
+        );
     }
 
     #[test]
     fn time_index_spec_skips_none_timezone_on_serialize() {
-        let spec = TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
+        let spec = IndexSpec {
+            column: "ts".to_string(),
             entity_columns: vec![],
-            bucket: TimeBucket::Seconds(30),
-            timezone: None,
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Seconds(30),
+                timezone: None,
+            },
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");
