@@ -51,7 +51,6 @@ struct CommandResult {
 
 struct ShellContext {
     table_root: PathBuf,
-    location: TableLocation,
     engine: BoxedEngine,
     table: timeseries_table_format::table::TimeSeriesTable,
     session: BoxedSession,
@@ -296,11 +295,7 @@ async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
     Ok(())
 }
 
-async fn append_first_segment(
-    table_root: &Path,
-    location: &TableLocation,
-    table: &mut TimeSeriesTable,
-) -> CliResult<()> {
+async fn append_first_segment(table_root: &Path, table: &mut TimeSeriesTable) -> CliResult<()> {
     loop {
         let parquet_path = prompt_non_empty("first segment parquet path: ")?;
         let parquet_path = PathBuf::from(parquet_path);
@@ -312,23 +307,9 @@ async fn append_first_segment(
             continue;
         }
 
-        let rel = match location.ensure_parquet_under_root(&parquet_path).await {
-            Ok(r) => r,
-            Err(e) => {
-                println!("{}", CliError::Storage { source: e });
-                continue;
-            }
-        };
-
-        let rel_str = if cfg!(windows) {
-            rel.to_string_lossy().replace('\\', "/")
-        } else {
-            rel.to_string_lossy().to_string()
-        };
-
         let ts_col = table.index_spec().timestamp_column.clone();
-        match table.append_parquet_segment(&rel_str, &ts_col).await {
-            Ok(s) => {
+        match table.append_parquet_from_path(&parquet_path, &ts_col).await {
+            Ok((s, rel_str)) => {
                 println!("appended: {rel_str}, size: {s}.");
                 break;
             }
@@ -356,7 +337,7 @@ async fn build_context(
         TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
 
     // Cached mutable table handle for refresh/append.
-    let table = open_table(location.clone(), table_root.as_path()).await?;
+    let table = open_table(location, table_root.as_path()).await?;
 
     // Cached query session built from the same in-memory table snapshot.
     let engine = make_engine(backend.into(), table_root.as_path());
@@ -370,7 +351,6 @@ async fn build_context(
     Ok((
         ShellContext {
             table_root,
-            location,
             engine,
             table,
             session,
@@ -848,29 +828,14 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
             });
         }
 
-        // 2) ensure parquet under root
         let parquet_path = PathBuf::from(rest.trim());
-        let rel = match ctx.location.ensure_parquet_under_root(&parquet_path).await {
-            Ok(r) => r,
-            Err(e) => {
-                println!("{}", CliError::Storage { source: e });
-                return Ok(CommandResult {
-                    action: CommandAction::Continue,
-                    query_result: None,
-                });
-            }
-        };
-
-        let rel_str = if cfg!(windows) {
-            rel.to_string_lossy().replace('\\', "/")
-        } else {
-            rel.to_string_lossy().to_string()
-        };
-
-        // 3) append (uses cached handle)
         let ts_col = ctx.table.index_spec().timestamp_column.clone();
-        match ctx.table.append_parquet_segment(&rel_str, &ts_col).await {
-            Ok(s) => {
+        match ctx
+            .table
+            .append_parquet_from_path(&parquet_path, &ts_col)
+            .await
+        {
+            Ok((s, rel_str)) => {
                 if ctx.timing {
                     println!(
                         "appended: {rel_str}, size: {s}. (elapsed_ms: {})",
@@ -1106,11 +1071,11 @@ fn shell_blocking(
 
     let location =
         TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
-    let mut table = handle.block_on(open_table(location.clone(), table_root.as_path()))?;
+    let mut table = handle.block_on(open_table(location, table_root.as_path()))?;
 
     if table.state().table_meta.logical_schema().is_none() {
         println!("table has no schema yet; please append the first segment.");
-        handle.block_on(append_first_segment(&table_root, &location, &mut table))?;
+        handle.block_on(append_first_segment(&table_root, &mut table))?;
     }
 
     let (mut ctx, table_name) = handle.block_on(build_context(table_root, backend))?;

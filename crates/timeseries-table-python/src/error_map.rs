@@ -25,7 +25,6 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyEr
         CoreStorageError::AlreadyExists { path, .. } => Some(path.clone()),
         CoreStorageError::OtherIo { path, .. } => Some(path.clone()),
         CoreStorageError::CleanupFailed { path, .. } => Some(path.clone()),
-        CoreStorageError::AlreadyExistsNoSource { path, .. } => Some(path.clone()),
     };
 
     let py_err = StorageError::new_err(msg);

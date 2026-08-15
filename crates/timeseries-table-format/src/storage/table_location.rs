@@ -5,17 +5,21 @@ use tokio::fs;
 
 use crate::storage::layout;
 use crate::storage::{
-    AlreadyExistsNoSourceSnafu, BackendError, NotFoundSnafu, OtherIoSnafu, StorageLocation,
-    StorageResult,
+    BackendError, NotFoundSnafu, OtherIoSnafu, StorageLocation, StorageResult, copy_new_from_local,
 };
 
 /// Table root location with table-scoped semantics.
 ///
 /// This wraps `StorageLocation` and is used when callers need to treat the
-/// location as a table root (e.g. log layout, segment paths, and helpers like
-/// `ensure_parquet_under_root`).
+/// location as a table root (e.g. log layout and segment paths).
 #[derive(Debug, Clone)]
 pub struct TableLocation(StorageLocation);
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PreparedParquet {
+    pub(crate) relative_path: PathBuf,
+    pub(crate) created: bool,
+}
 
 impl From<TableLocation> for StorageLocation {
     fn from(t: TableLocation) -> Self {
@@ -102,9 +106,10 @@ impl TableLocation {
         }
     }
 
-    /// Ensure `parquet_path` is under this table root.
-    /// If not, copy it into `data/<filename>` and return the relative path.
-    pub async fn ensure_parquet_under_root(&self, parquet_path: &Path) -> StorageResult<PathBuf> {
+    pub(crate) async fn prepare_parquet_under_root(
+        &self,
+        parquet_path: &Path,
+    ) -> StorageResult<PreparedParquet> {
         match self.as_ref() {
             StorageLocation::Local(table_root) => {
                 let root = fs::canonicalize(table_root)
@@ -122,7 +127,10 @@ impl TableLocation {
                     })?;
 
                 if let Ok(rel) = src.strip_prefix(&root) {
-                    return Ok(rel.to_path_buf());
+                    return Ok(PreparedParquet {
+                        relative_path: rel.to_path_buf(),
+                        created: false,
+                    });
                 }
 
                 let file_name = src
@@ -137,58 +145,13 @@ impl TableLocation {
                     })?
                     .to_owned();
 
-                let data_dir = root.join(layout::DATA_DIR_NAME);
-                fs::create_dir_all(&data_dir)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: data_dir.display().to_string(),
-                    })?;
+                let relative_path = PathBuf::from(layout::DATA_DIR_NAME).join(file_name);
+                copy_new_from_local(self.as_ref(), &src, &relative_path).await?;
 
-                let dst = data_dir.join(file_name);
-
-                match fs::metadata(&dst).await {
-                    Ok(_) => {
-                        return AlreadyExistsNoSourceSnafu {
-                            path: dst.display().to_string(),
-                        }
-                        .fail();
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // ok to proceed
-                    }
-
-                    Err(e) => {
-                        return Err(BackendError::Local(e)).context(OtherIoSnafu {
-                            path: dst.display().to_string(),
-                        });
-                    }
-                }
-
-                fs::copy(&src, &dst)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: dst.display().to_string(),
-                    })?;
-
-                let dst = fs::canonicalize(&dst)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: dst.display().to_string(),
-                    })?;
-
-                let rel = dst.strip_prefix(&root).map_err(|_| {
-                    OtherIoSnafu {
-                        path: dst.display().to_string(),
-                    }
-                    .into_error(BackendError::Local(std::io::Error::other(
-                        "copied parquet is not under table root",
-                    )))
-                })?;
-
-                Ok(rel.to_path_buf())
+                Ok(PreparedParquet {
+                    relative_path,
+                    created: true,
+                })
             }
         }
     }
@@ -264,7 +227,7 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[tokio::test]
-    async fn ensure_parquet_under_root_returns_relative_path() -> TestResult {
+    async fn prepare_parquet_under_root_marks_in_root_file_unowned() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -273,13 +236,14 @@ mod tests {
         tokio::fs::create_dir_all(abs_path.parent().unwrap()).await?;
         tokio::fs::write(&abs_path, b"parquet").await?;
 
-        let rel = location.ensure_parquet_under_root(&abs_path).await?;
-        assert_eq!(rel, rel_path);
+        let prepared = location.prepare_parquet_under_root(&abs_path).await?;
+        assert_eq!(prepared.relative_path, rel_path);
+        assert!(!prepared.created);
         Ok(())
     }
 
     #[tokio::test]
-    async fn ensure_parquet_under_root_copies_outside_file() -> TestResult {
+    async fn prepare_parquet_under_root_marks_external_copy_owned() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         tokio::fs::create_dir_all(&table_root).await?;
@@ -288,19 +252,19 @@ mod tests {
         let src_path = tmp.path().join("outside.parquet");
         tokio::fs::write(&src_path, b"parquet").await?;
 
-        let rel = location.ensure_parquet_under_root(&src_path).await?;
+        let prepared = location.prepare_parquet_under_root(&src_path).await?;
         let expected_rel = PathBuf::from("data/outside.parquet");
-        assert_eq!(rel, expected_rel);
+        assert_eq!(prepared.relative_path, expected_rel);
+        assert!(prepared.created);
 
         let dst = table_root.join(&expected_rel);
-        assert!(dst.exists());
-        let contents = tokio::fs::read(&dst).await?;
-        assert_eq!(contents, b"parquet");
+        assert_eq!(tokio::fs::read(&dst).await?, b"parquet");
+        assert_eq!(tokio::fs::read(&src_path).await?, b"parquet");
         Ok(())
     }
 
     #[tokio::test]
-    async fn ensure_parquet_under_root_refuses_overwrite() -> TestResult {
+    async fn prepare_parquet_under_root_refuses_overwrite() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         tokio::fs::create_dir_all(&table_root).await?;
@@ -315,11 +279,13 @@ mod tests {
         tokio::fs::write(&src_path, b"new").await?;
 
         let err = location
-            .ensure_parquet_under_root(&src_path)
+            .prepare_parquet_under_root(&src_path)
             .await
-            .expect_err("expected AlreadyExistsNoSource");
+            .expect_err("expected AlreadyExists");
 
-        assert!(matches!(err, StorageError::AlreadyExistsNoSource { .. }));
+        assert!(matches!(err, StorageError::AlreadyExists { .. }));
+        assert_eq!(tokio::fs::read(existing_dst).await?, b"existing");
+        assert_eq!(tokio::fs::read(src_path).await?, b"new");
         Ok(())
     }
 

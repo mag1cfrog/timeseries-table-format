@@ -47,7 +47,7 @@ pub enum CliError {
 
     #[snafu(display(
         "Append failed for table {table}. \
-         Ensure schema matches the table and the parquet is valid."
+         Ensure schema matches the table and the parquet is valid: {source}"
     ))]
     AppendSegment {
         table: String,

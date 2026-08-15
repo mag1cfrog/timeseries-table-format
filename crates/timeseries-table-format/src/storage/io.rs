@@ -83,12 +83,17 @@ static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
 #[cfg(test)]
 pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
     if cleanup_fails {
-        CLEANUP_FAILURES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(path.clone());
+        inject_cleanup_failure(path.clone());
     }
     WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
+pub(crate) fn inject_cleanup_failure(path: PathBuf) {
+    CLEANUP_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(path);
@@ -166,6 +171,97 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
         Err(operation) => {
             drop(file);
             Err(cleanup_created_file(&mut guard, path, operation).await)
+        }
+    }
+}
+
+async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
+    create_parent_dir(path).await?;
+
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+    {
+        Ok(file) => Ok(file),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            Err(StorageError::AlreadyExists {
+                path: path.display().to_string(),
+                source: BackendError::Local(source),
+                backtrace: Backtrace::capture(),
+            })
+        }
+        Err(source) => Err(StorageError::OtherIo {
+            path: path.display().to_string(),
+            source: BackendError::Local(source),
+            backtrace: Backtrace::capture(),
+        }),
+    }
+}
+
+pub(crate) async fn copy_new_from_local(
+    location: &StorageLocation,
+    source: &Path,
+    rel_path: &Path,
+) -> StorageResult<()> {
+    match location {
+        StorageLocation::Local(_) => {
+            let mut source_file = fs::File::open(source).await.map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    StorageError::NotFound {
+                        path: source.display().to_string(),
+                        source: BackendError::Local(error),
+                        backtrace: Backtrace::capture(),
+                    }
+                } else {
+                    StorageError::OtherIo {
+                        path: source.display().to_string(),
+                        source: BackendError::Local(error),
+                        backtrace: Backtrace::capture(),
+                    }
+                }
+            })?;
+            let destination = join_local(location, rel_path);
+            let mut destination_file = create_new_file(&destination).await?;
+            let mut guard = TempFileGuard::new(destination.clone());
+            #[cfg(test)]
+            let injected_copy_failure = take_write_new_failure(&destination);
+
+            let result = async {
+                #[cfg(test)]
+                if injected_copy_failure {
+                    return Err(write_failure(&destination));
+                }
+
+                tokio::io::copy(&mut source_file, &mut destination_file)
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: destination.display().to_string(),
+                    })?;
+                destination_file
+                    .sync_all()
+                    .await
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: destination.display().to_string(),
+                    })?;
+
+                Ok(())
+            }
+            .await;
+
+            match result {
+                Ok(()) => {
+                    guard.disarm();
+                    Ok(())
+                }
+                Err(operation) => {
+                    drop(destination_file);
+                    Err(cleanup_created_file(&mut guard, &destination, operation).await)
+                }
+            }
         }
     }
 }
@@ -307,6 +403,14 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
+            #[cfg(test)]
+            if take_cleanup_failure(&abs) {
+                return Err(StorageError::OtherIo {
+                    path: abs.display().to_string(),
+                    source: BackendError::Local(io::Error::other("injected cleanup failure")),
+                    backtrace: Backtrace::capture(),
+                });
+            }
             fs::remove_file(&abs)
                 .await
                 .map_err(BackendError::Local)
@@ -330,42 +434,7 @@ pub async fn write_new(
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
-            create_parent_dir(&abs).await?;
-
-            let path_str = abs.display().to_string();
-
-            // Atomic "create only if not exists" on the target path.
-            let open_result = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&abs)
-                .await;
-
-            let file = match open_result {
-                Ok(f) => f,
-                Err(e) => {
-                    let backend = BackendError::Local(e);
-                    // Classify AlreadyExists vs "other I/O"
-                    let storage_err = match &backend {
-                        BackendError::Local(inner)
-                            if inner.kind() == io::ErrorKind::AlreadyExists =>
-                        {
-                            StorageError::AlreadyExists {
-                                path: path_str,
-                                source: backend,
-                                backtrace: Backtrace::capture(),
-                            }
-                        }
-                        _ => StorageError::OtherIo {
-                            path: path_str,
-                            source: backend,
-                            backtrace: Backtrace::capture(),
-                        },
-                    };
-                    return Err(storage_err);
-                }
-            };
-
+            let file = create_new_file(&abs).await?;
             write_created_file(file, &abs, contents).await
         }
     }
@@ -584,6 +653,28 @@ mod tests {
 
         assert!(matches!(err, StorageError::OtherIo { .. }));
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn copy_new_from_local_removes_target_after_copy_failure() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        tokio::fs::create_dir(&table_root).await?;
+        let location = StorageLocation::local(&table_root);
+        let source = tmp.path().join("source.parquet");
+        tokio::fs::write(&source, b"parquet").await?;
+        let rel_path = Path::new("data/copied.parquet");
+        let destination = table_root.join(rel_path);
+        inject_write_new_failure(destination.clone(), false);
+
+        let err = copy_new_from_local(&location, &source, rel_path)
+            .await
+            .expect_err("copy should fail");
+
+        assert!(matches!(err, StorageError::OtherIo { .. }));
+        assert!(!destination.exists());
+        assert_eq!(tokio::fs::read(source).await?, b"parquet");
         Ok(())
     }
 

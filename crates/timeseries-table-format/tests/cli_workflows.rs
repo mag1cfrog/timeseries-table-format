@@ -203,6 +203,42 @@ fn cli_append_outside_root_copies_and_appends() -> StdResult<(), Box<dyn std::er
 }
 
 #[test]
+fn cli_failed_external_append_removes_its_copy() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let output = run_cli(&[
+        "create",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--time-column",
+        "event_time",
+        "--bucket",
+        "1m",
+    ])?;
+    assert_cli_success(output);
+
+    let source_path = tmp.path().join("invalid-external.parquet");
+    write_parquet_rows(&source_path, &[(0, "A", 1.0)])?;
+    let source_before = std::fs::read(&source_path)?;
+    let state_before = open_table_blocking(&table_root)?.state().clone();
+
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source_path.to_string_lossy().as_ref(),
+    ])?;
+
+    assert!(!output.status.success(), "append should fail");
+    assert_eq!(std::fs::read(&source_path)?, source_before);
+    assert!(!table_root.join("data/invalid-external.parquet").exists());
+    assert!(!table_root.join("_coverage").exists());
+    assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
+    Ok(())
+}
+
+#[test]
 fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");

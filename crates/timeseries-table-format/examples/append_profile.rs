@@ -158,17 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let meta = TableMeta::new_time_series(index);
     TimeSeriesTable::create(location.clone(), meta).await?;
 
-    let mut table = TimeSeriesTable::open(location.clone()).await?;
+    let mut table = TimeSeriesTable::open(location).await?;
 
-    let rel = location.ensure_parquet_under_root(&args.parquet).await?;
-    let rel_str = if cfg!(windows) {
-        rel.to_string_lossy().replace('\\', "/")
-    } else {
-        rel.to_string_lossy().to_string()
-    };
-
-    let (_version, report) = table
-        .append_parquet_segment_with_report(&rel_str, &args.time_column)
+    let (_version, _relative_path, report) = table
+        .append_parquet_from_path_with_report(&args.parquet, &args.time_column)
         .await?;
 
     print_report(&report);

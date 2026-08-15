@@ -68,8 +68,7 @@ pub fn map_storage_error(err: StorageError) -> SegmentError {
         StorageError::NotFound { path, .. } => (true, path.clone()),
         StorageError::AlreadyExists { path, .. }
         | StorageError::OtherIo { path, .. }
-        | StorageError::CleanupFailed { path, .. }
-        | StorageError::AlreadyExistsNoSource { path, .. } => (false, path.clone()),
+        | StorageError::CleanupFailed { path, .. } => (false, path.clone()),
     };
 
     if is_missing {

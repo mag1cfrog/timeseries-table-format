@@ -114,6 +114,35 @@ def test_append_parquet_copy_if_outside_true_when_already_under_root_does_not_co
     assert not (root / "data" / "in_root.parquet").exists()
 
 
+def test_append_parquet_copy_if_outside_true_failure_removes_copy(tmp_path):
+    root = tmp_path / "table"
+    tbl = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        time_column="ts",
+        bucket="1h",
+        entity_columns=["symbol"],
+        timezone=None,
+    )
+
+    outside = tmp_path / "wrong_time_column.parquet"
+    _write_parquet_with_ts2(
+        str(outside),
+        ts2_us=[0, 3_600 * 1_000_000],
+        symbol=["NVDA", "NVDA"],
+        close=[1.0, 2.0],
+    )
+    source_before = outside.read_bytes()
+    version_before = tbl.version()
+
+    with pytest.raises(ttf.TimeseriesTableError):
+        tbl.append_parquet(str(outside), copy_if_outside=True)
+
+    assert tbl.version() == version_before
+    assert outside.read_bytes() == source_before
+    assert not (root / "data" / outside.name).exists()
+    assert not (root / "_coverage").exists()
+
+
 def test_append_parquet_copy_collision_raises_storage_error(tmp_path):
     root = tmp_path / "table"
 
@@ -141,6 +170,8 @@ def test_append_parquet_copy_collision_raises_storage_error(tmp_path):
         symbol=["NVDA", "NVDA"],
         close=[3.0, 4.0],
     )
+    existing_before = existing.read_bytes()
+    source_before = outside.read_bytes()
 
     with pytest.raises(ttf.StorageError) as excinfo:
         tbl.append_parquet(str(outside), copy_if_outside=True)
@@ -150,6 +181,8 @@ def test_append_parquet_copy_collision_raises_storage_error(tmp_path):
     path = getattr(e, "path", "")
     assert isinstance(path, str)
     assert path.replace("\\", "/").endswith("/data/outside.parquet")
+    assert existing.read_bytes() == existing_before
+    assert outside.read_bytes() == source_before
 
 
 def test_append_parquet_copy_if_outside_false_relative_path_and_traversal(tmp_path):
@@ -239,9 +272,11 @@ def test_append_parquet_time_column_override(tmp_path):
         symbol=["NVDA", "NVDA"],
         close=[1.0, 2.0],
     )
+    source_before = seg.read_bytes()
 
     with pytest.raises(ttf.TimeseriesTableError):
         tbl.append_parquet(str(seg), copy_if_outside=False)
+    assert seg.read_bytes() == source_before
 
     v = tbl.append_parquet(str(seg), time_column="ts2", copy_if_outside=False)
     assert isinstance(v, int)
@@ -307,5 +342,5 @@ def test_append_parquet_windows_backslash_paths(tmp_path):
     )
 
     win_path = str(seg).replace("/", "\\")
-    v = tbl.append_parquet(win_path, copy_if_outside=False)
+    v = tbl.append_parquet(win_path, copy_if_outside=True)
     assert isinstance(v, int)
