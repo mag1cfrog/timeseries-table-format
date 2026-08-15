@@ -11,6 +11,7 @@
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the
 //! caller.
+use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
 use crate::storage::{self, StorageError, TableLocation};
 use crate::transaction_log::actions::{Commit, LogAction};
 use crate::transaction_log::*;
@@ -85,7 +86,33 @@ impl TransactionLogStore {
         let rel = Self::commit_rel_path(version);
         let json = self.read_to_string_rel(&rel).await?;
 
-        let commit = serde_json::from_str(&json).map_err(|e| CommitError::CorruptState {
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| CommitError::CorruptState {
+                msg: format!("failed to parse commit {version}: {e}"),
+                backtrace: Backtrace::capture(),
+            })?;
+
+        if let Some(found) = value
+            .get("actions")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|action| {
+                action
+                    .pointer("/UpdateTableMeta/format_version")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .find(|&found| found != u64::from(TABLE_FORMAT_VERSION))
+        {
+            return CorruptStateSnafu {
+                msg: format!(
+                    "Unsupported table format version: expected {TABLE_FORMAT_VERSION}, found {found}"
+                ),
+            }
+            .fail();
+        }
+
+        let commit = serde_json::from_value(value).map_err(|e| CommitError::CorruptState {
             msg: format!("failed to parse commit {version}: {e}"),
             backtrace: Backtrace::capture(),
         })?;

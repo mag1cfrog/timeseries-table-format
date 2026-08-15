@@ -9,12 +9,10 @@ use chrono_tz::Tz;
 pub(crate) use time_predicate::*;
 
 mod pruning;
-use crate::storage::StorageLocation;
 use crate::storage::file_size;
 pub(crate) use pruning::*;
 
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -31,12 +29,11 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::object_store::ObjectStoreUrl;
 
-use object_store::path::Path as ObjectStorePath;
-
 use datafusion::logical_expr::Expr;
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
+use crate::metadata::table_metadata::IndexValue;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -55,7 +52,6 @@ pub struct TsTableProvider {
     schema: SchemaRef,
     cache: RwLock<Cache>,
 
-    // Baseline: local filesystem only
     object_store_url: ObjectStoreUrl,
 }
 
@@ -93,11 +89,6 @@ where
     DataFusionError::External(Box::new(e))
 }
 
-/// Build a DataFusion execution error from a message.
-fn df_exec(msg: impl Into<String>) -> DataFusionError {
-    DataFusionError::Execution(msg.into())
-}
-
 impl TsTableProvider {
     /// Creates a new provider backed by the given `TimeSeriesTable`.
     pub fn try_new(table: Arc<TimeSeriesTable>) -> DFResult<Self> {
@@ -109,7 +100,8 @@ impl TsTableProvider {
             .arrow_schema_ref()
             .map_err(df_external)?;
 
-        let object_store_url = ObjectStoreUrl::parse("file://").map_err(df_external)?; // baseline: local FS
+        let object_store_url =
+            ObjectStoreUrl::parse(table.location().object_store_url()).map_err(df_external)?;
         let state = table.state().clone();
 
         Ok(Self {
@@ -144,12 +136,6 @@ impl TsTableProvider {
         Ok(state)
     }
 
-    fn segment_abs_path(&self, seg: &SegmentMeta) -> DFResult<PathBuf> {
-        match self.table.location().as_ref() {
-            StorageLocation::Local(root) => Ok(root.join(&seg.path)),
-        }
-    }
-
     async fn segment_file_size(&self, seg: &SegmentMeta) -> datafusion::error::Result<u64> {
         if let Some(sz) = seg.file_size {
             return Ok(sz);
@@ -168,7 +154,7 @@ impl TsTableProvider {
 
     /// Return the time column name from the table's index spec.
     fn time_column_name(&self) -> &str {
-        self.table.index_spec().timestamp_column.as_str()
+        self.table.index_spec().column.as_str()
     }
 
     fn ts_timezone(&self) -> Option<String> {
@@ -206,9 +192,11 @@ impl TsTableProvider {
         // Prune only if definitely false for that segment.
         segments
             .into_iter()
-            .filter(|seg| {
-                eval_time_pred_on_segment(&compiled, seg.ts_min, seg.ts_max)
-                    != IntervalTruth::AlwaysFalse
+            .filter(|seg| match (&seg.index_min, &seg.index_max) {
+                (IndexValue::Timestamp(min), IndexValue::Timestamp(max)) => {
+                    eval_time_pred_on_segment(&compiled, *min, *max) != IntervalTruth::AlwaysFalse
+                }
+                _ => true,
             })
             .collect()
     }
@@ -247,7 +235,7 @@ impl TableProvider for TsTableProvider {
         // 1) Get a snapshot (TableState) from core table
         let snapshot = self.latest_state().await?;
 
-        let segments = snapshot.segments_sorted_by_time();
+        let segments = snapshot.segments_sorted_by_index().map_err(df_external)?;
 
         let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
         let predicate = conjunction(filters.to_vec());
@@ -269,21 +257,12 @@ impl TableProvider for TsTableProvider {
 
         let selected = self.prune_segments_by_time(segments, filters);
         for seg in selected {
-            let abs = self.segment_abs_path(seg)?;
-            let abs = std::path::absolute(&abs).map_err(|e| {
-                df_exec(format!(
-                    "failed to make segment path absolute {}: {}",
-                    abs.display(),
-                    e
-                ))
-            })?;
-
             let file_size = self.segment_file_size(seg).await?;
-
-            // PartitionedFile expects an object_store Path string delimited by `/` (file URI
-            // semantics). Convert from the platform-native filesystem path to avoid Windows
-            // path quirks (e.g. `\\?\` canonicalization prefixes).
-            let location = ObjectStorePath::from_absolute_path(&abs).map_err(df_external)?;
+            let location = self
+                .table
+                .location()
+                .object_store_path(Path::new(&seg.path))
+                .map_err(df_external)?;
             let pf = PartitionedFile::new(location.as_ref(), file_size);
 
             builder = builder.with_file(pf);

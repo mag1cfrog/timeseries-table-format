@@ -101,7 +101,6 @@ tstable append \
 |------|----------|-------------|
 | `--table` | ✓ | Path to an existing table |
 | `--parquet` | ✓ | Path to the Parquet file to append |
-| `--time-column` | | Override timestamp column (default: from table metadata) |
 | `--timing` | | Print elapsed time |
 
 **Notes:**

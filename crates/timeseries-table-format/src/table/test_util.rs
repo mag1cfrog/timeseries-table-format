@@ -3,7 +3,7 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::table_metadata::{
-    TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
+    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket,
 };
 use arrow::array::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
@@ -37,11 +37,13 @@ pub(crate) struct TestRow {
 }
 
 pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta {
-    let index = TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let index = IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     };
 
     let logical_schema = LogicalSchema::new(vec![
@@ -368,11 +370,13 @@ pub(crate) fn utc_datetime(
 }
 
 pub(crate) fn make_basic_table_meta() -> TableMeta {
-    let index = TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let index = IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     };
 
     let logical_schema = LogicalSchema::new(vec![

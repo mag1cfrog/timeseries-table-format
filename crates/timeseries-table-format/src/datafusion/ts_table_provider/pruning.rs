@@ -71,7 +71,7 @@ pub(crate) fn eval_cmp_on_interval(
 }
 
 /// Result of evaluating a time predicate against an entire segment time interval
-/// `[ts_min, ts_max]` (both inclusive).
+/// Timestamp `index_min`/`index_max` bounds (both inclusive).
 ///
 /// IMPORTANT: this is **universal over the interval**, not "does the segment match".
 ///

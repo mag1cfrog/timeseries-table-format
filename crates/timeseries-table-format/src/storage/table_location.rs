@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "datafusion")]
+use object_store::path::Path as ObjectStorePath;
 use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
@@ -50,12 +52,40 @@ impl TableLocation {
         &self.0
     }
 
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn object_store_url(&self) -> String {
+        match self.as_ref() {
+            StorageLocation::Local(_) => "file://".to_owned(),
+        }
+    }
+
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn object_store_path(&self, relative_path: &Path) -> StorageResult<ObjectStorePath> {
+        let (normalized, native_path) = normalize_relative_storage_path(relative_path)?;
+
+        match self.as_ref() {
+            StorageLocation::Local(root) => {
+                let absolute = std::path::absolute(root.join(native_path))
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: normalized.clone(),
+                    })?;
+
+                ObjectStorePath::from_absolute_path(absolute).map_err(|source| {
+                    OtherIoSnafu { path: normalized }.into_error(BackendError::Local(
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+                    ))
+                })
+            }
+        }
+    }
+
     /// Validate and normalize a segment path for storage in table metadata.
     ///
     /// The returned path is table-relative and always uses `/` separators.
     /// The path must resolve to a file under the table root.
     pub async fn normalize_segment_path(&self, segment_path: &Path) -> StorageResult<String> {
-        let (normalized, native_path) = normalize_relative_segment_path(segment_path)?;
+        let (normalized, native_path) = normalize_relative_storage_path(segment_path)?;
         self.validate_segment_file(segment_path, &native_path)
             .await?;
         Ok(normalized)
@@ -82,7 +112,7 @@ impl TableLocation {
                     })?;
 
                 if resolved.strip_prefix(&root).is_err() {
-                    return Err(invalid_segment_path(
+                    return Err(invalid_relative_storage_path(
                         supplied_path,
                         "path resolves outside the table root",
                     ));
@@ -95,7 +125,7 @@ impl TableLocation {
                     })?
                     .is_file()
                 {
-                    return Err(invalid_segment_path(
+                    return Err(invalid_relative_storage_path(
                         supplied_path,
                         "path does not resolve to a file",
                     ));
@@ -157,19 +187,17 @@ impl TableLocation {
     }
 }
 
-pub(crate) fn normalize_relative_segment_path(
-    segment_path: &Path,
-) -> StorageResult<(String, PathBuf)> {
-    let supplied = segment_path
+pub(crate) fn normalize_relative_storage_path(path: &Path) -> StorageResult<(String, PathBuf)> {
+    let supplied = path
         .to_str()
-        .ok_or_else(|| invalid_segment_path(segment_path, "path is not valid UTF-8"))?;
+        .ok_or_else(|| invalid_relative_storage_path(path, "path is not valid UTF-8"))?;
     let portable = supplied.replace('\\', "/");
 
     if portable.is_empty() {
-        return Err(invalid_segment_path(segment_path, "path is empty"));
+        return Err(invalid_relative_storage_path(path, "path is empty"));
     }
     if portable.starts_with('/') {
-        return Err(invalid_segment_path(segment_path, "path must be relative"));
+        return Err(invalid_relative_storage_path(path, "path must be relative"));
     }
 
     let mut components = Vec::new();
@@ -178,15 +206,15 @@ pub(crate) fn normalize_relative_segment_path(
         .filter(|component| !component.is_empty())
     {
         if component == "." || component == ".." {
-            return Err(invalid_segment_path(
-                segment_path,
+            return Err(invalid_relative_storage_path(
+                path,
                 "path contains a current- or parent-directory component",
             ));
         }
         let bytes = component.as_bytes();
         if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-            return Err(invalid_segment_path(
-                segment_path,
+            return Err(invalid_relative_storage_path(
+                path,
                 "path contains a platform prefix",
             ));
         }
@@ -194,7 +222,7 @@ pub(crate) fn normalize_relative_segment_path(
     }
 
     if components.is_empty() {
-        return Err(invalid_segment_path(segment_path, "path is empty"));
+        return Err(invalid_relative_storage_path(path, "path is empty"));
     }
     let normalized = components.join("/");
     let mut native_path = PathBuf::new();
@@ -204,7 +232,7 @@ pub(crate) fn normalize_relative_segment_path(
     Ok((normalized, native_path))
 }
 
-fn invalid_segment_path(path: &Path, reason: &str) -> crate::storage::StorageError {
+fn invalid_relative_storage_path(path: &Path, reason: &str) -> crate::storage::StorageError {
     let path = if path.as_os_str().is_empty() {
         "<empty>".to_owned()
     } else {
@@ -212,7 +240,7 @@ fn invalid_segment_path(path: &Path, reason: &str) -> crate::storage::StorageErr
     };
     OtherIoSnafu { path: path.clone() }.into_error(BackendError::Local(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
-        format!("invalid segment path '{path}': {reason}"),
+        format!("invalid table-relative storage path '{path}': {reason}"),
     )))
 }
 

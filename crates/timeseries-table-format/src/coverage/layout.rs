@@ -2,18 +2,16 @@
 //!
 //! These helpers define:
 //! - how coverage ids are validated
-//! - how coverage sidecar paths are constructed (relative to the table root)
+//! - how coverage sidecar keys are constructed (relative to the table root)
 //! - deterministic id derivation helpers for per-segment and table snapshots
 //!
-//! Note: these functions return *relative* paths (under a table root). Callers
-//! should join them with the table root / storage backend before doing IO.
-
-use std::path::PathBuf;
+//! Note: these functions return canonical slash-separated object keys. The
+//! storage backend is responsible for resolving them under its table root.
 
 use snafu::Snafu;
 use uuid::Uuid;
 
-use crate::metadata::table_metadata::TimeBucket;
+use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeBucket};
 
 /// Root directory for coverage data.
 pub const COVERAGE_ROOT_DIR: &str = "_coverage";
@@ -83,32 +81,26 @@ pub fn validate_coverage_id(coverage_id: &str) -> Result<(), CoverageLayoutError
     Ok(())
 }
 
-/// Relative path: `_coverage/segments/<coverage_id>.roar`
-pub fn segment_coverage_path(coverage_id: &str) -> Result<PathBuf, CoverageLayoutError> {
+/// Relative object key: `_coverage/segments/<coverage_id>.roar`
+pub fn segment_coverage_key(coverage_id: &str) -> Result<String, CoverageLayoutError> {
     validate_coverage_id(coverage_id)?;
-    let mut p = PathBuf::from(COVERAGE_ROOT_DIR);
-    p.push("segments");
-    p.push(format!("{coverage_id}.{COVERAGE_EXT}"));
-    Ok(p)
+    Ok(format!(
+        "{SEGMENT_COVERAGE_DIR}/{coverage_id}.{COVERAGE_EXT}"
+    ))
 }
 
-/// Relative path: `_coverage/table/<version>-<snapshot_id>.roar`
-pub fn table_snapshot_path(
-    version: u64,
-    snapshot_id: &str,
-) -> Result<PathBuf, CoverageLayoutError> {
+/// Relative object key: `_coverage/table/<version>-<snapshot_id>.roar`
+pub fn table_snapshot_key(version: u64, snapshot_id: &str) -> Result<String, CoverageLayoutError> {
     validate_coverage_id(snapshot_id)?;
-    let mut p = PathBuf::from(COVERAGE_ROOT_DIR);
-    p.push("table");
-    p.push(format!("{version}-{snapshot_id}.{COVERAGE_EXT}"));
-    Ok(p)
+    Ok(format!(
+        "{TABLE_SNAPSHOT_DIR}/{version}-{snapshot_id}.{COVERAGE_EXT}"
+    ))
 }
 
-fn coverage_id_v1(
+fn coverage_id_v2(
     domain_prefix: &[u8],
     output_prefix: &str,
-    bucket_spec: &TimeBucket,
-    time_column: &str,
+    index: &IndexSpec,
     coverage_bytes: &[u8],
 ) -> String {
     let mut h = blake3::Hasher::new();
@@ -117,28 +109,34 @@ fn coverage_id_v1(
     h.update(domain_prefix);
     h.update(b"\0");
 
-    // stable encoding for TimeBucket (avoid Display/to_string)
-    match bucket_spec {
-        TimeBucket::Seconds(n) => {
-            h.update(b"S");
-            h.update(&n.to_le_bytes());
+    h.update(index.column.as_bytes());
+    h.update(b"\0");
+
+    match &index.kind {
+        IndexKind::Timestamp { bucket, timezone } => {
+            h.update(b"T");
+            hash_time_bucket(&mut h, bucket);
+            h.update(b"\0");
+            match timezone {
+                Some(timezone) => {
+                    h.update(b"S");
+                    h.update(timezone.as_bytes());
+                }
+                None => {
+                    h.update(b"N");
+                }
+            }
         }
-        TimeBucket::Minutes(n) => {
-            h.update(b"M");
-            h.update(&n.to_le_bytes());
+        IndexKind::Int64 { bucket_width } => {
+            h.update(b"I");
+            h.update(&bucket_width.get().to_le_bytes());
         }
-        TimeBucket::Hours(n) => {
-            h.update(b"H");
-            h.update(&n.to_le_bytes());
-        }
-        TimeBucket::Days(n) => {
-            h.update(b"D");
-            h.update(&n.to_le_bytes());
+        IndexKind::UInt64 { bucket_width } => {
+            h.update(b"U");
+            h.update(&bucket_width.get().to_le_bytes());
         }
     }
 
-    h.update(b"\0");
-    h.update(time_column.as_bytes());
     h.update(b"\0");
     h.update(coverage_bytes);
 
@@ -146,34 +144,35 @@ fn coverage_id_v1(
     format!("{output_prefix}-{}", &hex[..32])
 }
 
+fn hash_time_bucket(hasher: &mut blake3::Hasher, bucket: &TimeBucket) {
+    match bucket {
+        TimeBucket::Seconds(n) => {
+            hasher.update(b"S");
+            hasher.update(&n.to_le_bytes());
+        }
+        TimeBucket::Minutes(n) => {
+            hasher.update(b"M");
+            hasher.update(&n.to_le_bytes());
+        }
+        TimeBucket::Hours(n) => {
+            hasher.update(b"H");
+            hasher.update(&n.to_le_bytes());
+        }
+        TimeBucket::Days(n) => {
+            hasher.update(b"D");
+            hasher.update(&n.to_le_bytes());
+        }
+    }
+}
+
 /// Deterministically derive a safe content id for segment coverage.
-pub fn segment_coverage_id_v1(
-    bucket_spec: &TimeBucket,
-    time_column: &str,
-    coverage_bytes: &[u8],
-) -> String {
-    coverage_id_v1(
-        b"segcov-v1",
-        "segcov",
-        bucket_spec,
-        time_column,
-        coverage_bytes,
-    )
+pub fn segment_coverage_id_v2(index: &IndexSpec, coverage_bytes: &[u8]) -> String {
+    coverage_id_v2(b"segcov-v2", "segcov", index, coverage_bytes)
 }
 
 /// Deterministically derive a safe content id for table snapshot coverage.
-pub fn table_coverage_id_v1(
-    bucket_spec: &TimeBucket,
-    time_column: &str,
-    coverage_bytes: &[u8],
-) -> String {
-    coverage_id_v1(
-        b"tblcov-v1",
-        "tblcov",
-        bucket_spec,
-        time_column,
-        coverage_bytes,
-    )
+pub fn table_coverage_id_v2(index: &IndexSpec, coverage_bytes: &[u8]) -> String {
+    coverage_id_v2(b"tblcov-v2", "tblcov", index, coverage_bytes)
 }
 
 /// Add a writer-owned suffix to a deterministic coverage content id.
@@ -183,7 +182,20 @@ pub(crate) fn coverage_file_id_for_attempt(content_id: &str, attempt_id: &Uuid) 
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
+
+    fn timestamp_index(column: &str, bucket: TimeBucket) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Timestamp {
+                bucket,
+                timezone: None,
+            },
+        }
+    }
 
     #[test]
     fn validate_coverage_id_accepts_valid_ids() {
@@ -217,29 +229,28 @@ mod tests {
     }
 
     #[test]
-    fn segment_coverage_path_formats_and_validates() {
+    fn segment_coverage_key_formats_and_validates() {
         let id = "seg-001";
-        let path = segment_coverage_path(id).expect("valid id");
-        assert_eq!(path, PathBuf::from("_coverage/segments/seg-001.roar"));
+        let key = segment_coverage_key(id).expect("valid id");
+        assert_eq!(key, "_coverage/segments/seg-001.roar");
 
         // Ensure validation runs
-        assert!(segment_coverage_path("bad/id").is_err());
+        assert!(segment_coverage_key("bad/id").is_err());
     }
 
     #[test]
-    fn table_snapshot_path_formats() {
-        let path = table_snapshot_path(42, "snap-001").expect("valid snapshot id");
-        assert_eq!(path, PathBuf::from("_coverage/table/42-snap-001.roar"));
+    fn table_snapshot_key_formats() {
+        let key = table_snapshot_key(42, "snap-001").expect("valid snapshot id");
+        assert_eq!(key, "_coverage/table/42-snap-001.roar");
     }
 
     #[test]
     fn segment_coverage_id_is_deterministic_and_valid() {
-        let bucket = TimeBucket::Minutes(1);
-        let time_col = "ts";
+        let index = timestamp_index("ts", TimeBucket::Minutes(1));
         let bytes = b"bitmap-bytes";
 
-        let id1 = segment_coverage_id_v1(&bucket, time_col, bytes);
-        let id2 = segment_coverage_id_v1(&bucket, time_col, bytes);
+        let id1 = segment_coverage_id_v2(&index, bytes);
+        let id2 = segment_coverage_id_v2(&index, bytes);
 
         assert_eq!(id1, id2, "same inputs must produce stable id");
         assert!(id1.starts_with("segcov-"));
@@ -251,24 +262,61 @@ mod tests {
     fn segment_coverage_id_changes_with_inputs() {
         let bytes = b"bytes";
 
-        let base = segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", bytes);
-        let different_bucket = segment_coverage_id_v1(&TimeBucket::Hours(5), "ts", bytes);
-        let different_column = segment_coverage_id_v1(&TimeBucket::Seconds(5), "event_time", bytes);
-        let different_bytes = segment_coverage_id_v1(&TimeBucket::Seconds(5), "ts", b"other");
+        let base_index = timestamp_index("ts", TimeBucket::Seconds(5));
+        let base = segment_coverage_id_v2(&base_index, bytes);
+        let different_bucket =
+            segment_coverage_id_v2(&timestamp_index("ts", TimeBucket::Hours(5)), bytes);
+        let different_column = segment_coverage_id_v2(
+            &timestamp_index("event_time", TimeBucket::Seconds(5)),
+            bytes,
+        );
+        let different_kind = segment_coverage_id_v2(
+            &IndexSpec {
+                column: "ts".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::UInt64 {
+                    bucket_width: NonZeroU64::new(5).unwrap(),
+                },
+            },
+            bytes,
+        );
+        let different_integer_domain = segment_coverage_id_v2(
+            &IndexSpec {
+                column: "ts".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::Int64 {
+                    bucket_width: NonZeroU64::new(5).unwrap(),
+                },
+            },
+            bytes,
+        );
+        let different_width = segment_coverage_id_v2(
+            &IndexSpec {
+                column: "ts".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::UInt64 {
+                    bucket_width: NonZeroU64::new(6).unwrap(),
+                },
+            },
+            bytes,
+        );
+        let different_bytes = segment_coverage_id_v2(&base_index, b"other");
 
         assert_ne!(base, different_bucket, "bucket spec should affect id");
-        assert_ne!(base, different_column, "time column should affect id");
+        assert_ne!(base, different_column, "index column should affect id");
+        assert_ne!(base, different_kind, "index kind should affect id");
+        assert_ne!(different_kind, different_integer_domain);
+        assert_ne!(different_kind, different_width);
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
     }
 
     #[test]
     fn table_coverage_id_is_deterministic_and_valid() {
-        let bucket = TimeBucket::Hours(1);
-        let time_col = "ts";
+        let index = timestamp_index("ts", TimeBucket::Hours(1));
         let bytes = b"table-bitmap";
 
-        let id1 = table_coverage_id_v1(&bucket, time_col, bytes);
-        let id2 = table_coverage_id_v1(&bucket, time_col, bytes);
+        let id1 = table_coverage_id_v2(&index, bytes);
+        let id2 = table_coverage_id_v2(&index, bytes);
 
         assert_eq!(id1, id2, "same inputs must produce stable id");
         assert!(id1.starts_with("tblcov-"));
@@ -280,13 +328,18 @@ mod tests {
     fn table_coverage_id_changes_with_inputs() {
         let bytes = b"bytes";
 
-        let base = table_coverage_id_v1(&TimeBucket::Minutes(15), "ts", bytes);
-        let different_bucket = table_coverage_id_v1(&TimeBucket::Days(1), "ts", bytes);
-        let different_column = table_coverage_id_v1(&TimeBucket::Minutes(15), "event_time", bytes);
-        let different_bytes = table_coverage_id_v1(&TimeBucket::Minutes(15), "ts", b"other");
+        let base_index = timestamp_index("ts", TimeBucket::Minutes(15));
+        let base = table_coverage_id_v2(&base_index, bytes);
+        let different_bucket =
+            table_coverage_id_v2(&timestamp_index("ts", TimeBucket::Days(1)), bytes);
+        let different_column = table_coverage_id_v2(
+            &timestamp_index("event_time", TimeBucket::Minutes(15)),
+            bytes,
+        );
+        let different_bytes = table_coverage_id_v2(&base_index, b"other");
 
         assert_ne!(base, different_bucket, "bucket spec should affect id");
-        assert_ne!(base, different_column, "time column should affect id");
+        assert_ne!(base, different_column, "index column should affect id");
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
     }
 

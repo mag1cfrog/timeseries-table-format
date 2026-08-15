@@ -85,6 +85,8 @@ pub enum LogicalDataType {
     Int32,
     /// 64-bit signed integer.
     Int64,
+    /// 64-bit unsigned integer.
+    UInt64,
     /// 32-bit floating point.
     Float32,
     /// 64-bit floating point.
@@ -150,6 +152,7 @@ impl LogicalDataType {
             LogicalDataType::Bool => DataType::Boolean,
             LogicalDataType::Int32 => DataType::Int32,
             LogicalDataType::Int64 => DataType::Int64,
+            LogicalDataType::UInt64 => DataType::UInt64,
             LogicalDataType::Float32 => DataType::Float32,
             LogicalDataType::Float64 => DataType::Float64,
             LogicalDataType::Binary => DataType::Binary,
@@ -280,6 +283,7 @@ impl fmt::Display for LogicalDataType {
             LogicalDataType::Bool => write!(f, "bool"),
             LogicalDataType::Int32 => write!(f, "int32"),
             LogicalDataType::Int64 => write!(f, "int64"),
+            LogicalDataType::UInt64 => write!(f, "uint64"),
             LogicalDataType::Float32 => write!(f, "float32"),
             LogicalDataType::Float64 => write!(f, "float64"),
             LogicalDataType::Binary => write!(f, "binary"),
@@ -987,5 +991,23 @@ mod tests {
         let json = serde_json::to_string(&logical).unwrap();
         let back: LogicalSchema = serde_json::from_str(&json).unwrap();
         assert_eq!(back, logical);
+    }
+
+    #[test]
+    fn logical_schema_uint64_roundtrips_json_and_maps_exactly_to_arrow() {
+        let schema = LogicalSchema::new(vec![LogicalField {
+            name: "offset".to_string(),
+            data_type: LogicalDataType::UInt64,
+            nullable: false,
+        }])
+        .unwrap();
+
+        let json = serde_json::to_string(&schema).unwrap();
+        let restored: LogicalSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, schema);
+        assert_eq!(
+            restored.to_arrow_schema().unwrap().field(0).data_type(),
+            &DataType::UInt64
+        );
     }
 }

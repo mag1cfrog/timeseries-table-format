@@ -11,7 +11,9 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_format::{
-    metadata::table_metadata::TimeBucket, storage::TableLocation, table::TimeSeriesTable,
+    metadata::table_metadata::{IndexKind, TimeBucket},
+    storage::TableLocation,
+    table::TimeSeriesTable,
 };
 
 fn cli_bin() -> &'static str {
@@ -125,9 +127,14 @@ fn cli_create_creates_table() -> StdResult<(), Box<dyn std::error::Error>> {
 
     let table = open_table_blocking(&table_root)?;
     let index = table.index_spec();
-    assert_eq!(index.timestamp_column, "ts");
-    assert_eq!(index.bucket, TimeBucket::Minutes(15));
-    assert_eq!(index.timezone.as_deref(), Some("America/New_York"));
+    assert_eq!(index.column, "ts");
+    assert_eq!(
+        index.kind,
+        IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(15),
+            timezone: Some("America/New_York".to_string())
+        }
+    );
     assert_eq!(
         index.entity_columns,
         vec!["symbol".to_string(), "venue".to_string()]
@@ -151,8 +158,6 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
         table_root.to_string_lossy().as_ref(),
         "--parquet",
         parquet_path.to_string_lossy().as_ref(),
-        "--time-column",
-        "ts",
     ])?;
     assert_cli_success(output);
 
@@ -269,7 +274,7 @@ fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn st
 }
 
 #[test]
-fn cli_append_defaults_time_column() -> StdResult<(), Box<dyn std::error::Error>> {
+fn cli_append_uses_registered_time_column() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     create_table_via_cli(&table_root, "1m", &[])?;

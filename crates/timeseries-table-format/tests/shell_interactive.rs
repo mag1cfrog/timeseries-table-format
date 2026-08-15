@@ -3,7 +3,7 @@
 use std::{process::Stdio, time::Duration};
 use tempfile::TempDir;
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -41,11 +41,13 @@ fn make_table_meta(
     bucket: TimeBucket,
     entity_columns: Vec<String>,
 ) -> TableMeta {
-    let index = TimeIndexSpec {
-        timestamp_column: time_column.to_string(),
+    let index = IndexSpec {
+        column: time_column.to_string(),
         entity_columns,
-        bucket,
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket,
+            timezone: None,
+        },
     };
     TableMeta::new_time_series(index)
 }
@@ -117,9 +119,7 @@ async fn shell_interactive_existing_table_skips_first_append_prompt() -> TestRes
     {
         let location = TableLocation::local(&table_root);
         let mut table = TimeSeriesTable::open(location).await?;
-        table
-            .append_parquet_segment("data/seg.parquet", "ts")
-            .await?;
+        table.append_parquet_segment("data/seg.parquet").await?;
     }
 
     let input = format!("{}\nexit\n", table_root.display());

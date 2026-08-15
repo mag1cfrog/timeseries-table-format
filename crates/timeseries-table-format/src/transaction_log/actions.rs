@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::transaction_log::{TableMetaDelta, TimeBucket, segments::SegmentMeta};
+use crate::transaction_log::{IndexKind, TableMetaDelta, segments::SegmentMeta};
 /// An action recorded in a commit.
 ///
 /// Each commit contains a sequence of actions that are applied in order to
@@ -28,8 +28,8 @@ pub enum LogAction {
 
     /// Points to the table-level coverage snapshot sidecar for this commit version.
     UpdateTableCoverage {
-        /// Time bucket specification for the coverage snapshot.
-        bucket_spec: TimeBucket,
+        /// Canonical ordered-index coverage descriptor.
+        index_kind: IndexKind,
         /// Path to the coverage data.
         coverage_path: String,
     },

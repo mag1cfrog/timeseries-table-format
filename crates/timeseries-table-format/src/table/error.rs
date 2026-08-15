@@ -14,11 +14,14 @@ use parquet::errors::ParquetError;
 use snafu::prelude::*;
 
 use crate::{
-    coverage::io::CoverageError,
+    coverage::{bucket::BucketError, io::CoverageError},
     formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
-    metadata::schema_compat::SchemaCompatibilityError,
+    metadata::{
+        schema_compat::SchemaCompatibilityError,
+        table_metadata::{IndexKind, IndexSpecError, IndexValueError},
+    },
     storage::StorageError,
-    transaction_log::{CommitError, TableKind, TimeBucket, segments::SegmentError},
+    transaction_log::{CommitError, TableKind, segments::SegmentError},
 };
 
 /// Errors from high-level time-series table operations.
@@ -89,6 +92,36 @@ pub enum TableError {
     AlreadyExists {
         /// Current transaction log version that indicates the table already exists.
         current_version: u64,
+    },
+
+    /// The ordered-index specification is structurally invalid.
+    #[snafu(display("Invalid ordered index specification: {source}"))]
+    IndexSpec {
+        /// Structural or bucket configuration failure.
+        source: IndexSpecError,
+    },
+
+    /// An ordered value could not be mapped to its coverage bucket.
+    #[snafu(display("Coverage bucket mapping failed: {source}"))]
+    CoverageBucket {
+        /// Domain, range, or bucket configuration failure.
+        source: BucketError,
+    },
+
+    /// A timestamp-only operation was requested for another ordered domain.
+    #[snafu(display("Operation {operation} requires a timestamp index, found {actual}"))]
+    UnsupportedIndexKind {
+        /// Timestamp-only operation name.
+        operation: &'static str,
+        /// Actual registered ordered domain.
+        actual: &'static str,
+    },
+
+    /// Segment bounds cannot be ordered in one native index domain.
+    #[snafu(display("Invalid segment ordered-index bounds: {source}"))]
+    InvalidSegmentBounds {
+        /// Domain or bound-order failure.
+        source: IndexValueError,
     },
 
     /// Segment-level metadata / Parquet error during append (for example, missing time column, unsupported type, corrupt stats).
@@ -192,15 +225,15 @@ pub enum TableError {
         source: SegmentCoverageError,
     },
 
-    /// Table coverage pointer uses a bucket spec that doesn't match the table's index bucket.
+    /// Table coverage pointer uses a different ordered-index descriptor.
     #[snafu(display(
-        "Table coverage bucket spec mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
+        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
     ))]
-    TableCoverageBucketMismatch {
-        /// Bucket spec defined by the table's time index.
-        expected: TimeBucket,
-        /// Bucket spec recorded in the table coverage pointer.
-        actual: TimeBucket,
+    TableCoverageIndexKindMismatch {
+        /// Index descriptor defined by table metadata.
+        expected: IndexKind,
+        /// Index descriptor recorded in the table coverage pointer.
+        actual: IndexKind,
         /// Log version where the mismatching coverage pointer was recorded.
         pointer_version: u64,
     },
@@ -223,7 +256,7 @@ pub enum TableError {
         /// Number of overlapping buckets detected.
         overlap_count: u64,
         /// Example overlapping bucket (if available) to aid debugging.
-        example_bucket: Option<u32>,
+        example_bucket: Option<u64>,
     },
 
     /// A live segment already uses the normalized path supplied for append.
@@ -254,21 +287,6 @@ pub enum TableError {
         /// Underlying coverage error (boxed to keep the variant size small).
         #[snafu(source(from(CoverageError, Box::new)), backtrace)]
         source: Box<CoverageError>,
-    },
-
-    /// Building an expected bucket bitmap would exceed the u32 bucket domain.
-    ///
-    /// In v0.1 we store bucket ids in RoaringBitmap (u32). If the requested
-    /// time range maps to bucket ids > u32::MAX, we must fail instead of
-    /// truncating in release builds.
-    #[snafu(display(
-        "Expected bucket domain overflows u32: last_bucket_id={last_bucket_id} (max={max})"
-    ))]
-    BucketDomainOverflow {
-        /// The last bucket id in the requested range (inclusive).
-        last_bucket_id: u64,
-        /// Always u32::MAX, included to make the error self-describing.
-        max: u32,
     },
 
     /// Table state is missing a coverage snapshot pointer when required.

@@ -424,7 +424,7 @@ mod tests {
         metadata::logical_schema::{
             LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
-        metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
         storage::TableLocation,
         table::TimeSeriesTable,
     };
@@ -438,11 +438,13 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     fn make_table_meta() -> TestResult<TableMeta> {
-        let index = TimeIndexSpec {
-            timestamp_column: "ts".to_string(),
+        let index = IndexSpec {
+            column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
-            bucket: TimeBucket::Minutes(1),
-            timezone: None,
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
         };
 
         let logical_schema = LogicalSchema::new(vec![
@@ -499,7 +501,7 @@ mod tests {
 
         let rel = "data/segment.parquet";
         test_common::write_parquet_rows(&tmp.path().join(rel), rows)?;
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         Ok((tmp, rows))
     }

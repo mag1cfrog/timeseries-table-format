@@ -17,7 +17,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use serde_json::json;
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -160,17 +160,17 @@ async fn prepare(
         write_segment(&segment_path, row_groups, rows_per_group, payload_bytes)?;
     let segment_file_bytes = std::fs::metadata(&segment_path)?.len();
 
-    let index = TimeIndexSpec {
-        timestamp_column: TIME_COLUMN.to_string(),
+    let index = IndexSpec {
+        column: TIME_COLUMN.to_string(),
         entity_columns: Vec::new(),
-        bucket: TimeBucket::Seconds(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Seconds(1),
+            timezone: None,
+        },
     };
     let location = TableLocation::local(&table_root);
     let mut table = TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
-    table
-        .append_parquet_segment(SEGMENT_PATH, TIME_COLUMN)
-        .await?;
+    table.append_parquet_segment(SEGMENT_PATH).await?;
 
     println!(
         "{}",
@@ -208,9 +208,11 @@ async fn scan(table_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| invalid_data("prepared table has no segment"))?;
     let segment_path = segment.path.clone();
     let expected_rows = segment.row_count;
-    let start = segment.ts_min;
-    let end = segment
-        .ts_max
+    let (start, max) = match (&segment.index_min, &segment.index_max) {
+        (IndexValue::Timestamp(start), IndexValue::Timestamp(max)) => (*start, *max),
+        _ => return Err(invalid_data("expected timestamp segment bounds").into()),
+    };
+    let end = max
         .checked_add_signed(Duration::milliseconds(1))
         .ok_or_else(|| invalid_data("scan end timestamp overflow"))?;
 

@@ -164,7 +164,6 @@ class TimeSeriesTable:
     def append_parquet(
         self,
         parquet_path: str,
-        time_column: str | None = None,
         copy_if_outside: bool = True,
     ) -> int:
         """Append a Parquet segment to the table and return the new table version.
@@ -173,10 +172,9 @@ class TimeSeriesTable:
         ----------
         parquet_path:
             Path to a Parquet file.
-        time_column:
-            Optional override for the timestamp column name in the Parquet file.
         copy_if_outside:
             If `True`, copies the file under the table root before appending.
+            If `False`, `parquet_path` must be a table-relative storage key.
         """
         ...
 

@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use crate::metadata::segments::{FileFormat, SegmentMeta};
-use crate::metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec};
+use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket};
 use crate::storage::TableLocation;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::{LogAction, TransactionLogStore};
@@ -12,11 +12,13 @@ use tempfile::TempDir;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn make_basic_table_meta() -> TableMeta {
-    let index = TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let index = IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     };
 
     TableMeta::new_time_series(index)
@@ -38,8 +40,8 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
     let seg = SegmentMeta {
         path: "data/seg_0001.parquet".to_string(),
         format: FileFormat::Parquet,
-        ts_min: Utc.timestamp_opt(10, 0).single().unwrap(),
-        ts_max: Utc.timestamp_opt(20, 0).single().unwrap(),
+        index_min: (Utc.timestamp_opt(10, 0).single().unwrap()).into(),
+        index_max: (Utc.timestamp_opt(20, 0).single().unwrap()).into(),
         row_count: 1,
         file_size: None,
         coverage_path: None,
@@ -59,8 +61,8 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
     assert_eq!(latest.version, 2);
     assert!(latest.segments.contains_key(&seg.path));
     let latest_seg = latest.segments.get(&seg.path).expect("segment present");
-    assert_eq!(latest_seg.ts_min, seg.ts_min);
-    assert_eq!(latest_seg.ts_max, seg.ts_max);
+    assert_eq!(latest_seg.index_min, seg.index_min);
+    assert_eq!(latest_seg.index_max, seg.index_max);
     assert!(latest.table_coverage.is_none());
 
     Ok(())

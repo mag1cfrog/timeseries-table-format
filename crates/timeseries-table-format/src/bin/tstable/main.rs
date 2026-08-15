@@ -11,7 +11,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::ResultExt;
 use timeseries_table_format::{
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -100,10 +100,6 @@ enum Command {
 
         #[arg(long)]
         parquet: PathBuf,
-
-        /// Override timestamp column name (default: from table metadata)
-        #[arg(long = "time-column")]
-        time_column: Option<String>,
 
         /// Print elapsed time for the append
         #[arg(long, default_value_t = false)]
@@ -203,11 +199,10 @@ async fn cmd_create(
 ) -> CliResult<()> {
     let bucket = parse_time_bucket(&bucket)?;
 
-    let index = TimeIndexSpec {
-        timestamp_column: time_column,
-        bucket,
-        timezone,
+    let index = IndexSpec {
+        column: time_column,
         entity_columns,
+        kind: IndexKind::Timestamp { bucket, timezone },
     };
 
     let meta = TableMeta::new_time_series(index);
@@ -225,28 +220,17 @@ async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<Tim
         })
 }
 
-async fn cmd_append(
-    table: &Path,
-    parquet: &Path,
-    time_column: Option<String>,
-    timing: bool,
-) -> CliResult<()> {
+async fn cmd_append(table: &Path, parquet: &Path, timing: bool) -> CliResult<()> {
     let start = Instant::now();
     let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
-    // Open first so we can read metadata for default ts column.
     let mut t = open_table(location, table).await?;
 
-    let ts_col = match time_column {
-        Some(c) => c,
-        None => t.index_spec().timestamp_column.clone(),
-    };
-
-    let (_, rel_str) =
-        t.append_parquet_from_path(parquet, &ts_col)
-            .await
-            .context(AppendSegmentSnafu {
-                table: table.display().to_string(),
-            })?;
+    let (_, rel_str) = t
+        .append_parquet_from_path(parquet)
+        .await
+        .context(AppendSegmentSnafu {
+            table: table.display().to_string(),
+        })?;
 
     if timing {
         println!(
@@ -314,9 +298,8 @@ async fn run() -> CliResult<()> {
         Command::Append {
             table,
             parquet,
-            time_column,
             timing,
-        } => cmd_append(&table, &parquet, time_column, timing).await,
+        } => cmd_append(&table, &parquet, timing).await,
 
         Command::Query {
             table,

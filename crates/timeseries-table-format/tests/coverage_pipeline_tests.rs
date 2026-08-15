@@ -15,7 +15,7 @@ use timeseries_table_format::{
     metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     },
-    metadata::table_metadata::{TableMeta, TimeBucket, TimeIndexSpec},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
     table::{TableError, TimeSeriesTable},
 };
@@ -52,9 +52,9 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         &[(240_000, "A", 50.0), (241_000, "A", 60.0)],
     )?;
 
-    let v2 = table.append_parquet_segment(rel1, "ts").await?;
-    let v3 = table.append_parquet_segment(rel2, "ts").await?;
-    let v4 = table.append_parquet_segment(rel3, "ts").await?;
+    let v2 = table.append_parquet_segment(rel1).await?;
+    let v3 = table.append_parquet_segment(rel2).await?;
+    let v4 = table.append_parquet_segment(rel3).await?;
     assert_eq!((v2, v3, v4), (2, 3, 4));
     assert_eq!(table.state().version, 4);
 
@@ -71,7 +71,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .table_coverage
         .as_ref()
         .ok_or_else(|| "table snapshot pointer missing after appends".to_string())?;
-    assert_eq!(ptr.bucket_spec, table.index_spec().bucket);
+    assert_eq!(ptr.index_kind, table.index_spec().kind);
     assert_eq!(ptr.version, table.state().version);
 
     let expected = union_segment_coverages(&location, table.state().segments.values()).await?;
@@ -86,7 +86,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .as_ref()
         .ok_or_else(|| "snapshot pointer missing after reopen".to_string())?
         .clone();
-    assert_eq!(reopened_ptr.bucket_spec, table.index_spec().bucket);
+    assert_eq!(reopened_ptr.index_kind, table.index_spec().kind);
     let reopened_cov =
         read_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
     assert_eq!(reopened_cov.present(), expected.present());
@@ -98,7 +98,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
     write_parquet_rows(&tmp.path().join(rel_overlap), &[(121_500, "A", 70.0)])?;
     let err = reopened
-        .append_parquet_segment(rel_overlap, "ts")
+        .append_parquet_segment(rel_overlap)
         .await
         .expect_err("overlapping append should fail");
     assert!(matches!(err, TableError::CoverageOverlap { .. }));
@@ -134,16 +134,16 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     )?;
 
     table
-        .append_parquet_segment("data/cov-query-a.parquet", "ts")
+        .append_parquet_segment("data/cov-query-a.parquet")
         .await?;
     table
-        .append_parquet_segment("data/cov-query-b.parquet", "ts")
+        .append_parquet_segment("data/cov-query-b.parquet")
         .await?;
     table
-        .append_parquet_segment("data/cov-query-c.parquet", "ts")
+        .append_parquet_segment("data/cov-query-c.parquet")
         .await?;
     table
-        .append_parquet_segment("data/cov-query-d.parquet", "ts")
+        .append_parquet_segment("data/cov-query-d.parquet")
         .await?;
 
     // Re-open to exercise snapshot loading path.
@@ -162,7 +162,10 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         .last_fully_covered_window(end, 2)
         .await?
         .expect("should find contiguous window");
-    assert_eq!(last_window, 4u32..=5u32);
+    assert_eq!(
+        last_window,
+        0x8000_0000_0000_0004u64..=0x8000_0000_0000_0005u64
+    );
 
     // Check a shorter range that ends on a bucket boundary to exercise half-open logic.
     let short_end = ts_from_secs(180)?; // start of bucket 3; expected buckets 0,1,2 (covered: 0,1)
@@ -173,7 +176,10 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     assert_eq!(short_gap, 1);
 
     let short_window = table.last_fully_covered_window(short_end, 2).await?;
-    assert_eq!(short_window, Some(0u32..=1u32));
+    assert_eq!(
+        short_window,
+        Some(0x8000_0000_0000_0000u64..=0x8000_0000_0000_0001u64)
+    );
 
     // With a trailing single-bucket run (bucket 8), len should skip the short tail
     // and return the last contiguous run of sufficient length.
@@ -183,14 +189,17 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         .last_fully_covered_window(later_end, window_len)
         .await?
         .expect("window of len >=2 should be found");
-    assert_eq!(window, 4u32..=5u32);
+    assert_eq!(window, 0x8000_0000_0000_0004u64..=0x8000_0000_0000_0005u64);
 
     let window_len_three = 3;
     let window_three = table
         .last_fully_covered_window(later_end, window_len_three)
         .await?
         .expect("window of len >=3 should be found");
-    assert_eq!(window_three, 3u32..=5u32);
+    assert_eq!(
+        window_three,
+        0x8000_0000_0000_0003u64..=0x8000_0000_0000_0005u64
+    );
 
     Ok(())
 }
@@ -215,11 +224,13 @@ where
 }
 
 fn make_basic_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
-    let index = TimeIndexSpec {
-        timestamp_column: "ts".to_string(),
+    let index = IndexSpec {
+        column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
-        bucket: TimeBucket::Minutes(1),
-        timezone: None,
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
     };
 
     let logical_schema = LogicalSchema::new(vec![

@@ -30,15 +30,15 @@ use futures::Stream;
 use snafu::prelude::*;
 
 use crate::table::error::{
-    AlreadyExistsSnafu, EmptyTableSnafu, NotTimeSeriesSnafu, TransactionLogSnafu,
-    UnsupportedFormatVersionSnafu,
+    AlreadyExistsSnafu, EmptyTableSnafu, IndexSpecSnafu, NotTimeSeriesSnafu,
+    SchemaCompatibilitySnafu, TransactionLogSnafu, UnsupportedFormatVersionSnafu,
 };
 
 use crate::{
-    metadata::table_metadata::TABLE_FORMAT_VERSION,
+    metadata::{schema_compat::ensure_index_matches_schema, table_metadata::TABLE_FORMAT_VERSION},
     storage::TableLocation,
     transaction_log::{
-        LogAction, TableKind, TableMeta, TableState, TimeIndexSpec, TransactionLogStore,
+        IndexSpec, LogAction, TableKind, TableMeta, TableState, TransactionLogStore,
     },
 };
 
@@ -58,7 +58,7 @@ pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableErr
 pub struct TimeSeriesTable {
     log: TransactionLogStore,
     state: TableState,
-    index: TimeIndexSpec,
+    index: IndexSpec,
 }
 
 impl TimeSeriesTable {
@@ -77,7 +77,7 @@ impl TimeSeriesTable {
     }
 
     /// Return the time index specification for this table.
-    pub fn index_spec(&self) -> &TimeIndexSpec {
+    pub fn index_spec(&self) -> &IndexSpec {
         &self.index
     }
 
@@ -92,7 +92,7 @@ impl TimeSeriesTable {
     /// - Build a `TransactionLogStore` for the location.
     /// - Rebuild `TableState` from the transaction log.
     /// - Reject empty tables (version == 0).
-    /// - Require `TableKind::TimeSeries` and extract `TimeIndexSpec`.
+    /// - Require `TableKind::TimeSeries` and extract `IndexSpec`.
     pub async fn open(location: TableLocation) -> Result<Self, TableError> {
         let log = TransactionLogStore::new(location.clone());
 
@@ -158,6 +158,10 @@ impl TimeSeriesTable {
                 .fail();
             }
         };
+        index.validate().context(IndexSpecSnafu)?;
+        if let Some(schema) = &table_meta.logical_schema {
+            ensure_index_matches_schema(schema, &index).context(SchemaCompatibilitySnafu)?;
+        }
 
         let log = TransactionLogStore::new(location.clone());
 
@@ -247,7 +251,7 @@ mod tests {
 
     use crate::storage::{StorageLocation, layout};
     use crate::table::test_util::*;
-    use crate::transaction_log::{TimeBucket, TransactionLogStore};
+    use crate::transaction_log::{IndexKind, TimeBucket, TransactionLogStore};
 
     use tempfile::TempDir;
 
@@ -367,7 +371,10 @@ mod tests {
 
         let mut updated_meta = meta.clone();
         if let TableKind::TimeSeries(spec) = &mut updated_meta.kind {
-            spec.bucket = TimeBucket::Minutes(5);
+            spec.kind = IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(5),
+                timezone: None,
+            };
         }
 
         let log = TransactionLogStore::new(location.clone());
@@ -381,10 +388,22 @@ mod tests {
         assert_eq!(table.state().version, 2);
 
         match &table.state().table_meta.kind {
-            TableKind::TimeSeries(spec) => assert_eq!(spec.bucket, TimeBucket::Minutes(5)),
+            TableKind::TimeSeries(spec) => assert_eq!(
+                spec.kind,
+                IndexKind::Timestamp {
+                    bucket: TimeBucket::Minutes(5),
+                    timezone: None
+                }
+            ),
             other => panic!("expected time series table kind, got {other:?}"),
         }
-        assert_eq!(table.index_spec().bucket, TimeBucket::Minutes(5));
+        assert_eq!(
+            table.index_spec().kind,
+            IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(5),
+                timezone: None
+            }
+        );
         Ok(())
     }
 }
