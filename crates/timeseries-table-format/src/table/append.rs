@@ -27,7 +27,10 @@ use crate::{
         coverage::compute_segment_coverage, logical_schema_from_parquet,
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
-    metadata::schema_compat::ensure_schema_exact_match,
+    metadata::{
+        schema_compat::ensure_schema_exact_match,
+        table_metadata::{IndexKind, IndexSpec},
+    },
     storage,
     transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
 };
@@ -210,8 +213,19 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)?;
+                ensure_schema_exact_match(
+                    table_schema,
+                    &segment_schema,
+                    &IndexSpec {
+                        column: self.index.timestamp_column.clone(),
+                        entity_columns: self.index.entity_columns.clone(),
+                        kind: IndexKind::Timestamp {
+                            bucket: self.index.bucket.clone(),
+                            timezone: self.index.timezone.clone(),
+                        },
+                    },
+                )
+                .context(SchemaCompatibilitySnafu)?;
                 None
             }
         };
