@@ -99,8 +99,8 @@ jobs:
           # release builds. On Windows this can materially reduce sccache reuse due to PDB/debug
           # outputs varying across runs.
           printf 'CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0\n' >> "$GITHUB_ENV"
-          # Make paths stable across runners for sccache keys.
-          printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${GITHUB_WORKSPACE}=." >> "$GITHUB_ENV"
+          # Make linked artifacts and source paths stable across runners for sccache keys.
+          printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=/Brepro --remap-path-prefix=${GITHUB_WORKSPACE}=." >> "$GITHUB_ENV"
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
