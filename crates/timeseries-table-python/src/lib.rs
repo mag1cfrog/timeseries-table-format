@@ -9,7 +9,6 @@ mod tokio_runner;
 mod _native {
 
     use std::collections::BTreeSet;
-    use std::ffi::CString;
     use std::sync::{Arc, Mutex};
 
     use arrow_array::ffi::FFI_ArrowSchema;
@@ -353,10 +352,7 @@ mod _native {
         stream: FFI_ArrowArrayStream,
         api_name: &str,
     ) -> PyResult<Py<PyAny>> {
-        let name = CString::new("arrow_array_stream")
-            .map_err(|_| PyRuntimeError::new_err("invalid capsule name"))?;
-
-        let capsule = PyCapsule::new(py, stream, Some(name))?;
+        let capsule = PyCapsule::new_with_value(py, stream, c"arrow_array_stream")?;
 
         let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
             PyImportError::new_err(format!(
@@ -1946,9 +1942,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             },
         )?;
 
-        let name = CString::new("arrow_array_stream")
-            .map_err(|_| PyValueError::new_err("invalid capsule name"))?;
-        let capsule = PyCapsule::new(py, result.stream, Some(name))?;
+        let capsule = PyCapsule::new_with_value(py, result.stream, c"arrow_array_stream")?;
 
         let wrapper = Py::new(
             py,
@@ -2218,12 +2212,11 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         fn arrow_c_stream_wrapper_is_single_use() {
             use pyo3::types::PyAnyMethods;
             use pyo3::types::PyCapsule;
-            use std::ffi::CString;
 
             init_python();
             let ok = Python::try_attach(|py| {
-                let name = CString::new("arrow_array_stream").unwrap();
-                let capsule = PyCapsule::new(py, 123usize, Some(name)).unwrap();
+                let capsule =
+                    PyCapsule::new_with_value(py, 123usize, c"arrow_array_stream").unwrap();
 
                 let wrapper = Py::new(
                     py,
@@ -2248,12 +2241,11 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             use pyo3::types::PyAnyMethods;
             use pyo3::types::PyCapsule;
             use pyo3::types::PyDict;
-            use std::ffi::CString;
 
             init_python();
             let ok = Python::try_attach(|py| {
-                let name = CString::new("arrow_array_stream").unwrap();
-                let capsule = PyCapsule::new(py, 123usize, Some(name)).unwrap();
+                let capsule =
+                    PyCapsule::new_with_value(py, 123usize, c"arrow_array_stream").unwrap();
 
                 let wrapper = Py::new(
                     py,
