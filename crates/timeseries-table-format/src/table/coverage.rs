@@ -126,71 +126,46 @@ impl TimeSeriesTable {
 // Coverage query APIs for TimeSeriesTable.
 //
 // These APIs:
-// - derive an inclusive bucket range from a timestamp range (half-open [start, end))
+// - derive an inclusive bucket range from an ordered-index range (half-open [start, end))
 // - load table coverage (readonly recovery)
 // - reuse crate::coverage APIs (coverage_ratio, max_gap_len, last_window_at_or_before)
 use std::ops::RangeInclusive;
 
-use chrono::{DateTime, Duration, Utc};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 
 use crate::{
     coverage::Bucket,
-    coverage::bucket::{bucket_id, bucket_range},
-    metadata::table_metadata::{IndexKind, IndexValue},
+    coverage::bucket::{bucket_for_exclusive_end, bucket_range},
+    metadata::table_metadata::{IndexValue, validate_index_range},
     table::error::{CoverageBucketSnafu, InvalidRangeSnafu},
 };
 
 impl TimeSeriesTable {
-    fn bucket_range_for_time_range(
+    fn bucket_range_for_index_range<S, E>(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<RangeInclusive<Bucket>, TableError> {
-        ensure!(start < end, InvalidRangeSnafu { start, end });
-        self.ensure_timestamp_index("time coverage query")?;
-        bucket_range(
-            &self.index_spec().kind,
-            &IndexValue::Timestamp(start),
-            &IndexValue::Timestamp(end),
-        )
-        .context(CoverageBucketSnafu)
-    }
-
-    fn end_bucket_for_half_open_end(&self, ts_end: DateTime<Utc>) -> Result<u64, TableError> {
-        self.ensure_timestamp_index("last fully covered time window")?;
-
-        // For half-open semantics [.., ts_end), subtract 1ns so we pick the
-        // last bucket that still intersects the interval.
-        let end_adj = ts_end.checked_sub_signed(Duration::nanoseconds(1)).ok_or(
-            TableError::InvalidRange {
-                start: ts_end,
-                end: ts_end,
-            },
-        )?;
-        bucket_id(&self.index_spec().kind, &IndexValue::Timestamp(end_adj))
-            .context(CoverageBucketSnafu)
-    }
-
-    fn ensure_timestamp_index(&self, operation: &'static str) -> Result<(), TableError> {
-        if matches!(self.index_spec().kind, IndexKind::Timestamp { .. }) {
-            Ok(())
-        } else {
-            Err(TableError::UnsupportedIndexKind {
-                operation,
-                actual: self.index_spec().kind.name(),
-            })
-        }
+        start: S,
+        end: E,
+    ) -> Result<RangeInclusive<Bucket>, TableError>
+    where
+        S: Into<IndexValue>,
+        E: Into<IndexValue>,
+    {
+        let start = start.into();
+        let end = end.into();
+        validate_index_range(&self.index_spec().kind, &start, &end).context(InvalidRangeSnafu)?;
+        bucket_range(&self.index_spec().kind, &start, &end).context(CoverageBucketSnafu)
     }
 
     // ---- public query APIs ----
 
-    /// Coverage ratio in [0.0, 1.0] for the half-open time range [start, end).
+    /// Coverage ratio in [0.0, 1.0] for the half-open index range [start, end).
     ///
     /// Uses the table-level coverage snapshot (with readonly recovery from segments if needed).
     ///
     /// # Errors
-    /// - [`TableError::InvalidRange`] if `start >= end`.
+    /// Returns [`TableError::InvalidRange`] when the endpoints do not match the
+    /// table index or `start >= end`, and contextual coverage errors when the
+    /// snapshot cannot be loaded or the range cannot be bucketed.
     ///
     /// # Examples
     /// ```
@@ -204,20 +179,22 @@ impl TimeSeriesTable {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn coverage_ratio_for_range(
-        &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<f64, TableError> {
-        let range = self.bucket_range_for_time_range(start, end)?;
+    pub async fn coverage_ratio_for_range<S, E>(&self, start: S, end: E) -> Result<f64, TableError>
+    where
+        S: Into<IndexValue>,
+        E: Into<IndexValue>,
+    {
+        let range = self.bucket_range_for_index_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.coverage_ratio(&range))
     }
 
-    /// Maximum contiguous missing run length (in buckets) for the half-open time range [start, end).
+    /// Maximum contiguous missing run length in buckets for `[start, end)`.
     ///
     /// # Errors
-    /// - [`TableError::InvalidRange`] if `start >= end`.
+    /// Returns [`TableError::InvalidRange`] when the endpoints do not match the
+    /// table index or `start >= end`, and contextual coverage errors when the
+    /// snapshot cannot be loaded or the range cannot be bucketed.
     ///
     /// # Examples
     /// ```
@@ -231,24 +208,27 @@ impl TimeSeriesTable {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn max_gap_len_for_range(
-        &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<u128, TableError> {
-        let range = self.bucket_range_for_time_range(start, end)?;
+    pub async fn max_gap_len_for_range<S, E>(&self, start: S, end: E) -> Result<u128, TableError>
+    where
+        S: Into<IndexValue>,
+        E: Into<IndexValue>,
+    {
+        let range = self.bucket_range_for_index_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.max_gap_len(&range))
     }
 
-    /// Return the last fully covered contiguous window (in bucket space) of length >= window_len_buckets,
-    /// ending at or before ts_end.
+    /// Return the last fully covered contiguous window of `window_len_buckets`
+    /// ending before the exclusive ordered-index endpoint.
     ///
     /// Notes:
     /// - This returns a bucket-id RangeInclusive in the 64-bit bucket domain.
     /// - Returns `None` when `window_len_buckets == 0` or when no fully covered window is found.
     ///
     /// # Errors
+    /// Returns [`TableError::InvalidRange`] when `end` does not match the table
+    /// index, and contextual coverage errors when the endpoint cannot be
+    /// bucketed or the snapshot cannot be loaded.
     ///
     /// # Examples
     /// ```
@@ -261,16 +241,23 @@ impl TimeSeriesTable {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn last_fully_covered_window(
+    pub async fn last_fully_covered_window<E>(
         &self,
-        ts_end: DateTime<Utc>,
+        end: E,
         window_len_buckets: u64,
-    ) -> Result<Option<RangeInclusive<Bucket>>, TableError> {
+    ) -> Result<Option<RangeInclusive<Bucket>>, TableError>
+    where
+        E: Into<IndexValue>,
+    {
+        let end = end.into();
+        end.validate_kind(&self.index_spec().kind)
+            .context(InvalidRangeSnafu)?;
         if window_len_buckets == 0 {
             return Ok(None);
         }
 
-        let end_bucket = self.end_bucket_for_half_open_end(ts_end)?;
+        let end_bucket =
+            bucket_for_exclusive_end(&self.index_spec().kind, &end).context(CoverageBucketSnafu)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.last_window_at_or_before(end_bucket, window_len_buckets))
     }
@@ -278,17 +265,22 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
+    use std::{num::NonZeroU64, path::Path};
 
     use super::*;
     use crate::{
-        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+        coverage::{
+            Coverage,
+            bucket::{BucketError, bucket_id},
+            io::write_coverage_sidecar_atomic,
+        },
+        metadata::table_metadata::{IndexKind, IndexSpec, IndexValueError, TableMeta, TimeBucket},
         storage::TableLocation,
         table::test_util::{
             TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
         },
     };
-    use chrono::TimeZone;
+    use chrono::{DateTime, TimeZone, Utc};
     use tempfile::TempDir;
 
     type HelperResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -303,6 +295,32 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        Ok((tmp, table))
+    }
+
+    async fn table_with_index_coverage(
+        kind: IndexKind,
+        coverage: Coverage,
+    ) -> HelperResult<(TempDir, TimeSeriesTable)> {
+        let tmp = TempDir::new()?;
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(tmp.path()),
+            TableMeta::new_time_series(IndexSpec {
+                column: "index".to_string(),
+                entity_columns: Vec::new(),
+                kind: kind.clone(),
+            }),
+        )
+        .await?;
+        let coverage_path = "_coverage/table/query-test.roar";
+        write_coverage_sidecar_atomic(table.location(), Path::new(coverage_path), &coverage)
+            .await?;
+        let version = table.state().version;
+        table.state_mut().table_coverage = Some(TableCoveragePointer {
+            index_kind: kind,
+            coverage_path: coverage_path.to_string(),
+            version,
+        });
         Ok((tmp, table))
     }
 
@@ -377,7 +395,7 @@ mod tests {
         let ts = utc_datetime(2024, 1, 1, 0, 0, 0);
 
         let err = table
-            .bucket_range_for_time_range(ts, ts)
+            .bucket_range_for_index_range(ts, ts)
             .expect_err("start >= end should be invalid");
         assert!(matches!(err, TableError::InvalidRange { .. }));
         Ok(())
@@ -389,8 +407,77 @@ mod tests {
         let start = ts_from_secs(0);
         let end = ts_from_secs(180); // covers buckets 0,1,2 with 1-minute bucket spec
 
-        let range = table.bucket_range_for_time_range(start, end)?;
+        let range = table.bucket_range_for_index_range(start, end)?;
         assert_eq!(range, 0x8000_0000_0000_0000..=0x8000_0000_0000_0002);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_coverage_queries_handle_gaps_extremes_and_last_window() -> TestResult {
+        let kind = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(10).unwrap(),
+        };
+        let coverage: Coverage = [-10i64, 0, 10]
+            .into_iter()
+            .map(|value| bucket_id(&kind, &value.into()).unwrap())
+            .collect();
+        let huge_gap = u128::from(
+            bucket_id(&kind, &(-10i64).into()).unwrap()
+                - bucket_id(&kind, &i64::MIN.into()).unwrap(),
+        )
+        .max(u128::from(
+            bucket_for_exclusive_end(&kind, &i64::MAX.into()).unwrap()
+                - bucket_id(&kind, &10i64.into()).unwrap(),
+        ));
+        let (_tmp, table) = table_with_index_coverage(kind, coverage).await?;
+
+        assert_eq!(table.coverage_ratio_for_range(-20i64, 30i64).await?, 0.6);
+        assert_eq!(table.max_gap_len_for_range(-20i64, 30i64).await?, 1);
+        assert_eq!(table.max_gap_len_for_range(-10i64, 0i64).await?, 0);
+        assert_eq!(table.max_gap_len_for_range(-50i64, -20i64).await?, 3);
+        assert_eq!(
+            table.max_gap_len_for_range(i64::MIN, i64::MAX).await?,
+            huge_gap
+        );
+
+        let window = table
+            .last_fully_covered_window(10i64, 2)
+            .await?
+            .expect("signed window across zero");
+        assert_eq!(
+            window,
+            bucket_id(&table.index_spec().kind, &(-10i64).into()).unwrap()
+                ..=bucket_id(&table.index_spec().kind, &0i64.into()).unwrap()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsigned_coverage_queries_preserve_large_values_and_boundaries() -> TestResult {
+        let kind = IndexKind::UInt64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let start = i64::MAX as u64 + 1;
+        let coverage: Coverage = [start, start + 1, u64::MAX - 2, u64::MAX - 1]
+            .into_iter()
+            .collect();
+        let (_tmp, table) = table_with_index_coverage(kind, coverage).await?;
+
+        let requested = u128::from(u64::MAX) - u128::from(start);
+        let ratio = table.coverage_ratio_for_range(start, u64::MAX).await?;
+        assert!((ratio - 4.0 / requested as f64).abs() < f64::EPSILON);
+        assert_eq!(
+            table.max_gap_len_for_range(start, u64::MAX).await?,
+            u128::from(u64::MAX) - u128::from(start) - 4
+        );
+        assert_eq!(
+            table.last_fully_covered_window(start + 2, 2).await?,
+            Some(start..=start + 1)
+        );
+        assert_eq!(
+            table.last_fully_covered_window(u64::MAX, 2).await?,
+            Some(u64::MAX - 2..=u64::MAX - 1)
+        );
         Ok(())
     }
 
@@ -528,7 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn last_window_rejects_integer_index_before_reading_coverage() -> TestResult {
+    async fn coverage_queries_validate_before_reading_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::UInt64 {
             bucket_width: NonZeroU64::new(1).unwrap(),
@@ -549,8 +636,42 @@ mod tests {
         let error = table
             .last_fully_covered_window(ts_from_secs(1), 1)
             .await
-            .expect_err("integer indexes are unsupported by the timestamp API");
-        assert!(matches!(error, TableError::UnsupportedIndexKind { .. }));
+            .expect_err("endpoint domain must match the table index");
+        assert!(matches!(
+            error,
+            TableError::InvalidRange {
+                source: IndexValueError::KindMismatch {
+                    expected: "uint64",
+                    actual: "timestamp"
+                }
+            }
+        ));
+
+        assert!(matches!(
+            table.coverage_ratio_for_range(1u64, 1u64).await,
+            Err(TableError::InvalidRange {
+                source: IndexValueError::InvalidRange { .. }
+            })
+        ));
+        assert!(matches!(
+            table.max_gap_len_for_range(2u64, 1u64).await,
+            Err(TableError::InvalidRange {
+                source: IndexValueError::InvalidRange { .. }
+            })
+        ));
+        assert!(matches!(
+            table.coverage_ratio_for_range(0u64, 1i64).await,
+            Err(TableError::InvalidRange {
+                source: IndexValueError::KindMismatch { .. }
+            })
+        ));
+        assert_eq!(table.last_fully_covered_window(0u64, 0).await?, None);
+        assert!(matches!(
+            table.last_fully_covered_window(0u64, 1).await,
+            Err(TableError::CoverageBucket {
+                source: BucketError::RangeEndUnderflow { .. }
+            })
+        ));
         Ok(())
     }
 

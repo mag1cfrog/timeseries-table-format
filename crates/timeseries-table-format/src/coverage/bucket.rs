@@ -101,7 +101,18 @@ pub fn bucket_range(
     validate_index_range(kind, start, end).map_err(|source| BucketError::IndexValue { source })?;
 
     let first = bucket_id(kind, start)?;
-    let last_value = match end {
+    Ok(first..=bucket_id(kind, &value_before(end)?)?)
+}
+
+/// Return the bucket containing the final value before an exclusive endpoint.
+pub fn bucket_for_exclusive_end(kind: &IndexKind, end: &IndexValue) -> Result<Bucket, BucketError> {
+    end.validate_kind(kind)
+        .map_err(|source| BucketError::IndexValue { source })?;
+    bucket_id(kind, &value_before(end)?)
+}
+
+fn value_before(end: &IndexValue) -> Result<IndexValue, BucketError> {
+    Ok(match end {
         IndexValue::Timestamp(end) => {
             IndexValue::Timestamp(end.checked_sub_signed(Duration::nanoseconds(1)).ok_or(
                 BucketError::RangeEndUnderflow {
@@ -119,8 +130,7 @@ pub fn bucket_range(
                 end: IndexValue::UInt64(*end),
             }
         })?),
-    };
-    Ok(first..=bucket_id(kind, &last_value)?)
+    })
 }
 
 #[cfg(test)]
@@ -212,6 +222,10 @@ mod tests {
         };
         let range = bucket_range(&signed, &0i64.into(), &20i64.into()).unwrap();
         assert_eq!(range, SIGN_BIT..=SIGN_BIT + 1);
+        assert_eq!(
+            bucket_for_exclusive_end(&signed, &20i64.into()).unwrap(),
+            SIGN_BIT + 1
+        );
 
         let unsigned = IndexKind::UInt64 {
             bucket_width: NonZeroU64::new(10).unwrap(),
@@ -266,6 +280,10 @@ mod tests {
         assert!(matches!(
             bucket_range(&unsigned, &1u64.into(), &1u64.into()),
             Err(BucketError::IndexValue { .. })
+        ));
+        assert!(matches!(
+            bucket_for_exclusive_end(&unsigned, &0u64.into()),
+            Err(BucketError::RangeEndUnderflow { .. })
         ));
     }
 }

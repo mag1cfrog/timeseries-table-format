@@ -2,25 +2,24 @@
 //!
 //! This module wires the public `scan_range` entry point to the underlying
 //! segment metadata and Parquet readers:
-//! - Pick candidate segments whose timestamp `index_min`/`index_max` intersects the requested
-//!   half-open window `[ts_start, ts_end)`.
-//! - Stream those segments in timestamp order with Parquet's native async,
+//! - Pick candidate segments whose ordered `index_min`/`index_max` intersects the requested
+//!   half-open range `[start, end)`.
+//! - Stream those segments in index order with Parquet's native async,
 //!   file-backed reader.
-//! - Filter each batch by the time column with half-open semantics, converting
-//!   the requested bounds to the column’s Arrow timestamp unit while preserving
-//!   timezone metadata.
+//! - Filter each batch by its ordered-index column with native Arrow scalar
+//!   comparisons and half-open semantics.
 //!
-//! The filtering path uses Arrow’s scalar comparison kernels to avoid
-//! allocating full-length bound arrays, and treats null timestamp values as
-//! “drop row” via `filter_record_batch`. The implementation assumes v0.1
-//! invariants (non-overlapping segments) so chronological ordering is a simple
+//! The filtering path uses Arrow's scalar comparison kernels to avoid
+//! allocating full-length bound arrays, and treats null index values as
+//! "drop row" via `filter_record_batch`. The implementation assumes v0.1
+//! invariants (non-overlapping segments) so index ordering is a simple
 //! sort by typed index bounds.
 use std::path::Path;
 
-use arrow::array::Scalar;
+use arrow::array::{Datum, Scalar};
 use arrow::array::{
-    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
+    Int64Array, RecordBatch, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
 };
 use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
@@ -31,8 +30,8 @@ use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuil
 use snafu::prelude::*;
 
 use crate::metadata::{
-    segments::{SegmentMeta, sort_segment_meta_by_index},
-    table_metadata::{IndexKind, IndexValue},
+    segments::SegmentMeta,
+    table_metadata::{IndexValue, IndexValueError, validate_index_range},
 };
 use crate::storage::{self, TableLocation};
 use crate::transaction_log::TableState;
@@ -44,150 +43,46 @@ const SCAN_BATCH_SIZE: usize = 8_192;
 
 fn segments_for_range(
     state: &TableState,
-    ts_start: DateTime<Utc>,
-    ts_end: DateTime<Utc>,
-) -> Vec<SegmentMeta> {
-    state
-        .segments
-        .values()
-        .filter(|seg| {
-            // half-open query [ts_start, ts_end)
-            // Intersection with the segment's closed timestamp index bounds is:
-            // index_max >= ts_start && index_min < ts_end.
-            matches!(
-                (&seg.index_min, &seg.index_max),
-                (IndexValue::Timestamp(min), IndexValue::Timestamp(max))
-                    if *max >= ts_start && *min < ts_end
-            )
-        })
-        .cloned()
-        .collect()
+    start: &IndexValue,
+    end: &IndexValue,
+) -> Result<Vec<SegmentMeta>, IndexValueError> {
+    let mut candidates = Vec::new();
+    for segment in state.segments_sorted_by_index()? {
+        if !segment.index_max.compare(start)?.is_lt() && segment.index_min.compare(end)?.is_lt() {
+            candidates.push(segment.clone());
+        }
+    }
+    Ok(candidates)
 }
 
-/// Helper macro to filter a `RecordBatch` by a timestamp column for a
-/// half-open time range `[start, end)`.
-///
-/// This macro is used by `read_segment_range` for all supported timestamp
-/// units (`second`, `millisecond`, `microsecond`, `nanosecond`) and
-/// encapsulates three non-obvious choices:
-///
-/// 1. **Half-open semantics**:
-///    Rows are kept iff `start_bound <= ts < end_bound`, where
-///    `start_bound`/`end_bound` are already converted to the same integer
-///    time unit as the column (via `to_bounds_i64`).
-///
-/// 2. **Timezone preservation**:
-///    Arrow timestamps carry an optional timezone in their `DataType`
-///    (`Timestamp(unit, Option<tz>)`). The comparison kernels require the
-///    types (including timezone) of both operands to match. To avoid
-///    mismatches, we:
-///       - read the timezone from the actual column’s `DataType`,
-///       - build 1-element timestamp arrays for `start` and `end` with
-///         the same unit and timezone,
-///       - wrap those arrays as `Scalar<Timestamp…Array>`.
-///
-///    This ensures `ts_arr` and the scalar bounds have identical
-///    `DataType`, so the Arrow `gt_eq` / `lt` kernels accept them.
-///
-/// 3. **Scalar-based vectorization (no full-length bound arrays)**:
-///    Arrow’s compute kernels accept `Datum` operands, which can be
-///    either arrays or scalars. When one side is a scalar, the kernel
-///    *broadcasts* the single value across the length of the array without
-///    materializing a repeated column. Using `Scalar::new` over a
-///    1-element array gives us:
-///       - vectorized, element-wise comparison over the whole batch, and
-///       - minimal extra allocation (two tiny 1-element arrays),
-///         instead of allocating full-length `[start; len]` / `[end; len]`
-///         arrays.
-///
-/// The resulting `BooleanArray` mask is then passed to
-/// `filter_record_batch`, which drops nulls in the mask (null => “do not
-/// keep row”), matching the intended `null -> false` semantics for the
-/// time column.
-///
-/// This macro returns the non-empty filtered batch, or `None` when every row
-/// was filtered out.
-macro_rules! filter_ts_batch {
-    ($array_ty: ty,
-    $batch:expr,
-    $ts_idx:expr,
-    $start_bound:expr,
-    $end_bound:expr,
-    $path:expr,
-    $time_col:expr,
-    $ts_field:expr
-) => {{
-        // 1) Downcast the column to the concrete timestamp array type
-        let col = $batch.column($ts_idx);
-        let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
-            TableError::UnsupportedTimeType {
-                path: $path.to_string(),
-                column: $time_col.to_string(),
-                datatype: $ts_field.data_type().clone(),
-            }
-        })?;
+/// Filter one batch with native scalar comparisons. Arrow broadcasts each
+/// scalar bound without allocating a batch-sized bound column.
+fn filter_index_batch(
+    batch: RecordBatch,
+    index_idx: usize,
+    start: &dyn Datum,
+    end: &dyn Datum,
+    path: &str,
+    index_column: &str,
+) -> Result<Option<RecordBatch>, TableError> {
+    let index_array = batch.column(index_idx).as_ref();
+    let arrow_error = |source| TableError::Arrow {
+        path: path.to_string(),
+        column: index_column.to_string(),
+        source,
+    };
+    let ge_mask = cmp_kernels::gt_eq(&index_array, start).map_err(&arrow_error)?;
+    let lt_mask = cmp_kernels::lt(&index_array, end).map_err(&arrow_error)?;
+    let mask = boolean_kernels::and(&ge_mask, &lt_mask).map_err(&arrow_error)?;
+    let filtered = filter_record_batch(&batch, &mask).map_err(arrow_error)?;
+    Ok((filtered.num_rows() > 0).then_some(filtered))
+}
 
-        // 2) Extract timezone from the array's DataType to ensure that our scalar matches and comparisons are compatible
-        let tz_opt = match ts_arr.data_type() {
-            DataType::Timestamp(_, tz_opt) => tz_opt.clone(),
-            _ => None,
-        };
-
-        // 3) Build *1-element* arrays for the bounds, with matching timezone,
-        //    then wrap them as Scalars. Arrow's comparison kernels operate on
-        //    `Datum` (array or scalar) and will broadcast these scalar bounds
-        //    across the whole `ts_arr` without allocating full-length repeated
-        //    arrays.
-        let start_arr = <$array_ty>::from(vec![$start_bound]).with_timezone_opt(tz_opt.clone());
-        let end_arr = <$array_ty>::from(vec![$end_bound]).with_timezone_opt(tz_opt);
-
-        // Wrap them as scalars (no repeated buffers)
-        let start_scalar = Scalar::new(start_arr);
-        let end_scalar = Scalar::new(end_arr);
-
-        // 4) Vectorized comparisons:
-        // ge_mask = (ts >= start)
-        // lt_mask = (ts < end)
-        let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar).map_err(|source| {
-            TableError::Arrow {
-                path: $path.to_string(),
-                column: $time_col.to_string(),
-                source,
-            }
-        })?;
-        let lt_mask = cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| {
-            TableError::Arrow {
-                path: $path.to_string(),
-                column: $time_col.to_string(),
-                source,
-            }
-        })?;
-
-        // 5) Combine: keep rows where ts >= start AND ts < end
-        let mask = boolean_kernels::and(&ge_mask, &lt_mask).map_err(|source| {
-            TableError::Arrow {
-                path: $path.to_string(),
-                column: $time_col.to_string(),
-                source,
-            }
-        })?;
-
-        // Note on null semantics:
-        // - If ts_arr[i] is null, both comparisons produce null in the mask.
-        // Arrow's `filter_record_batch` treats null mask values as false,
-        // excluding those rows from results.
-
-        // 6) apply the mask to the whole batch
-        let filtered = filter_record_batch(&$batch, &mask).map_err(|source| {
-            TableError::Arrow {
-                path: $path.to_string(),
-                column: $time_col.to_string(),
-                source,
-            }
-        })?;
-
-        Ok::<_, TableError>((filtered.num_rows() > 0).then_some(filtered))
-    }};
+#[derive(Clone, Copy)]
+enum ScanBounds {
+    Timestamp(i64, i64),
+    Int64(i64, i64),
+    UInt64(u64, u64),
 }
 
 fn to_bounds_i64(
@@ -239,21 +134,30 @@ fn to_bounds_i64(
 
         DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok((to_ns(ts_start)?, to_ns(ts_end)?)),
 
-        other => Err(TableError::UnsupportedTimeType {
+        other => Err(TableError::IndexColumnTypeMismatch {
             path: path.to_string(),
             column: column.to_string(),
+            expected: "timestamp",
             datatype: other.clone(),
         }),
     }
 }
 
-async fn segment_range_stream(
+async fn segment_range_stream<S, E>(
     reader: impl AsyncFileReader + Unpin + 'static,
     path: String,
-    time_column: &str,
-    ts_start: DateTime<Utc>,
-    ts_end: DateTime<Utc>,
-) -> Result<TimeSeriesScan, TableError> {
+    index_column: &str,
+    start: S,
+    end: E,
+) -> Result<TimeSeriesScan, TableError>
+where
+    S: Into<IndexValue>,
+    E: Into<IndexValue>,
+{
+    let start = start.into();
+    let end = end.into();
+    let expected = start.kind_name();
+
     let builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .map_err(|source| TableError::ParquetRead {
@@ -261,17 +165,36 @@ async fn segment_range_stream(
             source,
         })?;
 
-    // Locate the time column and compute numeric bounds before moving the
+    // Locate the index column and compute native bounds before moving the
     // builder into the directly-polled record-batch stream.
     let schema = builder.schema();
-    let ts_idx = schema
-        .index_of(time_column)
-        .map_err(|_| TableError::MissingTimeColumn {
+    let index_idx = schema
+        .index_of(index_column)
+        .map_err(|_| TableError::MissingIndexColumn {
             path: path.clone(),
-            column: time_column.to_string(),
+            column: index_column.to_string(),
         })?;
-    let ts_field = schema.field(ts_idx).clone();
-    let (start_bound, end_bound) = to_bounds_i64(&ts_field, &path, time_column, ts_start, ts_end)?;
+    let index_field = schema.field(index_idx).clone();
+    let bounds = match (&start, &end, index_field.data_type()) {
+        (IndexValue::Timestamp(start), IndexValue::Timestamp(end), DataType::Timestamp(_, _)) => {
+            let (start, end) = to_bounds_i64(&index_field, &path, index_column, *start, *end)?;
+            ScanBounds::Timestamp(start, end)
+        }
+        (IndexValue::Int64(start), IndexValue::Int64(end), DataType::Int64) => {
+            ScanBounds::Int64(*start, *end)
+        }
+        (IndexValue::UInt64(start), IndexValue::UInt64(end), DataType::UInt64) => {
+            ScanBounds::UInt64(*start, *end)
+        }
+        _ => {
+            return Err(TableError::IndexColumnTypeMismatch {
+                path,
+                column: index_column.to_string(),
+                expected,
+                datatype: index_field.data_type().clone(),
+            });
+        }
+    };
 
     let reader = builder
         .with_batch_size(SCAN_BATCH_SIZE)
@@ -280,13 +203,13 @@ async fn segment_range_stream(
             path: path.clone(),
             source,
         })?;
-    let time_column = time_column.to_string();
+    let index_column = index_column.to_string();
 
     let stream = reader
         .then(move |batch_res| {
             let path = path.clone();
-            let time_column = time_column.clone();
-            let ts_field = ts_field.clone();
+            let index_column = index_column.clone();
+            let index_field = index_field.clone();
 
             async move {
                 let batch = batch_res.map_err(|source| TableError::ParquetRead {
@@ -294,52 +217,51 @@ async fn segment_range_stream(
                     source,
                 })?;
 
-                let filtered = match ts_field.data_type() {
-                    DataType::Timestamp(TimeUnit::Second, _) => filter_ts_batch!(
-                        TimestampSecondArray,
-                        batch,
-                        ts_idx,
-                        start_bound,
-                        end_bound,
-                        path,
-                        time_column,
-                        ts_field
-                    )?,
-                    DataType::Timestamp(TimeUnit::Millisecond, _) => filter_ts_batch!(
-                        TimestampMillisecondArray,
-                        batch,
-                        ts_idx,
-                        start_bound,
-                        end_bound,
-                        path,
-                        time_column,
-                        ts_field
-                    )?,
-                    DataType::Timestamp(TimeUnit::Microsecond, _) => filter_ts_batch!(
-                        TimestampMicrosecondArray,
-                        batch,
-                        ts_idx,
-                        start_bound,
-                        end_bound,
-                        path,
-                        time_column,
-                        ts_field
-                    )?,
-                    DataType::Timestamp(TimeUnit::Nanosecond, _) => filter_ts_batch!(
-                        TimestampNanosecondArray,
-                        batch,
-                        ts_idx,
-                        start_bound,
-                        end_bound,
-                        path,
-                        time_column,
-                        ts_field
-                    )?,
-                    other => {
-                        return Err(TableError::UnsupportedTimeType {
+                let filtered = match (bounds, index_field.data_type()) {
+                    (ScanBounds::Timestamp(start, end), DataType::Timestamp(unit, timezone)) => {
+                        macro_rules! filter_timestamp {
+                            ($array_ty:ty) => {{
+                                let start = Scalar::new(
+                                    <$array_ty>::from(vec![start])
+                                        .with_timezone_opt(timezone.clone()),
+                                );
+                                let end = Scalar::new(
+                                    <$array_ty>::from(vec![end])
+                                        .with_timezone_opt(timezone.clone()),
+                                );
+                                filter_index_batch(
+                                    batch,
+                                    index_idx,
+                                    &start,
+                                    &end,
+                                    &path,
+                                    &index_column,
+                                )
+                            }};
+                        }
+                        match unit {
+                            TimeUnit::Second => filter_timestamp!(TimestampSecondArray)?,
+                            TimeUnit::Millisecond => filter_timestamp!(TimestampMillisecondArray)?,
+                            TimeUnit::Microsecond => filter_timestamp!(TimestampMicrosecondArray)?,
+                            TimeUnit::Nanosecond => filter_timestamp!(TimestampNanosecondArray)?,
+                        }
+                    }
+                    (ScanBounds::Int64(start, end), DataType::Int64) => {
+                        let start = Scalar::new(Int64Array::from(vec![start]));
+                        let end = Scalar::new(Int64Array::from(vec![end]));
+                        filter_index_batch(batch, index_idx, &start, &end, &path, &index_column)?
+                    }
+                    (ScanBounds::UInt64(start, end), DataType::UInt64) => {
+                        let start = Scalar::new(UInt64Array::from(vec![start]));
+                        let end = Scalar::new(UInt64Array::from(vec![end]));
+                        filter_index_batch(batch, index_idx, &start, &end, &path, &index_column)?
+                    }
+                    (_, datatype) => {
+                        return Err(TableError::IndexColumnTypeMismatch {
                             path,
-                            column: time_column,
-                            datatype: other.clone(),
+                            column: index_column,
+                            expected,
+                            datatype: datatype.clone(),
                         });
                     }
                 };
@@ -356,67 +278,57 @@ async fn segment_range_stream(
     Ok(Box::pin(stream))
 }
 
-async fn read_segment_range(
+async fn read_segment_range<S, E>(
     location: &TableLocation,
     segment: &SegmentMeta,
-    time_column: &str,
-    ts_start: DateTime<Utc>,
-    ts_end: DateTime<Utc>,
-) -> Result<TimeSeriesScan, TableError> {
+    index_column: &str,
+    start: S,
+    end: E,
+) -> Result<TimeSeriesScan, TableError>
+where
+    S: Into<IndexValue>,
+    E: Into<IndexValue>,
+{
     let rel_path = Path::new(&segment.path);
     let reader = storage::open_parquet_reader(location.as_ref(), rel_path)
         .await
         .context(StorageSnafu)?;
 
-    segment_range_stream(reader, segment.path.clone(), time_column, ts_start, ts_end).await
+    segment_range_stream(reader, segment.path.clone(), index_column, start, end).await
 }
 
 struct ScanState {
     candidates: std::vec::IntoIter<SegmentMeta>,
     current: Option<TimeSeriesScan>,
     location: TableLocation,
-    time_column: String,
-    ts_start: DateTime<Utc>,
-    ts_end: DateTime<Utc>,
+    index_column: String,
+    start: IndexValue,
+    end: IndexValue,
 }
 
 impl TimeSeriesTable {
-    /// Scan the time-series table for record batches overlapping `[ts_start, ts_end)`,
+    /// Scan the time-series table for record batches overlapping `[start, end)`,
     /// returning a stream of filtered batches from the segments covering that range.
-    pub async fn scan_range(
-        &self,
-        ts_start: DateTime<Utc>,
-        ts_end: DateTime<Utc>,
-    ) -> Result<TimeSeriesScan, TableError> {
-        if ts_start >= ts_end {
-            return InvalidRangeSnafu {
-                start: ts_start,
-                end: ts_end,
-            }
-            .fail();
-        }
+    pub async fn scan_range<S, E>(&self, start: S, end: E) -> Result<TimeSeriesScan, TableError>
+    where
+        S: Into<IndexValue>,
+        E: Into<IndexValue>,
+    {
+        let start = start.into();
+        let end = end.into();
+        validate_index_range(&self.index.kind, &start, &end).context(InvalidRangeSnafu)?;
 
-        if !matches!(self.index.kind, IndexKind::Timestamp { .. }) {
-            return Err(TableError::UnsupportedIndexKind {
-                operation: "timestamp range scan",
-                actual: self.index.kind.name(),
-            });
-        }
-        let ts_column = self.index.column.clone();
-
-        // 1) Pick candidate segments.
-        let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
-
-        // 2) Sort deterministically by index_min, index_max, and path.
-        sort_segment_meta_by_index(&mut candidates).context(InvalidSegmentBoundsSnafu)?;
+        // Pick candidate segments and sort them by index_min, index_max, and path.
+        let candidates =
+            segments_for_range(&self.state, &start, &end).context(InvalidSegmentBoundsSnafu)?;
 
         let state = ScanState {
             candidates: candidates.into_iter(),
             current: None,
             location: self.location().clone(),
-            time_column: ts_column,
-            ts_start,
-            ts_end,
+            index_column: self.index.column.clone(),
+            start,
+            end,
         };
 
         // Process one lazily opened segment stream at a time. `try_unfold`
@@ -439,9 +351,9 @@ impl TimeSeriesTable {
                     read_segment_range(
                         &state.location,
                         &segment,
-                        &state.time_column,
-                        state.ts_start,
-                        state.ts_end,
+                        &state.index_column,
+                        state.start.clone(),
+                        state.end.clone(),
                     )
                     .await?,
                 );
@@ -460,8 +372,9 @@ mod tests {
 
     use crate::metadata::logical_schema::LogicalTimestampUnit;
     use crate::metadata::segments::FileFormat;
+    use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta};
 
-    use arrow::array::RecordBatch;
+    use arrow::array::ArrayRef;
     use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};
 
     use chrono::{TimeZone, Utc};
@@ -473,6 +386,7 @@ mod tests {
     use parquet::file::properties::WriterProperties;
 
     use std::fs::File;
+    use std::num::NonZeroU64;
     use std::ops::Range;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -577,6 +491,415 @@ mod tests {
                 .map(Arc::new);
             futures::future::ready(metadata).boxed()
         }
+    }
+
+    fn indexed_segment(path: &str, min: IndexValue, max: IndexValue) -> SegmentMeta {
+        SegmentMeta {
+            path: path.to_string(),
+            format: FileFormat::Parquet,
+            index_min: min,
+            index_max: max,
+            row_count: 1,
+            file_size: None,
+            coverage_path: None,
+        }
+    }
+
+    fn state_with_segments(segments: Vec<SegmentMeta>) -> TableState {
+        TableState {
+            version: 1,
+            table_meta: make_basic_table_meta(),
+            segments: segments
+                .into_iter()
+                .map(|segment| (segment.path.clone(), segment))
+                .collect(),
+            table_coverage: None,
+        }
+    }
+
+    fn integer_table_meta(kind: IndexKind) -> TableMeta {
+        TableMeta::new_time_series(IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: Vec::new(),
+            kind,
+        })
+    }
+
+    fn write_index_parquet(path: &Path, values: ArrayRef) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            values.data_type().clone(),
+            values.null_count() > 0,
+        )]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values])?;
+        let properties = WriterProperties::builder()
+            .set_max_row_group_size(1)
+            .build();
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(properties))?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    }
+
+    async fn collect_i64_index(
+        table: &TimeSeriesTable,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<i64>, TableError> {
+        let mut stream = table.scan_range(start, end).await?;
+        let mut values = Vec::new();
+        while let Some(batch) = stream.next().await.transpose()? {
+            assert_eq!(batch.schema().field(0).data_type(), &DataType::Int64);
+            values.extend(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("int64 index")
+                    .iter()
+                    .flatten(),
+            );
+        }
+        Ok(values)
+    }
+
+    async fn collect_u64_index(
+        table: &TimeSeriesTable,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u64>, TableError> {
+        let mut stream = table.scan_range(start, end).await?;
+        let mut values = Vec::new();
+        while let Some(batch) = stream.next().await.transpose()? {
+            assert_eq!(batch.schema().field(0).data_type(), &DataType::UInt64);
+            values.extend(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("uint64 index")
+                    .iter()
+                    .flatten(),
+            );
+        }
+        Ok(values)
+    }
+
+    #[test]
+    fn integer_candidates_preserve_half_open_order() -> Result<(), IndexValueError> {
+        let signed = state_with_segments(vec![
+            indexed_segment("before", (-10i64).into(), (-1i64).into()),
+            indexed_segment("touch-start", (-5i64).into(), 0i64.into()),
+            indexed_segment("same-b", 1i64.into(), 9i64.into()),
+            indexed_segment("same-a", 1i64.into(), 9i64.into()),
+            indexed_segment("at-end", 10i64.into(), 20i64.into()),
+        ]);
+        let signed_paths = segments_for_range(&signed, &0i64.into(), &10i64.into())?
+            .into_iter()
+            .map(|segment| segment.path)
+            .collect::<Vec<_>>();
+        assert_eq!(signed_paths, ["touch-start", "same-a", "same-b"]);
+
+        let start = i64::MAX as u64 + 1;
+        let unsigned = state_with_segments(vec![
+            indexed_segment("below", 0u64.into(), (start - 1).into()),
+            indexed_segment("touch-start", (start - 1).into(), start.into()),
+            indexed_segment("inside", (start + 1).into(), (u64::MAX - 1).into()),
+            indexed_segment("at-end", u64::MAX.into(), u64::MAX.into()),
+        ]);
+        let unsigned_paths = segments_for_range(&unsigned, &start.into(), &u64::MAX.into())?
+            .into_iter()
+            .map(|segment| segment.path)
+            .collect::<Vec<_>>();
+        assert_eq!(unsigned_paths, ["touch-start", "inside"]);
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_selection_rejects_invalid_persisted_bounds() {
+        let inverted =
+            state_with_segments(vec![indexed_segment("inverted", 2i64.into(), 1i64.into())]);
+        assert!(matches!(
+            segments_for_range(&inverted, &0i64.into(), &3i64.into()),
+            Err(IndexValueError::InvalidBounds { .. })
+        ));
+
+        let signed = state_with_segments(vec![indexed_segment("signed", 0i64.into(), 1i64.into())]);
+        assert!(matches!(
+            segments_for_range(&signed, &0u64.into(), &2u64.into()),
+            Err(IndexValueError::DomainMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn scan_range_filters_signed_integer_boundaries_and_nulls() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        let rel = "data/int64-scan.parquet";
+        write_index_parquet(
+            &tmp.path().join(rel),
+            Arc::new(Int64Array::from(vec![
+                Some(i64::MIN),
+                Some(-2),
+                None,
+                Some(-1),
+                Some(0),
+                Some(1),
+                Some(i64::MAX - 1),
+                Some(i64::MAX),
+            ])),
+        )?;
+        table.append_parquet_segment(rel).await?;
+
+        assert_eq!(collect_i64_index(&table, -2, 2).await?, [-2, -1, 0, 1]);
+        assert_eq!(
+            collect_i64_index(&table, i64::MIN, i64::MIN + 1).await?,
+            [i64::MIN]
+        );
+        assert_eq!(
+            collect_i64_index(&table, i64::MAX - 1, i64::MAX).await?,
+            [i64::MAX - 1]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_preserves_large_unsigned_values() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::UInt64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        let rel = "data/uint64-scan.parquet";
+        let start = i64::MAX as u64 + 1;
+        write_index_parquet(
+            &tmp.path().join(rel),
+            Arc::new(UInt64Array::from(vec![
+                Some(start - 1),
+                Some(start),
+                None,
+                Some(start + 1),
+                Some(u64::MAX - 1),
+                Some(u64::MAX),
+            ])),
+        )?;
+        table.append_parquet_segment(rel).await?;
+
+        assert_eq!(
+            collect_u64_index(&table, start, u64::MAX).await?,
+            [start, start + 1, u64::MAX - 1]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_validates_typed_bounds_before_segment_checks() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        table.state.segments.insert(
+            "missing.parquet".to_string(),
+            indexed_segment("missing.parquet", 2i64.into(), 1i64.into()),
+        );
+
+        let equal = match table.scan_range(0i64, 0i64).await {
+            Err(error) => error,
+            Ok(_) => panic!("equal range must fail"),
+        };
+        let reversed = match table.scan_range(1i64, 0i64).await {
+            Err(error) => error,
+            Ok(_) => panic!("reversed range must fail"),
+        };
+        for error in [equal, reversed] {
+            assert!(matches!(
+                error,
+                TableError::InvalidRange {
+                    source: IndexValueError::InvalidRange { .. }
+                }
+            ));
+        }
+
+        assert!(matches!(
+            table.scan_range(0i64, 1u64).await,
+            Err(TableError::InvalidRange {
+                source: IndexValueError::KindMismatch {
+                    expected: "int64",
+                    actual: "uint64"
+                }
+            })
+        ));
+        let start = Utc.timestamp_opt(0, 0).single().unwrap();
+        let end = Utc.timestamp_opt(1, 0).single().unwrap();
+        assert!(matches!(
+            table.scan_range(start, end).await,
+            Err(TableError::InvalidRange {
+                source: IndexValueError::KindMismatch {
+                    expected: "int64",
+                    actual: "timestamp"
+                }
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integer_segment_stream_is_directly_polled() -> TestResult {
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("int64-stream.parquet");
+        write_index_parquet(
+            &path,
+            Arc::new(Int64Array::from(vec![Some(0), Some(1), Some(-1), None])),
+        )?;
+        let data = bytes::Bytes::from(std::fs::read(path)?);
+        let (reader, stats) = TrackingReader::new(data.clone());
+        let mut stream = segment_range_stream(
+            reader,
+            "data/int64-stream.parquet".to_string(),
+            "ts",
+            0i64,
+            2i64,
+        )
+        .await?;
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
+
+        let batch = stream.next().await.transpose()?.expect("filtered batch");
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("int64 index")
+                .iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            [0]
+        );
+        drop(stream);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+
+        let (reader, stats, release) = TrackingReader::with_gate(data, 2);
+        let mut stream = segment_range_stream(
+            reader,
+            "data/int64-stream.parquet".to_string(),
+            "ts",
+            0i64,
+            2i64,
+        )
+        .await?;
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .transpose()?
+                .expect("first integer batch")
+                .num_rows(),
+            1
+        );
+        let second = stream.next();
+        futures::pin_mut!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 2);
+        release.send(()).expect("release second row-group read");
+        assert_eq!(
+            second
+                .await
+                .transpose()?
+                .expect("second integer batch")
+                .num_rows(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integer_scan_skips_non_candidates_and_stops_after_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        let wrong_type = "data/wrong-type.parquet";
+        write_index_parquet(
+            &tmp.path().join(wrong_type),
+            Arc::new(UInt64Array::from(vec![1, 2])),
+        )?;
+        for segment in [
+            indexed_segment(
+                "data/non-candidate.parquet",
+                (-10i64).into(),
+                (-5i64).into(),
+            ),
+            indexed_segment(wrong_type, 1i64.into(), 2i64.into()),
+            indexed_segment("data/later.parquet", 3i64.into(), 4i64.into()),
+        ] {
+            table.state.segments.insert(segment.path.clone(), segment);
+        }
+
+        let mut empty = table.scan_range(-20i64, -15i64).await?;
+        assert!(empty.next().await.is_none());
+
+        let mut failed = table.scan_range(0i64, 10i64).await?;
+        assert!(matches!(
+            failed.next().await,
+            Some(Err(TableError::IndexColumnTypeMismatch { .. }))
+        ));
+        assert!(failed.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_reports_registered_and_decoded_index_types() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        let rel = "data/wrong-index-type.parquet";
+        write_index_parquet(
+            &tmp.path().join(rel),
+            Arc::new(UInt64Array::from(vec![1, 2])),
+        )?;
+        table.state.segments.insert(
+            rel.to_string(),
+            indexed_segment(rel, 1i64.into(), 2i64.into()),
+        );
+
+        let mut stream = table.scan_range(0i64, 3i64).await?;
+        let error = stream
+            .next()
+            .await
+            .expect("segment error")
+            .expect_err("decoded type must match registered index");
+        assert!(matches!(
+            error,
+            TableError::IndexColumnTypeMismatch {
+                path,
+                column,
+                expected: "int64",
+                datatype: DataType::UInt64,
+            } if path == rel && column == "ts"
+        ));
+        assert!(stream.next().await.is_none());
+        Ok(())
     }
 
     fn write_multi_row_group_parquet(
@@ -842,7 +1165,7 @@ mod tests {
             Ok(_) => panic!("missing ts column should error"),
         };
 
-        assert!(matches!(err, TableError::MissingTimeColumn { .. }));
+        assert!(matches!(err, TableError::MissingIndexColumn { .. }));
         assert!(err.to_string().contains(rel));
         Ok(())
     }
@@ -875,7 +1198,7 @@ mod tests {
             Ok(_) => panic!("unsupported time type should error"),
         };
 
-        assert!(matches!(err, TableError::UnsupportedTimeType { .. }));
+        assert!(matches!(err, TableError::IndexColumnTypeMismatch { .. }));
         assert!(err.to_string().contains(rel));
         Ok(())
     }
@@ -903,7 +1226,10 @@ mod tests {
             .timestamp_opt(9_223_372_037, 0)
             .single()
             .expect("overflow ts");
-        let err = match read_segment_range(&location, &segment, "ts", huge, huge).await {
+        let end = huge
+            .checked_add_signed(chrono::Duration::seconds(1))
+            .unwrap();
+        let err = match read_segment_range(&location, &segment, "ts", huge, end).await {
             Err(err) => err,
             Ok(_) => panic!("overflow during bound conversion should error"),
         };
@@ -1294,7 +1620,7 @@ mod tests {
         let mut stream = table.scan_range(start, end).await?;
         let err = stream.next().await.expect("expected error from scan");
 
-        assert!(matches!(err, Err(TableError::MissingTimeColumn { .. })));
+        assert!(matches!(err, Err(TableError::MissingIndexColumn { .. })));
         assert!(stream.next().await.is_none());
         Ok(())
     }
@@ -1328,7 +1654,10 @@ mod tests {
         let mut stream = table.scan_range(start, end).await?;
         let err = stream.next().await.expect("expected error from scan");
 
-        assert!(matches!(err, Err(TableError::UnsupportedTimeType { .. })));
+        assert!(matches!(
+            err,
+            Err(TableError::IndexColumnTypeMismatch { .. })
+        ));
         Ok(())
     }
 

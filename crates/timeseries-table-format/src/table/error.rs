@@ -108,15 +108,6 @@ pub enum TableError {
         source: BucketError,
     },
 
-    /// A timestamp-only operation was requested for another ordered domain.
-    #[snafu(display("Operation {operation} requires a timestamp index, found {actual}"))]
-    UnsupportedIndexKind {
-        /// Timestamp-only operation name.
-        operation: &'static str,
-        /// Actual registered ordered domain.
-        actual: &'static str,
-    },
-
     /// Segment bounds cannot be ordered in one native index domain.
     #[snafu(display("Invalid segment ordered-index bounds: {source}"))]
     InvalidSegmentBounds {
@@ -155,13 +146,11 @@ pub enum TableError {
         source: StorageError,
     },
 
-    /// Start and end timestamps must satisfy start < end when scanning.
-    #[snafu(display("Invalid scan range: start={start}, end={end} (expect start < end)"))]
+    /// Ordered-index range validation failed.
+    #[snafu(display("Ordered-index range validation failed: {source}"))]
     InvalidRange {
-        /// Inclusive/lower timestamp bound supplied by caller.
-        start: DateTime<Utc>,
-        /// Exclusive/upper timestamp bound supplied by caller.
-        end: DateTime<Utc>,
+        /// Domain, kind, or bound-order failure.
+        source: IndexValueError,
     },
 
     /// Parquet read/IO error during scanning or schema extraction.
@@ -184,23 +173,27 @@ pub enum TableError {
         source: ArrowError,
     },
 
-    /// Segment is missing the configured time column required for scans.
-    #[snafu(display("Missing time column {column} in segment {path}"))]
-    MissingTimeColumn {
+    /// Segment is missing the configured ordered-index column required for scans.
+    #[snafu(display("Missing ordered-index column {column} in segment {path}"))]
+    MissingIndexColumn {
         /// Normalized table-relative path of the segment being scanned.
         path: String,
-        /// Name of the expected time column that was not found in the segment.
+        /// Name of the expected ordered-index column that was not found.
         column: String,
     },
 
-    /// Time column exists but has an unsupported Arrow type for scanning.
-    #[snafu(display("Unsupported time column {column} with type {datatype:?} in segment {path}"))]
-    UnsupportedTimeType {
+    /// Ordered-index column has an Arrow type that disagrees with the table index.
+    #[snafu(display(
+        "Ordered-index column {column} in segment {path} has Arrow type {datatype:?}, expected {expected}"
+    ))]
+    IndexColumnTypeMismatch {
         /// Normalized table-relative path of the segment being scanned.
         path: String,
-        /// Name of the time column with an unsupported type.
+        /// Name of the ordered-index column with the mismatched type.
         column: String,
-        /// Arrow data type encountered for the time column.
+        /// Registered ordered-index domain.
+        expected: &'static str,
+        /// Arrow data type encountered for the ordered-index column.
         datatype: DataType,
     },
 
