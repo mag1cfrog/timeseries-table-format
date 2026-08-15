@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use snafu::Snafu;
+use uuid::Uuid;
 
 use crate::metadata::table_metadata::TimeBucket;
 
@@ -145,7 +146,7 @@ fn coverage_id_v1(
     format!("{output_prefix}-{}", &hex[..32])
 }
 
-/// Deterministically derive a safe coverage id for a segment coverage sidecar.
+/// Deterministically derive a safe content id for segment coverage.
 pub fn segment_coverage_id_v1(
     bucket_spec: &TimeBucket,
     time_column: &str,
@@ -160,7 +161,7 @@ pub fn segment_coverage_id_v1(
     )
 }
 
-/// Deterministically derive a safe coverage id for a table snapshot sidecar.
+/// Deterministically derive a safe content id for table snapshot coverage.
 pub fn table_coverage_id_v1(
     bucket_spec: &TimeBucket,
     time_column: &str,
@@ -173,6 +174,11 @@ pub fn table_coverage_id_v1(
         time_column,
         coverage_bytes,
     )
+}
+
+/// Add a writer-owned suffix to a deterministic coverage content id.
+pub(crate) fn coverage_file_id_for_attempt(content_id: &str, attempt_id: &Uuid) -> String {
+    format!("{content_id}-{attempt_id}")
 }
 
 #[cfg(test)]
@@ -282,5 +288,16 @@ mod tests {
         assert_ne!(base, different_bucket, "bucket spec should affect id");
         assert_ne!(base, different_column, "time column should affect id");
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
+    }
+
+    #[test]
+    fn coverage_file_ids_are_owned_by_the_append_attempt() {
+        let content_id = "segcov-0123456789abcdef0123456789abcdef";
+        let first = coverage_file_id_for_attempt(content_id, &Uuid::from_u128(1));
+        let second = coverage_file_id_for_attempt(content_id, &Uuid::from_u128(2));
+
+        assert_ne!(first, second);
+        validate_coverage_id(&first).expect("first id should be valid");
+        validate_coverage_id(&second).expect("second id should be valid");
     }
 }

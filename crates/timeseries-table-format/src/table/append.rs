@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use snafu::prelude::*;
+use uuid::Uuid;
 
 use crate::{
     coverage::serde::coverage_to_bytes,
     coverage::{
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
-            segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1,
-            table_snapshot_path,
+            coverage_file_id_for_attempt, segment_coverage_id_v1, segment_coverage_path,
+            table_coverage_id_v1, table_snapshot_path,
         },
     },
     formats::parquet::{
@@ -27,7 +28,7 @@ use crate::{
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::ensure_schema_exact_match,
-    storage::{self, StorageError},
+    storage,
     transaction_log::{LogAction, TableState, table_state::TableCoveragePointer},
 };
 
@@ -239,76 +240,58 @@ impl TimeSeriesTable {
                 source: CoverageError::Serde { source },
             })?;
 
-        // 6) Write sidecars before commit and track only files created by this attempt.
-        let coverage_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
-        let seg_cov_path =
-            segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
+        // 6) Give this append private sidecar paths, then write them before commit.
+        let attempt_id = Uuid::new_v4();
+        let segment_content_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
+        let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
+        let seg_cov_path = segment_coverage_path(&segment_file_id).map_err(|source| {
+            TableError::CoverageSidecar {
                 source: CoverageError::Layout { source },
+            }
+        })?;
+
+        let new_version_guess = expected_version + 1;
+        let new_table_cov = table_cov.union(&segment_cov);
+        let new_snap_cov_bytes =
+            coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
+                source: CoverageError::Serde { source },
             })?;
+        let snapshot_content_id =
+            table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
+        let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
+        let snapshot_path =
+            table_snapshot_path(new_version_guess, &snapshot_file_id).map_err(|source| {
+                TableError::CoverageSidecar {
+                    source: CoverageError::Layout { source },
+                }
+            })?;
+
         let step_start = Instant::now();
         let mut created_sidecars = Vec::new();
-        match write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes).await
-        {
-            Ok(()) => created_sidecars.push(seg_cov_path.clone()),
-            Err(CoverageError::Storage {
-                source: StorageError::AlreadyExists { .. },
-            }) => {
-                // Same content-addressed id means the existing file is reusable.
-            }
-            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
-        }
+        write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes)
+            .await
+            .map_err(|source| TableError::CoverageSidecar { source })?;
+        created_sidecars.push(seg_cov_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
         }
 
-        let new_version_guess = expected_version + 1;
-        let new_table_cov = table_cov.union(&segment_cov);
-        let new_snap_cov_bytes = match coverage_to_bytes(&new_table_cov) {
-            Ok(bytes) => bytes,
-            Err(source) => {
-                let error = TableError::CoverageSidecar {
-                    source: CoverageError::Serde { source },
-                };
-                return Err(self
-                    .rollback_created_sidecars(&created_sidecars, error)
-                    .await);
-            }
-        };
-        let snapshot_id = table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
-        let snapshot_path = match table_snapshot_path(new_version_guess, &snapshot_id) {
-            Ok(path) => path,
-            Err(source) => {
-                let error = TableError::CoverageSidecar {
-                    source: CoverageError::Layout { source },
-                };
-                return Err(self
-                    .rollback_created_sidecars(&created_sidecars, error)
-                    .await);
-            }
-        };
-
         let step_start = Instant::now();
-        match write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
-            .await
+        if let Err(source) =
+            write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
+                .await
         {
-            Ok(()) => created_sidecars.push(snapshot_path.clone()),
-            Err(CoverageError::Storage {
-                source: StorageError::AlreadyExists { .. },
-            }) => {
-                // Same content-addressed id means the existing file is reusable.
-            }
-            Err(source) => {
-                let error = TableError::CoverageSidecar { source };
-                return Err(self
-                    .rollback_created_sidecars(&created_sidecars, error)
-                    .await);
-            }
+            let error = TableError::CoverageSidecar { source };
+            return Err(self
+                .rollback_created_sidecars(&created_sidecars, error)
+                .await);
         }
+        created_sidecars.push(snapshot_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_snapshot_sidecar", step_start.elapsed(), Vec::new());
         }
 
-        // 7) Build actions and commit.
+        // 7) Build actions and atomically publish the commit.
         segment_meta.coverage_path = Some(seg_cov_path.to_string_lossy().to_string());
 
         let mut actions = Vec::new();
@@ -1451,13 +1434,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_append_preserves_reused_sidecars() -> TestResult {
+    async fn stale_append_cleans_only_its_writer_owned_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
         let mut loser = TimeSeriesTable::open(location).await?;
-        let winner_path = "data/reused-winner.parquet";
-        let loser_path = "data/reused-loser.parquet";
+        let winner_path = "data/writer-owned-winner.parquet";
+        let loser_path = "data/writer-owned-loser.parquet";
 
         write_test_parquet(
             &tmp.path().join(winner_path),
@@ -1510,9 +1493,8 @@ mod tests {
             overlap_count: 1,
             example_bucket: Some(0),
         };
-
         let err = table
-            .rollback_created_sidecars(&[sidecar.clone()], source)
+            .rollback_created_sidecars(std::slice::from_ref(&sidecar), source)
             .await;
         let message = err.to_string();
 

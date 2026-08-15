@@ -272,7 +272,8 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
 /// Create a *new* file at `rel_path` and write `contents`, failing if the file
 /// already exists.
 ///
-/// This is used for commit files where we want per-version uniqueness.
+/// This is used for objects that must not overwrite existing data, including
+/// commit files and writer-owned sidecars.
 pub async fn write_new(
     location: &StorageLocation,
     rel_path: &Path,

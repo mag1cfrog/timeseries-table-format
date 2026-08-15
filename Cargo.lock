@@ -3249,6 +3249,7 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
