@@ -106,29 +106,39 @@ pub enum TableError {
     },
 
     /// Parquet read/IO error during scanning or schema extraction.
-    #[snafu(display("Parquet read error: {source}"))]
+    #[snafu(display("Parquet read error for segment {path}: {source}"))]
     ParquetRead {
+        /// Normalized table-relative path of the segment being scanned.
+        path: String,
         /// Underlying Parquet error raised during read or schema extraction.
         source: ParquetError,
     },
 
     /// Arrow compute or conversion error while materializing or filtering batches.
-    #[snafu(display("Arrow error while filtering batch: {source}"))]
+    #[snafu(display("Arrow error while filtering column {column} in segment {path}: {source}"))]
     Arrow {
+        /// Normalized table-relative path of the segment being scanned.
+        path: String,
+        /// Configured time column being filtered.
+        column: String,
         /// Underlying Arrow error raised during batch conversion or filtering.
         source: ArrowError,
     },
 
     /// Segment is missing the configured time column required for scans.
-    #[snafu(display("Missing time column {column} in segment"))]
+    #[snafu(display("Missing time column {column} in segment {path}"))]
     MissingTimeColumn {
+        /// Normalized table-relative path of the segment being scanned.
+        path: String,
         /// Name of the expected time column that was not found in the segment.
         column: String,
     },
 
     /// Time column exists but has an unsupported Arrow type for scanning.
-    #[snafu(display("Unsupported time column {column} with type {datatype:?}"))]
+    #[snafu(display("Unsupported time column {column} with type {datatype:?} in segment {path}"))]
     UnsupportedTimeType {
+        /// Normalized table-relative path of the segment being scanned.
+        path: String,
         /// Name of the time column with an unsupported type.
         column: String,
         /// Arrow data type encountered for the time column.
@@ -136,8 +146,12 @@ pub enum TableError {
     },
 
     /// Converting a timestamp to the requested unit would overflow `i64`.
-    #[snafu(display("Timestamp conversion overflow for column {column} (value: {timestamp})"))]
+    #[snafu(display(
+        "Timestamp conversion overflow for column {column} in segment {path} (value: {timestamp})"
+    ))]
     TimeConversionOverflow {
+        /// Normalized table-relative path of the segment being scanned.
+        path: String,
         /// Name of the time column being converted.
         column: String,
         /// The timestamp value that could not be represented as i64 nanos.

@@ -4,8 +4,8 @@
 //! segment metadata and Parquet readers:
 //! - Pick candidate segments whose `[ts_min, ts_max]` intersects the requested
 //!   half-open window `[ts_start, ts_end)`.
-//! - Stream those segments in timestamp order, reading Parquet bytes from
-//!   storage and building `RecordBatch` readers over in-memory buffers.
+//! - Stream those segments in timestamp order with Parquet's native async,
+//!   file-backed reader.
 //! - Filter each batch by the time column with half-open semantics, converting
 //!   the requested bounds to the column’s Arrow timestamp unit while preserving
 //!   timezone metadata.
@@ -19,17 +19,15 @@ use std::path::Path;
 
 use arrow::array::Scalar;
 use arrow::array::{
-    Array, RecordBatchReader, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
+    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
 };
 use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::{boolean as boolean_kernels, cmp as cmp_kernels};
-use arrow::datatypes::{Field, TimeUnit};
-use arrow::{array::RecordBatch, datatypes::DataType};
-use bytes::Bytes;
+use arrow::datatypes::{DataType, Field, TimeUnit};
 use chrono::{DateTime, Utc};
-use futures::{StreamExt, TryStreamExt};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use futures::{StreamExt, TryStreamExt, future};
+use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder};
 use snafu::prelude::*;
 
 use crate::metadata::segments::SegmentMeta;
@@ -39,6 +37,8 @@ use crate::transaction_log::TableState;
 use super::error::{InvalidRangeSnafu, StorageSnafu, TableError};
 use super::{TimeSeriesScan, TimeSeriesTable};
 use crate::metadata::segments::cmp_segment_meta_by_time;
+
+const SCAN_BATCH_SIZE: usize = 8_192;
 
 fn segments_for_range(
     state: &TableState,
@@ -99,22 +99,23 @@ fn segments_for_range(
 /// keep row”), matching the intended `null -> false` semantics for the
 /// time column.
 ///
-/// This macro returns `Result<(), TableError>` so callers can use `?` for
-/// error propagation inside the match over different timestamp units.
+/// This macro returns the non-empty filtered batch, or `None` when every row
+/// was filtered out.
 macro_rules! filter_ts_batch {
     ($array_ty: ty,
     $batch:expr,
     $ts_idx:expr,
     $start_bound:expr,
     $end_bound:expr,
+    $path:expr,
     $time_col:expr,
-    $ts_field:expr,
-    $out:expr
+    $ts_field:expr
 ) => {{
         // 1) Downcast the column to the concrete timestamp array type
         let col = $batch.column($ts_idx);
         let ts_arr = col.as_any().downcast_ref::<$array_ty>().ok_or_else(|| {
             TableError::UnsupportedTimeType {
+                path: $path.to_string(),
                 column: $time_col.to_string(),
                 datatype: $ts_field.data_type().clone(),
             }
@@ -141,14 +142,29 @@ macro_rules! filter_ts_batch {
         // 4) Vectorized comparisons:
         // ge_mask = (ts >= start)
         // lt_mask = (ts < end)
-        let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar)
-            .map_err(|source| TableError::Arrow { source })?;
-        let lt_mask =
-            cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| TableError::Arrow { source })?;
+        let ge_mask = cmp_kernels::gt_eq(ts_arr, &start_scalar).map_err(|source| {
+            TableError::Arrow {
+                path: $path.to_string(),
+                column: $time_col.to_string(),
+                source,
+            }
+        })?;
+        let lt_mask = cmp_kernels::lt(ts_arr, &end_scalar).map_err(|source| {
+            TableError::Arrow {
+                path: $path.to_string(),
+                column: $time_col.to_string(),
+                source,
+            }
+        })?;
 
         // 5) Combine: keep rows where ts >= start AND ts < end
-        let mask = boolean_kernels::and(&ge_mask, &lt_mask)
-            .map_err(|source| TableError::Arrow { source })?;
+        let mask = boolean_kernels::and(&ge_mask, &lt_mask).map_err(|source| {
+            TableError::Arrow {
+                path: $path.to_string(),
+                column: $time_col.to_string(),
+                source,
+            }
+        })?;
 
         // Note on null semantics:
         // - If ts_arr[i] is null, both comparisons produce null in the mask.
@@ -156,51 +172,182 @@ macro_rules! filter_ts_batch {
         // excluding those rows from results.
 
         // 6) apply the mask to the whole batch
-        let filtered =
-            filter_record_batch(&$batch, &mask).map_err(|source| TableError::Arrow { source })?;
+        let filtered = filter_record_batch(&$batch, &mask).map_err(|source| {
+            TableError::Arrow {
+                path: $path.to_string(),
+                column: $time_col.to_string(),
+                source,
+            }
+        })?;
 
-        if filtered.num_rows() > 0 {
-            $out.push(filtered);
-        }
-
-        Ok::<(), TableError>(())
+        Ok::<_, TableError>((filtered.num_rows() > 0).then_some(filtered))
     }};
 }
 
 fn to_bounds_i64(
     field: &Field,
+    path: &str,
     column: &str,
     ts_start: DateTime<Utc>,
     ts_end: DateTime<Utc>,
 ) -> Result<(i64, i64), TableError> {
+    let ceil_bound = |dt: DateTime<Utc>, floor: i64, nanos_per_unit: u32| {
+        if dt.timestamp_subsec_nanos().is_multiple_of(nanos_per_unit) {
+            Ok(floor)
+        } else {
+            floor
+                .checked_add(1)
+                .ok_or_else(|| TableError::TimeConversionOverflow {
+                    path: path.to_string(),
+                    column: column.to_string(),
+                    timestamp: dt,
+                })
+        }
+    };
     let to_ns = |dt: DateTime<Utc>| {
         dt.timestamp()
             .checked_mul(1_000_000_000)
             .and_then(|secs| secs.checked_add(dt.timestamp_subsec_nanos() as i64))
             .ok_or_else(|| TableError::TimeConversionOverflow {
+                path: path.to_string(),
                 column: column.to_string(),
                 timestamp: dt,
             })
     };
 
     match field.data_type() {
-        DataType::Timestamp(TimeUnit::Second, _) => Ok((ts_start.timestamp(), ts_end.timestamp())),
+        DataType::Timestamp(TimeUnit::Second, _) => Ok((
+            ceil_bound(ts_start, ts_start.timestamp(), 1_000_000_000)?,
+            ceil_bound(ts_end, ts_end.timestamp(), 1_000_000_000)?,
+        )),
 
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            Ok((ts_start.timestamp_millis(), ts_end.timestamp_millis()))
-        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => Ok((
+            ceil_bound(ts_start, ts_start.timestamp_millis(), 1_000_000)?,
+            ceil_bound(ts_end, ts_end.timestamp_millis(), 1_000_000)?,
+        )),
 
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            Ok((ts_start.timestamp_micros(), ts_end.timestamp_micros()))
-        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Ok((
+            ceil_bound(ts_start, ts_start.timestamp_micros(), 1_000)?,
+            ceil_bound(ts_end, ts_end.timestamp_micros(), 1_000)?,
+        )),
 
         DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok((to_ns(ts_start)?, to_ns(ts_end)?)),
 
         other => Err(TableError::UnsupportedTimeType {
+            path: path.to_string(),
             column: column.to_string(),
             datatype: other.clone(),
         }),
     }
+}
+
+async fn segment_range_stream(
+    reader: impl AsyncFileReader + Unpin + 'static,
+    path: String,
+    time_column: &str,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
+) -> Result<TimeSeriesScan, TableError> {
+    let builder = ParquetRecordBatchStreamBuilder::new(reader)
+        .await
+        .map_err(|source| TableError::ParquetRead {
+            path: path.clone(),
+            source,
+        })?;
+
+    // Locate the time column and compute numeric bounds before moving the
+    // builder into the directly-polled record-batch stream.
+    let schema = builder.schema();
+    let ts_idx = schema
+        .index_of(time_column)
+        .map_err(|_| TableError::MissingTimeColumn {
+            path: path.clone(),
+            column: time_column.to_string(),
+        })?;
+    let ts_field = schema.field(ts_idx).clone();
+    let (start_bound, end_bound) = to_bounds_i64(&ts_field, &path, time_column, ts_start, ts_end)?;
+
+    let reader = builder
+        .with_batch_size(SCAN_BATCH_SIZE)
+        .build()
+        .map_err(|source| TableError::ParquetRead {
+            path: path.clone(),
+            source,
+        })?;
+    let time_column = time_column.to_string();
+
+    let stream = reader
+        .then(move |batch_res| {
+            let path = path.clone();
+            let time_column = time_column.clone();
+            let ts_field = ts_field.clone();
+
+            async move {
+                let batch = batch_res.map_err(|source| TableError::ParquetRead {
+                    path: path.clone(),
+                    source,
+                })?;
+
+                let filtered = match ts_field.data_type() {
+                    DataType::Timestamp(TimeUnit::Second, _) => filter_ts_batch!(
+                        TimestampSecondArray,
+                        batch,
+                        ts_idx,
+                        start_bound,
+                        end_bound,
+                        path,
+                        time_column,
+                        ts_field
+                    )?,
+                    DataType::Timestamp(TimeUnit::Millisecond, _) => filter_ts_batch!(
+                        TimestampMillisecondArray,
+                        batch,
+                        ts_idx,
+                        start_bound,
+                        end_bound,
+                        path,
+                        time_column,
+                        ts_field
+                    )?,
+                    DataType::Timestamp(TimeUnit::Microsecond, _) => filter_ts_batch!(
+                        TimestampMicrosecondArray,
+                        batch,
+                        ts_idx,
+                        start_bound,
+                        end_bound,
+                        path,
+                        time_column,
+                        ts_field
+                    )?,
+                    DataType::Timestamp(TimeUnit::Nanosecond, _) => filter_ts_batch!(
+                        TimestampNanosecondArray,
+                        batch,
+                        ts_idx,
+                        start_bound,
+                        end_bound,
+                        path,
+                        time_column,
+                        ts_field
+                    )?,
+                    other => {
+                        return Err(TableError::UnsupportedTimeType {
+                            path,
+                            column: time_column,
+                            datatype: other.clone(),
+                        });
+                    }
+                };
+
+                if filtered.is_none() {
+                    tokio::task::yield_now().await;
+                }
+
+                Ok(filtered)
+            }
+        })
+        .try_filter_map(|batch| future::ready(Ok(batch)));
+
+    Ok(Box::pin(stream))
 }
 
 async fn read_segment_range(
@@ -209,100 +356,22 @@ async fn read_segment_range(
     time_column: &str,
     ts_start: DateTime<Utc>,
     ts_end: DateTime<Utc>,
-) -> Result<Vec<RecordBatch>, TableError> {
+) -> Result<TimeSeriesScan, TableError> {
     let rel_path = Path::new(&segment.path);
-
-    // 1) Use storage layer to get raw bytes.
-    let bytes = storage::read_all_bytes(location.as_ref(), rel_path)
+    let reader = storage::open_parquet_reader(location.as_ref(), rel_path)
         .await
         .context(StorageSnafu)?;
 
-    // 2) Build a reader over an in-memory cursor.
-    let bytes = Bytes::from(bytes);
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-        .map_err(|source| TableError::ParquetRead { source })?;
+    segment_range_stream(reader, segment.path.clone(), time_column, ts_start, ts_end).await
+}
 
-    let reader = builder
-        .build()
-        .map_err(|source| TableError::ParquetRead { source })?;
-
-    // 3) locate the time column and compute numeric bounds
-    let schema = reader.schema();
-    let ts_idx = schema
-        .index_of(time_column)
-        .map_err(|_| TableError::MissingTimeColumn {
-            column: time_column.to_string(),
-        })?;
-
-    let ts_field = schema.field(ts_idx);
-
-    let (start_bound, end_bound) = to_bounds_i64(ts_field, time_column, ts_start, ts_end)?;
-
-    let mut out = Vec::new();
-
-    // 4) iterate over batches and filter them
-    for batch_res in reader {
-        let batch = batch_res.map_err(|source| TableError::Arrow { source })?;
-
-        match ts_field.data_type() {
-            DataType::Timestamp(TimeUnit::Second, _) => {
-                filter_ts_batch!(
-                    TimestampSecondArray,
-                    batch,
-                    ts_idx,
-                    start_bound,
-                    end_bound,
-                    time_column,
-                    ts_field,
-                    out
-                )?;
-            }
-            DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                filter_ts_batch!(
-                    TimestampMillisecondArray,
-                    batch,
-                    ts_idx,
-                    start_bound,
-                    end_bound,
-                    time_column,
-                    ts_field,
-                    out
-                )?;
-            }
-            DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                filter_ts_batch!(
-                    TimestampMicrosecondArray,
-                    batch,
-                    ts_idx,
-                    start_bound,
-                    end_bound,
-                    time_column,
-                    ts_field,
-                    out
-                )?;
-            }
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                filter_ts_batch!(
-                    TimestampNanosecondArray,
-                    batch,
-                    ts_idx,
-                    start_bound,
-                    end_bound,
-                    time_column,
-                    ts_field,
-                    out
-                )?;
-            }
-            other => {
-                return Err(TableError::UnsupportedTimeType {
-                    column: time_column.to_string(),
-                    datatype: other.clone(),
-                });
-            }
-        }
-    }
-
-    Ok(out)
+struct ScanState {
+    candidates: std::vec::IntoIter<SegmentMeta>,
+    current: Option<TimeSeriesScan>,
+    location: TableLocation,
+    time_column: String,
+    ts_start: DateTime<Utc>,
+    ts_end: DateTime<Utc>,
 }
 
 impl TimeSeriesTable {
@@ -329,24 +398,43 @@ impl TimeSeriesTable {
         // 2) Sort deterministically by ts_min, ts_max, and path.
         candidates.sort_unstable_by(cmp_segment_meta_by_time);
 
-        let location = self.location().clone();
+        let state = ScanState {
+            candidates: candidates.into_iter(),
+            current: None,
+            location: self.location().clone(),
+            time_column: ts_column,
+            ts_start,
+            ts_end,
+        };
 
-        // 3) Build stream: for each segment, read + filter
-        let stream = futures::stream::iter(candidates)
-            .then(move |seg| {
-                let location = location.clone();
-                let ts_column = ts_column.clone();
-
-                async move {
-                    let batches =
-                        read_segment_range(&location, &seg, &ts_column, ts_start, ts_end).await?;
-
-                    Ok::<_, TableError>(futures::stream::iter(
-                        batches.into_iter().map(Ok::<_, TableError>),
-                    ))
+        // Process one lazily opened segment stream at a time. `try_unfold`
+        // drops its state after the first error, so later segments are not
+        // opened after a terminal scan failure.
+        let stream = futures::stream::try_unfold(state, |mut state| async move {
+            loop {
+                if let Some(current) = state.current.as_mut() {
+                    match current.next().await {
+                        Some(Ok(batch)) => return Ok(Some((batch, state))),
+                        Some(Err(error)) => return Err(error),
+                        None => state.current = None,
+                    }
                 }
-            })
-            .try_flatten();
+
+                let Some(segment) = state.candidates.next() else {
+                    return Ok(None);
+                };
+                state.current = Some(
+                    read_segment_range(
+                        &state.location,
+                        &segment,
+                        &state.time_column,
+                        state.ts_start,
+                        state.ts_end,
+                    )
+                    .await?,
+                );
+            }
+        });
 
         Ok(Box::pin(stream))
     }
@@ -361,12 +449,359 @@ mod tests {
     use crate::metadata::logical_schema::LogicalTimestampUnit;
     use crate::metadata::segments::FileFormat;
 
-    use arrow::datatypes::TimeUnit as ArrowTimeUnit;
+    use arrow::array::RecordBatch;
+    use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};
 
     use chrono::{TimeZone, Utc};
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt, future::BoxFuture};
+    use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::ArrowReaderOptions;
+    use parquet::errors::Result as ParquetResult;
+    use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
+    use parquet::file::properties::WriterProperties;
 
+    use std::fs::File;
+    use std::ops::Range;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct TrackingStats {
+        read_calls: AtomicUsize,
+        bytes_read: AtomicUsize,
+        dropped: AtomicBool,
+    }
+
+    struct TrackingReader {
+        data: bytes::Bytes,
+        stats: Arc<TrackingStats>,
+        gate: Option<(usize, futures::channel::oneshot::Receiver<()>)>,
+    }
+
+    impl TrackingReader {
+        fn new(data: bytes::Bytes) -> (Self, Arc<TrackingStats>) {
+            let stats = Arc::new(TrackingStats::default());
+            (
+                Self {
+                    data,
+                    stats: Arc::clone(&stats),
+                    gate: None,
+                },
+                stats,
+            )
+        }
+
+        fn with_gate(
+            data: bytes::Bytes,
+            gated_call: usize,
+        ) -> (
+            Self,
+            Arc<TrackingStats>,
+            futures::channel::oneshot::Sender<()>,
+        ) {
+            let (mut reader, stats) = Self::new(data);
+            let (release, gate) = futures::channel::oneshot::channel();
+            reader.gate = Some((gated_call, gate));
+            (reader, stats, release)
+        }
+
+        fn read_ranges(&self, ranges: Vec<Range<u64>>) -> (usize, Vec<bytes::Bytes>) {
+            let call = self.stats.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.stats.bytes_read.fetch_add(
+                ranges
+                    .iter()
+                    .map(|range| (range.end - range.start) as usize)
+                    .sum::<usize>(),
+                Ordering::SeqCst,
+            );
+            (
+                call,
+                ranges
+                    .into_iter()
+                    .map(|range| self.data.slice(range.start as usize..range.end as usize))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TrackingReader {
+        fn drop(&mut self) {
+            self.stats.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl AsyncFileReader for TrackingReader {
+        fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<bytes::Bytes>> {
+            let (_, mut ranges) = self.read_ranges(vec![range]);
+            futures::future::ready(Ok(ranges.pop().expect("one requested range"))).boxed()
+        }
+
+        fn get_byte_ranges(
+            &mut self,
+            ranges: Vec<Range<u64>>,
+        ) -> BoxFuture<'_, ParquetResult<Vec<bytes::Bytes>>> {
+            let (call, bytes) = self.read_ranges(ranges);
+            let gate = self
+                .gate
+                .as_ref()
+                .is_some_and(|(gated_call, _)| *gated_call == call)
+                .then(|| self.gate.take().expect("configured gate").1);
+            async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                Ok(bytes)
+            }
+            .boxed()
+        }
+
+        fn get_metadata<'a>(
+            &'a mut self,
+            _options: Option<&'a ArrowReaderOptions>,
+        ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
+            let metadata = ParquetMetaDataReader::new()
+                .parse_and_finish(&self.data)
+                .map(Arc::new);
+            futures::future::ready(metadata).boxed()
+        }
+    }
+
+    fn write_multi_row_group_parquet(
+        path: &Path,
+        row_groups: &[&[i64]],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let primary_timezone: Arc<str> = Arc::from("UTC");
+        let secondary_timezone: Arc<str> = Arc::from("+00:00");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, Some(primary_timezone.clone())),
+                false,
+            ),
+            Field::new(
+                "observed_at",
+                DataType::Timestamp(ArrowTimeUnit::Microsecond, Some(secondary_timezone.clone())),
+                false,
+            ),
+        ]));
+
+        let file = File::create(path)?;
+        let mut writer = ArrowWriter::try_new(
+            file,
+            Arc::clone(&schema),
+            Some(WriterProperties::builder().build()),
+        )?;
+        for values in row_groups {
+            let ts = TimestampMillisecondArray::from(values.to_vec())
+                .with_timezone_opt(Some(primary_timezone.clone()));
+            let observed_at = TimestampMicrosecondArray::from(
+                values.iter().map(|value| value * 1_000).collect::<Vec<_>>(),
+            )
+            .with_timezone_opt(Some(secondary_timezone.clone()));
+            writer.write(&RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(ts), Arc::new(observed_at)],
+            )?)?;
+            writer.flush()?;
+        }
+        writer.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn timestamp_bounds_round_up_to_column_precision() {
+        let timestamp = |seconds, nanos| Utc.timestamp_opt(seconds, nanos).single().unwrap();
+        let cases = [
+            (
+                ArrowTimeUnit::Second,
+                timestamp(1, 500_000_000),
+                timestamp(2, 500_000_000),
+                (2, 3),
+            ),
+            (
+                ArrowTimeUnit::Second,
+                timestamp(-2, 500_000_000),
+                timestamp(-1, 500_000_000),
+                (-1, 0),
+            ),
+            (
+                ArrowTimeUnit::Second,
+                timestamp(1, 0),
+                timestamp(2, 0),
+                (1, 2),
+            ),
+            (
+                ArrowTimeUnit::Millisecond,
+                timestamp(1, 500_000),
+                timestamp(2, 500_000),
+                (1_001, 2_001),
+            ),
+            (
+                ArrowTimeUnit::Millisecond,
+                timestamp(-1, 999_500_000),
+                timestamp(0, 500_000),
+                (0, 1),
+            ),
+            (
+                ArrowTimeUnit::Millisecond,
+                timestamp(1, 0),
+                timestamp(2, 0),
+                (1_000, 2_000),
+            ),
+            (
+                ArrowTimeUnit::Microsecond,
+                timestamp(1, 500),
+                timestamp(2, 500),
+                (1_000_001, 2_000_001),
+            ),
+            (
+                ArrowTimeUnit::Microsecond,
+                timestamp(-1, 999_999_500),
+                timestamp(0, 500),
+                (0, 1),
+            ),
+            (
+                ArrowTimeUnit::Microsecond,
+                timestamp(1, 0),
+                timestamp(2, 0),
+                (1_000_000, 2_000_000),
+            ),
+        ];
+
+        for (unit, start, end, expected) in cases {
+            let field = Field::new("ts", DataType::Timestamp(unit, None), false);
+            assert_eq!(
+                to_bounds_i64(&field, "data/segment.parquet", "ts", start, end).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn segment_stream_reads_on_demand_and_preserves_schema() -> TestResult {
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("multi-row-group.parquet");
+        write_multi_row_group_parquet(&path, &[&[1_000], &[2_000], &[3_000]])?;
+        let data = bytes::Bytes::from(std::fs::read(path)?);
+        let file_size = data.len();
+
+        let (reader, stats) = TrackingReader::new(data.clone());
+        let mut stream = segment_range_stream(
+            reader,
+            "data/multi-row-group.parquet".to_string(),
+            "ts",
+            Utc.timestamp_millis_opt(0).single().unwrap(),
+            Utc.timestamp_millis_opt(4_000).single().unwrap(),
+        )
+        .await?;
+
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
+        let first = stream.next().await.transpose()?.expect("first batch");
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+        assert!(stats.bytes_read.load(Ordering::SeqCst) < file_size);
+        assert_eq!(
+            first.schema().field(0).data_type(),
+            &DataType::Timestamp(ArrowTimeUnit::Millisecond, Some(Arc::<str>::from("UTC")))
+        );
+        assert_eq!(
+            first.schema().field(1).data_type(),
+            &DataType::Timestamp(ArrowTimeUnit::Microsecond, Some(Arc::<str>::from("+00:00")))
+        );
+
+        tokio::task::yield_now().await;
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+        drop(stream);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+
+        let (reader, gated_stats, release) = TrackingReader::with_gate(data, 2);
+        let mut stream = segment_range_stream(
+            reader,
+            "data/multi-row-group.parquet".to_string(),
+            "ts",
+            Utc.timestamp_millis_opt(0).single().unwrap(),
+            Utc.timestamp_millis_opt(4_000).single().unwrap(),
+        )
+        .await?;
+        let mut timestamps = Vec::new();
+        let first = stream.next().await.transpose()?.expect("first batch");
+        timestamps.extend(
+            first
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("millisecond timestamp")
+                .values()
+                .iter()
+                .copied(),
+        );
+        assert_eq!(gated_stats.read_calls.load(Ordering::SeqCst), 1);
+
+        let second = stream.next();
+        futures::pin_mut!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(gated_stats.read_calls.load(Ordering::SeqCst), 2);
+        release.send(()).expect("release second row-group read");
+        let second = second.await.transpose()?.expect("second batch");
+        timestamps.extend(
+            second
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("millisecond timestamp")
+                .values()
+                .iter()
+                .copied(),
+        );
+
+        while let Some(batch) = stream.next().await.transpose()? {
+            timestamps.extend(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("millisecond timestamp")
+                    .values()
+                    .iter()
+                    .copied(),
+            );
+        }
+        assert_eq!(timestamps, vec![1_000, 2_000, 3_000]);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fully_filtered_segment_stream_yields_and_cancels() -> TestResult {
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("filtered-row-groups.parquet");
+        write_multi_row_group_parquet(&path, &[&[1_000], &[2_000], &[3_000]])?;
+        let data = bytes::Bytes::from(std::fs::read(path)?);
+        let (reader, stats, release) = TrackingReader::with_gate(data, 2);
+
+        let mut stream = segment_range_stream(
+            reader,
+            "data/filtered-row-groups.parquet".to_string(),
+            "ts",
+            Utc.timestamp_millis_opt(10_000).single().unwrap(),
+            Utc.timestamp_millis_opt(20_000).single().unwrap(),
+        )
+        .await?;
+
+        {
+            let next = stream.next();
+            futures::pin_mut!(next);
+            assert!(futures::poll!(&mut next).is_pending());
+            assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+            assert!(futures::poll!(&mut next).is_pending());
+            assert_eq!(stats.read_calls.load(Ordering::SeqCst), 2);
+        }
+
+        drop(stream);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+        assert!(release.send(()).is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn read_segment_range_errors_when_missing_time_column() -> TestResult {
@@ -390,11 +825,13 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = read_segment_range(&location, &segment, "ts", start, end)
-            .await
-            .expect_err("missing ts column should error");
+        let err = match read_segment_range(&location, &segment, "ts", start, end).await {
+            Err(err) => err,
+            Ok(_) => panic!("missing ts column should error"),
+        };
 
         assert!(matches!(err, TableError::MissingTimeColumn { .. }));
+        assert!(err.to_string().contains(rel));
         Ok(())
     }
 
@@ -421,11 +858,13 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = read_segment_range(&location, &segment, "ts", start, end)
-            .await
-            .expect_err("unsupported time type should error");
+        let err = match read_segment_range(&location, &segment, "ts", start, end).await {
+            Err(err) => err,
+            Ok(_) => panic!("unsupported time type should error"),
+        };
 
         assert!(matches!(err, TableError::UnsupportedTimeType { .. }));
+        assert!(err.to_string().contains(rel));
         Ok(())
     }
 
@@ -452,9 +891,10 @@ mod tests {
             .timestamp_opt(9_223_372_037, 0)
             .single()
             .expect("overflow ts");
-        let err = read_segment_range(&location, &segment, "ts", huge, huge)
-            .await
-            .expect_err("overflow during bound conversion should error");
+        let err = match read_segment_range(&location, &segment, "ts", huge, huge).await {
+            Err(err) => err,
+            Ok(_) => panic!("overflow during bound conversion should error"),
+        };
 
         assert!(matches!(err, TableError::TimeConversionOverflow { .. }));
         Ok(())
@@ -582,6 +1022,41 @@ mod tests {
         let result = table.scan_range(start, end).await;
 
         assert!(matches!(result, Err(TableError::InvalidRange { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_supports_second_unit() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+
+        let rel = "data/seg-seconds.parquet";
+        let path = tmp.path().join(rel);
+        write_arrow_parquet_with_unit(
+            &path,
+            ArrowTimeUnit::Second,
+            &[Some(1), Some(2), Some(3)],
+            &["A", "A", "A"],
+            &[1.0, 2.0, 3.0],
+        )?;
+        let segment = SegmentMeta {
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: Utc.timestamp_opt(1, 0).single().unwrap(),
+            ts_max: Utc.timestamp_opt(3, 0).single().unwrap(),
+            row_count: 3,
+            file_size: None,
+            coverage_path: None,
+        };
+        table.state.segments.insert(segment.path.clone(), segment);
+
+        let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
+        let end = Utc.timestamp_millis_opt(2_500).single().unwrap();
+        let rows = collect_scan_rows(&table, start, end).await?;
+
+        assert_eq!(rows, vec![(2, "A".to_string(), 2.0)]);
         Ok(())
     }
 
@@ -790,6 +1265,16 @@ mod tests {
         };
 
         table.state.segments.insert(segment.path.clone(), segment);
+        let unopened = SegmentMeta {
+            path: "data/should-not-open.parquet".to_string(),
+            format: FileFormat::Parquet,
+            ts_min: utc_datetime(2024, 1, 1, 0, 1, 30),
+            ts_max: utc_datetime(2024, 1, 1, 0, 1, 31),
+            row_count: 1,
+            file_size: None,
+            coverage_path: None,
+        };
+        table.state.segments.insert(unopened.path.clone(), unopened);
 
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 2, 0);
@@ -798,6 +1283,7 @@ mod tests {
         let err = stream.next().await.expect("expected error from scan");
 
         assert!(matches!(err, Err(TableError::MissingTimeColumn { .. })));
+        assert!(stream.next().await.is_none());
         Ok(())
     }
 
@@ -930,6 +1416,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_range_reports_missing_segment_path() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let meta = make_basic_table_meta();
+        let mut table = TimeSeriesTable::create(location, meta).await?;
+        let rel = "data/missing.parquet";
+        let segment = SegmentMeta {
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            ts_min: Utc.timestamp_millis_opt(1_000).single().unwrap(),
+            ts_max: Utc.timestamp_millis_opt(2_000).single().unwrap(),
+            row_count: 1,
+            file_size: None,
+            coverage_path: None,
+        };
+        table.state.segments.insert(segment.path.clone(), segment);
+
+        let mut stream = table
+            .scan_range(
+                Utc.timestamp_millis_opt(0).single().unwrap(),
+                Utc.timestamp_millis_opt(3_000).single().unwrap(),
+            )
+            .await?;
+        let error = stream
+            .next()
+            .await
+            .expect("missing segment error")
+            .expect_err("missing segment should fail");
+
+        assert!(matches!(error, TableError::Storage { .. }));
+        assert!(error.to_string().contains(rel));
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn scan_range_propagates_parquet_read_error() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -959,9 +1481,14 @@ mod tests {
         let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
 
         let mut stream = table.scan_range(start, end).await?;
-        let err = stream.next().await.expect("first item should be error");
+        let err = stream
+            .next()
+            .await
+            .expect("first item should be error")
+            .expect_err("corrupt segment should fail");
 
-        assert!(matches!(err, Err(TableError::ParquetRead { .. })));
+        assert!(matches!(err, TableError::ParquetRead { .. }));
+        assert!(err.to_string().contains(rel));
         Ok(())
     }
 }
