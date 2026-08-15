@@ -16,6 +16,7 @@ use tokio::{
 
 use crate::storage::{
     BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageLocation, StorageResult,
+    normalize_relative_storage_path,
 };
 
 /// Guard that removes a file on drop unless disarmed.
@@ -222,7 +223,7 @@ pub(crate) async fn copy_new_from_local(
                     }
                 }
             })?;
-            let destination = join_local(location, rel_path);
+            let destination = join_local(location, rel_path)?;
             let mut destination_file = create_new_file(&destination).await?;
             let mut guard = TempFileGuard::new(destination.clone());
             #[cfg(test)]
@@ -266,12 +267,13 @@ pub(crate) async fn copy_new_from_local(
     }
 }
 
-/// Join a table location with a relative path into an absolute local path.
+/// Validate a backend-relative storage key and resolve it under a local root.
 ///
 /// v0.1: only Local is supported.
-pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> PathBuf {
+pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> StorageResult<PathBuf> {
+    let (_, native_path) = normalize_relative_storage_path(rel)?;
     match location {
-        StorageLocation::Local(root) => root.join(rel),
+        StorageLocation::Local(root) => Ok(root.join(native_path)),
     }
 }
 
@@ -281,9 +283,10 @@ pub(crate) async fn open_parquet_reader(
     rel_path: &Path,
 ) -> StorageResult<Box<dyn AsyncFileReader>> {
     let path = rel_path.display().to_string();
+    let absolute_path = join_local(location, rel_path)?;
 
     match location {
-        StorageLocation::Local(root) => match fs::File::open(root.join(rel_path)).await {
+        StorageLocation::Local(_) => match fs::File::open(absolute_path).await {
             Ok(file) => Ok(Box::new(file)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 Err(BackendError::Local(error)).context(NotFoundSnafu { path })
@@ -329,7 +332,7 @@ pub async fn write_atomic(
 ) -> StorageResult<()> {
     match location {
         StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
+            let abs = join_local(location, rel_path)?;
 
             create_parent_dir(&abs).await?;
 
@@ -383,7 +386,7 @@ pub async fn write_atomic(
 pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> StorageResult<String> {
     match location {
         StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
+            let abs = join_local(location, rel_path)?;
 
             match fs::read_to_string(&abs).await {
                 Ok(s) => Ok(s),
@@ -402,7 +405,7 @@ pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> Stor
 pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> StorageResult<()> {
     match location {
         StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
+            let abs = join_local(location, rel_path)?;
             #[cfg(test)]
             if take_cleanup_failure(&abs) {
                 return Err(StorageError::OtherIo {
@@ -433,7 +436,7 @@ pub async fn write_new(
 ) -> StorageResult<()> {
     match location {
         StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
+            let abs = join_local(location, rel_path)?;
             let file = create_new_file(&abs).await?;
             write_created_file(file, &abs, contents).await
         }
@@ -451,7 +454,7 @@ pub async fn write_new(
 pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> StorageResult<Vec<u8>> {
     match location {
         StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
+            let abs = join_local(location, rel_path)?;
             let path_str = abs.display().to_string();
 
             match fs::read(&abs).await {
@@ -471,7 +474,7 @@ pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> Stor
 pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageResult<u64> {
     match location {
         StorageLocation::Local(_) => {
-            let abs = join_local(location, rel_path);
+            let abs = join_local(location, rel_path)?;
             let path_str = rel_path.display().to_string();
 
             let meta = fs::metadata(&abs).await;
@@ -712,6 +715,30 @@ mod tests {
         assert!(abs.exists());
         let read_back = tokio::fs::read_to_string(&abs).await?;
         assert_eq!(read_back, "nested new");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_operations_reject_paths_outside_root() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        tokio::fs::create_dir(&table_root).await?;
+        let location = StorageLocation::local(&table_root);
+        let outside = tmp.path().join("outside.txt");
+
+        for path in [PathBuf::from("../outside.txt"), outside.clone()] {
+            let write_error = write_new(&location, &path, b"escaped")
+                .await
+                .expect_err("outside write path must be rejected");
+            assert!(matches!(write_error, StorageError::OtherIo { .. }));
+
+            let read_error = read_all_bytes(&location, &path)
+                .await
+                .expect_err("outside read path must be rejected");
+            assert!(matches!(read_error, StorageError::OtherIo { .. }));
+        }
+
+        assert!(!outside.exists());
         Ok(())
     }
 }

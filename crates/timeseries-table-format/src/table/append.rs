@@ -85,7 +85,7 @@ impl TimeSeriesTable {
     async fn normalize_new_segment_path(&self, relative_path: &str) -> Result<String, TableError> {
         let supplied_path = Path::new(relative_path);
         let (normalized, native_path) =
-            storage::normalize_relative_segment_path(supplied_path).context(StorageSnafu)?;
+            storage::normalize_relative_storage_path(supplied_path).context(StorageSnafu)?;
 
         if self.state.segments.contains_key(&normalized) {
             return DuplicateSegmentPathSnafu { path: normalized }.fail();

@@ -33,7 +33,7 @@ mod io;
 pub use io::*;
 
 mod table_location;
-pub(crate) use table_location::normalize_relative_segment_path;
+pub(crate) use table_location::normalize_relative_storage_path;
 pub use table_location::*;
 
 mod output;

@@ -33,16 +33,16 @@ use crate::{
         schema_compat::ensure_index_matches_schema, segments::sort_segment_meta_by_index,
         table_metadata::TABLE_FORMAT_VERSION,
     },
-    storage::normalize_relative_segment_path,
+    storage::normalize_relative_storage_path,
     transaction_log::*,
 };
 
-fn validate_persisted_segment_path(path: &str) -> Result<(), CommitError> {
-    let (canonical, _) = match normalize_relative_segment_path(Path::new(path)) {
+fn validate_persisted_storage_path(path: &str, description: &str) -> Result<(), CommitError> {
+    let (canonical, _) = match normalize_relative_storage_path(Path::new(path)) {
         Ok(path) => path,
         Err(source) => {
             return CorruptStateSnafu {
-                msg: format!("Invalid persisted segment path {path:?}: {source}"),
+                msg: format!("Invalid persisted {description} {path:?}: {source}"),
             }
             .fail();
         }
@@ -51,7 +51,7 @@ fn validate_persisted_segment_path(path: &str) -> Result<(), CommitError> {
     if canonical != path {
         return CorruptStateSnafu {
             msg: format!(
-                "Non-canonical persisted segment path {path:?}; canonical form is {canonical:?}"
+                "Non-canonical persisted {description} {path:?}; canonical form is {canonical:?}"
             ),
         }
         .fail();
@@ -148,7 +148,13 @@ impl TransactionLogStore {
             for action in commit.actions {
                 match action {
                     LogAction::AddSegment(meta) => {
-                        validate_persisted_segment_path(&meta.path)?;
+                        validate_persisted_storage_path(&meta.path, "segment path")?;
+                        if let Some(coverage_path) = &meta.coverage_path {
+                            validate_persisted_storage_path(
+                                coverage_path,
+                                "segment coverage path",
+                            )?;
+                        }
                         if segments.contains_key(&meta.path) {
                             return CorruptStateSnafu {
                                 msg: format!("Duplicate live segment path: {}", meta.path),
@@ -158,7 +164,7 @@ impl TransactionLogStore {
                         segments.insert(meta.path.clone(), meta);
                     }
                     LogAction::RemoveSegment { path } => {
-                        validate_persisted_segment_path(&path)?;
+                        validate_persisted_storage_path(&path, "segment path")?;
                         segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
@@ -178,6 +184,7 @@ impl TransactionLogStore {
                         index_kind,
                         coverage_path,
                     } => {
+                        validate_persisted_storage_path(&coverage_path, "table coverage path")?;
                         table_coverage = Some(TableCoveragePointer {
                             index_kind,
                             coverage_path,
@@ -492,6 +499,54 @@ mod tests {
                     .expect_err("noncanonical segment action path should be rejected");
                 assert!(matches!(err, CommitError::CorruptState { .. }));
                 assert!(err.to_string().contains("segment path"), "{err}");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_noncanonical_coverage_paths() -> TestResult {
+        for path in [
+            "",
+            "/tmp/coverage.roar",
+            "../coverage.roar",
+            "_coverage/../coverage.roar",
+            r"_coverage\segments\coverage.roar",
+            "_coverage//segments/coverage.roar",
+            r"C:\coverage.roar",
+        ] {
+            let mut segment = sample_segment("seg");
+            segment.coverage_path = Some(path.to_owned());
+
+            let index_kind = match sample_table_meta().kind {
+                TableKind::TimeSeries(index) => index.kind,
+                TableKind::Generic => unreachable!("sample metadata is time-series"),
+            };
+            for (description, action) in [
+                ("segment coverage path", LogAction::AddSegment(segment)),
+                (
+                    "table coverage path",
+                    LogAction::UpdateTableCoverage {
+                        index_kind,
+                        coverage_path: path.to_owned(),
+                    },
+                ),
+            ] {
+                let (_tmp, store) = create_test_log_store();
+                store
+                    .commit_with_expected_version(
+                        0,
+                        vec![LogAction::UpdateTableMeta(sample_table_meta()), action],
+                    )
+                    .await?;
+
+                let err = store
+                    .rebuild_table_state()
+                    .await
+                    .expect_err("noncanonical coverage path should be rejected");
+                assert!(matches!(err, CommitError::CorruptState { .. }));
+                assert!(err.to_string().contains(description), "{err}");
             }
         }
 

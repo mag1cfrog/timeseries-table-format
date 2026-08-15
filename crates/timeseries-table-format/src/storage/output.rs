@@ -21,7 +21,7 @@ struct LocalSink {
 
 impl LocalSink {
     async fn open(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
-        let final_path = join_local(location, rel_path);
+        let final_path = join_local(location, rel_path)?;
         create_parent_dir(&final_path).await?;
 
         let tmp_path = final_path.with_extension("tmp");
@@ -156,13 +156,23 @@ impl OutputLocation {
         match &storage {
             StorageLocation::Local(_) => {
                 let path = PathBuf::from(trimmed);
-
-                let base = PathBuf::from(".");
-                let rel_path = path;
+                let rel_path = path.file_name().ok_or_else(|| {
+                    OtherIoSnafu {
+                        path: trimmed.to_string(),
+                    }
+                    .into_error(BackendError::Local(std::io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "output location has no file name",
+                    )))
+                })?;
+                let base = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
 
                 Ok(OutputLocation {
-                    storage: StorageLocation::Local(base),
-                    rel_path,
+                    storage: StorageLocation::Local(base.to_path_buf()),
+                    rel_path: PathBuf::from(rel_path),
                 })
             }
         }
