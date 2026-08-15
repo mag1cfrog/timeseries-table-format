@@ -253,7 +253,7 @@ def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
     assert getattr(e, "table_root", None) == str(root)
 
 
-def test_append_parquet_time_column_override(tmp_path):
+def test_append_parquet_uses_registered_time_column(tmp_path):
     root = tmp_path / "table"
 
     tbl = ttf.TimeSeriesTable.create(
@@ -277,9 +277,6 @@ def test_append_parquet_time_column_override(tmp_path):
     with pytest.raises(ttf.TimeseriesTableError):
         tbl.append_parquet(str(seg), copy_if_outside=False)
     assert seg.read_bytes() == source_before
-
-    v = tbl.append_parquet(str(seg), time_column="ts2", copy_if_outside=False)
-    assert isinstance(v, int)
 
 
 def test_append_parquet_schema_mismatch_raises_schema_mismatch_error(tmp_path):

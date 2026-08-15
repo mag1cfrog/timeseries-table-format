@@ -52,9 +52,9 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         &[(240_000, "A", 50.0), (241_000, "A", 60.0)],
     )?;
 
-    let v2 = table.append_parquet_segment(rel1, "ts").await?;
-    let v3 = table.append_parquet_segment(rel2, "ts").await?;
-    let v4 = table.append_parquet_segment(rel3, "ts").await?;
+    let v2 = table.append_parquet_segment(rel1).await?;
+    let v3 = table.append_parquet_segment(rel2).await?;
+    let v4 = table.append_parquet_segment(rel3).await?;
     assert_eq!((v2, v3, v4), (2, 3, 4));
     assert_eq!(table.state().version, 4);
 
@@ -98,7 +98,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
     write_parquet_rows(&tmp.path().join(rel_overlap), &[(121_500, "A", 70.0)])?;
     let err = reopened
-        .append_parquet_segment(rel_overlap, "ts")
+        .append_parquet_segment(rel_overlap)
         .await
         .expect_err("overlapping append should fail");
     assert!(matches!(err, TableError::CoverageOverlap { .. }));
@@ -134,16 +134,16 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     )?;
 
     table
-        .append_parquet_segment("data/cov-query-a.parquet", "ts")
+        .append_parquet_segment("data/cov-query-a.parquet")
         .await?;
     table
-        .append_parquet_segment("data/cov-query-b.parquet", "ts")
+        .append_parquet_segment("data/cov-query-b.parquet")
         .await?;
     table
-        .append_parquet_segment("data/cov-query-c.parquet", "ts")
+        .append_parquet_segment("data/cov-query-c.parquet")
         .await?;
     table
-        .append_parquet_segment("data/cov-query-d.parquet", "ts")
+        .append_parquet_segment("data/cov-query-d.parquet")
         .await?;
 
     // Re-open to exercise snapshot loading path.

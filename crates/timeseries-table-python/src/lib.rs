@@ -1366,15 +1366,13 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             Ok(d)
         }
 
-        #[pyo3(signature = (parquet_path, time_column=None, copy_if_outside=true))]
+        #[pyo3(signature = (parquet_path, copy_if_outside=true))]
         /// Append a Parquet segment to the table.
         ///
         /// Parameters
         /// ----------
         /// parquet_path:
         ///     Path to a Parquet file.
-        /// time_column:
-        ///     Optional override for the timestamp column name in the Parquet file.
         /// copy_if_outside:
         ///     If `True`, copies the file under the table root before appending.
         ///     If `False`, the path must already be under the table root (parent traversal via
@@ -1397,7 +1395,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             &mut self,
             py: Python<'_>,
             parquet_path: String,
-            time_column: Option<String>,
             copy_if_outside: bool,
         ) -> PyResult<u64> {
             use crate::tokio_runner;
@@ -1406,9 +1403,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             use timeseries_table_format::storage::StorageLocation;
             let rt = tokio_runner::global_runtime()?;
-
-            let effective_time_column =
-                time_column.unwrap_or_else(|| self.inner.index_spec().column.clone());
 
             let table_root_for_err = self.table_root.clone();
             let table_root_for_err_cp = table_root_for_err.clone();
@@ -1423,10 +1417,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 async move {
                     let rel_path = if copy_if_outside {
                         return table
-                            .append_parquet_from_path(
-                                Path::new(&parquet_path),
-                                &effective_time_column,
-                            )
+                            .append_parquet_from_path(Path::new(&parquet_path))
                             .await
                             .map(|(version, _)| version)
                             .map_err(AppendParquetError::Table);
@@ -1482,7 +1473,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                     }
 
                     let version = table
-                        .append_parquet_segment(&rel_str, &effective_time_column)
+                        .append_parquet_segment(&rel_str)
                         .await
                         .map_err(AppendParquetError::Table)?;
 
@@ -1546,10 +1537,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 let mut table = TimeSeriesTable::create(location, meta).await?;
 
                 let _v1 = table
-                    .append_parquet_from_path(Path::new(&first_parquet_path), "ts")
+                    .append_parquet_from_path(Path::new(&first_parquet_path))
                     .await?;
                 let _v2 = table
-                    .append_parquet_from_path(Path::new(&second_parquet_path), "ts")
+                    .append_parquet_from_path(Path::new(&second_parquet_path))
                     .await?;
 
                 Ok::<(), TableError>(())

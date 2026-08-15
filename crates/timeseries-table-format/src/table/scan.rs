@@ -959,8 +959,8 @@ mod tests {
             ],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
+        table.append_parquet_segment(rel2).await?;
 
         // Query spans both segments but excludes the last row of the second segment.
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
@@ -1006,7 +1006,7 @@ mod tests {
             ],
         )?;
 
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
         let end = Utc.timestamp_millis_opt(2_000).single().expect("valid ts");
@@ -1089,7 +1089,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         let start = Utc
             .timestamp_opt(1, 500_000_000)
@@ -1126,7 +1126,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         let start = Utc
             .timestamp_opt(1, 250_000_000)
@@ -1159,7 +1159,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         let start = Utc.timestamp_millis_opt(500).single().unwrap();
         let end = Utc.timestamp_millis_opt(2_500).single().unwrap();
@@ -1366,8 +1366,8 @@ mod tests {
         )?;
 
         // Append in reverse index_min order to exercise the segment comparator.
-        table.append_parquet_segment(rel_b, "ts").await?;
-        table.append_parquet_segment(rel_a, "ts").await?;
+        table.append_parquet_segment(rel_b).await?;
+        table.append_parquet_segment(rel_a).await?;
 
         let start = Utc.timestamp_millis_opt(50_000).single().unwrap();
         let end = Utc.timestamp_millis_opt(150_000).single().unwrap();
@@ -1416,8 +1416,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
+        table.append_parquet_segment(rel2).await?;
 
         let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
         let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
@@ -1483,7 +1483,7 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         // Corrupt the file after append so scan encounters a read failure.
         let f = std::fs::OpenOptions::new().write(true).open(&path)?;

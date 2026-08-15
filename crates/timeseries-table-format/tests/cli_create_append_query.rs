@@ -13,7 +13,7 @@ fn cli() -> Command {
 }
 
 #[test]
-fn cli_append_with_explicit_time_column() -> Result<(), Box<dyn std::error::Error>> {
+fn cli_append_uses_registered_time_column() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table = table_root(&tmp, "t");
     let parquet = tmp.path().join("data.parquet");
@@ -41,8 +41,6 @@ fn cli_append_with_explicit_time_column() -> Result<(), Box<dyn std::error::Erro
             table.to_string_lossy().as_ref(),
             "--parquet",
             parquet.to_string_lossy().as_ref(),
-            "--time-column",
-            "ts",
         ])
         .assert()
         .success()

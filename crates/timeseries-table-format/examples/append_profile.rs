@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut table = TimeSeriesTable::open(location).await?;
 
     let (_version, _relative_path, report) = table
-        .append_parquet_from_path_with_report(&args.parquet, &args.time_column)
+        .append_parquet_from_path_with_report(&args.parquet)
         .await?;
 
     print_report(&report);

@@ -314,7 +314,7 @@ mod tests {
     ) -> HelperResult<()> {
         let abs = tmp.path().join(rel_path);
         write_test_parquet(&abs, true, false, rows)?;
-        table.append_parquet_segment(rel_path, "ts").await?;
+        table.append_parquet_segment(rel_path).await?;
         Ok(())
     }
 

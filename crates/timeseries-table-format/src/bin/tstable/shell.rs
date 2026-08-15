@@ -306,8 +306,7 @@ async fn append_first_segment(table_root: &Path, table: &mut TimeSeriesTable) ->
             continue;
         }
 
-        let ts_col = table.index_spec().column.clone();
-        match table.append_parquet_from_path(&parquet_path, &ts_col).await {
+        match table.append_parquet_from_path(&parquet_path).await {
             Ok((s, rel_str)) => {
                 println!("appended: {rel_str}, size: {s}.");
                 break;
@@ -828,12 +827,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         }
 
         let parquet_path = PathBuf::from(rest.trim());
-        let ts_col = ctx.table.index_spec().column.clone();
-        match ctx
-            .table
-            .append_parquet_from_path(&parquet_path, &ts_col)
-            .await
-        {
+        match ctx.table.append_parquet_from_path(&parquet_path).await {
             Ok((s, rel_str)) => {
                 if ctx.timing {
                     println!(
@@ -1278,7 +1272,7 @@ mod tests {
 
         let rel = "data/segment.parquet";
         test_common::write_parquet_rows(&tmp.path().join(rel), rows)?;
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         Ok(tmp)
     }
@@ -1314,7 +1308,7 @@ mod tests {
         test_common::write_parquet_rows_with_base(&tmp.path().join(rel), 3, 1_700_000_100_000)?;
         let location = TableLocation::local(tmp.path());
         let mut other = TimeSeriesTable::open(location).await?;
-        other.append_parquet_segment(rel, "ts").await?;
+        other.append_parquet_segment(rel).await?;
 
         let res = process_command(&mut ctx, &query_sql(&table_name))
             .await?
@@ -1359,7 +1353,7 @@ mod tests {
         test_common::write_parquet_rows_with_base(&tmp.path().join(rel), 3, 1_700_000_100_000)?;
         let location = TableLocation::local(tmp.path());
         let mut other = TimeSeriesTable::open(location.clone()).await?;
-        other.append_parquet_segment(rel, "ts").await?;
+        other.append_parquet_segment(rel).await?;
 
         let current_version = other.current_version().await?;
         assert!(current_version > ctx.table.state().version);

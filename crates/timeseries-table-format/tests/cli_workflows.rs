@@ -158,8 +158,6 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
         table_root.to_string_lossy().as_ref(),
         "--parquet",
         parquet_path.to_string_lossy().as_ref(),
-        "--time-column",
-        "ts",
     ])?;
     assert_cli_success(output);
 
@@ -276,7 +274,7 @@ fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn st
 }
 
 #[test]
-fn cli_append_defaults_time_column() -> StdResult<(), Box<dyn std::error::Error>> {
+fn cli_append_uses_registered_time_column() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     create_table_via_cli(&table_root, "1m", &[])?;

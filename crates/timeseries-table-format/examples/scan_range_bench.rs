@@ -170,9 +170,7 @@ async fn prepare(
     };
     let location = TableLocation::local(&table_root);
     let mut table = TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
-    table
-        .append_parquet_segment(SEGMENT_PATH, TIME_COLUMN)
-        .await?;
+    table.append_parquet_segment(SEGMENT_PATH).await?;
 
     println!(
         "{}",

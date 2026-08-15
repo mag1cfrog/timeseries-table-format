@@ -119,9 +119,7 @@ async fn shell_interactive_existing_table_skips_first_append_prompt() -> TestRes
     {
         let location = TableLocation::local(&table_root);
         let mut table = TimeSeriesTable::open(location).await?;
-        table
-            .append_parquet_segment("data/seg.parquet", "ts")
-            .await?;
+        table.append_parquet_segment("data/seg.parquet").await?;
     }
 
     let input = format!("{}\nexit\n", table_root.display());

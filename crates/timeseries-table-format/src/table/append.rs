@@ -102,7 +102,6 @@ impl TimeSeriesTable {
     async fn append_parquet_path_file(
         &mut self,
         parquet_path: &Path,
-        time_column: &str,
         mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<(u64, String), TableError> {
         let prepared = self
@@ -116,10 +115,9 @@ impl TimeSeriesTable {
             let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
             if let Some(r) = report.as_mut() {
                 r.set_context("relative_path", &relative_path);
-                r.set_context("time_column", time_column);
             }
             let version = self
-                .append_parquet_segment_file(&relative_path, time_column, report)
+                .append_parquet_segment_file(&relative_path, report)
                 .await?;
             Ok((version, relative_path))
         }
@@ -150,10 +148,10 @@ impl TimeSeriesTable {
     async fn append_parquet_segment_file(
         &mut self,
         relative_path: &str,
-        time_column: &str,
         mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
+        let index_column = self.index.column.clone();
         let expected_version = self.state.version;
         let bucket_spec = match &self.index.kind {
             IndexKind::Timestamp { bucket, .. } => bucket.clone(),
@@ -164,6 +162,9 @@ impl TimeSeriesTable {
                 });
             }
         };
+        if let Some(r) = report.as_mut() {
+            r.set_context("time_column", &index_column);
+        }
 
         // 0) Coverage readiness checks.
         ensure_existing_segments_have_coverage(&self.state)?;
@@ -171,7 +172,7 @@ impl TimeSeriesTable {
         // 1) Segment meta + schema.
         let step_start = Instant::now();
         let (mut segment_meta, meta_report) =
-            segment_meta_from_parquet(self.location(), rel_path, time_column)
+            segment_meta_from_parquet(self.location(), rel_path, &index_column)
                 .await
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
@@ -273,7 +274,7 @@ impl TimeSeriesTable {
         // 4) Compute segment coverage.
         let step_start = Instant::now();
         let segment_cov =
-            compute_segment_coverage(self.location(), rel_path, time_column, &bucket_spec)
+            compute_segment_coverage(self.location(), rel_path, &index_column, &bucket_spec)
                 .await
                 .context(SegmentCoverageSnafu)?;
         if let Some(r) = report.as_mut() {
@@ -423,14 +424,9 @@ impl TimeSeriesTable {
     }
 
     /// Append a Parquet segment using its canonical relative path as identity.
-    pub async fn append_parquet_segment(
-        &mut self,
-        relative_path: &str,
-        time_column: &str,
-    ) -> Result<u64, TableError> {
+    pub async fn append_parquet_segment(&mut self, relative_path: &str) -> Result<u64, TableError> {
         let relative_path = self.normalize_new_segment_path(relative_path).await?;
-        self.append_parquet_segment_file(&relative_path, time_column, None)
-            .await
+        self.append_parquet_segment_file(&relative_path, None).await
     }
 
     /// Copy an external Parquet file into the table when needed and append it.
@@ -442,10 +438,8 @@ impl TimeSeriesTable {
     pub async fn append_parquet_from_path(
         &mut self,
         parquet_path: &Path,
-        time_column: &str,
     ) -> Result<(u64, String), TableError> {
-        self.append_parquet_path_file(parquet_path, time_column, None)
-            .await
+        self.append_parquet_path_file(parquet_path, None).await
     }
 
     /// Copy and append a Parquet file while collecting a profiling report.
@@ -453,11 +447,10 @@ impl TimeSeriesTable {
     pub async fn append_parquet_from_path_with_report(
         &mut self,
         parquet_path: &Path,
-        time_column: &str,
     ) -> Result<(u64, String, AppendReport), TableError> {
         let mut report = AppendReportBuilder::new();
         let (version, relative_path) = self
-            .append_parquet_path_file(parquet_path, time_column, Some(&mut report))
+            .append_parquet_path_file(parquet_path, Some(&mut report))
             .await?;
         Ok((version, relative_path, report.finish()))
     }
@@ -466,15 +459,13 @@ impl TimeSeriesTable {
     pub async fn append_parquet_segment_with_report(
         &mut self,
         relative_path: &str,
-        time_column: &str,
     ) -> Result<(u64, AppendReport), TableError> {
         let relative_path = self.normalize_new_segment_path(relative_path).await?;
         let mut report = AppendReportBuilder::new();
         report.set_context("relative_path", &relative_path);
-        report.set_context("time_column", time_column);
 
         let version = self
-            .append_parquet_segment_file(&relative_path, time_column, Some(&mut report))
+            .append_parquet_segment_file(&relative_path, Some(&mut report))
             .await?;
 
         Ok((version, report.finish()))
@@ -543,7 +534,7 @@ mod tests {
         write_parquet_without_time_column(&path, &["A"], &[1.0])?;
 
         let err = table
-            .append_parquet_segment(rel, "ts")
+            .append_parquet_segment(rel)
             .await
             .expect_err("expected missing time column");
 
@@ -578,7 +569,7 @@ mod tests {
         let source_bytes = std::fs::read(&source)?;
 
         let err = table
-            .append_parquet_from_path(&source, "ts")
+            .append_parquet_from_path(&source)
             .await
             .expect_err("missing time column should fail");
 
@@ -601,7 +592,7 @@ mod tests {
         let source_bytes = std::fs::read(&source)?;
 
         let err = table
-            .append_parquet_from_path(&source, "ts")
+            .append_parquet_from_path(&source)
             .await
             .expect_err("missing time column should fail");
 
@@ -629,7 +620,7 @@ mod tests {
         )?;
         let source_bytes = std::fs::read(&source)?;
 
-        let (version, relative_path) = table.append_parquet_from_path(&source, "ts").await?;
+        let (version, relative_path) = table.append_parquet_from_path(&source).await?;
 
         assert_eq!(version, 2);
         assert_eq!(relative_path, "data/external-success.parquet");
@@ -664,7 +655,7 @@ mod tests {
         crate::storage::inject_write_new_failure(table_root.join(layout::commit_rel_path(2)), true);
 
         let err = table
-            .append_parquet_from_path(&source, "ts")
+            .append_parquet_from_path(&source)
             .await
             .expect_err("commit outcome should be ambiguous");
 
@@ -696,7 +687,7 @@ mod tests {
         crate::storage::inject_cleanup_failure(destination.clone());
 
         let err = table
-            .append_parquet_from_path(&source, "ts")
+            .append_parquet_from_path(&source)
             .await
             .expect_err("copy rollback should fail");
         let message = err.to_string();
@@ -738,7 +729,7 @@ mod tests {
             }],
         )?;
 
-        let new_version = table.append_parquet_segment(rel_path, "ts").await?;
+        let new_version = table.append_parquet_segment(rel_path).await?;
 
         assert_eq!(new_version, 2);
         assert_eq!(table.state.version, 2);
@@ -793,9 +784,7 @@ mod tests {
         drop(file);
 
         let file_size = std::fs::metadata(&abs_path)?.len().to_string();
-        let (version, report) = table
-            .append_parquet_segment_with_report(rel_path, "ts")
-            .await?;
+        let (version, report) = table.append_parquet_segment_with_report(rel_path).await?;
 
         assert_eq!(version, 2);
         assert_eq!(
@@ -857,7 +846,7 @@ mod tests {
             }],
         )?;
 
-        let version = table.append_parquet_segment(rel_path, "ts").await?;
+        let version = table.append_parquet_segment(rel_path).await?;
         assert_eq!(version, 2);
 
         let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
@@ -906,7 +895,7 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel_path1, "ts").await?;
+        table.append_parquet_segment(rel_path1).await?;
 
         let rel_path2 = "data/seg-entity-a-2.parquet";
         let abs_path2 = tmp.path().join(rel_path2);
@@ -921,7 +910,7 @@ mod tests {
             }],
         )?;
 
-        let version = table.append_parquet_segment(rel_path2, "ts").await?;
+        let version = table.append_parquet_segment(rel_path2).await?;
         assert_eq!(version, 3);
 
         let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
@@ -962,7 +951,7 @@ mod tests {
                 price: 10.0,
             }],
         )?;
-        table.append_parquet_segment(rel_path1, "ts").await?;
+        table.append_parquet_segment(rel_path1).await?;
 
         let rel_path2 = "data/seg-entity-b.parquet";
         let abs_path2 = tmp.path().join(rel_path2);
@@ -978,7 +967,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment(rel_path2, "ts")
+            .append_parquet_segment(rel_path2)
             .await
             .expect_err("expected entity identity mismatch");
 
@@ -1037,7 +1026,7 @@ mod tests {
             }],
         )?;
 
-        let new_version = table.append_parquet_segment(rel_path, "ts").await?;
+        let new_version = table.append_parquet_segment(rel_path).await?;
 
         assert_eq!(new_version, 2);
         let schema = table
@@ -1080,7 +1069,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment(rel_path, "ts")
+            .append_parquet_segment(rel_path)
             .await
             .expect_err("expected schema mismatch");
 
@@ -1116,7 +1105,7 @@ mod tests {
                 price: 10.0,
             }],
         )?;
-        table.append_parquet_segment(rel_path, "ts").await?;
+        table.append_parquet_segment(rel_path).await?;
         let state_before = table.state.clone();
         let sidecar_counts_before = [
             std::fs::read_dir(tmp.path().join(layout::SEGMENT_COVERAGE_DIR))?.count(),
@@ -1128,7 +1117,7 @@ mod tests {
         tokio::fs::remove_file(&abs_path).await?;
 
         let err = table
-            .append_parquet_segment(rel_path, "ts")
+            .append_parquet_segment(rel_path)
             .await
             .expect_err("live path must be rejected");
         assert!(matches!(
@@ -1137,7 +1126,7 @@ mod tests {
         ));
 
         let err = table
-            .append_parquet_segment_with_report(r"data\dup.parquet", "ts")
+            .append_parquet_segment_with_report(r"data\dup.parquet")
             .await
             .expect_err("normalized live path must be rejected");
         assert!(matches!(
@@ -1204,8 +1193,8 @@ mod tests {
             ],
         )?;
 
-        let v2 = table.append_parquet_segment(rel1, "ts").await?;
-        let v3 = table.append_parquet_segment(rel2, "ts").await?;
+        let v2 = table.append_parquet_segment(rel1).await?;
+        let v3 = table.append_parquet_segment(rel2).await?;
         assert_eq!(v2, 2);
         assert_eq!(v3, 3);
 
@@ -1268,10 +1257,10 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
 
         let err = table
-            .append_parquet_segment(rel2, "ts")
+            .append_parquet_segment(rel2)
             .await
             .expect_err("overlapping append should fail");
 
@@ -1311,8 +1300,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
+        table.append_parquet_segment(rel2).await?;
 
         let reopened = TimeSeriesTable::open(location.clone()).await?;
         let ptr = reopened
@@ -1365,8 +1354,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
+        table.append_parquet_segment(rel2).await?;
 
         let state = table.state.clone();
         let ptr = state
@@ -1423,8 +1412,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
+        table.append_parquet_segment(rel2).await?;
 
         let state = table.state.clone();
         let ptr = state
@@ -1467,7 +1456,7 @@ mod tests {
                 price: 10.0,
             }],
         )?;
-        table.append_parquet_segment(existing, "ts").await?;
+        table.append_parquet_segment(existing).await?;
 
         let snapshot_path = table
             .state
@@ -1492,7 +1481,7 @@ mod tests {
         )?;
 
         let err = table
-            .append_parquet_segment(overlapping, "ts")
+            .append_parquet_segment(overlapping)
             .await
             .expect_err("overlap must be rejected");
         assert!(matches!(err, TableError::CoverageOverlap { .. }));
@@ -1519,7 +1508,7 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
 
         let mut state = table.state.clone();
         state.table_coverage = None;
@@ -1582,8 +1571,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
+        table.append_parquet_segment(rel2).await?;
 
         let mut state = table.state.clone();
         state.table_coverage = None;
@@ -1657,11 +1646,11 @@ mod tests {
             }],
         )?;
 
-        assert_eq!(winner.append_parquet_segment(winner_path, "ts").await?, 2);
+        assert_eq!(winner.append_parquet_segment(winner_path).await?, 2);
         let coverage_before = coverage_files(tmp.path())?;
 
         let err = loser
-            .append_parquet_segment(loser_path, "ts")
+            .append_parquet_segment(loser_path)
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -1719,11 +1708,11 @@ mod tests {
             }],
         )?;
 
-        winner.append_parquet_segment(winner_path, "ts").await?;
+        winner.append_parquet_segment(winner_path).await?;
         let coverage_before = coverage_files(tmp.path())?;
 
         let err = loser
-            .append_parquet_segment(loser_path, "ts")
+            .append_parquet_segment(loser_path)
             .await
             .expect_err("stale append should conflict");
 
@@ -1761,7 +1750,7 @@ mod tests {
         crate::storage::inject_write_new_failure(commit_path.clone(), true);
 
         let err = table
-            .append_parquet_segment(segment_path, "ts")
+            .append_parquet_segment(segment_path)
             .await
             .expect_err("failed commit cleanup should make the outcome ambiguous");
 
@@ -1840,14 +1829,14 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
 
         // Simulate legacy/bad state: drop coverage_path on the existing segment.
         let seg = table.state.segments.get_mut(rel1).expect("segment present");
         seg.coverage_path = None;
 
         let err = table
-            .append_parquet_segment(rel2, "ts")
+            .append_parquet_segment(rel2)
             .await
             .expect_err("append should fail when existing segment lacks coverage");
 
@@ -1894,12 +1883,12 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
 
         // Simulate missing snapshot pointer while segments exist.
         table.state.table_coverage = None;
 
-        table.append_parquet_segment(rel2, "ts").await?;
+        table.append_parquet_segment(rel2).await?;
 
         // Snapshot pointer should be restored after a successful append.
         let ptr = table
@@ -1953,7 +1942,7 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1, "ts").await?;
+        table.append_parquet_segment(rel1).await?;
 
         // Tamper snapshot pointer to a mismatching bucket spec.
         let bad_bucket = TimeBucket::Hours(1);
@@ -1973,7 +1962,7 @@ mod tests {
         });
 
         let err = table
-            .append_parquet_segment(rel2, "ts")
+            .append_parquet_segment(rel2)
             .await
             .expect_err("append should fail when snapshot bucket mismatches index");
 

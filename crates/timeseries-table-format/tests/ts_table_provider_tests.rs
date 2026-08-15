@@ -501,14 +501,10 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
 
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
-    table
-        .append_parquet_segment("data/seg-a.parquet", "ts")
-        .await?;
+    table.append_parquet_segment("data/seg-a.parquet").await?;
 
     write_segment(tmp.path(), "data/seg-b.parquet", &rows_b, false)?;
-    table
-        .append_parquet_segment("data/seg-b.parquet", "ts")
-        .await?;
+    table.append_parquet_segment("data/seg-b.parquet").await?;
 
     Ok(table)
 }
@@ -523,7 +519,7 @@ async fn create_single_segment_table_with_props(
 
     let abs = tmp.path().join(rel_path);
     write_parquet_with_props(&abs, rows, false, Some(props))?;
-    table.append_parquet_segment(rel_path, "ts").await?;
+    table.append_parquet_segment(rel_path).await?;
 
     Ok(table)
 }
@@ -855,7 +851,7 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     let rel_path = "data/seg-missing-size.parquet";
     write_segment(tmp.path(), rel_path, &rows, false)?;
 
-    table.append_parquet_segment(rel_path, "ts").await?;
+    table.append_parquet_segment(rel_path).await?;
     drop(table);
 
     let commit_path = tmp.path().join(layout::commit_rel_path(2));
@@ -892,9 +888,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
     let mut writer = TimeSeriesTable::create(location.clone(), meta).await?;
     let rows_a = make_rows(minutes_to_millis(1), 5, "A", 10.0);
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
-    writer
-        .append_parquet_segment("data/seg-a.parquet", "ts")
-        .await?;
+    writer.append_parquet_segment("data/seg-a.parquet").await?;
 
     let provider_table = Arc::new(TimeSeriesTable::open(location.clone()).await?);
     let ctx = SessionContext::new();
@@ -906,9 +900,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
 
     let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
     write_segment(tmp.path(), "data/seg-b.parquet", &rows_b, false)?;
-    writer
-        .append_parquet_segment("data/seg-b.parquet", "ts")
-        .await?;
+    writer.append_parquet_segment("data/seg-b.parquet").await?;
 
     let refreshed_batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
     let refreshed_count = scalar_u64(&refreshed_batches)?;

@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut table = TimeSeriesTable::create(location, meta).await?;
 
     // 4) Append the segment via the transaction log (OCC).
-    let (version, _) = table.append_parquet_from_path(&parquet_path, "ts").await?;
+    let (version, _) = table.append_parquet_from_path(&parquet_path).await?;
 
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!("Table root     : {}", table_root.display());

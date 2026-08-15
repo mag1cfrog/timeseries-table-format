@@ -501,7 +501,7 @@ mod tests {
 
         let rel = "data/segment.parquet";
         test_common::write_parquet_rows(&tmp.path().join(rel), rows)?;
-        table.append_parquet_segment(rel, "ts").await?;
+        table.append_parquet_segment(rel).await?;
 
         Ok((tmp, rows))
     }
