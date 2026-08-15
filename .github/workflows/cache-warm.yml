@@ -145,6 +145,7 @@ jobs:
       actions: read
       contents: read
     with:
+      include-sdist: true
       max-parallel: 4
       run-pytest: false
       upload-artifacts: false
