@@ -29,7 +29,7 @@ use crate::{
     },
     metadata::schema_compat::ensure_schema_exact_match,
     storage,
-    transaction_log::{LogAction, TableState, table_state::TableCoveragePointer},
+    transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
 };
 
 use super::{
@@ -94,6 +94,54 @@ impl TimeSeriesTable {
             .context(StorageSnafu)?;
 
         Ok(normalized)
+    }
+
+    async fn append_parquet_path_file(
+        &mut self,
+        parquet_path: &Path,
+        time_column: &str,
+        mut report: Option<&mut AppendReportBuilder>,
+    ) -> Result<(u64, String), TableError> {
+        let prepared = self
+            .location()
+            .prepare_parquet_under_root(parquet_path)
+            .await
+            .context(StorageSnafu)?;
+        let prepared_path = prepared.relative_path.to_string_lossy().into_owned();
+
+        let append_result = async {
+            let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
+            if let Some(r) = report.as_mut() {
+                r.set_context("relative_path", &relative_path);
+                r.set_context("time_column", time_column);
+            }
+            let version = self
+                .append_parquet_segment_file(&relative_path, time_column, report)
+                .await?;
+            Ok((version, relative_path))
+        }
+        .await;
+
+        match append_result {
+            Ok(result) => Ok(result),
+            Err(
+                error @ TableError::TransactionLog {
+                    source: CommitError::AmbiguousOutcome { .. },
+                },
+            ) => Err(error),
+            Err(source) if prepared.created => {
+                match storage::remove_file(self.location().as_ref(), &prepared.relative_path).await
+                {
+                    Ok(()) => Err(source),
+                    Err(cleanup_error) => Err(TableError::ExternalParquetRollback {
+                        path: prepared.relative_path.display().to_string(),
+                        source: Box::new(source),
+                        cleanup_error,
+                    }),
+                }
+            }
+            Err(source) => Err(source),
+        }
     }
 
     async fn append_parquet_segment_file(
@@ -373,6 +421,33 @@ impl TimeSeriesTable {
             .await
     }
 
+    /// Copy an external Parquet file into the table when needed and append it.
+    ///
+    /// A copy created by this operation is removed when append fails before
+    /// publication. Files already under the table root and copies involved in
+    /// an ambiguous commit outcome are preserved.
+    pub async fn append_parquet_from_path(
+        &mut self,
+        parquet_path: &Path,
+        time_column: &str,
+    ) -> Result<(u64, String), TableError> {
+        self.append_parquet_path_file(parquet_path, time_column, None)
+            .await
+    }
+
+    /// Copy and append a Parquet file while collecting a profiling report.
+    pub async fn append_parquet_from_path_with_report(
+        &mut self,
+        parquet_path: &Path,
+        time_column: &str,
+    ) -> Result<(u64, String, AppendReport), TableError> {
+        let mut report = AppendReportBuilder::new();
+        let (version, relative_path) = self
+            .append_parquet_path_file(parquet_path, time_column, Some(&mut report))
+            .await?;
+        Ok((version, relative_path, report.finish()))
+    }
+
     /// Append a Parquet segment and return a profiling report.
     pub async fn append_parquet_segment_with_report(
         &mut self,
@@ -402,7 +477,7 @@ mod tests {
     use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::metadata::time_column::TimeColumnError;
     use crate::storage::layout;
-    use crate::storage::{StorageLocation, TableLocation};
+    use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
         Commit, CommitError, TableKind, TableMeta, TimeBucket, TimeIndexSpec,
@@ -466,6 +541,158 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_from_path_removes_failed_external_copy() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        let location = TableLocation::local(&table_root);
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(&table_root)?;
+        let source = tmp.path().join("wrong-time-column.parquet");
+        write_parquet_without_time_column(&source, &["A"], &[1.0])?;
+        let source_bytes = std::fs::read(&source)?;
+
+        let err = table
+            .append_parquet_from_path(&source, "ts")
+            .await
+            .expect_err("missing time column should fail");
+
+        assert!(matches!(err, TableError::SegmentMeta { .. }));
+        assert!(!table_root.join("data/wrong-time-column.parquet").exists());
+        assert_eq!(std::fs::read(source)?, source_bytes);
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert_eq!(coverage_files(&table_root)?, coverage_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_from_path_preserves_failed_in_root_file() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let source = tmp.path().join("data/in-root-invalid.parquet");
+        write_parquet_without_time_column(&source, &["A"], &[1.0])?;
+        let source_bytes = std::fs::read(&source)?;
+
+        let err = table
+            .append_parquet_from_path(&source, "ts")
+            .await
+            .expect_err("missing time column should fail");
+
+        assert!(matches!(err, TableError::SegmentMeta { .. }));
+        assert_eq!(std::fs::read(source)?, source_bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_from_path_retains_successful_external_copy() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        let location = TableLocation::local(&table_root);
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let source = tmp.path().join("external-success.parquet");
+        write_test_parquet(
+            &source,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+        let source_bytes = std::fs::read(&source)?;
+
+        let (version, relative_path) = table.append_parquet_from_path(&source, "ts").await?;
+
+        assert_eq!(version, 2);
+        assert_eq!(relative_path, "data/external-success.parquet");
+        assert_eq!(
+            std::fs::read(table_root.join(&relative_path))?,
+            source_bytes
+        );
+        assert_eq!(std::fs::read(source)?, source_bytes);
+        assert!(table.state.segments.contains_key(&relative_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_from_path_retains_copy_for_ambiguous_commit() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        let location = TableLocation::local(&table_root);
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let state_before = table.state.clone();
+        let source = tmp.path().join("ambiguous-external.parquet");
+        write_test_parquet(
+            &source,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+        let source_bytes = std::fs::read(&source)?;
+        crate::storage::inject_write_new_failure(table_root.join(layout::commit_rel_path(2)), true);
+
+        let err = table
+            .append_parquet_from_path(&source, "ts")
+            .await
+            .expect_err("commit outcome should be ambiguous");
+
+        assert!(matches!(
+            err,
+            TableError::TransactionLog {
+                source: CommitError::AmbiguousOutcome { .. }
+            }
+        ));
+        assert_eq!(
+            std::fs::read(table_root.join("data/ambiguous-external.parquet"))?,
+            source_bytes
+        );
+        assert_eq!(std::fs::read(source)?, source_bytes);
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_from_path_reports_copy_rollback_failure() -> TestResult {
+        let tmp = TempDir::new()?;
+        let table_root = tmp.path().join("table");
+        let location = TableLocation::local(&table_root);
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let source = tmp.path().join("rollback-cleanup.parquet");
+        write_parquet_without_time_column(&source, &["A"], &[1.0])?;
+        let destination = table_root.join("data/rollback-cleanup.parquet");
+        crate::storage::inject_cleanup_failure(destination.clone());
+
+        let err = table
+            .append_parquet_from_path(&source, "ts")
+            .await
+            .expect_err("copy rollback should fail");
+        let message = err.to_string();
+
+        assert!(matches!(
+            err,
+            TableError::ExternalParquetRollback {
+                path,
+                source,
+                cleanup_error: StorageError::OtherIo { .. },
+            } if path.contains("rollback-cleanup.parquet")
+                && matches!(*source, TableError::SegmentMeta { .. })
+        ));
+        assert!(message.contains("rollback-cleanup.parquet"));
+        assert!(message.contains("injected cleanup failure"));
+        assert!(destination.exists());
+        tokio::fs::remove_file(destination).await?;
         Ok(())
     }
 

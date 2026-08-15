@@ -50,6 +50,20 @@ pub enum TableError {
         cleanup_errors: Vec<String>,
     },
 
+    /// Append failed and its provisional external Parquet copy could not be removed.
+    #[snafu(display(
+        "Append failed: {source}; failed to remove provisional Parquet copy at {path}: {cleanup_error}"
+    ))]
+    ExternalParquetRollback {
+        /// Table-relative path of the provisional copy that may remain.
+        path: String,
+        /// Original append failure that triggered rollback.
+        #[snafu(source)]
+        source: Box<TableError>,
+        /// Storage failure encountered while removing the provisional copy.
+        cleanup_error: StorageError,
+    },
+
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
     EmptyTable,

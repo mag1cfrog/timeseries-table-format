@@ -83,12 +83,17 @@ static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
 #[cfg(test)]
 pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
     if cleanup_fails {
-        CLEANUP_FAILURES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(path.clone());
+        inject_cleanup_failure(path.clone());
     }
     WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
+pub(crate) fn inject_cleanup_failure(path: PathBuf) {
+    CLEANUP_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(path);
@@ -398,6 +403,14 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path);
+            #[cfg(test)]
+            if take_cleanup_failure(&abs) {
+                return Err(StorageError::OtherIo {
+                    path: abs.display().to_string(),
+                    source: BackendError::Local(io::Error::other("injected cleanup failure")),
+                    backtrace: Backtrace::capture(),
+                });
+            }
             fs::remove_file(&abs)
                 .await
                 .map_err(BackendError::Local)
