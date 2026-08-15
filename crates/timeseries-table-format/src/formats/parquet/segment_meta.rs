@@ -12,45 +12,123 @@ use parquet::arrow::{
     arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
     async_reader::ParquetRecordBatchStreamBuilder,
 };
-use parquet::basic::{LogicalType, TimeUnit, Type as PhysicalType};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
 
 use snafu::Backtrace;
 use tokio::task::JoinSet;
 
-use crate::metadata::time_column::TimeColumnError;
+use crate::metadata::segments::ParquetIndexColumnError;
+use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::storage::{TableLocation, file_size, open_parquet_reader};
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
 use crate::transaction_log::{FileFormat, SegmentMeta};
 
-struct TimestampStatsPlan {
-    min_max: Option<(i64, i64)>,
+use super::schema::{ParquetIndexKind, ParquetTimestampUnit, validate_parquet_index};
+
+#[derive(Debug, Clone, Copy)]
+enum TimestampUnit {
+    Seconds,
+    Millis,
+    Micros,
+    Nanos,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexBounds {
+    min: IndexValue,
+    max: IndexValue,
+}
+
+struct IndexStatsPlan {
+    bounds: Option<IndexBounds>,
     row_groups_to_scan: Vec<usize>,
 }
 
-fn merge_min_max(current: &mut Option<(i64, i64)>, next: (i64, i64)) {
-    *current = Some(match *current {
-        Some((min, max)) => (min.min(next.0), max.max(next.1)),
-        None => next,
-    });
+fn compare_index_values(
+    path: &str,
+    left: &IndexValue,
+    right: &IndexValue,
+) -> Result<std::cmp::Ordering, SegmentMetaError> {
+    left.compare(right)
+        .map_err(|source| SegmentMetaError::InvalidIndexBounds {
+            path: path.to_string(),
+            source,
+        })
+}
+
+fn observe_index_value(
+    path: &str,
+    bounds: &mut Option<IndexBounds>,
+    value: IndexValue,
+) -> Result<(), SegmentMetaError> {
+    match bounds {
+        Some(bounds) => {
+            if compare_index_values(path, &value, &bounds.min)?.is_lt() {
+                bounds.min = value.clone();
+            }
+            if compare_index_values(path, &value, &bounds.max)?.is_gt() {
+                bounds.max = value;
+            }
+        }
+        None => {
+            *bounds = Some(IndexBounds {
+                min: value.clone(),
+                max: value,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn merge_index_bounds(
+    path: &str,
+    current: &mut Option<IndexBounds>,
+    next: IndexBounds,
+) -> Result<(), SegmentMetaError> {
+    observe_index_value(path, current, next.min)?;
+    observe_index_value(path, current, next.max)
+}
+
+fn timestamp_unit(unit: ParquetTimestampUnit) -> TimestampUnit {
+    match unit {
+        ParquetTimestampUnit::Millis => TimestampUnit::Millis,
+        ParquetTimestampUnit::Micros => TimestampUnit::Micros,
+        ParquetTimestampUnit::Nanos => TimestampUnit::Nanos,
+    }
+}
+
+fn index_value_from_physical(
+    path: &str,
+    column: &str,
+    kind: ParquetIndexKind,
+    raw: i64,
+) -> Result<IndexValue, SegmentMetaError> {
+    match kind {
+        ParquetIndexKind::Timestamp(unit) => {
+            ts_from_i64(path, column, timestamp_unit(unit), raw).map(IndexValue::Timestamp)
+        }
+        ParquetIndexKind::Int64 => Ok(IndexValue::Int64(raw)),
+        ParquetIndexKind::UInt64 => Ok(IndexValue::UInt64(raw as u64)),
+    }
 }
 
 /// Use exact row-group statistics and identify only the row groups that require scanning.
-fn plan_timestamp_scan(
+fn plan_index_scan(
     path: &str,
     column: &str,
-    time_idx: usize,
+    column_index: usize,
+    kind: ParquetIndexKind,
     metadata: &ParquetMetaData,
-) -> Result<TimestampStatsPlan, SegmentMetaError> {
-    let mut min_max = None;
+) -> Result<IndexStatsPlan, SegmentMetaError> {
+    let mut bounds = None;
     let mut row_groups_to_scan = Vec::new();
 
     for (row_group_index, rg) in metadata.row_groups().iter().enumerate() {
         if rg.num_rows() == 0 {
             continue;
         }
-        let col_meta = rg.column(time_idx);
+        let col_meta = rg.column(column_index);
 
         let stats = match col_meta.statistics() {
             Some(s) => s,
@@ -60,7 +138,7 @@ fn plan_timestamp_scan(
             }
         };
 
-        let (group_min, group_max) = match stats {
+        let (raw_min, raw_max) = match stats {
             Statistics::Int64(stats) if stats.min_is_exact() && stats.max_is_exact() => {
                 match (stats.min_opt(), stats.max_opt()) {
                     (Some(min), Some(max)) => (*min, *max),
@@ -83,66 +161,84 @@ fn plan_timestamp_scan(
             }
         };
 
-        if group_min > group_max {
+        let group_bounds = IndexBounds {
+            min: index_value_from_physical(path, column, kind, raw_min)?,
+            max: index_value_from_physical(path, column, kind, raw_max)?,
+        };
+        if compare_index_values(path, &group_bounds.min, &group_bounds.max)?.is_gt() {
             return Err(SegmentMetaError::ParquetStatsShape {
                 path: path.to_string(),
                 column: column.to_string(),
                 detail: format!(
-                    "timestamp statistics minimum {group_min} exceeds maximum {group_max}"
+                    "{} statistics minimum {} exceeds maximum {}",
+                    group_bounds.min.kind_name(),
+                    group_bounds.min,
+                    group_bounds.max
                 ),
             });
         }
 
-        merge_min_max(&mut min_max, (group_min, group_max));
+        merge_index_bounds(path, &mut bounds, group_bounds)?;
     }
 
-    Ok(TimestampStatsPlan {
-        min_max,
+    Ok(IndexStatsPlan {
+        bounds,
         row_groups_to_scan,
     })
 }
 
 use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 
-async fn scan_timestamp_batches(
+fn arrow_index_error(path: &str, index: &IndexSpec, observed_type: String) -> SegmentMetaError {
+    SegmentMetaError::OrderedIndexColumn {
+        source: ParquetIndexColumnError {
+            path: path.to_string(),
+            column: index.column.clone(),
+            expected_domain: index.kind.name(),
+            observed_type,
+        },
+    }
+}
+
+fn observe_primitive_array<T, F>(
     path: &str,
-    time_column: &str,
+    bounds: &mut Option<IndexBounds>,
+    array: &arrow_array::PrimitiveArray<T>,
+    mut to_value: F,
+) -> Result<(), SegmentMetaError>
+where
+    T: arrow_array::types::ArrowPrimitiveType,
+    F: FnMut(T::Native) -> Result<IndexValue, SegmentMetaError>,
+{
+    use arrow_array::Array;
+
+    if array.null_count() == 0 {
+        for &raw in array.values() {
+            observe_index_value(path, bounds, to_value(raw)?)?;
+        }
+    } else {
+        for raw in array.iter().flatten() {
+            observe_index_value(path, bounds, to_value(raw)?)?;
+        }
+    }
+    Ok(())
+}
+
+async fn scan_index_batches(
+    path: &str,
+    index: &IndexSpec,
     mut reader: impl Stream<
         Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
     > + Unpin,
-) -> SegmentResult<(Option<(i64, i64)>, u64)> {
+) -> SegmentResult<(Option<IndexBounds>, u64)> {
     use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
     use arrow_array::{
-        Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray,
+        Array, Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
     };
 
-    let mut min_max = None;
+    let mut bounds = None;
     let mut scanned_rows: u64 = 0;
-
-    macro_rules! scan_arr {
-        ($arr:ty, $col:expr) => {{
-            let arr = $col.as_any().downcast_ref::<$arr>().ok_or_else(|| {
-                SegmentMetaError::TimeColumn {
-                    path: path.to_string(),
-                    source: TimeColumnError::UnsupportedArrowType {
-                        column: time_column.to_string(),
-                        datatype: $col.data_type().to_string(),
-                    },
-                }
-            })?;
-
-            if arr.null_count() == 0 {
-                for &v in arr.values() {
-                    merge_min_max(&mut min_max, (v, v));
-                }
-            } else {
-                for v in arr.iter().flatten() {
-                    merge_min_max(&mut min_max, (v, v));
-                }
-            }
-        }};
-    }
 
     while let Some(batch_res) = reader.next().await {
         let batch = batch_res.map_err(|source| SegmentMetaError::ParquetRead {
@@ -153,40 +249,68 @@ async fn scan_timestamp_batches(
         scanned_rows = scanned_rows.saturating_add(batch.num_rows() as u64);
 
         let col = batch.column(0);
-        match col.data_type() {
-            DataType::Timestamp(unit, _) => match unit {
-                ArrowTimeUnit::Second => scan_arr!(TimestampSecondArray, col),
-                ArrowTimeUnit::Millisecond => scan_arr!(TimestampMillisecondArray, col),
-                ArrowTimeUnit::Microsecond => scan_arr!(TimestampMicrosecondArray, col),
-                ArrowTimeUnit::Nanosecond => scan_arr!(TimestampNanosecondArray, col),
-            },
-            other => {
-                return Err(SegmentMetaError::TimeColumn {
-                    path: path.to_string(),
-                    source: TimeColumnError::UnsupportedArrowType {
-                        column: time_column.to_string(),
-                        datatype: other.to_string(),
-                    },
+        match (&index.kind, col.data_type()) {
+            (IndexKind::Timestamp { .. }, DataType::Timestamp(unit, _)) => {
+                let unit = match unit {
+                    ArrowTimeUnit::Second => TimestampUnit::Seconds,
+                    ArrowTimeUnit::Millisecond => TimestampUnit::Millis,
+                    ArrowTimeUnit::Microsecond => TimestampUnit::Micros,
+                    ArrowTimeUnit::Nanosecond => TimestampUnit::Nanos,
+                };
+                macro_rules! scan_timestamp_array {
+                    ($array_type:ty) => {{
+                        let array =
+                            col.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
+                                arrow_index_error(path, index, format!("Arrow {}", col.data_type()))
+                            })?;
+                        observe_primitive_array(path, &mut bounds, array, |raw| {
+                            ts_from_i64(path, &index.column, unit, raw).map(IndexValue::Timestamp)
+                        })?;
+                    }};
                 }
-                .into());
+                match unit {
+                    TimestampUnit::Seconds => scan_timestamp_array!(TimestampSecondArray),
+                    TimestampUnit::Millis => scan_timestamp_array!(TimestampMillisecondArray),
+                    TimestampUnit::Micros => scan_timestamp_array!(TimestampMicrosecondArray),
+                    TimestampUnit::Nanos => scan_timestamp_array!(TimestampNanosecondArray),
+                }
+            }
+            (IndexKind::Int64 { .. }, DataType::Int64) => {
+                let array = col.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                    arrow_index_error(path, index, format!("Arrow {}", col.data_type()))
+                })?;
+                observe_primitive_array(path, &mut bounds, array, |raw| {
+                    Ok(IndexValue::Int64(raw))
+                })?;
+            }
+            (IndexKind::UInt64 { .. }, DataType::UInt64) => {
+                let array = col.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
+                    arrow_index_error(path, index, format!("Arrow {}", col.data_type()))
+                })?;
+                observe_primitive_array(path, &mut bounds, array, |raw| {
+                    Ok(IndexValue::UInt64(raw))
+                })?;
+            }
+            other => {
+                return Err(arrow_index_error(path, index, format!("Arrow {other:?}")).into());
             }
         }
 
         tokio::task::yield_now().await;
     }
 
-    Ok((min_max, scanned_rows))
+    Ok((bounds, scanned_rows))
 }
 
-async fn scan_timestamp_row_groups(
+async fn scan_index_row_groups(
     location: &TableLocation,
     rel_path: &Path,
     path: &str,
-    time_column: &str,
+    index: &IndexSpec,
     metadata: ArrowReaderMetadata,
     row_groups: Vec<usize>,
-) -> SegmentResult<(Option<(i64, i64)>, u64)> {
-    let mask = ProjectionMask::columns(metadata.parquet_schema(), [time_column]);
+) -> SegmentResult<(Option<IndexBounds>, u64)> {
+    let mask = ProjectionMask::columns(metadata.parquet_schema(), [index.column.as_str()]);
     let (max_tasks, row_groups_per_task) = resolve_rg_settings(row_groups.len());
     let chunks = row_groups
         .chunks(row_groups_per_task)
@@ -199,7 +323,7 @@ async fn scan_timestamp_row_groups(
         let location = location.clone();
         let rel_path = rel_path.to_path_buf();
         let path = path.to_string();
-        let time_column = time_column.to_string();
+        let index = index.clone();
         let metadata = metadata.clone();
         let mask = mask.clone();
 
@@ -218,62 +342,27 @@ async fn scan_timestamp_row_groups(
                     backtrace: Backtrace::capture(),
                 })?;
 
-            scan_timestamp_batches(&path, &time_column, reader).await
+            scan_index_batches(&path, &index, reader).await
         });
     }
 
-    let mut min_max = None;
+    let mut bounds = None;
     let mut scanned_rows: u64 = 0;
     while let Some(result) = tasks.join_next().await {
-        let (task_min_max, rows) = result.map_err(|source| SegmentMetaError::ParquetRead {
+        let (task_bounds, rows) = result.map_err(|source| SegmentMetaError::ParquetRead {
             path: path.to_string(),
             source: parquet::errors::ParquetError::General(format!(
                 "row-group scan task failed: {source}"
             )),
             backtrace: Backtrace::capture(),
         })??;
-        if let Some(task_min_max) = task_min_max {
-            merge_min_max(&mut min_max, task_min_max);
+        if let Some(task_bounds) = task_bounds {
+            merge_index_bounds(path, &mut bounds, task_bounds)?;
         }
         scanned_rows = scanned_rows.saturating_add(rows);
     }
 
-    Ok((min_max, scanned_rows))
-}
-
-/// Internal enum to capture which Parquet timestamp unit we selected.
-#[derive(Debug, Clone, Copy)]
-enum TimestampUnit {
-    Millis,
-    Micros,
-    Nanos,
-}
-
-fn choose_timestamp_unit_from_logical(
-    column: &str,
-    physical: PhysicalType,
-    logical: Option<&LogicalType>,
-) -> Result<TimestampUnit, TimeColumnError> {
-    if physical != PhysicalType::INT64 {
-        return Err(TimeColumnError::UnsupportedParquetType {
-            column: column.to_string(),
-            physical: format!("{physical:?}"),
-            logical: format!("{logical:?}"),
-        });
-    }
-
-    match logical {
-        Some(LogicalType::Timestamp { unit, .. }) => match unit {
-            TimeUnit::MILLIS => Ok(TimestampUnit::Millis),
-            TimeUnit::MICROS => Ok(TimestampUnit::Micros),
-            TimeUnit::NANOS => Ok(TimestampUnit::Nanos),
-        },
-        other => Err(TimeColumnError::UnsupportedParquetType {
-            column: column.to_string(),
-            physical: format!("{physical:?}"),
-            logical: format!("{other:?}"),
-        }),
-    }
+    Ok((bounds, scanned_rows))
 }
 
 fn ts_from_i64(
@@ -283,6 +372,7 @@ fn ts_from_i64(
     value: i64,
 ) -> Result<DateTime<Utc>, SegmentMetaError> {
     let dt_opt = match unit {
+        TimestampUnit::Seconds => Utc.timestamp_opt(value, 0),
         TimestampUnit::Millis => Utc.timestamp_millis_opt(value),
         TimestampUnit::Micros => Utc.timestamp_micros(value),
         TimestampUnit::Nanos => {
@@ -308,7 +398,7 @@ pub(crate) struct SegmentMetaReport {
     pub(crate) row_groups: usize,
     /// Total row count from file metadata.
     pub(crate) row_count: u64,
-    /// True if no timestamp rows needed to be scanned.
+    /// True if no ordered-index rows needed to be scanned.
     pub(crate) used_stats: bool,
     /// Number of rows scanned during fallback (0 if stats were used).
     pub(crate) scanned_rows: u64,
@@ -318,7 +408,7 @@ pub(crate) struct SegmentMetaReport {
 pub(crate) async fn segment_meta_from_parquet(
     location: &TableLocation,
     rel_path: &Path,
-    time_column: &str,
+    index: &IndexSpec,
 ) -> SegmentResult<(SegmentMeta, SegmentMetaReport)> {
     let path_str = rel_path.display().to_string();
     let file_size = file_size(location.as_ref(), rel_path)
@@ -343,82 +433,65 @@ pub(crate) async fn segment_meta_from_parquet(
             backtrace: Backtrace::capture(),
         })?;
 
-    let (row_count, row_groups, unit, stats_plan) = {
-        let parquet_metadata = metadata.metadata();
-        let file_meta = parquet_metadata.file_metadata();
-        let row_count: u64 =
-            file_meta
-                .num_rows()
-                .try_into()
-                .map_err(|_| SegmentMetaError::ParquetStatsShape {
+    let (row_count, row_groups, stats_plan) =
+        {
+            let parquet_metadata = metadata.metadata();
+            let file_meta = parquet_metadata.file_metadata();
+            let row_count: u64 = file_meta.num_rows().try_into().map_err(|_| {
+                SegmentMetaError::ParquetStatsShape {
                     path: path_str.clone(),
-                    column: time_column.to_string(),
+                    column: index.column.clone(),
                     detail: format!("negative row count {}", file_meta.num_rows()),
-                })?;
-        let row_groups = parquet_metadata.num_row_groups();
-        let schema = file_meta.schema_descr();
-        let time_idx = schema
-            .columns()
-            .iter()
-            .position(|column| column.path().string() == time_column)
-            .ok_or_else(|| SegmentMetaError::TimeColumn {
-                path: path_str.clone(),
-                source: TimeColumnError::Missing {
-                    column: time_column.to_string(),
-                },
+                }
             })?;
-        let column = schema.column(time_idx);
-        let unit = choose_timestamp_unit_from_logical(
-            time_column,
-            column.physical_type(),
-            column.logical_type_ref(),
-        )
-        .map_err(|source| SegmentMetaError::TimeColumn {
-            path: path_str.clone(),
-            source,
-        })?;
-        let stats_plan = plan_timestamp_scan(&path_str, time_column, time_idx, parquet_metadata)?;
-        (row_count, row_groups, unit, stats_plan)
-    };
+            let row_groups = parquet_metadata.num_row_groups();
+            let schema = file_meta.schema_descr();
+            let validated = validate_parquet_index(&path_str, schema, index)
+                .map_err(|source| SegmentMetaError::OrderedIndexColumn { source })?;
+            let stats_plan = plan_index_scan(
+                &path_str,
+                &index.column,
+                validated.leaf_index,
+                validated.kind,
+                parquet_metadata,
+            )?;
+            (row_count, row_groups, stats_plan)
+        };
     drop(file);
 
-    let TimestampStatsPlan {
-        mut min_max,
+    let IndexStatsPlan {
+        mut bounds,
         row_groups_to_scan,
     } = stats_plan;
     let used_stats = row_groups_to_scan.is_empty();
     let scanned_rows = if used_stats {
         0
     } else {
-        let (scanned_min_max, scanned_rows) = scan_timestamp_row_groups(
+        let (scanned_bounds, scanned_rows) = scan_index_row_groups(
             location,
             rel_path,
             &path_str,
-            time_column,
+            index,
             metadata,
             row_groups_to_scan,
         )
         .await?;
-        if let Some(scanned_min_max) = scanned_min_max {
-            merge_min_max(&mut min_max, scanned_min_max);
+        if let Some(scanned_bounds) = scanned_bounds {
+            merge_index_bounds(&path_str, &mut bounds, scanned_bounds)?;
         }
         scanned_rows
     };
-    let (ts_min_raw, ts_max_raw) =
-        min_max.ok_or_else(|| SegmentMetaError::ParquetStatsMissing {
-            path: path_str.clone(),
-            column: time_column.to_string(),
-        })?;
-
-    // Convert raw i64 timestamps to DateTime<Utc> using the chosen unit.
-    let ts_min = ts_from_i64(&path_str, time_column, unit, ts_min_raw)?;
-    let ts_max = ts_from_i64(&path_str, time_column, unit, ts_max_raw)?;
+    let bounds = bounds.ok_or_else(|| SegmentMetaError::NoObservedIndexValue {
+        path: path_str.clone(),
+        column: index.column.clone(),
+        expected_domain: index.kind.name(),
+    })?;
 
     let meta_out = SegmentMeta {
         path: path_str,
         format: FileFormat::Parquet,
-        index_min: ts_min.into(),
-        index_max: ts_max.into(),
+        index_min: bounds.min,
+        index_max: bounds.max,
         row_count,
         file_size: Some(file_size),
         coverage_path: None,
@@ -437,13 +510,15 @@ pub(crate) async fn segment_meta_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::table_metadata::IndexValue;
+    use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TimeBucket};
     use crate::transaction_log::segments::{SegmentError, SegmentIoError};
-    use arrow::array::{ArrayRef, BinaryBuilder, TimestampMillisecondArray};
+    use arrow::array::{
+        ArrayRef, BinaryBuilder, Int64Array, TimestampMillisecondArray, UInt64Array,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
-    use parquet::basic::{Compression, LogicalType, Repetition, TimeUnit};
+    use parquet::basic::{Compression, LogicalType, Repetition, TimeUnit, Type as PhysicalType};
     use parquet::column::writer::ColumnWriter;
     use parquet::file::metadata::{
         ColumnChunkMetaData, FileMetaData, ParquetMetaDataWriter, RowGroupMetaData,
@@ -454,6 +529,8 @@ mod tests {
     use parquet::schema::types::{SchemaDescriptor, Type};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::num::NonZeroU64;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::fs;
@@ -461,10 +538,55 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    fn timestamp_index(column: &str) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Seconds(1),
+                timezone: None,
+            },
+        }
+    }
+
+    fn int64_index(column: &str) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::MIN,
+            },
+        }
+    }
+
+    fn uint64_index(column: &str) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::UInt64 {
+                bucket_width: NonZeroU64::MIN,
+            },
+        }
+    }
+
     fn timestamp(value: &IndexValue) -> &DateTime<Utc> {
         match value {
             IndexValue::Timestamp(value) => value,
             other => panic!("expected timestamp bound, found {other}"),
+        }
+    }
+
+    fn int64(value: &IndexValue) -> i64 {
+        match value {
+            IndexValue::Int64(value) => *value,
+            other => panic!("expected int64 bound, found {other}"),
+        }
+    }
+
+    fn uint64(value: &IndexValue) -> u64 {
+        match value {
+            IndexValue::UInt64(value) => *value,
+            other => panic!("expected uint64 bound, found {other}"),
         }
     }
 
@@ -513,6 +635,14 @@ mod tests {
                 "TIMESTAMP_NANOS" => LogicalType::Timestamp {
                     is_adjusted_to_u_t_c: true,
                     unit: TimeUnit::NANOS,
+                },
+                "INT_64" => LogicalType::Integer {
+                    bit_width: 64,
+                    is_signed: true,
+                },
+                "UINT_64" => LogicalType::Integer {
+                    bit_width: 64,
+                    is_signed: false,
                 },
                 other => return Err(format!("unsupported logical for test: {other}").into()),
             };
@@ -566,25 +696,37 @@ mod tests {
         timestamps: &[Option<i64>],
         payload_size: Option<usize>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        write_arrow_index_file(
+            path,
+            "ts",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())),
+            payload_size,
+            false,
+        )
+    }
+
+    fn write_arrow_index_file(
+        path: &Path,
+        column: &str,
+        data_type: DataType,
+        index_values: ArrayRef,
+        payload_size: Option<usize>,
+        stats_enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let mut fields = vec![Field::new(
-            "ts",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-            true,
-        )];
-        let mut arrays: Vec<ArrayRef> = vec![Arc::new(TimestampMillisecondArray::from(
-            timestamps.to_vec(),
-        ))];
+        let row_count = index_values.len();
+        let mut fields = vec![Field::new(column, data_type, true)];
+        let mut arrays = vec![index_values];
 
         if let Some(payload_size) = payload_size {
             fields.push(Field::new("payload", DataType::Binary, false));
             let payload = vec![0xA5; payload_size];
-            let mut payloads =
-                BinaryBuilder::with_capacity(timestamps.len(), timestamps.len() * payload_size);
-            for _ in timestamps {
+            let mut payloads = BinaryBuilder::with_capacity(row_count, row_count * payload_size);
+            for _ in 0..row_count {
                 payloads.append_value(&payload);
             }
             arrays.push(Arc::new(payloads.finish()));
@@ -593,17 +735,54 @@ mod tests {
         let schema = Arc::new(Schema::new(fields));
         let batch = RecordBatch::try_new(Arc::clone(&schema), arrays)?;
         let props = WriterProperties::builder()
-            .set_statistics_enabled(EnabledStatistics::None)
             .set_compression(Compression::UNCOMPRESSED)
-            .set_dictionary_enabled(false)
-            .build();
+            .set_dictionary_enabled(false);
+        let props = if stats_enabled {
+            props.build()
+        } else {
+            props
+                .set_statistics_enabled(EnabledStatistics::None)
+                .build()
+        };
         let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(props))?;
         writer.write(&batch)?;
         writer.close()?;
         Ok(())
     }
 
-    fn clear_timestamp_statistics(
+    fn write_arrow_int64_file(
+        path: &Path,
+        column: &str,
+        values: &[Option<i64>],
+        stats_enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        write_arrow_index_file(
+            path,
+            column,
+            DataType::Int64,
+            Arc::new(Int64Array::from(values.to_vec())),
+            None,
+            stats_enabled,
+        )
+    }
+
+    fn write_arrow_uint64_file(
+        path: &Path,
+        column: &str,
+        values: &[Option<u64>],
+        stats_enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        write_arrow_index_file(
+            path,
+            column,
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(values.to_vec())),
+            None,
+            stats_enabled,
+        )
+    }
+
+    fn clear_index_statistics(
         path: &Path,
         row_group_index: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -640,7 +819,7 @@ mod tests {
         Ok(())
     }
 
-    fn metadata_with_timestamp_statistics(
+    fn metadata_with_int64_statistics(
         stats: Statistics,
     ) -> Result<ParquetMetaData, Box<dyn std::error::Error>> {
         let column = Arc::new(
@@ -677,62 +856,54 @@ mod tests {
     }
 
     #[test]
-    fn choose_timestamp_unit_rejects_wrong_logical() {
-        // No logical type (None) should fail
-        let err = choose_timestamp_unit_from_logical("ts", PhysicalType::INT64, None).unwrap_err();
-        assert!(matches!(
-            err,
-            TimeColumnError::UnsupportedParquetType { .. }
-        ));
-    }
-
-    #[test]
-    fn choose_timestamp_unit_rejects_wrong_physical() {
-        let lt = LogicalType::Timestamp {
-            is_adjusted_to_u_t_c: true,
-            unit: TimeUnit::MILLIS,
-        };
-        let err =
-            choose_timestamp_unit_from_logical("ts", PhysicalType::INT32, Some(&lt)).unwrap_err();
-        assert!(matches!(
-            err,
-            TimeColumnError::UnsupportedParquetType { .. }
-        ));
-    }
-
-    #[test]
     fn inexact_statistics_force_fallback() -> TestResult {
         let stats = match Statistics::int64(Some(10), Some(20), None, Some(0), false) {
             Statistics::Int64(stats) => Statistics::Int64(stats.with_min_is_exact(false)),
             _ => unreachable!(),
         };
-        let metadata = metadata_with_timestamp_statistics(stats)?;
+        let metadata = metadata_with_int64_statistics(stats)?;
 
-        let plan = plan_timestamp_scan("path", "ts", 0, &metadata)?;
-        assert_eq!(plan.min_max, None);
-        assert_eq!(plan.row_groups_to_scan, vec![0]);
+        for kind in [
+            ParquetIndexKind::Timestamp(ParquetTimestampUnit::Millis),
+            ParquetIndexKind::Int64,
+            ParquetIndexKind::UInt64,
+        ] {
+            let plan = plan_index_scan("path", "index", 0, kind, &metadata)?;
+            assert_eq!(plan.bounds, None);
+            assert_eq!(plan.row_groups_to_scan, vec![0]);
+        }
         Ok(())
     }
 
     #[test]
     fn inverted_statistics_are_rejected() -> TestResult {
-        let stats = Statistics::int64(Some(20), Some(10), None, Some(0), false);
-        let metadata = metadata_with_timestamp_statistics(stats)?;
+        for (kind, min, max, domain) in [
+            (
+                ParquetIndexKind::Timestamp(ParquetTimestampUnit::Millis),
+                20,
+                10,
+                "timestamp",
+            ),
+            (ParquetIndexKind::Int64, 20, 10, "int64"),
+            (ParquetIndexKind::UInt64, -1, 0, "uint64"),
+        ] {
+            let stats = Statistics::int64(Some(min), Some(max), None, Some(0), false);
+            let metadata = metadata_with_int64_statistics(stats)?;
+            let err = plan_index_scan("data/inverted.parquet", "index", 0, kind, &metadata)
+                .err()
+                .expect("inverted statistics must fail");
 
-        let err = plan_timestamp_scan("data/inverted.parquet", "ts", 0, &metadata)
-            .err()
-            .expect("inverted statistics must fail");
-
-        assert!(matches!(
-            err,
-            SegmentMetaError::ParquetStatsShape {
-                path,
-                column,
-                detail,
-            } if path == "data/inverted.parquet"
-                && column == "ts"
-                && detail == "timestamp statistics minimum 20 exceeds maximum 10"
-        ));
+            assert!(matches!(
+                err,
+                SegmentMetaError::ParquetStatsShape {
+                    path,
+                    column,
+                    detail,
+                } if path == "data/inverted.parquet"
+                    && column == "index"
+                    && detail.contains(&format!("{domain} statistics minimum"))
+            ));
+        }
         Ok(())
     }
 
@@ -752,7 +923,8 @@ mod tests {
             true,
         )?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), 10);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 30);
@@ -763,6 +935,76 @@ mod tests {
         assert_eq!(report.row_count, 3);
         assert!(report.used_stats);
         assert_eq!(report.scanned_rows, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn segment_meta_preserves_int64_extremes_in_stats_and_fallback() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let values = [i64::MIN, 0, i64::MAX];
+
+        let stats_path = Path::new("data/int64-stats.parquet");
+        write_parquet_file(
+            &tmp.path().join(stats_path),
+            "index",
+            Some("INT_64"),
+            PhysicalType::INT64,
+            &values,
+            true,
+        )?;
+        let (stats_meta, stats_report) =
+            segment_meta_from_parquet(&location, stats_path, &int64_index("index")).await?;
+        assert_eq!(int64(&stats_meta.index_min), i64::MIN);
+        assert_eq!(int64(&stats_meta.index_max), i64::MAX);
+        assert!(stats_report.used_stats);
+        assert_eq!(stats_report.scanned_rows, 0);
+
+        let fallback_path = Path::new("data/int64-fallback.parquet");
+        write_arrow_int64_file(
+            &tmp.path().join(fallback_path),
+            "index",
+            &values.map(Some),
+            false,
+        )?;
+        let (fallback_meta, fallback_report) =
+            segment_meta_from_parquet(&location, fallback_path, &int64_index("index")).await?;
+        assert_eq!(int64(&fallback_meta.index_min), i64::MIN);
+        assert_eq!(int64(&fallback_meta.index_max), i64::MAX);
+        assert!(!fallback_report.used_stats);
+        assert_eq!(fallback_report.scanned_rows, values.len() as u64);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn segment_meta_preserves_uint64_extremes_in_stats_and_fallback() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let values = [0, i64::MAX as u64 + 1, u64::MAX];
+
+        for (name, stats_enabled) in [("stats", true), ("fallback", false)] {
+            let rel_path = PathBuf::from(format!("data/uint64-{name}.parquet"));
+            write_arrow_uint64_file(
+                &tmp.path().join(&rel_path),
+                "index",
+                &values.map(Some),
+                stats_enabled,
+            )?;
+
+            let (meta, report) =
+                segment_meta_from_parquet(&location, &rel_path, &uint64_index("index")).await?;
+            assert_eq!(uint64(&meta.index_min), 0);
+            assert_eq!(uint64(&meta.index_max), u64::MAX);
+            assert_eq!(report.used_stats, stats_enabled);
+            assert_eq!(
+                report.scanned_rows,
+                if stats_enabled {
+                    0
+                } else {
+                    values.len() as u64
+                }
+            );
+        }
         Ok(())
     }
 
@@ -782,7 +1024,8 @@ mod tests {
             true,
         )?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -50);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 400);
@@ -809,7 +1052,8 @@ mod tests {
             false,
         )?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), 5);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 7);
@@ -835,14 +1079,42 @@ mod tests {
             &row_groups,
             true,
         )?;
-        clear_timestamp_statistics(&abs, 1)?;
+        clear_index_statistics(&abs, 1)?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -100);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 300);
         assert_eq!(meta.row_count, 6);
         assert_eq!(report.row_groups, 3);
+        assert!(!report.used_stats);
+        assert_eq!(report.scanned_rows, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn int64_fallback_scans_only_row_groups_without_usable_stats() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let rel_path = Path::new("data/int64-partial-stats.parquet");
+        let abs = tmp.path().join(rel_path);
+        let row_groups: [&[i64]; 3] = [&[10, 20], &[i64::MIN, i64::MAX], &[30, 40]];
+
+        write_parquet_row_groups(
+            &abs,
+            "index",
+            Some("INT_64"),
+            PhysicalType::INT64,
+            &row_groups,
+            true,
+        )?;
+        clear_index_statistics(&abs, 1)?;
+
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &int64_index("index")).await?;
+        assert_eq!(int64(&meta.index_min), i64::MIN);
+        assert_eq!(int64(&meta.index_max), i64::MAX);
         assert!(!report.used_stats);
         assert_eq!(report.scanned_rows, 2);
         Ok(())
@@ -864,7 +1136,8 @@ mod tests {
             true,
         )?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -5);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 30);
@@ -892,7 +1165,8 @@ mod tests {
             false,
         )?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), 0);
         assert_eq!(
@@ -917,7 +1191,8 @@ mod tests {
             None,
         )?;
 
-        let (meta, report) = segment_meta_from_parquet(&location, rel_path, "ts").await?;
+        let (meta, report) =
+            segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await?;
 
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -10);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 20);
@@ -935,13 +1210,56 @@ mod tests {
 
         write_arrow_timestamp_file(&tmp.path().join(rel_path), &[None, None, None], None)?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
             Err(SegmentError::Meta {
-                source: SegmentMetaError::ParquetStatsMissing { path, column }
+                source: SegmentMetaError::NoObservedIndexValue {
+                    path,
+                    column,
+                    expected_domain: "timestamp"
+                }
             }) if path == "data/all_null.parquet" && column == "ts"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fallback_rejects_all_null_integer_indexes() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let signed_path = Path::new("data/all-null-int64.parquet");
+        write_arrow_int64_file(&tmp.path().join(signed_path), "index", &[None, None], false)?;
+        let signed = segment_meta_from_parquet(&location, signed_path, &int64_index("index")).await;
+        assert!(matches!(
+            signed,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::NoObservedIndexValue {
+                    expected_domain: "int64",
+                    ..
+                }
+            })
+        ));
+
+        let unsigned_path = Path::new("data/all-null-uint64.parquet");
+        write_arrow_uint64_file(
+            &tmp.path().join(unsigned_path),
+            "index",
+            &[None, None],
+            false,
+        )?;
+        let unsigned =
+            segment_meta_from_parquet(&location, unsigned_path, &uint64_index("index")).await;
+        assert!(matches!(
+            unsigned,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::NoObservedIndexValue {
+                    expected_domain: "uint64",
+                    ..
+                }
+            })
         ));
         Ok(())
     }
@@ -990,9 +1308,10 @@ mod tests {
         payload_file.flush().await?;
         drop(payload_file);
 
-        let (plain, plain_report) = segment_meta_from_parquet(&location, plain_path, "ts").await?;
+        let (plain, plain_report) =
+            segment_meta_from_parquet(&location, plain_path, &timestamp_index("ts")).await?;
         let (with_payload, payload_report) =
-            segment_meta_from_parquet(&location, payload_path, "ts").await?;
+            segment_meta_from_parquet(&location, payload_path, &timestamp_index("ts")).await?;
 
         assert!(with_payload.file_size.unwrap() > 4 * 1024 * 1024);
         assert_eq!(with_payload.index_min, plain.index_min);
@@ -1020,12 +1339,12 @@ mod tests {
             false,
         )?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
             Err(SegmentError::Meta {
-                source: SegmentMetaError::ParquetStatsMissing { .. }
+                source: SegmentMetaError::NoObservedIndexValue { .. }
             })
         ));
         Ok(())
@@ -1048,7 +1367,8 @@ mod tests {
             true,
         )?;
 
-        let (meta_micro, _) = segment_meta_from_parquet(&location, rel_micro, "ts").await?;
+        let (meta_micro, _) =
+            segment_meta_from_parquet(&location, rel_micro, &timestamp_index("ts")).await?;
         assert_eq!(
             timestamp(&meta_micro.index_min)
                 .timestamp_nanos_opt()
@@ -1074,7 +1394,8 @@ mod tests {
             true,
         )?;
 
-        let (meta_nano, _) = segment_meta_from_parquet(&location, rel_nano, "ts").await?;
+        let (meta_nano, _) =
+            segment_meta_from_parquet(&location, rel_nano, &timestamp_index("ts")).await?;
         assert_eq!(
             timestamp(&meta_nano.index_min).timestamp_nanos_opt(),
             Some(3_000)
@@ -1104,16 +1425,22 @@ mod tests {
             true,
         )?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
             Err(SegmentError::Meta {
-                source: SegmentMetaError::TimeColumn {
-                    source: TimeColumnError::Missing { .. },
-                    ..
+                source: SegmentMetaError::OrderedIndexColumn {
+                    source: ParquetIndexColumnError {
+                        path,
+                        column,
+                        expected_domain: "timestamp",
+                        observed_type,
+                    }
                 }
-            })
+            }) if path == "data/no_time.parquet"
+                && column == "ts"
+                && observed_type == "missing"
         ));
         Ok(())
     }
@@ -1128,16 +1455,69 @@ mod tests {
         // INT32 with timestamp logical is unsupported.
         write_parquet_file(&abs, "ts", None, PhysicalType::INT32, &[1, 2], true)?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
             Err(SegmentError::Meta {
-                source: SegmentMetaError::TimeColumn {
-                    source: TimeColumnError::UnsupportedParquetType { .. },
-                    ..
+                source: SegmentMetaError::OrderedIndexColumn {
+                    source: ParquetIndexColumnError {
+                        path,
+                        column,
+                        expected_domain: "timestamp",
+                        observed_type,
+                    }
                 }
-            })
+            }) if path == "data/unsupported_time.parquet"
+                && column == "ts"
+                && observed_type.contains("INT32")
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integer_index_validation_rejects_signed_unsigned_mismatches() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        let signed_path = Path::new("data/signed.parquet");
+        write_arrow_int64_file(&tmp.path().join(signed_path), "index", &[Some(1)], true)?;
+        let signed_as_unsigned =
+            segment_meta_from_parquet(&location, signed_path, &uint64_index("index")).await;
+        assert!(matches!(
+            signed_as_unsigned,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::OrderedIndexColumn {
+                    source: ParquetIndexColumnError {
+                        path,
+                        column,
+                        expected_domain: "uint64",
+                        observed_type,
+                    }
+                }
+            }) if path == "data/signed.parquet"
+                && column == "index"
+                && observed_type.contains("logical=None")
+        ));
+
+        let unsigned_path = Path::new("data/unsigned.parquet");
+        write_arrow_uint64_file(&tmp.path().join(unsigned_path), "index", &[Some(1)], true)?;
+        let unsigned_as_signed =
+            segment_meta_from_parquet(&location, unsigned_path, &int64_index("index")).await;
+        assert!(matches!(
+            unsigned_as_signed,
+            Err(SegmentError::Meta {
+                source: SegmentMetaError::OrderedIndexColumn {
+                    source: ParquetIndexColumnError {
+                        path,
+                        column,
+                        expected_domain: "int64",
+                        observed_type,
+                    }
+                }
+            }) if path == "data/unsigned.parquet"
+                && column == "index"
+                && observed_type.contains("is_signed: false")
         ));
         Ok(())
     }
@@ -1158,7 +1538,7 @@ mod tests {
             true,
         )?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
@@ -1180,7 +1560,7 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"PAR1PAR1garbage").await?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
@@ -1200,7 +1580,7 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"short").await?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,
@@ -1217,7 +1597,7 @@ mod tests {
         let location = TableLocation::local(tmp.path());
         let rel_path = Path::new("data/missing.parquet");
 
-        let result = segment_meta_from_parquet(&location, rel_path, "ts").await;
+        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
 
         assert!(matches!(
             result,

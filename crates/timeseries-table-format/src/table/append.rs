@@ -174,7 +174,7 @@ impl TimeSeriesTable {
         // 1) Segment meta + schema.
         let step_start = Instant::now();
         let (mut segment_meta, meta_report) =
-            segment_meta_from_parquet(self.location(), rel_path, &index_column)
+            segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
@@ -484,8 +484,8 @@ mod tests {
     use crate::coverage::Coverage;
     use crate::coverage::io::read_coverage_sidecar;
     use crate::metadata::logical_schema::{LogicalDataType, LogicalTimestampUnit};
+    use crate::metadata::segments::ParquetIndexColumnError;
     use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
-    use crate::metadata::time_column::TimeColumnError;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
@@ -549,11 +549,14 @@ mod tests {
                 assert!(matches!(
                     source,
                     SegmentError::Meta {
-                        source: SegmentMetaError::TimeColumn {
-                            source: TimeColumnError::Missing { .. },
-                            ..
+                        source: SegmentMetaError::OrderedIndexColumn {
+                            source: ParquetIndexColumnError {
+                                expected_domain: "timestamp",
+                                observed_type,
+                                ..
+                            }
                         }
-                    },
+                    } if observed_type == "missing",
                 ));
             }
             other => panic!("unexpected error: {other:?}"),

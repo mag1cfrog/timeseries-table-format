@@ -12,7 +12,6 @@ use snafu::{Backtrace, prelude::*};
 use crate::metadata::{
     logical_schema::LogicalSchemaError,
     table_metadata::{IndexKind, IndexValue, IndexValueError},
-    time_column::TimeColumnError,
 };
 
 /// Supported on-disk file formats for segments.
@@ -60,6 +59,22 @@ pub struct SegmentMeta {
     /// Coverage sidecar pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_path: Option<String>,
+}
+
+/// Exact Parquet ordered-index column validation failure.
+#[derive(Debug, Snafu, Clone, PartialEq, Eq)]
+#[snafu(display(
+    "Invalid ordered-index column {column} in segment at {path}: expected {expected_domain}, observed {observed_type}"
+))]
+pub struct ParquetIndexColumnError {
+    /// Normalized path to the segment file.
+    pub path: String,
+    /// Registered top-level ordered-index column.
+    pub column: String,
+    /// Registered ordered-index domain.
+    pub expected_domain: &'static str,
+    /// Observed Parquet column shape and annotations.
+    pub observed_type: String,
 }
 
 impl SegmentMeta {
@@ -142,13 +157,11 @@ pub enum SegmentMetaError {
         backtrace: Backtrace,
     },
 
-    /// Time column validation or metadata error.
-    #[snafu(display("Time column error in segment at {path}: {source}"))]
-    TimeColumn {
-        /// The path to the segment file with a time column error.
-        path: String,
-        /// The underlying time column error.
-        source: TimeColumnError,
+    /// The registered ordered-index column is missing or incompatible.
+    #[snafu(transparent)]
+    OrderedIndexColumn {
+        /// Exact registered and observed Parquet column details.
+        source: ParquetIndexColumnError,
     },
 
     /// Statistics exist but are not well-shaped (wrong length / unexpected type).
@@ -164,13 +177,17 @@ pub enum SegmentMetaError {
         detail: String,
     },
 
-    /// No usable statistics for the time column; v0.1 may fall back to a scan.
-    #[snafu(display("Parquet statistics missing for {column} in segment at {path}"))]
-    ParquetStatsMissing {
-        /// The path to the file missing statistics for the column.
+    /// The file contains no non-null value for the registered ordered index.
+    #[snafu(display(
+        "No observed {expected_domain} value for ordered-index column {column} in segment at {path}"
+    ))]
+    NoObservedIndexValue {
+        /// Path to the segment file.
         path: String,
-        /// The column missing statistics.
+        /// Registered ordered-index column.
         column: String,
+        /// Registered ordered-index domain.
+        expected_domain: &'static str,
     },
 
     /// Failed to derive a valid LogicalSchema from the Parquet file.
