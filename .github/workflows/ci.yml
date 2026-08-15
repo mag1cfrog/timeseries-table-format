@@ -47,6 +47,8 @@ jobs:
               - 'scripts/test_check_release_version.py'
               - 'scripts/append_rss_regression.py'
               - 'scripts/test_append_rss_regression.py'
+              - 'scripts/scan_range_rss_regression.py'
+              - 'scripts/test_scan_range_rss_regression.py'
       - name: Check for skip label
         id: skip
         env:
@@ -171,18 +173,21 @@ jobs:
           python scripts/test_check_release_version.py
           python scripts/check_release_version.py
 
-      - name: append RSS regression checks
+      - name: process RSS regression checks
         run: |
           uv sync --project crates/timeseries-table-python --locked --no-install-project
-          crates/timeseries-table-python/.venv/bin/ruff check scripts/append_rss_regression.py scripts/test_append_rss_regression.py
-          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/append_rss_regression.py scripts/test_append_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff check scripts/append_rss_regression.py scripts/test_append_rss_regression.py scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/append_rss_regression.py scripts/test_append_rss_regression.py scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
           (
             cd crates/timeseries-table-python
             PYTHONPATH=../../scripts .venv/bin/ty check \
               ../../scripts/append_rss_regression.py \
-              ../../scripts/test_append_rss_regression.py
+              ../../scripts/test_append_rss_regression.py \
+              ../../scripts/scan_range_rss_regression.py \
+              ../../scripts/test_scan_range_rss_regression.py
           )
           crates/timeseries-table-python/.venv/bin/python scripts/test_append_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/python scripts/test_scan_range_rss_regression.py
 
       - name: fmt
         run: cargo fmt --all -- --check

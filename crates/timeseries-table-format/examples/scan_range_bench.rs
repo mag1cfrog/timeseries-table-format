@@ -72,7 +72,7 @@ fn write_segment(
     row_groups: usize,
     rows_per_group: usize,
     payload_bytes: usize,
-) -> Result<(u64, usize), Box<dyn std::error::Error>> {
+) -> Result<(u64, usize, u64), Box<dyn std::error::Error>> {
     let total_rows = row_groups
         .checked_mul(rows_per_group)
         .ok_or_else(|| invalid_data("total row count overflow"))?;
@@ -120,8 +120,20 @@ fn write_segment(
         ))
         .into());
     }
+    let max_row_group_bytes = metadata
+        .row_groups()
+        .iter()
+        .map(|row_group| u64::try_from(row_group.total_byte_size()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
 
-    Ok((u64::try_from(total_rows)?, max_batch_memory_bytes))
+    Ok((
+        u64::try_from(total_rows)?,
+        max_batch_memory_bytes,
+        max_row_group_bytes,
+    ))
 }
 
 async fn prepare(
@@ -144,7 +156,7 @@ async fn prepare(
             .parent()
             .ok_or_else(|| invalid_data("segment path has no parent"))?,
     )?;
-    let (total_rows, max_generated_batch_memory_bytes) =
+    let (total_rows, max_generated_batch_memory_bytes, max_row_group_bytes) =
         write_segment(&segment_path, row_groups, rows_per_group, payload_bytes)?;
     let segment_file_bytes = std::fs::metadata(&segment_path)?.len();
 
@@ -172,6 +184,8 @@ async fn prepare(
             "total_rows": total_rows,
             "payload_bytes_per_row": payload_bytes,
             "max_generated_batch_memory_bytes": max_generated_batch_memory_bytes,
+            "max_row_group_bytes": max_row_group_bytes,
+            "process_id": std::process::id(),
         }))?
     );
     Ok(())
@@ -241,6 +255,7 @@ async fn scan(table_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             "max_returned_batch_memory_bytes": max_batch_memory_bytes,
             "time_to_first_batch_ns": first_batch_ns,
             "total_elapsed_ns": total_elapsed_ns,
+            "process_id": std::process::id(),
         }))?
     );
     Ok(())
