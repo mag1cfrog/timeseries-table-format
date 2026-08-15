@@ -38,6 +38,18 @@ pub enum TableError {
         source: CommitError,
     },
 
+    /// Append failed and one or more owned coverage sidecars could not be removed.
+    #[snafu(display(
+        "Append failed: {source}; coverage sidecar rollback also failed: {cleanup_errors:?}"
+    ))]
+    AppendRollback {
+        /// Original append failure that triggered rollback.
+        #[snafu(source)]
+        source: Box<TableError>,
+        /// Cleanup failures, including each affected sidecar path.
+        cleanup_errors: Vec<String>,
+    },
+
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
     EmptyTable,
