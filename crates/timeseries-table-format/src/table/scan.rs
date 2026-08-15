@@ -32,7 +32,7 @@ use snafu::prelude::*;
 
 use crate::metadata::{
     segments::{SegmentMeta, sort_segment_meta_by_index},
-    table_metadata::{IndexKind, IndexValue},
+    table_metadata::{IndexKind, IndexValue, IndexValueError},
 };
 use crate::storage::{self, TableLocation};
 use crate::transaction_log::TableState;
@@ -44,24 +44,19 @@ const SCAN_BATCH_SIZE: usize = 8_192;
 
 fn segments_for_range(
     state: &TableState,
-    ts_start: DateTime<Utc>,
-    ts_end: DateTime<Utc>,
-) -> Vec<SegmentMeta> {
-    state
-        .segments
-        .values()
-        .filter(|seg| {
-            // half-open query [ts_start, ts_end)
-            // Intersection with the segment's closed timestamp index bounds is:
-            // index_max >= ts_start && index_min < ts_end.
-            matches!(
-                (&seg.index_min, &seg.index_max),
-                (IndexValue::Timestamp(min), IndexValue::Timestamp(max))
-                    if *max >= ts_start && *min < ts_end
-            )
-        })
-        .cloned()
-        .collect()
+    start: &IndexValue,
+    end: &IndexValue,
+) -> Result<Vec<SegmentMeta>, IndexValueError> {
+    let mut segments = state.segments.values().cloned().collect::<Vec<_>>();
+    sort_segment_meta_by_index(&mut segments)?;
+
+    let mut candidates = Vec::new();
+    for segment in segments {
+        if !segment.index_max.compare(start)?.is_lt() && segment.index_min.compare(end)?.is_lt() {
+            candidates.push(segment);
+        }
+    }
+    Ok(candidates)
 }
 
 /// Helper macro to filter a `RecordBatch` by a timestamp column for a
@@ -404,11 +399,11 @@ impl TimeSeriesTable {
         }
         let ts_column = self.index.column.clone();
 
-        // 1) Pick candidate segments.
-        let mut candidates = segments_for_range(&self.state, ts_start, ts_end);
-
-        // 2) Sort deterministically by index_min, index_max, and path.
-        sort_segment_meta_by_index(&mut candidates).context(InvalidSegmentBoundsSnafu)?;
+        // Pick candidate segments and sort them by index_min, index_max, and path.
+        let start = IndexValue::Timestamp(ts_start);
+        let end = IndexValue::Timestamp(ts_end);
+        let candidates =
+            segments_for_range(&self.state, &start, &end).context(InvalidSegmentBoundsSnafu)?;
 
         let state = ScanState {
             candidates: candidates.into_iter(),
@@ -577,6 +572,76 @@ mod tests {
                 .map(Arc::new);
             futures::future::ready(metadata).boxed()
         }
+    }
+
+    fn indexed_segment(path: &str, min: IndexValue, max: IndexValue) -> SegmentMeta {
+        SegmentMeta {
+            path: path.to_string(),
+            format: FileFormat::Parquet,
+            index_min: min,
+            index_max: max,
+            row_count: 1,
+            file_size: None,
+            coverage_path: None,
+        }
+    }
+
+    fn state_with_segments(segments: Vec<SegmentMeta>) -> TableState {
+        TableState {
+            version: 1,
+            table_meta: make_basic_table_meta(),
+            segments: segments
+                .into_iter()
+                .map(|segment| (segment.path.clone(), segment))
+                .collect(),
+            table_coverage: None,
+        }
+    }
+
+    #[test]
+    fn integer_candidates_preserve_half_open_order() -> Result<(), IndexValueError> {
+        let signed = state_with_segments(vec![
+            indexed_segment("before", (-10i64).into(), (-1i64).into()),
+            indexed_segment("touch-start", (-5i64).into(), 0i64.into()),
+            indexed_segment("same-b", 1i64.into(), 9i64.into()),
+            indexed_segment("same-a", 1i64.into(), 9i64.into()),
+            indexed_segment("at-end", 10i64.into(), 20i64.into()),
+        ]);
+        let signed_paths = segments_for_range(&signed, &0i64.into(), &10i64.into())?
+            .into_iter()
+            .map(|segment| segment.path)
+            .collect::<Vec<_>>();
+        assert_eq!(signed_paths, ["touch-start", "same-a", "same-b"]);
+
+        let start = i64::MAX as u64 + 1;
+        let unsigned = state_with_segments(vec![
+            indexed_segment("below", 0u64.into(), (start - 1).into()),
+            indexed_segment("touch-start", (start - 1).into(), start.into()),
+            indexed_segment("inside", (start + 1).into(), (u64::MAX - 1).into()),
+            indexed_segment("at-end", u64::MAX.into(), u64::MAX.into()),
+        ]);
+        let unsigned_paths = segments_for_range(&unsigned, &start.into(), &u64::MAX.into())?
+            .into_iter()
+            .map(|segment| segment.path)
+            .collect::<Vec<_>>();
+        assert_eq!(unsigned_paths, ["touch-start", "inside"]);
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_selection_rejects_invalid_persisted_bounds() {
+        let inverted =
+            state_with_segments(vec![indexed_segment("inverted", 2i64.into(), 1i64.into())]);
+        assert!(matches!(
+            segments_for_range(&inverted, &0i64.into(), &3i64.into()),
+            Err(IndexValueError::InvalidBounds { .. })
+        ));
+
+        let signed = state_with_segments(vec![indexed_segment("signed", 0i64.into(), 1i64.into())]);
+        assert!(matches!(
+            segments_for_range(&signed, &0u64.into(), &2u64.into()),
+            Err(IndexValueError::DomainMismatch { .. })
+        ));
     }
 
     fn write_multi_row_group_parquet(
