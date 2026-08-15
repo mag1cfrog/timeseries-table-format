@@ -8,16 +8,159 @@ use std::path::Path;
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
 use parquet::file::metadata::FileMetaData;
-use parquet::schema::types::Type;
+use parquet::schema::types::{SchemaDescriptor, Type};
 use snafu::Backtrace;
 
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
 };
+use crate::metadata::segments::ParquetIndexColumnError;
+use crate::metadata::table_metadata::{IndexKind, IndexSpec};
 use crate::storage::{TableLocation, open_parquet_reader};
 use crate::transaction_log::segments::{
     SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ParquetTimestampUnit {
+    Millis,
+    Micros,
+    Nanos,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ParquetIndexKind {
+    Timestamp(ParquetTimestampUnit),
+    Int64,
+    UInt64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ValidatedParquetIndex {
+    pub(super) leaf_index: usize,
+    pub(super) kind: ParquetIndexKind,
+}
+
+fn invalid_index_column(
+    path: &str,
+    index: &IndexSpec,
+    observed_type: impl Into<String>,
+) -> ParquetIndexColumnError {
+    ParquetIndexColumnError {
+        path: path.to_string(),
+        column: index.column.clone(),
+        expected_domain: index.kind.name(),
+        observed_type: observed_type.into(),
+    }
+}
+
+fn observed_parquet_type(t: &Type) -> String {
+    let info = t.get_basic_info();
+    let repetition = info.repetition();
+    if t.is_group() {
+        return format!("{repetition:?} nested group");
+    }
+    format!(
+        "{repetition:?} {:?} logical={:?}",
+        t.get_physical_type(),
+        info.logical_type_ref()
+    )
+}
+
+pub(super) fn validate_parquet_index(
+    path: &str,
+    schema: &SchemaDescriptor,
+    index: &IndexSpec,
+) -> Result<ValidatedParquetIndex, ParquetIndexColumnError> {
+    let Some(root_index) = schema
+        .root_schema()
+        .get_fields()
+        .iter()
+        .position(|field| field.name() == index.column)
+    else {
+        let observed = schema
+            .columns()
+            .iter()
+            .find(|column| {
+                column
+                    .path()
+                    .parts()
+                    .last()
+                    .is_some_and(|name| name == &index.column)
+            })
+            .map(|column| format!("nested column {}", column.path().string()))
+            .unwrap_or_else(|| "missing".to_string());
+        return Err(invalid_index_column(path, index, observed));
+    };
+
+    let root = &schema.root_schema().get_fields()[root_index];
+    if root.is_group() || matches!(root.get_basic_info().repetition(), Repetition::REPEATED) {
+        return Err(invalid_index_column(
+            path,
+            index,
+            observed_parquet_type(root),
+        ));
+    }
+
+    let leaf_index = (0..schema.num_columns())
+        .find(|leaf| schema.get_column_root_idx(*leaf) == root_index)
+        .ok_or_else(|| invalid_index_column(path, index, "primitive column without a leaf"))?;
+    let column = schema.column(leaf_index);
+    let physical = column.physical_type();
+    let logical = column.logical_type_ref();
+    let kind = match (&index.kind, physical, logical) {
+        (
+            IndexKind::Timestamp { .. },
+            PhysicalType::INT64,
+            Some(LogicalType::Timestamp {
+                unit: TimeUnit::MILLIS,
+                ..
+            }),
+        ) => ParquetIndexKind::Timestamp(ParquetTimestampUnit::Millis),
+        (
+            IndexKind::Timestamp { .. },
+            PhysicalType::INT64,
+            Some(LogicalType::Timestamp {
+                unit: TimeUnit::MICROS,
+                ..
+            }),
+        ) => ParquetIndexKind::Timestamp(ParquetTimestampUnit::Micros),
+        (
+            IndexKind::Timestamp { .. },
+            PhysicalType::INT64,
+            Some(LogicalType::Timestamp {
+                unit: TimeUnit::NANOS,
+                ..
+            }),
+        ) => ParquetIndexKind::Timestamp(ParquetTimestampUnit::Nanos),
+        (IndexKind::Int64 { .. }, PhysicalType::INT64, None)
+        | (
+            IndexKind::Int64 { .. },
+            PhysicalType::INT64,
+            Some(LogicalType::Integer {
+                bit_width: 64,
+                is_signed: true,
+            }),
+        ) => ParquetIndexKind::Int64,
+        (
+            IndexKind::UInt64 { .. },
+            PhysicalType::INT64,
+            Some(LogicalType::Integer {
+                bit_width: 64,
+                is_signed: false,
+            }),
+        ) => ParquetIndexKind::UInt64,
+        _ => {
+            return Err(invalid_index_column(
+                path,
+                index,
+                observed_parquet_type(root),
+            ));
+        }
+    };
+
+    Ok(ValidatedParquetIndex { leaf_index, kind })
+}
 
 fn map_parquet_col_to_logical_type(
     column: &str,
@@ -56,6 +199,16 @@ fn map_parquet_col_to_logical_type(
                 return Ok(LogicalDataType::Decimal {
                     precision: *precision,
                     scale: *scale,
+                });
+            }
+            LogicalType::Integer {
+                bit_width: 64,
+                is_signed,
+            } if physical == PhysicalType::INT64 => {
+                return Ok(if *is_signed {
+                    LogicalDataType::Int64
+                } else {
+                    LogicalDataType::UInt64
                 });
             }
 
@@ -388,7 +541,7 @@ fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, Lo
     LogicalSchema::new(fields)
 }
 
-/// Derive a logical schema directly from a local Parquet file footer.
+/// Derive a logical schema from a stored Parquet segment footer.
 pub async fn logical_schema_from_parquet(
     location: &TableLocation,
     rel_path: &Path,
@@ -424,6 +577,7 @@ mod tests {
     use parquet::schema::types::Type;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
+    use std::num::NonZeroU64;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -785,6 +939,31 @@ mod tests {
         Ok(())
     }
 
+    fn int64_index(column: &str) -> IndexSpec {
+        IndexSpec {
+            column: column.to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::MIN,
+            },
+        }
+    }
+
+    fn validate_index_from_test_file(
+        path: &Path,
+        schema: Arc<Type>,
+        index: &IndexSpec,
+    ) -> Result<ValidatedParquetIndex, ParquetIndexColumnError> {
+        write_schema_only_parquet(path, schema).expect("write test Parquet footer");
+        let reader = SerializedFileReader::new(File::open(path).expect("open test Parquet file"))
+            .expect("read test Parquet footer");
+        validate_parquet_index(
+            &path.display().to_string(),
+            reader.metadata().file_metadata().schema_descr(),
+            index,
+        )
+    }
+
     fn assert_schema_err(
         rel_path: &Path,
         schema: Arc<Type>,
@@ -829,6 +1008,98 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn map_parquet_col_to_logical_type_maps_64_bit_integer_annotations() {
+        for (is_signed, expected) in [
+            (true, LogicalDataType::Int64),
+            (false, LogicalDataType::UInt64),
+        ] {
+            let logical = LogicalType::Integer {
+                bit_width: 64,
+                is_signed,
+            };
+
+            let mapped =
+                map_parquet_col_to_logical_type("index", PhysicalType::INT64, Some(&logical), None)
+                    .unwrap();
+
+            assert_eq!(mapped, expected);
+        }
+    }
+
+    #[test]
+    fn ordered_index_validation_rejects_non_scalar_and_incompatible_columns() -> TestResult {
+        let nested_leaf = Type::primitive_type_builder("index", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let nested = Type::group_type_builder("payload")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![Arc::new(nested_leaf)])
+            .build()?;
+        let repeated = Type::primitive_type_builder("index", PhysicalType::INT64)
+            .with_repetition(Repetition::REPEATED)
+            .build()?;
+        let narrow = Type::primitive_type_builder("index", PhysicalType::INT32)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Integer {
+                bit_width: 32,
+                is_signed: true,
+            }))
+            .build()?;
+        let timestamp = Type::primitive_type_builder("index", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: TimeUnit::MILLIS,
+            }))
+            .build()?;
+        let decimal = Type::primitive_type_builder("index", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Decimal {
+                scale: 0,
+                precision: 18,
+            }))
+            .with_scale(0)
+            .with_precision(18)
+            .build()?;
+        let float = Type::primitive_type_builder("index", PhysicalType::DOUBLE)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+        let binary = Type::primitive_type_builder("index", PhysicalType::BYTE_ARRAY)
+            .with_repetition(Repetition::REQUIRED)
+            .build()?;
+
+        let tmp = TempDir::new()?;
+        for (name, field, observed) in [
+            ("nested", nested, "nested column payload.index"),
+            ("repeated", repeated, "REPEATED INT64"),
+            ("narrow", narrow, "INT32"),
+            ("timestamp", timestamp, "Timestamp"),
+            ("decimal", decimal, "Decimal"),
+            ("float", float, "DOUBLE"),
+            ("binary", binary, "BYTE_ARRAY"),
+        ] {
+            let schema = Arc::new(
+                Type::group_type_builder("schema")
+                    .with_fields(vec![Arc::new(field)])
+                    .build()?,
+            );
+            let path = tmp.path().join(format!("{name}.parquet"));
+            let error = validate_index_from_test_file(&path, schema, &int64_index("index"))
+                .expect_err("incompatible ordered index must fail");
+
+            assert_eq!(error.path, path.display().to_string());
+            assert_eq!(error.column, "index");
+            assert_eq!(error.expected_domain, "int64");
+            assert!(
+                error.observed_type.contains(observed),
+                "expected {observed:?} in {:?}",
+                error.observed_type
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -1575,6 +1846,10 @@ mod tests {
             .build()?;
         let value = Type::primitive_type_builder("value", PhysicalType::INT64)
             .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::Integer {
+                bit_width: 64,
+                is_signed: false,
+            }))
             .build()?;
         let key_value = Type::group_type_builder("key_value")
             .with_repetition(Repetition::REPEATED)
@@ -1628,7 +1903,7 @@ mod tests {
                             }),
                             value: Some(Box::new(LogicalField {
                                 name: "value".to_string(),
-                                data_type: LogicalDataType::Int64,
+                                data_type: LogicalDataType::UInt64,
                                 nullable: true,
                             })),
                             keys_sorted: false,
@@ -2168,6 +2443,29 @@ mod tests {
             LogicalDataType::Int64,
             TestColumnValues::Int64(vec![1, 2, 3]),
         )
+    }
+
+    #[test]
+    fn logical_schema_maps_annotated_uint64() -> TestResult {
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("uint64.parquet");
+        let field = Type::primitive_type_builder("index", PhysicalType::INT64)
+            .with_repetition(Repetition::REQUIRED)
+            .with_logical_type(Some(LogicalType::Integer {
+                bit_width: 64,
+                is_signed: false,
+            }))
+            .build()?;
+        let parquet_schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![Arc::new(field)])
+                .build()?,
+        );
+        write_schema_only_parquet(&path, parquet_schema)?;
+
+        let schema = logical_schema_from_test_file(&path)?;
+        assert_eq!(schema.columns()[0].data_type, LogicalDataType::UInt64);
+        Ok(())
     }
 
     #[test]

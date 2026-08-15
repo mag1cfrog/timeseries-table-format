@@ -27,10 +27,7 @@ use crate::{
         coverage::compute_segment_coverage, logical_schema_from_parquet,
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
-    metadata::{
-        schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
-        table_metadata::IndexKind,
-    },
+    metadata::schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
     storage,
     transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
 };
@@ -153,19 +150,9 @@ impl TimeSeriesTable {
         mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
-        let index_column = self.index.column.clone();
         let expected_version = self.state.version;
-        let bucket_spec = match &self.index.kind {
-            IndexKind::Timestamp { bucket, .. } => bucket.clone(),
-            kind => {
-                return Err(TableError::UnsupportedIndexKind {
-                    operation: "timestamp Parquet append",
-                    actual: kind.name(),
-                });
-            }
-        };
         if let Some(r) = report.as_mut() {
-            r.set_context("time_column", &index_column);
+            r.set_context("index_column", self.index.column.as_str());
         }
 
         // 0) Coverage readiness checks.
@@ -174,7 +161,7 @@ impl TimeSeriesTable {
         // 1) Segment meta + schema.
         let step_start = Instant::now();
         let (mut segment_meta, meta_report) =
-            segment_meta_from_parquet(self.location(), rel_path, &index_column)
+            segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
                 .context(SegmentMetaSnafu)?;
         if let Some(r) = report.as_mut() {
@@ -275,10 +262,9 @@ impl TimeSeriesTable {
 
         // 4) Compute segment coverage.
         let step_start = Instant::now();
-        let segment_cov =
-            compute_segment_coverage(self.location(), rel_path, &index_column, &bucket_spec)
-                .await
-                .context(SegmentCoverageSnafu)?;
+        let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
+            .await
+            .context(SegmentCoverageSnafu)?;
         if let Some(r) = report.as_mut() {
             r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
         }
@@ -484,26 +470,51 @@ mod tests {
     use crate::coverage::Coverage;
     use crate::coverage::io::read_coverage_sidecar;
     use crate::metadata::logical_schema::{LogicalDataType, LogicalTimestampUnit};
+    use crate::metadata::segments::ParquetIndexColumnError;
     use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
-    use crate::metadata::time_column::TimeColumnError;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
         Commit, CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
     };
+    use arrow::{
+        array::{ArrayRef, Int64Array, UInt64Array},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use parquet::arrow::ArrowWriter;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
+    use std::num::NonZeroU64;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn timestamp_bucket(index: &IndexSpec) -> &TimeBucket {
-        match &index.kind {
-            IndexKind::Timestamp { bucket, .. } => bucket,
-            other => panic!("expected timestamp index, found {other:?}"),
+    fn registered_index(kind: IndexKind) -> IndexSpec {
+        IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: Vec::new(),
+            kind,
         }
+    }
+
+    fn write_single_index_parquet(
+        path: &Path,
+        data_type: DataType,
+        values: ArrayRef,
+    ) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", data_type, false)]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values])?;
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
     }
 
     fn coverage_files(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
@@ -549,11 +560,14 @@ mod tests {
                 assert!(matches!(
                     source,
                     SegmentError::Meta {
-                        source: SegmentMetaError::TimeColumn {
-                            source: TimeColumnError::Missing { .. },
-                            ..
+                        source: SegmentMetaError::OrderedIndexColumn {
+                            source: ParquetIndexColumnError {
+                                expected_domain: "timestamp",
+                                observed_type,
+                                ..
+                            }
                         }
-                    },
+                    } if observed_type == "missing",
                 ));
             }
             other => panic!("unexpected error: {other:?}"),
@@ -763,6 +777,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_parquet_segment_supports_registered_int64_index() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = registered_index(IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(10).unwrap(),
+        });
+        let mut table =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
+                .await?;
+        let rel_path = "data/int64.parquet";
+        write_arrow_parquet_int_time(
+            &tmp.path().join(rel_path),
+            &[i64::MIN, -1, 0, i64::MAX],
+            &["A", "A", "A", "A"],
+            &[1.0, 2.0, 3.0, 4.0],
+        )?;
+
+        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
+
+        let segment = table.state.segments.get(rel_path).expect("segment present");
+        assert_eq!(segment.index_min, IndexValue::Int64(i64::MIN));
+        assert_eq!(segment.index_max, IndexValue::Int64(i64::MAX));
+        assert_eq!(
+            table
+                .state
+                .table_coverage
+                .as_ref()
+                .expect("table coverage")
+                .index_kind,
+            index.kind
+        );
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state, table.state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn int64_appends_enforce_coverage_and_exact_later_schema() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = registered_index(IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(10).unwrap(),
+        });
+        let mut table =
+            TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
+
+        for (path, values) in [
+            ("data/negative.parquet", &[-25, -15][..]),
+            ("data/positive.parquet", &[5, 15][..]),
+        ] {
+            write_arrow_parquet_int_time(&tmp.path().join(path), values, &["A", "A"], &[1.0, 2.0])?;
+            table.append_parquet_segment(path).await?;
+        }
+        assert_eq!(table.state.version, 3);
+
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(tmp.path())?;
+        let overlap_path = "data/negative-overlap.parquet";
+        write_arrow_parquet_int_time(&tmp.path().join(overlap_path), &[-19], &["A"], &[3.0])?;
+        assert!(matches!(
+            table
+                .append_parquet_segment(overlap_path)
+                .await
+                .expect_err("negative bucket overlap must fail"),
+            TableError::CoverageOverlap { .. }
+        ));
+
+        let mismatch_path = "data/schema-mismatch.parquet";
+        write_single_index_parquet(
+            &tmp.path().join(mismatch_path),
+            DataType::Int64,
+            Arc::new(Int64Array::from(vec![100])),
+        )?;
+        assert!(matches!(
+            table
+                .append_parquet_segment(mismatch_path)
+                .await
+                .expect_err("later schema mismatch must fail"),
+            TableError::SchemaCompatibility { .. }
+        ));
+        assert_eq!(table.state, state_before);
+        assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_parquet_segment_supports_registered_uint64_index() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = registered_index(IndexKind::UInt64 {
+            bucket_width: NonZeroU64::new(10).unwrap(),
+        });
+        let mut table =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
+                .await?;
+        let rel_path = "data/uint64.parquet";
+        write_single_index_parquet(
+            &tmp.path().join(rel_path),
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![0, i64::MAX as u64 + 1, u64::MAX])),
+        )?;
+
+        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
+
+        let segment = table.state.segments.get(rel_path).expect("segment present");
+        assert_eq!(segment.index_min, IndexValue::UInt64(0));
+        assert_eq!(segment.index_max, IndexValue::UInt64(u64::MAX));
+        assert_eq!(
+            table
+                .state
+                .table_meta
+                .logical_schema
+                .as_ref()
+                .expect("schema adopted")
+                .columns()[0]
+                .data_type,
+            LogicalDataType::UInt64
+        );
+        assert_eq!(
+            table
+                .state
+                .table_coverage
+                .as_ref()
+                .expect("table coverage")
+                .index_kind,
+            index.kind
+        );
+
+        let non_overlap_path = "data/uint64-non-overlap.parquet";
+        write_single_index_parquet(
+            &tmp.path().join(non_overlap_path),
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![u64::MAX - 20])),
+        )?;
+        assert_eq!(table.append_parquet_segment(non_overlap_path).await?, 3);
+
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(tmp.path())?;
+        let overlap_path = "data/uint64-overlap.parquet";
+        write_single_index_parquet(
+            &tmp.path().join(overlap_path),
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![u64::MAX - 1])),
+        )?;
+        assert!(matches!(
+            table
+                .append_parquet_segment(overlap_path)
+                .await
+                .expect_err("large uint64 bucket overlap must fail"),
+            TableError::CoverageOverlap { .. }
+        ));
+        assert_eq!(table.state, state_before);
+        assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state, table.state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_signed_data_for_uint64_index_without_mutation() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = registered_index(IndexKind::UInt64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        });
+        let mut table =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(tmp.path())?;
+        let rel_path = "data/signed.parquet";
+        write_arrow_parquet_int_time(&tmp.path().join(rel_path), &[1], &["A"], &[1.0])?;
+
+        let error = table
+            .append_parquet_segment(rel_path)
+            .await
+            .expect_err("signed data must not append to a uint64 index");
+
+        assert!(matches!(
+            error,
+            TableError::SegmentMeta {
+                source: SegmentError::Meta {
+                    source: SegmentMetaError::OrderedIndexColumn {
+                        source: ParquetIndexColumnError {
+                            expected_domain: "uint64",
+                            observed_type,
+                            ..
+                        }
+                    }
+                }
+            } if observed_type.contains("logical=None")
+        ));
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_inspects_file_without_reading_unrelated_column_data() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -797,7 +1009,7 @@ mod tests {
             report.context,
             vec![
                 ("relative_path".to_string(), rel_path.to_string()),
-                ("time_column".to_string(), "ts".to_string()),
+                ("index_column".to_string(), "ts".to_string()),
                 ("file_size_bytes".to_string(), file_size),
             ]
         );
@@ -1211,10 +1423,8 @@ mod tests {
         assert!(seg1.coverage_path.is_some());
         assert!(seg2.coverage_path.is_some());
 
-        let bucket_spec = timestamp_bucket(table.index_spec()).clone();
-
-        let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
-        let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
+        let cov1 = compute_segment_coverage(&location, Path::new(rel1), table.index_spec()).await?;
+        let cov2 = compute_segment_coverage(&location, Path::new(rel2), table.index_spec()).await?;
         let expected_snapshot = cov1.union(&cov2);
 
         let ptr = table
@@ -1316,11 +1526,12 @@ mod tests {
             .as_ref()
             .expect("table snapshot pointer present after reopen");
 
-        let bucket_spec = timestamp_bucket(reopened.index_spec()).clone();
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
-        let cov1 = compute_segment_coverage(&location, Path::new(rel1), "ts", &bucket_spec).await?;
-        let cov2 = compute_segment_coverage(&location, Path::new(rel2), "ts", &bucket_spec).await?;
+        let cov1 =
+            compute_segment_coverage(&location, Path::new(rel1), reopened.index_spec()).await?;
+        let cov2 =
+            compute_segment_coverage(&location, Path::new(rel2), reopened.index_spec()).await?;
         let expected = cov1.union(&cov2);
 
         let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
@@ -1685,34 +1896,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_append_cleans_only_its_writer_owned_sidecars() -> TestResult {
+    async fn stale_int64_append_cleans_only_its_writer_owned_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
-        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let index = registered_index(IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(10).unwrap(),
+        });
+        let mut winner =
+            TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
         let mut loser = TimeSeriesTable::open(location).await?;
         let winner_path = "data/writer-owned-winner.parquet";
         let loser_path = "data/writer-owned-loser.parquet";
 
-        write_test_parquet(
-            &tmp.path().join(winner_path),
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 10_000,
-                symbol: "X",
-                price: 100.0,
-            }],
-        )?;
-        write_test_parquet(
-            &tmp.path().join(loser_path),
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 20_000,
-                symbol: "X",
-                price: 200.0,
-            }],
-        )?;
+        write_arrow_parquet_int_time(&tmp.path().join(winner_path), &[0], &["X"], &[100.0])?;
+        write_arrow_parquet_int_time(&tmp.path().join(loser_path), &[100], &["X"], &[200.0])?;
 
         winner.append_parquet_segment(winner_path).await?;
         let coverage_before = coverage_files(tmp.path())?;
@@ -1733,24 +1930,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_commit_retains_writer_owned_sidecars() -> TestResult {
+    async fn ambiguous_int64_commit_retains_writer_owned_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
-        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let index = registered_index(IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(10).unwrap(),
+        });
+        let mut table =
+            TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
         let state_before = table.state.clone();
         let coverage_before = coverage_files(tmp.path())?;
         let segment_path = "data/ambiguous.parquet";
 
-        write_test_parquet(
-            &tmp.path().join(segment_path),
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 10_000,
-                symbol: "X",
-                price: 100.0,
-            }],
-        )?;
+        write_arrow_parquet_int_time(&tmp.path().join(segment_path), &[10], &["X"], &[100.0])?;
 
         let commit_path = tmp.path().join(layout::commit_rel_path(2));
         crate::storage::inject_write_new_failure(commit_path.clone(), true);

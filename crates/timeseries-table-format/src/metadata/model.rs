@@ -13,5 +13,4 @@ pub use crate::metadata::{
         TABLE_FORMAT_VERSION, TableKind, TableMeta, TableMetaDelta, TimeBucket,
         validate_index_range,
     },
-    time_column::TimeColumnError,
 };
