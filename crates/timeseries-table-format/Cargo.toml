@@ -89,6 +89,10 @@ name = "segment_meta_bench"
 required-features = ["cli"]
 
 [[example]]
+name = "scan_range_bench"
+required-features = ["cli"]
+
+[[example]]
 name = "query_nvda_ma"
 required-features = ["datafusion"]
 
