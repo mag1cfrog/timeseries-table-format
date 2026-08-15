@@ -16,7 +16,7 @@
 //! use timeseries_table_format::coverage::Coverage;
 //! use timeseries_table_format::coverage::serde::{coverage_to_bytes, coverage_from_bytes};
 //!
-//! let cov = Coverage::from_iter(vec![1u32, 2, 3]);
+//! let cov = Coverage::from_iter(vec![1u64, 2, 3]);
 //! let bytes = coverage_to_bytes(&cov)?;
 //! let restored = coverage_from_bytes(&bytes)?;
 //! assert_eq!(cov.cardinality(), restored.cardinality());

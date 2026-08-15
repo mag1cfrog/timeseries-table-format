@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "datafusion")]
+use object_store::path::Path as ObjectStorePath;
 use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
@@ -48,6 +50,34 @@ impl TableLocation {
     /// Return the underlying StorageLocation
     pub fn storage(&self) -> &StorageLocation {
         &self.0
+    }
+
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn object_store_url(&self) -> String {
+        match self.as_ref() {
+            StorageLocation::Local(_) => "file://".to_owned(),
+        }
+    }
+
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn object_store_path(&self, relative_path: &Path) -> StorageResult<ObjectStorePath> {
+        let (normalized, native_path) = normalize_relative_storage_path(relative_path)?;
+
+        match self.as_ref() {
+            StorageLocation::Local(root) => {
+                let absolute = std::path::absolute(root.join(native_path))
+                    .map_err(BackendError::Local)
+                    .context(OtherIoSnafu {
+                        path: normalized.clone(),
+                    })?;
+
+                ObjectStorePath::from_absolute_path(absolute).map_err(|source| {
+                    OtherIoSnafu { path: normalized }.into_error(BackendError::Local(
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+                    ))
+                })
+            }
+        }
     }
 
     /// Validate and normalize a segment path for storage in table metadata.

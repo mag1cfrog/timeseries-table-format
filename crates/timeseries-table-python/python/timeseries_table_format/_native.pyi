@@ -174,6 +174,7 @@ class TimeSeriesTable:
             Path to a Parquet file.
         copy_if_outside:
             If `True`, copies the file under the table root before appending.
+            If `False`, `parquet_path` must be a table-relative storage key.
         """
         ...
 

@@ -49,11 +49,6 @@ mod _native {
         tokio_runner,
     };
 
-    enum AppendParquetError {
-        Table(timeseries_table_format::table::TableError),
-        ValueError(String),
-    }
-
     enum RegisterTsTableError {
         Table(timeseries_table_format::table::TableError),
         DataFusion(DFError),
@@ -1375,8 +1370,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///     Path to a Parquet file.
         /// copy_if_outside:
         ///     If `True`, copies the file under the table root before appending.
-        ///     If `False`, the path must already be under the table root (parent traversal via
-        ///     `..` is rejected).
+        ///     If `False`, `parquet_path` must be a table-relative storage key.
         ///
         /// Returns
         /// -------
@@ -1399,92 +1393,28 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ) -> PyResult<u64> {
             use crate::tokio_runner;
 
-            use std::path::{Component, Path};
+            use std::path::Path;
 
-            use timeseries_table_format::storage::StorageLocation;
             let rt = tokio_runner::global_runtime()?;
 
             let table_root_for_err = self.table_root.clone();
-            let table_root_for_err_cp = table_root_for_err.clone();
 
-            // Clone location before taking a mutable borrow of `self.inner`.
-            let location = self.inner.location().clone();
             let table = &mut self.inner;
 
             tokio_runner::run_blocking_map_err(
                 py,
                 rt.as_ref(),
                 async move {
-                    let rel_path = if copy_if_outside {
-                        return table
+                    if copy_if_outside {
+                        table
                             .append_parquet_from_path(Path::new(&parquet_path))
                             .await
                             .map(|(version, _)| version)
-                            .map_err(AppendParquetError::Table);
                     } else {
-                        let root_path = match location.storage() {
-                            StorageLocation::Local(p) => p.as_path(),
-                        };
-
-                        let src_path = Path::new(&parquet_path);
-
-                        // 1) If caller passes a path *including* table root, strip it.
-                        // (works for absolute-under-root and also some relative cases).
-                        let rel = src_path
-                            .strip_prefix(root_path)
-                            .or_else(|_| src_path.strip_prefix(Path::new(&table_root_for_err)))
-                            .ok()
-                            .map(|p| p.to_path_buf());
-
-                        // 2) Otherwise, if caller passed a relative path, treat it as already relative-to-root,
-                        // but refuse parent traversal.
-                        let rel = match rel {
-                            Some(r) => r,
-                            None if !src_path.is_absolute() => {
-                                if src_path
-                                    .components()
-                                    .any(|c| matches!(c, Component::ParentDir))
-                                {
-                                    return Err(AppendParquetError::ValueError(format!(
-                                        "parquet_path must not contain '..' when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err})"
-                                    )));
-                                }
-                                src_path.to_path_buf()
-                            }
-                            None => {
-                                return Err(AppendParquetError::ValueError(format!(
-                                    "parquet_path must be under table_root when copy_if_outside=False (parquet_path={parquet_path:?}, table_root={table_root_for_err})"
-                                )));
-                            }
-                        };
-
-                        if rel.as_os_str().is_empty() {
-                            return Err(AppendParquetError::ValueError(format!(
-                                "parquet_path must point to a file under table_root, not the root itself (parquet_path={parquet_path:?}, table_root={table_root_for_err})"
-                            )));
-                        }
-
-                        rel
-                    };
-
-                    let mut rel_str = rel_path.to_string_lossy().to_string();
-                    if cfg!(windows) {
-                        rel_str = rel_str.replace('\\', "/");
+                        table.append_parquet_segment(&parquet_path).await
                     }
-
-                    let version = table
-                        .append_parquet_segment(&rel_str)
-                        .await
-                        .map_err(AppendParquetError::Table)?;
-
-                    Ok::<u64, AppendParquetError>(version)
                 },
-                move |py, err| match err {
-                    AppendParquetError::Table(e) => {
-                        table_error_to_py_with_root(py, &table_root_for_err_cp, e)
-                    }
-                    AppendParquetError::ValueError(msg) => PyValueError::new_err(msg),
-                },
+                move |py, err| table_error_to_py_with_root(py, &table_root_for_err, err),
             )
         }
     }

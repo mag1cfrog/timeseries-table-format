@@ -79,10 +79,10 @@ def test_append_parquet_outside_and_inside_root(tmp_path):
         close=[3.0, 4.0],
     )
 
-    v2 = tbl.append_parquet(str(inside), copy_if_outside=False)
+    v2 = tbl.append_parquet("data/inside.parquet", copy_if_outside=False)
     assert v2 > v1
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ttf.StorageError):
         tbl.append_parquet(str(outside), copy_if_outside=False)
 
 
@@ -208,7 +208,7 @@ def test_append_parquet_copy_if_outside_false_relative_path_and_traversal(tmp_pa
     v = tbl.append_parquet("data/rel.parquet", copy_if_outside=False)
     assert isinstance(v, int)
 
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(ttf.StorageError) as excinfo:
         tbl.append_parquet("../x.parquet", copy_if_outside=False)
     assert str(root) in str(excinfo.value)
 
@@ -241,10 +241,10 @@ def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
         close=[10.0, 20.0],
     )
 
-    tbl.append_parquet(str(seg_a), copy_if_outside=False)
+    tbl.append_parquet("data/a.parquet", copy_if_outside=False)
 
     with pytest.raises(ttf.CoverageOverlapError) as excinfo:
-        tbl.append_parquet(str(seg_b), copy_if_outside=False)
+        tbl.append_parquet("data/b.parquet", copy_if_outside=False)
 
     e = excinfo.value
     assert isinstance(e.segment_path, str)
@@ -275,7 +275,7 @@ def test_append_parquet_uses_registered_time_column(tmp_path):
     source_before = seg.read_bytes()
 
     with pytest.raises(ttf.TimeseriesTableError):
-        tbl.append_parquet(str(seg), copy_if_outside=False)
+        tbl.append_parquet("data/ts2.parquet", copy_if_outside=False)
     assert seg.read_bytes() == source_before
 
 
@@ -307,10 +307,10 @@ def test_append_parquet_schema_mismatch_raises_schema_mismatch_error(tmp_path):
         close=[3, 4],
     )
 
-    tbl.append_parquet(str(seg_a), copy_if_outside=False)
+    tbl.append_parquet("data/a.parquet", copy_if_outside=False)
 
     with pytest.raises(ttf.SchemaMismatchError) as excinfo:
-        tbl.append_parquet(str(seg_b), copy_if_outside=False)
+        tbl.append_parquet("data/b.parquet", copy_if_outside=False)
     assert getattr(excinfo.value, "table_root", None) == str(root)
 
 
