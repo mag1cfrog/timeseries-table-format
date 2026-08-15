@@ -2,12 +2,14 @@ mod segment_pruning;
 #[cfg(test)]
 mod tests;
 mod time_predicate;
+mod timestamp_pruning;
 use arrow::datatypes::DataType;
 
 use chrono::FixedOffset;
 
 use chrono_tz::Tz;
 pub(crate) use time_predicate::*;
+pub(crate) use timestamp_pruning::{UnifiedInterval, add_interval};
 
 mod pruning;
 use crate::storage::file_size;
