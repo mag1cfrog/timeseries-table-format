@@ -14,6 +14,7 @@ use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
+use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::logical_expr::{Expr, Operator};
@@ -33,7 +34,9 @@ use timeseries_table_format::metadata::logical_schema::{
 };
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::TimeSeriesTable;
-use timeseries_table_format::transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket};
+use timeseries_table_format::transaction_log::{
+    Commit, IndexKind, IndexSpec, LogAction, TableMeta, TimeBucket,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -44,24 +47,41 @@ struct TestRow {
     price: Option<f64>,
 }
 
+const UTC_PRUNING_FILES: &[&str] = &[
+    "time-before.parquet",
+    "time-target.parquet",
+    "time-after.parquet",
+];
+
 fn make_index_spec() -> IndexSpec {
+    make_index_spec_with_timezone(None)
+}
+
+fn make_index_spec_with_timezone(timezone: Option<&str>) -> IndexSpec {
     IndexSpec {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
             bucket: TimeBucket::Minutes(1),
-            timezone: None,
+            timezone: timezone.map(str::to_string),
         },
     }
 }
 
 fn make_table_meta(price_nullable: bool) -> Result<TableMeta, Box<dyn std::error::Error>> {
+    make_table_meta_with_timezone(price_nullable, None)
+}
+
+fn make_table_meta_with_timezone(
+    price_nullable: bool,
+    timezone: Option<&str>,
+) -> Result<TableMeta, Box<dyn std::error::Error>> {
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
-                timezone: None,
+                timezone: timezone.map(str::to_string),
             },
             nullable: false,
         },
@@ -78,7 +98,7 @@ fn make_table_meta(price_nullable: bool) -> Result<TableMeta, Box<dyn std::error
     ])?;
 
     Ok(TableMeta::new_time_series_with_schema(
-        make_index_spec(),
+        make_index_spec_with_timezone(timezone),
         logical_schema,
     ))
 }
@@ -690,6 +710,105 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     Ok(table)
 }
 
+async fn create_utc_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
+    let mut table = create_table(tmp, false).await?;
+    let segments = [
+        (UTC_PRUNING_FILES[0], 0, 59_999, 10.0),
+        (UTC_PRUNING_FILES[1], 60_000, 119_999, 20.0),
+        (UTC_PRUNING_FILES[2], 120_000, 179_999, 30.0),
+    ];
+
+    for (file, min, max, price) in segments {
+        let path = format!("data/{file}");
+        let rows = [
+            TestRow {
+                ts_millis: min,
+                symbol: "A",
+                price: Some(price),
+            },
+            TestRow {
+                ts_millis: max,
+                symbol: "A",
+                price: Some(price + 1.0),
+            },
+        ];
+        write_segment(tmp.path(), &path, &rows, false)?;
+        table.append_parquet_segment(&path).await?;
+    }
+
+    Ok(table)
+}
+
+async fn create_zoned_pruning_table(
+    tmp: &TempDir,
+    timezone: &str,
+    segments: &[(&str, &str, &str, f64)],
+) -> TestResult<TimeSeriesTable> {
+    // Parquet logical schema extraction does not preserve named timezones, so
+    // append the real files first and record the canonical zoned schema after.
+    let meta = make_table_meta(false)?;
+    let mut table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
+
+    for &(file, min, max, price) in segments {
+        let path = format!("data/{file}");
+        let rows = [
+            TestRow {
+                ts_millis: ts_millis(min),
+                symbol: "A",
+                price: Some(price),
+            },
+            TestRow {
+                ts_millis: ts_millis(max),
+                symbol: "A",
+                price: Some(price + 1.0),
+            },
+        ];
+        write_parquet_with_props_and_tz(
+            &tmp.path().join(&path),
+            &rows,
+            false,
+            None,
+            Some(timezone),
+        )?;
+        table.append_parquet_segment(&path).await?;
+    }
+
+    let base_version = table.state().version;
+    let coverage_path = table
+        .state()
+        .table_coverage
+        .as_ref()
+        .ok_or("expected table coverage after append")?
+        .coverage_path
+        .clone();
+    let index_kind = make_index_spec_with_timezone(Some(timezone)).kind;
+    let commit = Commit {
+        version: base_version + 1,
+        base_version,
+        timestamp: Utc::now(),
+        actions: vec![
+            LogAction::UpdateTableMeta(make_table_meta_with_timezone(false, Some(timezone))?),
+            LogAction::UpdateTableCoverage {
+                index_kind,
+                coverage_path,
+            },
+        ],
+    };
+    tokio::fs::write(
+        tmp.path().join(layout::commit_rel_path(commit.version)),
+        serde_json::to_vec(&commit)?,
+    )
+    .await?;
+    tokio::fs::write(
+        tmp.path().join(layout::current_rel_path()),
+        format!("{}\n", commit.version),
+    )
+    .await?;
+    drop(table);
+
+    Ok(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?)
+}
+
 async fn create_single_segment_table_with_props(
     tmp: &TempDir,
     rel_path: &str,
@@ -787,6 +906,39 @@ fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str])
         positions.windows(2).all(|pair| pair[0] < pair[1]),
         "selected files are not in deterministic index order; plan:\n{plan}"
     );
+}
+
+fn planned_file_names(plan: &dyn ExecutionPlan) -> TestResult<Vec<String>> {
+    let exec = find_data_source_exec(plan).ok_or("expected DataSourceExec in physical plan")?;
+    let scan = exec
+        .data_source()
+        .as_any()
+        .downcast_ref::<FileScanConfig>()
+        .ok_or("expected FileScanConfig in DataSourceExec")?;
+
+    scan.file_groups
+        .iter()
+        .flat_map(|group| group.files())
+        .map(|file| {
+            file.object_meta
+                .location
+                .filename()
+                .map(str::to_string)
+                .ok_or_else(|| "planned file path has no filename".into())
+        })
+        .collect()
+}
+
+async fn run_timestamp_query(
+    ctx: &SessionContext,
+    predicate: &str,
+) -> TestResult<(Vec<String>, Vec<RecordBatch>)> {
+    let query = format!("SELECT ts FROM t WHERE {predicate} ORDER BY ts");
+    let dataframe = ctx.sql(&query).await?;
+    let plan = dataframe.create_physical_plan().await?;
+    let files = planned_file_names(plan.as_ref())?;
+    let batches = collect(plan, ctx.task_ctx()).await?;
+    Ok((files, batches))
 }
 
 fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
@@ -1591,6 +1743,338 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
     let max_ts = scalar_i64_from_array(batch.column(1).as_ref())?;
     assert_eq!(min_ts, minutes_to_millis(1));
     assert_eq!(max_ts, minutes_to_millis(3) + 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn timestamp_direct_predicates_select_expected_files_and_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_utc_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let cases = [
+        (
+            "ts = '1970-01-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000],
+        ),
+        (
+            "ts < '1970-01-01T00:01:00Z'",
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
+        ),
+        (
+            "ts <= '1970-01-01T00:01:00Z'",
+            vec!["time-before.parquet", "time-target.parquet"],
+            vec![0, 59_999, 60_000],
+        ),
+        (
+            "ts > '1970-01-01T00:01:59.999Z'",
+            vec!["time-after.parquet"],
+            vec![120_000, 179_999],
+        ),
+        (
+            "ts >= '1970-01-01T00:01:59.999Z'",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![119_999, 120_000, 179_999],
+        ),
+        (
+            "to_timestamp('1970-01-01T00:01:00Z') > ts",
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
+        ),
+        (
+            "ts BETWEEN '1970-01-01T00:01:00Z' AND '1970-01-01T00:01:59.999Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "ts NOT BETWEEN '1970-01-01T00:01:00Z' AND '1970-01-01T00:01:59.999Z'",
+            vec!["time-before.parquet", "time-after.parquet"],
+            vec![0, 59_999, 120_000, 179_999],
+        ),
+        (
+            "ts IN ('1970-01-01T00:01:00Z', '1970-01-01T00:01:59.999Z')",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "ts NOT IN ('1970-01-01T00:01:00Z')",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 119_999, 120_000, 179_999],
+        ),
+        (
+            "ts >= '1970-01-01T00:01:00Z' AND ts <= '1970-01-01T00:01:59.999Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "ts <= '1970-01-01T00:00:59.999Z' OR ts >= '1970-01-01T00:02:00Z'",
+            vec!["time-before.parquet", "time-after.parquet"],
+            vec![0, 59_999, 120_000, 179_999],
+        ),
+        (
+            "NOT (ts < '1970-01-01T00:01:00Z')",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![60_000, 119_999, 120_000, 179_999],
+        ),
+        (
+            "ts != '1970-01-01T00:01:00Z'",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 119_999, 120_000, 179_999],
+        ),
+        (
+            "price BETWEEN 20.0 AND 21.0",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![60_000, 119_999],
+        ),
+        (
+            "date_part('minute', ts) = 1",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![60_000, 119_999],
+        ),
+        ("ts < '1969-12-31T23:59:59Z'", vec![], vec![]),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+        assert_eq!(files, expected_files, "wrong files for {predicate}");
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong rows for {predicate}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_utc_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let cases = [
+        (
+            "ts + interval '1 minute' = '1970-01-01T00:02:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000],
+        ),
+        (
+            "ts - interval '1 minute' >= '1970-01-01T00:01:00Z'",
+            vec!["time-after.parquet"],
+            vec![120_000, 179_999],
+        ),
+        (
+            "to_timestamp('1970-01-01T00:02:00Z') <= ts + interval '1 minute'",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![60_000, 119_999, 120_000, 179_999],
+        ),
+        (
+            "ts + interval '1 month' = '1970-02-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000],
+        ),
+        (
+            "ts + interval '1 millisecond' <= '1970-01-01T00:02:00Z'",
+            vec!["time-before.parquet", "time-target.parquet"],
+            vec![0, 59_999, 60_000, 119_999],
+        ),
+        (
+            "ts - ts < interval '1 second'",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 60_000, 119_999, 120_000, 179_999],
+        ),
+        (
+            "to_unixtime(ts) < 60",
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
+        ),
+        (
+            "to_unixtime(ts) < '60'",
+            UTC_PRUNING_FILES.to_vec(),
+            vec![0, 59_999, 119_999, 120_000, 179_999],
+        ),
+        (
+            "date_trunc('minute', ts) = '1970-01-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "date_bin(interval '1 minute', ts) = '1970-01-01T00:01:00Z'",
+            vec!["time-target.parquet"],
+            vec![60_000, 119_999],
+        ),
+        (
+            "date_bin(interval '1 minute', ts, to_timestamp('1970-01-01T00:00:30Z')) = '1970-01-01T00:01:30Z'",
+            vec!["time-target.parquet", "time-after.parquet"],
+            vec![119_999, 120_000],
+        ),
+        (
+            "date_trunc('minute', ts) < '1970-01-01T00:01:30Z'",
+            vec!["time-before.parquet", "time-target.parquet"],
+            vec![0, 59_999, 60_000, 119_999],
+        ),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+        assert_eq!(files, expected_files, "wrong files for {predicate}");
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong rows for {predicate}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn timestamp_calendar_date_transforms_select_expected_files_and_rows() -> TestResult {
+    const FILES: &[&str] = &[
+        "calendar-before.parquet",
+        "calendar-target.parquet",
+        "calendar-after.parquet",
+    ];
+    let tmp = TempDir::new()?;
+    let table = create_zoned_pruning_table(
+        &tmp,
+        "UTC",
+        &[
+            (
+                FILES[0],
+                "2024-01-07T00:00:00Z",
+                "2024-01-07T23:59:59.999Z",
+                10.0,
+            ),
+            (
+                FILES[1],
+                "2024-01-08T00:00:00Z",
+                "2024-01-08T23:59:59.999Z",
+                20.0,
+            ),
+            (
+                FILES[2],
+                "2024-01-09T00:00:00Z",
+                "2024-01-09T23:59:59.999Z",
+                30.0,
+            ),
+        ],
+    )
+    .await?;
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::new(table))?;
+    let expected_values = vec![
+        ts_millis("2024-01-08T00:00:00Z"),
+        ts_millis("2024-01-08T23:59:59.999Z"),
+    ];
+
+    for predicate in [
+        "to_date(CAST(ts AS VARCHAR)) = '2024-01-08'",
+        "date_trunc('day', ts) = '2024-01-08T00:00:00Z'",
+    ] {
+        let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+        assert_eq!(files, vec![FILES[1]], "wrong files for {predicate}");
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong rows for {predicate}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestResult {
+    const FILES: &[&str] = &[
+        "dst-before-day.parquet",
+        "dst-day-start.parquet",
+        "dst-before-jump.parquet",
+        "dst-after-jump.parquet",
+        "dst-after-day.parquet",
+    ];
+    let tmp = TempDir::new()?;
+    let table = create_zoned_pruning_table(
+        &tmp,
+        "America/New_York",
+        &[
+            (
+                FILES[0],
+                "2024-03-10T04:00:00Z",
+                "2024-03-10T04:59:59.999Z",
+                10.0,
+            ),
+            (
+                FILES[1],
+                "2024-03-10T05:00:00Z",
+                "2024-03-10T05:59:59.999Z",
+                20.0,
+            ),
+            (
+                FILES[2],
+                "2024-03-10T06:00:00Z",
+                "2024-03-10T06:59:59.999Z",
+                30.0,
+            ),
+            (
+                FILES[3],
+                "2024-03-10T07:00:00Z",
+                "2024-03-10T07:59:59.999Z",
+                40.0,
+            ),
+            (
+                FILES[4],
+                "2024-03-11T04:00:00Z",
+                "2024-03-11T04:59:59.999Z",
+                50.0,
+            ),
+        ],
+    )
+    .await?;
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::new(table))?;
+    let cases = [
+        (
+            "date_trunc('day', ts) = '2024-03-10T00:00:00-05:00'",
+            vec![FILES[1], FILES[2], FILES[3]],
+            vec![
+                ts_millis("2024-03-10T05:00:00Z"),
+                ts_millis("2024-03-10T05:59:59.999Z"),
+                ts_millis("2024-03-10T06:00:00Z"),
+                ts_millis("2024-03-10T06:59:59.999Z"),
+                ts_millis("2024-03-10T07:00:00Z"),
+                ts_millis("2024-03-10T07:59:59.999Z"),
+            ],
+        ),
+        (
+            "date_trunc('hour', ts) = '2024-03-10T01:00:00-05:00'",
+            vec![FILES[2]],
+            vec![
+                ts_millis("2024-03-10T06:00:00Z"),
+                ts_millis("2024-03-10T06:59:59.999Z"),
+            ],
+        ),
+        (
+            "date_bin(interval '2 hours', ts) = '2024-03-10T01:00:00-05:00'",
+            vec![FILES[2], FILES[3]],
+            vec![
+                ts_millis("2024-03-10T06:00:00Z"),
+                ts_millis("2024-03-10T06:59:59.999Z"),
+                ts_millis("2024-03-10T07:00:00Z"),
+                ts_millis("2024-03-10T07:59:59.999Z"),
+            ],
+        ),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+        assert_eq!(files, expected_files, "wrong files for {predicate}");
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong rows for {predicate}"
+        );
+    }
     Ok(())
 }
 
