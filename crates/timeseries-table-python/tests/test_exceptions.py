@@ -35,6 +35,8 @@ def test_coverage_overlap_maps_to_specific_exception():
         tbl = pa.table({"ts": ts, "v": v})
         pq.write_table(tbl, first_parquet_path)
         pq.write_table(tbl, second_parquet_path)
+        with open(second_parquet_path, "rb") as source:
+            second_before = source.read()
 
         with pytest.raises(ttf.CoverageOverlapError) as excinfo:
             testing._test_trigger_overlap(
@@ -46,6 +48,10 @@ def test_coverage_overlap_maps_to_specific_exception():
         assert isinstance(e.overlap_count, int)
         assert e.overlap_count > 0
         assert e.example_bucket is None or isinstance(e.example_bucket, int)
+        assert os.path.exists(os.path.join(table_root, "data", "first.parquet"))
+        assert not os.path.exists(os.path.join(table_root, "data", "second.parquet"))
+        with open(second_parquet_path, "rb") as source:
+            assert source.read() == second_before
 
 
 def test_test_sleep_without_gil_allows_other_threads_to_run():

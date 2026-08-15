@@ -1398,8 +1398,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             use std::path::{Component, Path};
 
             use timeseries_table_format::storage::StorageLocation;
-            use timeseries_table_format::table::TableError;
-
             let rt = tokio_runner::global_runtime()?;
 
             let effective_time_column =
@@ -1417,12 +1415,14 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 rt.as_ref(),
                 async move {
                     let rel_path = if copy_if_outside {
-                        location
-                            .ensure_parquet_under_root(Path::new(&parquet_path))
+                        return table
+                            .append_parquet_from_path(
+                                Path::new(&parquet_path),
+                                &effective_time_column,
+                            )
                             .await
-                            .map_err(|source| {
-                                AppendParquetError::Table(TableError::Storage { source })
-                            })?
+                            .map(|(version, _)| version)
+                            .map_err(AppendParquetError::Table);
                     } else {
                         let root_path = match location.storage() {
                             StorageLocation::Local(p) => p.as_path(),
@@ -1534,22 +1534,13 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 let location = TableLocation::parse(&table_root)
                     .map_err(|e| TableError::Storage { source: e })?;
 
-                let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
-
-                let first_rel = location
-                    .ensure_parquet_under_root(Path::new(&first_parquet_path))
-                    .await
-                    .map_err(|e| TableError::Storage { source: e })?;
-                let second_rel = location
-                    .ensure_parquet_under_root(Path::new(&second_parquet_path))
-                    .await
-                    .map_err(|e| TableError::Storage { source: e })?;
+                let mut table = TimeSeriesTable::create(location, meta).await?;
 
                 let _v1 = table
-                    .append_parquet_segment(&first_rel.to_string_lossy(), "ts")
+                    .append_parquet_from_path(Path::new(&first_parquet_path), "ts")
                     .await?;
                 let _v2 = table
-                    .append_parquet_segment(&second_rel.to_string_lossy(), "ts")
+                    .append_parquet_from_path(Path::new(&second_parquet_path), "ts")
                     .await?;
 
                 Ok::<(), TableError>(())
