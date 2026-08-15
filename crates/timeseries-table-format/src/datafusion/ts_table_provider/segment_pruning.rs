@@ -320,6 +320,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["data/second.parquet", "data/third.parquet"]
         );
+
+        let null_predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(PhysicalColumn::new("idx", 0)),
+            Operator::Eq,
+            Arc::new(Literal::new(ScalarValue::Int64(None))),
+        ));
+        let selected =
+            prune_segments(&schema, &index, segments.iter().collect(), &null_predicate).unwrap();
+        assert_eq!(selected.len(), segments.len());
     }
 
     #[test]
@@ -435,5 +444,17 @@ mod tests {
                 .contains("data/wrong-domain.parquet")
         );
         assert!(segment_error.to_string().contains("expected int64"));
+
+        let reversed = segment(
+            "data/reversed.parquet",
+            IndexValue::Int64(2),
+            IndexValue::Int64(1),
+        );
+        let reversed_error =
+            segment_pruning_statistics(&schema(DataType::Int64), &signed_index, &[&reversed])
+                .err()
+                .expect("reversed bounds must fail");
+        assert!(reversed_error.to_string().contains("data/reversed.parquet"));
+        assert!(reversed_error.to_string().contains("expected min <= max"));
     }
 }
