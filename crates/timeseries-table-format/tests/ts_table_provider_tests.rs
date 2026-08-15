@@ -1,12 +1,13 @@
 //! Integration tests for the DataFusion table provider.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
-    TimestampMillisecondBuilder, UInt64Array,
+    Array, ArrayRef, Float64Builder, Int64Array, StringArray, StringBuilder,
+    TimestampMillisecondArray, TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -494,6 +495,186 @@ fn write_segment(
     write_parquet(&abs, rows, price_nullable)
 }
 
+fn write_numeric_segment(
+    root: &Path,
+    rel_path: &str,
+    index_type: DataType,
+    index_values: ArrayRef,
+    tags: &[&str],
+) -> TestResult {
+    let path = root.join(rel_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("idx", index_type, false),
+        Field::new("tag", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![index_values, Arc::new(StringArray::from(tags.to_vec()))],
+    )?;
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn make_numeric_table_meta(kind: IndexKind, data_type: LogicalDataType) -> TestResult<TableMeta> {
+    let schema = LogicalSchema::new(vec![
+        LogicalField {
+            name: "idx".to_string(),
+            data_type,
+            nullable: false,
+        },
+        LogicalField {
+            name: "tag".to_string(),
+            data_type: LogicalDataType::Utf8,
+            nullable: false,
+        },
+    ])?;
+    Ok(TableMeta::new_time_series_with_schema(
+        IndexSpec {
+            column: "idx".to_string(),
+            entity_columns: vec![],
+            kind,
+        },
+        schema,
+    ))
+}
+
+async fn append_int64_segment(
+    table: &mut TimeSeriesTable,
+    root: &Path,
+    rel_path: &str,
+    values: &[i64],
+    tags: &[&str],
+) -> TestResult {
+    write_numeric_segment(
+        root,
+        rel_path,
+        DataType::Int64,
+        Arc::new(Int64Array::from(values.to_vec())),
+        tags,
+    )?;
+    table.append_parquet_segment(rel_path).await?;
+    Ok(())
+}
+
+async fn append_uint64_segment(
+    table: &mut TimeSeriesTable,
+    root: &Path,
+    rel_path: &str,
+    values: &[u64],
+    tags: &[&str],
+) -> TestResult {
+    write_numeric_segment(
+        root,
+        rel_path,
+        DataType::UInt64,
+        Arc::new(UInt64Array::from(values.to_vec())),
+        tags,
+    )?;
+    table.append_parquet_segment(rel_path).await?;
+    Ok(())
+}
+
+async fn create_int64_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
+    let meta = make_numeric_table_meta(
+        IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        },
+        LogicalDataType::Int64,
+    )?;
+    let mut table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
+    append_int64_segment(
+        &mut table,
+        tmp.path(),
+        "data/int-a.parquet",
+        &[i64::MIN, -10],
+        &["other", "other"],
+    )
+    .await?;
+    append_int64_segment(
+        &mut table,
+        tmp.path(),
+        "data/int-b.parquet",
+        &[-1],
+        &["other"],
+    )
+    .await?;
+    append_int64_segment(
+        &mut table,
+        tmp.path(),
+        "data/int-c.parquet",
+        &[0],
+        &["zero"],
+    )
+    .await?;
+    append_int64_segment(
+        &mut table,
+        tmp.path(),
+        "data/int-d.parquet",
+        &[1, 10],
+        &["other", "other"],
+    )
+    .await?;
+    append_int64_segment(
+        &mut table,
+        tmp.path(),
+        "data/int-e.parquet",
+        &[20, i64::MAX],
+        &["other", "other"],
+    )
+    .await?;
+    Ok(table)
+}
+
+async fn create_uint64_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
+    let meta = make_numeric_table_meta(
+        IndexKind::UInt64 {
+            bucket_width: NonZeroU64::new(1).unwrap(),
+        },
+        LogicalDataType::UInt64,
+    )?;
+    let mut table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
+    let signed_max = i64::MAX as u64;
+    append_uint64_segment(
+        &mut table,
+        tmp.path(),
+        "data/uint-a.parquet",
+        &[0],
+        &["zero"],
+    )
+    .await?;
+    append_uint64_segment(
+        &mut table,
+        tmp.path(),
+        "data/uint-b.parquet",
+        &[signed_max],
+        &["other"],
+    )
+    .await?;
+    append_uint64_segment(
+        &mut table,
+        tmp.path(),
+        "data/uint-c.parquet",
+        &[signed_max + 1, signed_max + 2],
+        &["other", "other"],
+    )
+    .await?;
+    append_uint64_segment(
+        &mut table,
+        tmp.path(),
+        "data/uint-d.parquet",
+        &[u64::MAX],
+        &["max"],
+    )
+    .await?;
+    Ok(table)
+}
+
 async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
     let mut table = create_table(tmp, false).await?;
 
@@ -568,6 +749,46 @@ fn explain_plan_text(batches: &[RecordBatch]) -> Result<String, Box<dyn std::err
     Ok(out.join("\n"))
 }
 
+fn numeric_select(predicate: Option<&str>) -> String {
+    match predicate {
+        Some(predicate) => format!("SELECT idx FROM t WHERE {predicate} ORDER BY idx"),
+        None => "SELECT idx FROM t ORDER BY idx".to_string(),
+    }
+}
+
+async fn run_numeric_query(
+    ctx: &SessionContext,
+    predicate: Option<&str>,
+) -> TestResult<(String, Vec<RecordBatch>)> {
+    let query = numeric_select(predicate);
+    let explain = collect_batches(ctx, &format!("EXPLAIN VERBOSE {query}")).await?;
+    let plan = explain_plan_text(&explain)?;
+    let results = collect_batches(ctx, &query).await?;
+    Ok((plan, results))
+}
+
+fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str]) {
+    for file in all_files {
+        assert_eq!(
+            plan.contains(file),
+            expected_files.contains(file),
+            "unexpected selection for {file}; plan:\n{plan}"
+        );
+    }
+
+    let positions = expected_files
+        .iter()
+        .map(|file| {
+            plan.find(file)
+                .unwrap_or_else(|| panic!("expected plan to contain {file}; plan:\n{plan}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "selected files are not in deterministic index order; plan:\n{plan}"
+    );
+}
+
 fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
     if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
         return Some(exec);
@@ -606,7 +827,7 @@ fn field_names(batch: &RecordBatch) -> Vec<String> {
         .collect()
 }
 
-fn collect_ts_values(batches: &[RecordBatch]) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+fn collect_i64_values(batches: &[RecordBatch]) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     for batch in batches {
         let array = batch.column(0);
@@ -618,7 +839,7 @@ fn collect_ts_values(batches: &[RecordBatch]) -> Result<Vec<i64>, Box<dyn std::e
                     .ok_or("expected TimestampMillisecondArray")?;
                 for idx in 0..arr.len() {
                     if arr.is_null(idx) {
-                        return Err("unexpected null timestamp".into());
+                        return Err("unexpected null value".into());
                     }
                     out.push(arr.value(idx));
                 }
@@ -630,12 +851,30 @@ fn collect_ts_values(batches: &[RecordBatch]) -> Result<Vec<i64>, Box<dyn std::e
                     .ok_or("expected Int64Array")?;
                 for idx in 0..arr.len() {
                     if arr.is_null(idx) {
-                        return Err("unexpected null timestamp".into());
+                        return Err("unexpected null value".into());
                     }
                     out.push(arr.value(idx));
                 }
             }
-            other => return Err(format!("unexpected ts type {other:?}").into()),
+            other => return Err(format!("unexpected value type {other:?}").into()),
+        }
+    }
+    Ok(out)
+}
+
+fn collect_u64_values(batches: &[RecordBatch]) -> TestResult<Vec<u64>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let array = batch.column(0);
+        let values = array
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or("expected UInt64Array")?;
+        for idx in 0..values.len() {
+            if values.is_null(idx) {
+                return Err("unexpected null value".into());
+            }
+            out.push(values.value(idx));
         }
     }
     Ok(out)
@@ -808,7 +1047,7 @@ async fn order_by_limit_returns_descending_rows() -> TestResult {
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts DESC LIMIT 3").await?;
-    let values = collect_ts_values(&batches)?;
+    let values = collect_i64_values(&batches)?;
     assert_eq!(values.len(), 3);
     assert_eq!(
         values,
@@ -1352,5 +1591,285 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
     let max_ts = scalar_i64_from_array(batch.column(1).as_ref())?;
     assert_eq!(min_ts, minutes_to_millis(1));
     assert_eq!(max_ts, minutes_to_millis(3) + 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn int64_queries_prune_planned_files_and_return_exact_rows() -> TestResult {
+    const FILES: &[&str] = &[
+        "int-a.parquet",
+        "int-b.parquet",
+        "int-c.parquet",
+        "int-d.parquet",
+        "int-e.parquet",
+    ];
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_int64_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let cases = vec![
+        (
+            None,
+            FILES.to_vec(),
+            vec![i64::MIN, -10, -1, 0, 1, 10, 20, i64::MAX],
+        ),
+        (
+            Some("idx < 0"),
+            vec!["int-a.parquet", "int-b.parquet"],
+            vec![i64::MIN, -10, -1],
+        ),
+        (
+            Some("0 > idx"),
+            vec!["int-a.parquet", "int-b.parquet"],
+            vec![i64::MIN, -10, -1],
+        ),
+        (
+            Some("idx <= -10"),
+            vec!["int-a.parquet"],
+            vec![i64::MIN, -10],
+        ),
+        (
+            Some("-10 >= idx"),
+            vec!["int-a.parquet"],
+            vec![i64::MIN, -10],
+        ),
+        (Some("idx > 10"), vec!["int-e.parquet"], vec![20, i64::MAX]),
+        (Some("10 < idx"), vec!["int-e.parquet"], vec![20, i64::MAX]),
+        (Some("idx >= 20"), vec!["int-e.parquet"], vec![20, i64::MAX]),
+        (Some("20 <= idx"), vec!["int-e.parquet"], vec![20, i64::MAX]),
+        (Some("idx = 0"), vec!["int-c.parquet"], vec![0]),
+        (Some("0 = idx"), vec!["int-c.parquet"], vec![0]),
+        (
+            Some("idx != 0"),
+            vec![
+                "int-a.parquet",
+                "int-b.parquet",
+                "int-d.parquet",
+                "int-e.parquet",
+            ],
+            vec![i64::MIN, -10, -1, 1, 10, 20, i64::MAX],
+        ),
+        (
+            Some("0 != idx"),
+            vec![
+                "int-a.parquet",
+                "int-b.parquet",
+                "int-d.parquet",
+                "int-e.parquet",
+            ],
+            vec![i64::MIN, -10, -1, 1, 10, 20, i64::MAX],
+        ),
+        (
+            Some("idx BETWEEN -1 AND 1"),
+            vec!["int-b.parquet", "int-c.parquet", "int-d.parquet"],
+            vec![-1, 0, 1],
+        ),
+        (
+            Some("idx NOT BETWEEN -1 AND 1"),
+            vec!["int-a.parquet", "int-d.parquet", "int-e.parquet"],
+            vec![i64::MIN, -10, 10, 20, i64::MAX],
+        ),
+        (
+            Some("idx IN (-1, 20)"),
+            vec!["int-b.parquet", "int-e.parquet"],
+            vec![-1, 20],
+        ),
+        (
+            Some("idx NOT IN (-1, 20)"),
+            vec![
+                "int-a.parquet",
+                "int-c.parquet",
+                "int-d.parquet",
+                "int-e.parquet",
+            ],
+            vec![i64::MIN, -10, 0, 1, 10, i64::MAX],
+        ),
+        (
+            Some("idx >= 0 AND idx <= 1"),
+            vec!["int-c.parquet", "int-d.parquet"],
+            vec![0, 1],
+        ),
+        (
+            Some("idx < -10 OR idx > 10"),
+            vec!["int-a.parquet", "int-e.parquet"],
+            vec![i64::MIN, 20, i64::MAX],
+        ),
+        (
+            Some("NOT (idx < 1)"),
+            vec!["int-d.parquet", "int-e.parquet"],
+            vec![1, 10, 20, i64::MAX],
+        ),
+        (Some("idx > 9223372036854775807"), vec![], vec![]),
+        (Some("tag = 'zero'"), FILES.to_vec(), vec![0]),
+        (
+            Some("idx = 0 AND tag = 'zero'"),
+            vec!["int-c.parquet"],
+            vec![0],
+        ),
+        (Some("idx = 0 OR tag = 'never'"), FILES.to_vec(), vec![0]),
+        (
+            Some("idx + CAST(char_length(tag) AS BIGINT) = 4"),
+            FILES.to_vec(),
+            vec![-1, 0],
+        ),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let (plan, batches) = run_numeric_query(&ctx, predicate).await?;
+        assert_planned_files(&plan, FILES, &expected_files);
+        assert_eq!(
+            collect_i64_values(&batches)?,
+            expected_values,
+            "wrong results for predicate {predicate:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn uint64_queries_prune_planned_files_without_signed_narrowing() -> TestResult {
+    const FILES: &[&str] = &[
+        "uint-a.parquet",
+        "uint-b.parquet",
+        "uint-c.parquet",
+        "uint-d.parquet",
+    ];
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_uint64_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let signed_max = i64::MAX as u64;
+    let signed_max_sql = "CAST('9223372036854775807' AS BIGINT UNSIGNED)";
+    let above_signed_max_sql = "CAST('9223372036854775808' AS BIGINT UNSIGNED)";
+    let unsigned_max_sql = "CAST('18446744073709551615' AS BIGINT UNSIGNED)";
+    let cases = vec![
+        (
+            None,
+            FILES.to_vec(),
+            vec![0, signed_max, signed_max + 1, signed_max + 2, u64::MAX],
+        ),
+        (
+            Some(format!("idx < {signed_max_sql}")),
+            vec!["uint-a.parquet"],
+            vec![0],
+        ),
+        (
+            Some(format!("idx <= {signed_max_sql}")),
+            vec!["uint-a.parquet", "uint-b.parquet"],
+            vec![0, signed_max],
+        ),
+        (
+            Some(format!("idx > {signed_max_sql}")),
+            vec!["uint-c.parquet", "uint-d.parquet"],
+            vec![signed_max + 1, signed_max + 2, u64::MAX],
+        ),
+        (
+            Some(format!("idx >= {above_signed_max_sql}")),
+            vec!["uint-c.parquet", "uint-d.parquet"],
+            vec![signed_max + 1, signed_max + 2, u64::MAX],
+        ),
+        (
+            Some(format!("idx = {unsigned_max_sql}")),
+            vec!["uint-d.parquet"],
+            vec![u64::MAX],
+        ),
+        (
+            Some(format!("idx != {unsigned_max_sql}")),
+            vec!["uint-a.parquet", "uint-b.parquet", "uint-c.parquet"],
+            vec![0, signed_max, signed_max + 1, signed_max + 2],
+        ),
+        (
+            Some(format!(
+                "idx BETWEEN {signed_max_sql} AND {above_signed_max_sql}"
+            )),
+            vec!["uint-b.parquet", "uint-c.parquet"],
+            vec![signed_max, signed_max + 1],
+        ),
+        (
+            Some(format!(
+                "idx NOT BETWEEN {signed_max_sql} AND {above_signed_max_sql}"
+            )),
+            vec!["uint-a.parquet", "uint-c.parquet", "uint-d.parquet"],
+            vec![0, signed_max + 2, u64::MAX],
+        ),
+        (
+            Some(format!("idx IN (0, {unsigned_max_sql})")),
+            vec!["uint-a.parquet", "uint-d.parquet"],
+            vec![0, u64::MAX],
+        ),
+        (
+            Some(format!("idx NOT IN (0, {unsigned_max_sql})")),
+            vec!["uint-b.parquet", "uint-c.parquet"],
+            vec![signed_max, signed_max + 1, signed_max + 2],
+        ),
+        (
+            Some(format!(
+                "idx > {signed_max_sql} AND idx < {unsigned_max_sql}"
+            )),
+            vec!["uint-c.parquet"],
+            vec![signed_max + 1, signed_max + 2],
+        ),
+        (
+            Some(format!("idx = 0 OR idx = {above_signed_max_sql}")),
+            vec!["uint-a.parquet", "uint-c.parquet"],
+            vec![0, signed_max + 1],
+        ),
+        (
+            Some(format!("NOT (idx < {above_signed_max_sql})")),
+            vec!["uint-c.parquet", "uint-d.parquet"],
+            vec![signed_max + 1, signed_max + 2, u64::MAX],
+        ),
+        (Some(format!("idx > {unsigned_max_sql}")), vec![], vec![]),
+    ];
+
+    for (predicate, expected_files, expected_values) in cases {
+        let predicate = predicate.as_deref();
+        let (plan, batches) = run_numeric_query(&ctx, predicate).await?;
+        assert_planned_files(&plan, FILES, &expected_files);
+        assert_eq!(
+            collect_u64_values(&batches)?,
+            expected_values,
+            "wrong results for predicate {predicate:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn numeric_pruning_precedes_missing_file_size_lookup() -> TestResult {
+    const FILES: &[&str] = &[
+        "int-a.parquet",
+        "int-b.parquet",
+        "int-c.parquet",
+        "int-d.parquet",
+        "int-e.parquet",
+    ];
+    let tmp = TempDir::new()?;
+    let table = create_int64_table(&tmp).await?;
+    drop(table);
+
+    let commit_path = tmp.path().join(layout::commit_rel_path(2));
+    let mut commit: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+    let segment = commit["actions"]
+        .as_array_mut()
+        .and_then(|actions| {
+            actions
+                .iter_mut()
+                .find_map(|action| action.get_mut("AddSegment"))
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("append commit contains AddSegment");
+    segment.remove("file_size");
+    tokio::fs::write(&commit_path, serde_json::to_vec(&commit)?).await?;
+    tokio::fs::remove_file(tmp.path().join("data/int-a.parquet")).await?;
+
+    let table = Arc::new(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let (plan, batches) = run_numeric_query(&ctx, Some("idx >= 20")).await?;
+
+    assert_planned_files(&plan, FILES, &["int-e.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, vec![20, i64::MAX]);
     Ok(())
 }
