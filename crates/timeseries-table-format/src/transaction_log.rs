@@ -105,15 +105,16 @@ pub enum CommitError {
         source: StorageError,
     },
 
-    /// Publishing CURRENT failed and the new commit file could not be removed.
+    /// A commit operation failed and its newly-created commit file may remain.
     #[snafu(display(
-        "Commit outcome is ambiguous: failed to publish CURRENT: {publish_error}; failed to remove unpublished commit file at {commit_path}: {cleanup_error}"
+        "Commit outcome is ambiguous at {commit_path}: {operation_error}; failed to remove the commit file: {cleanup_error}"
     ))]
     AmbiguousOutcome {
         /// Path of the commit file that may remain unpublished.
         commit_path: String,
-        /// Failure encountered while publishing CURRENT.
-        publish_error: Box<StorageError>,
+        /// Write, sync, or publish failure that triggered cleanup.
+        #[snafu(source)]
+        operation_error: Box<StorageError>,
         /// Failure encountered while removing the unpublished commit file.
         cleanup_error: Box<StorageError>,
         /// Backtrace for debugging.

@@ -67,6 +67,22 @@ pub enum StorageError {
         backtrace: Backtrace,
     },
 
+    /// A newly-created object could not be removed after its write failed.
+    #[snafu(display(
+        "Storage operation failed at {path}: {operation_error}; cleanup also failed: {cleanup_error}"
+    ))]
+    CleanupFailed {
+        /// Path of the object that may remain after the failed cleanup.
+        path: String,
+        /// Original write or sync failure.
+        #[snafu(source)]
+        operation_error: Box<StorageError>,
+        /// Failure encountered while removing the newly-created object.
+        cleanup_error: Box<StorageError>,
+        /// The backtrace at the time the cleanup failure was reported.
+        backtrace: Backtrace,
+    },
+
     /// The specified path already exists when creation was requested with
     /// create-new semantics.
     #[snafu(display("Path already exists: {path}"))]

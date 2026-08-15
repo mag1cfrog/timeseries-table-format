@@ -24,6 +24,7 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyEr
         CoreStorageError::NotFound { path, .. } => Some(path.clone()),
         CoreStorageError::AlreadyExists { path, .. } => Some(path.clone()),
         CoreStorageError::OtherIo { path, .. } => Some(path.clone()),
+        CoreStorageError::CleanupFailed { path, .. } => Some(path.clone()),
         CoreStorageError::AlreadyExistsNoSource { path, .. } => Some(path.clone()),
     };
 
@@ -62,7 +63,9 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
 
         CommitError::Storage { source } => storage_error_to_py(py, source),
 
-        CommitError::CorruptState { .. } => TimeseriesTableError::new_err(msg),
+        CommitError::AmbiguousOutcome { .. } | CommitError::CorruptState { .. } => {
+            TimeseriesTableError::new_err(msg)
+        }
     }
 }
 

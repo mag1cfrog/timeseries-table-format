@@ -1,8 +1,12 @@
 use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
+#[cfg(test)]
 use std::{
-    error::Error,
-    fmt, io,
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
+use std::{
+    io,
     path::{Path, PathBuf},
 };
 use tokio::{
@@ -47,33 +51,46 @@ impl Drop for TempFileGuard {
     }
 }
 
-#[derive(Debug)]
-struct CleanupFailure {
-    operation: StorageError,
-    cleanup: io::Error,
-}
-
-impl fmt::Display for CleanupFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}; cleanup of the newly-created file also failed: {}",
-            self.operation, self.cleanup
-        )
-    }
-}
-
-impl Error for CleanupFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.operation)
-    }
-}
-
 fn cleanup_failure(path: &Path, operation: StorageError, cleanup: io::Error) -> StorageError {
-    let kind = cleanup.kind();
+    let path = path.display().to_string();
+    let cleanup_error = StorageError::OtherIo {
+        path: path.clone(),
+        source: BackendError::Local(cleanup),
+        backtrace: Backtrace::capture(),
+    };
+    StorageError::CleanupFailed {
+        path,
+        operation_error: Box::new(operation),
+        cleanup_error: Box::new(cleanup_error),
+        backtrace: Backtrace::capture(),
+    }
+}
+
+#[cfg(test)]
+static WRITE_NEW_FAILURES: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
+    WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path, cleanup_fails);
+}
+
+#[cfg(test)]
+fn take_write_new_failure(path: &Path) -> Option<bool> {
+    WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+}
+
+#[cfg(test)]
+fn write_failure(path: &Path) -> StorageError {
     StorageError::OtherIo {
         path: path.display().to_string(),
-        source: BackendError::Local(io::Error::new(kind, CleanupFailure { operation, cleanup })),
+        source: BackendError::Local(io::Error::other("injected write failure")),
         backtrace: Backtrace::capture(),
     }
 }
@@ -91,7 +108,14 @@ async fn cleanup_created_file(
 
 async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
     let mut guard = TempFileGuard::new(path.to_owned());
+    #[cfg(test)]
+    let injected_cleanup_failure = take_write_new_failure(path);
     let result = async {
+        #[cfg(test)]
+        if injected_cleanup_failure.is_some() {
+            return Err(write_failure(path));
+        }
+
         file.write_all(contents)
             .await
             .map_err(BackendError::Local)
@@ -117,6 +141,15 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
         }
         Err(operation) => {
             drop(file);
+            #[cfg(test)]
+            if injected_cleanup_failure == Some(true) {
+                guard.disarm();
+                return Err(cleanup_failure(
+                    path,
+                    operation,
+                    io::Error::other("injected cleanup failure"),
+                ));
+            }
             Err(cleanup_created_file(&mut guard, path, operation).await)
         }
     }
@@ -523,42 +556,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_created_file_removes_owned_target() -> TestResult {
+    async fn write_new_removes_target_after_write_failure() -> TestResult {
         let tmp = TempDir::new()?;
-        let path = tmp.path().join("failed.txt");
-        tokio::fs::write(&path, b"").await?;
-        let mut guard = TempFileGuard::new(path.clone());
-        let operation = StorageError::OtherIo {
-            path: path.display().to_string(),
-            source: BackendError::Local(io::Error::other("write failed")),
-            backtrace: Backtrace::capture(),
-        };
+        let location = StorageLocation::local(tmp.path());
+        let rel_path = Path::new("failed.txt");
+        let path = tmp.path().join(rel_path);
+        inject_write_new_failure(path.clone(), false);
 
-        let err = cleanup_created_file(&mut guard, &path, operation).await;
+        let err = write_new(&location, rel_path, b"contents")
+            .await
+            .expect_err("write should fail");
 
         assert!(matches!(err, StorageError::OtherIo { .. }));
         assert!(!path.exists());
         Ok(())
     }
 
-    #[test]
-    fn cleanup_failure_preserves_both_error_messages() {
-        let path = Path::new("failed.txt");
-        let operation = StorageError::OtherIo {
-            path: path.display().to_string(),
-            source: BackendError::Local(io::Error::other("write failed")),
-            backtrace: Backtrace::capture(),
-        };
-        let err = cleanup_failure(
-            path,
-            operation,
-            io::Error::new(io::ErrorKind::PermissionDenied, "remove failed"),
-        );
+    #[tokio::test]
+    async fn write_new_reports_cleanup_failure() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let rel_path = Path::new("orphaned.txt");
+        let path = tmp.path().join(rel_path);
+        inject_write_new_failure(path.clone(), true);
+
+        let err = write_new(&location, rel_path, b"contents")
+            .await
+            .expect_err("write and cleanup should fail");
         let message = err.to_string();
 
-        assert!(message.contains("failed.txt"));
-        assert!(message.contains("write failed"));
-        assert!(message.contains("remove failed"));
+        assert!(matches!(err, StorageError::CleanupFailed { .. }));
+        assert!(message.contains("orphaned.txt"));
+        assert!(message.contains("injected write failure"));
+        assert!(message.contains("injected cleanup failure"));
+        assert!(path.exists());
+        tokio::fs::remove_file(path).await?;
+        Ok(())
     }
 
     #[tokio::test]

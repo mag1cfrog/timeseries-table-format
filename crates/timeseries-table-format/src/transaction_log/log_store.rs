@@ -70,7 +70,7 @@ impl TransactionLogStore {
             },
             Err(cleanup_error) => CommitError::AmbiguousOutcome {
                 commit_path: commit_rel.display().to_string(),
-                publish_error: Box::new(publish_error),
+                operation_error: Box::new(publish_error),
                 cleanup_error: Box::new(cleanup_error),
                 backtrace: Backtrace::capture(),
             },
@@ -190,9 +190,22 @@ impl TransactionLogStore {
         //    implement automatic conflict resolution (e.g., retrying with rebased
         //    changes if the operations don't actually conflict, like Delta Lake).
         let commit_rel = Self::commit_rel_path(version);
-        storage::write_new(self.location.as_ref(), &commit_rel, &json)
-            .await
-            .map_err(|source| CommitError::Storage { source })?;
+        match storage::write_new(self.location.as_ref(), &commit_rel, &json).await {
+            Ok(()) => {}
+            Err(StorageError::CleanupFailed {
+                operation_error,
+                cleanup_error,
+                ..
+            }) => {
+                return Err(CommitError::AmbiguousOutcome {
+                    commit_path: commit_rel.display().to_string(),
+                    operation_error,
+                    cleanup_error,
+                    backtrace: Backtrace::capture(),
+                });
+            }
+            Err(source) => return Err(CommitError::Storage { source }),
+        }
 
         // 5) Update CURRENT via atomic write (temp + rename).
         let current_rel = storage::layout::current_rel_path();
@@ -475,6 +488,25 @@ mod tests {
         assert!(matches!(err, CommitError::AmbiguousOutcome { .. }));
         assert!(message.contains("missing-current.tmp"));
         assert!(message.contains(&commit_rel.display().to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_write_cleanup_failure_returns_ambiguous_outcome() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let commit_rel = layout::commit_rel_path(1);
+        let commit_path = tmp.path().join(&commit_rel);
+        storage::inject_write_new_failure(commit_path.clone(), true);
+
+        let err = store
+            .commit_with_expected_version(0, vec![])
+            .await
+            .expect_err("commit write and cleanup should fail");
+
+        assert!(matches!(err, CommitError::AmbiguousOutcome { .. }));
+        assert!(commit_path.exists());
+        assert_eq!(store.load_current_version().await?, 0);
+        tokio::fs::remove_file(commit_path).await?;
         Ok(())
     }
 }
