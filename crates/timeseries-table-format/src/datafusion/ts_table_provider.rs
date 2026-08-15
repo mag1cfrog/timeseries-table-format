@@ -1,3 +1,4 @@
+mod segment_pruning;
 #[cfg(test)]
 mod tests;
 mod time_predicate;
@@ -12,6 +13,7 @@ mod pruning;
 use crate::storage::file_size;
 pub(crate) use pruning::*;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,11 +35,12 @@ use datafusion::logical_expr::Expr;
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
-use crate::metadata::table_metadata::IndexValue;
+use crate::metadata::table_metadata::{IndexKind, IndexValue};
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
-use datafusion::logical_expr::utils::conjunction;
+use datafusion::logical_expr::utils::{conjunction, expr_to_columns};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
 use tokio::sync::RwLock;
@@ -152,13 +155,13 @@ impl TsTableProvider {
         Ok(sz)
     }
 
-    /// Return the time column name from the table's index spec.
-    fn time_column_name(&self) -> &str {
+    /// Return the ordered-index column name from the table's index spec.
+    fn index_column_name(&self) -> &str {
         self.table.index_spec().column.as_str()
     }
 
     fn ts_timezone(&self) -> Option<String> {
-        let ts_col = self.time_column_name();
+        let ts_col = self.index_column_name();
         let field = self.schema.field_with_name(ts_col).ok()?;
         match field.data_type() {
             DataType::Timestamp(_, Some(tz)) => Some(tz.to_string()),
@@ -171,7 +174,7 @@ impl TsTableProvider {
         segments: Vec<&'a SegmentMeta>,
         filters: &[Expr],
     ) -> Vec<&'a SegmentMeta> {
-        let ts_col = self.time_column_name();
+        let ts_col = self.index_column_name();
         let tz_opt = self.ts_timezone();
         let parsed_tz = tz_opt.as_deref().and_then(parse_tz);
 
@@ -199,6 +202,35 @@ impl TsTableProvider {
                 _ => true,
             })
             .collect()
+    }
+
+    fn prune_segments_by_index<'a>(
+        &self,
+        segments: Vec<&'a SegmentMeta>,
+        filters: &[Expr],
+        predicate: &Arc<dyn PhysicalExpr>,
+    ) -> DFResult<Vec<&'a SegmentMeta>> {
+        match &self.table.index_spec().kind {
+            IndexKind::Timestamp { .. } => Ok(self.prune_segments_by_time(segments, filters)),
+            IndexKind::Int64 { .. } | IndexKind::UInt64 { .. } => {
+                let mut columns = HashSet::new();
+                for filter in filters {
+                    expr_to_columns(filter, &mut columns)?;
+                }
+                if !columns
+                    .iter()
+                    .any(|column| column.name == self.index_column_name())
+                {
+                    return Ok(segments);
+                }
+                segment_pruning::prune_segments(
+                    &self.schema,
+                    self.table.index_spec(),
+                    segments,
+                    predicate,
+                )
+            }
+        }
     }
 }
 
@@ -235,6 +267,12 @@ impl TableProvider for TsTableProvider {
         // 1) Get a snapshot (TableState) from core table
         let snapshot = self.latest_state().await?;
 
+        for segment in snapshot.segments.values() {
+            segment
+                .validate_bounds(&self.table.index_spec().kind)
+                .map_err(df_external)?;
+        }
+
         let segments = snapshot.segments_sorted_by_index().map_err(df_external)?;
 
         let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
@@ -245,7 +283,8 @@ impl TableProvider for TsTableProvider {
             .unwrap_or_else(|| lit(true));
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
-        let parquet_source = Arc::new(ParquetSource::default().with_predicate(predicate));
+        let parquet_source =
+            Arc::new(ParquetSource::default().with_predicate(Arc::clone(&predicate)));
 
         let mut builder = FileScanConfigBuilder::new(
             self.object_store_url.clone(),
@@ -255,7 +294,7 @@ impl TableProvider for TsTableProvider {
         .with_projection_indices(projection.cloned())
         .with_limit(limit);
 
-        let selected = self.prune_segments_by_time(segments, filters);
+        let selected = self.prune_segments_by_index(segments, filters, &predicate)?;
         for seg in selected {
             let file_size = self.segment_file_size(seg).await?;
             let location = self
