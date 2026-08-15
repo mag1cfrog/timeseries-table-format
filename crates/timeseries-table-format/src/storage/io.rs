@@ -1,5 +1,10 @@
 use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
+#[cfg(test)]
+use std::{
+    collections::HashSet,
+    sync::{LazyLock, Mutex},
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -13,8 +18,7 @@ use crate::storage::{
     BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageLocation, StorageResult,
 };
 
-/// Guard that removes a temporary file on drop unless disarmed.
-/// Used to ensure cleanup on error paths during atomic writes.
+/// Guard that removes a file on drop unless disarmed.
 pub(super) struct TempFileGuard {
     path: PathBuf,
     armed: bool,
@@ -30,6 +34,18 @@ impl TempFileGuard {
     pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
+
+    async fn cleanup(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if take_cleanup_failure(&self.path) {
+            self.disarm();
+            return Err(io::Error::other("injected cleanup failure"));
+        }
+
+        let result = fs::remove_file(&self.path).await;
+        self.disarm();
+        result
+    }
 }
 
 impl Drop for TempFileGuard {
@@ -37,6 +53,119 @@ impl Drop for TempFileGuard {
         if self.armed {
             // Best-effort cleanup; ignore errors since we're likely already handling another error.
             let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn cleanup_failure(path: &Path, operation: StorageError, cleanup: io::Error) -> StorageError {
+    let path = path.display().to_string();
+    let cleanup_error = StorageError::OtherIo {
+        path: path.clone(),
+        source: BackendError::Local(cleanup),
+        backtrace: Backtrace::capture(),
+    };
+    StorageError::CleanupFailed {
+        path,
+        operation_error: Box::new(operation),
+        cleanup_error: Box::new(cleanup_error),
+        backtrace: Backtrace::capture(),
+    }
+}
+
+#[cfg(test)]
+static WRITE_NEW_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
+    if cleanup_fails {
+        CLEANUP_FAILURES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.clone());
+    }
+    WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
+fn take_write_new_failure(path: &Path) -> bool {
+    WRITE_NEW_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+}
+
+#[cfg(test)]
+fn take_cleanup_failure(path: &Path) -> bool {
+    CLEANUP_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+}
+
+#[cfg(test)]
+fn write_failure(path: &Path) -> StorageError {
+    StorageError::OtherIo {
+        path: path.display().to_string(),
+        source: BackendError::Local(io::Error::other("injected write failure")),
+        backtrace: Backtrace::capture(),
+    }
+}
+
+async fn cleanup_created_file(
+    guard: &mut TempFileGuard,
+    path: &Path,
+    operation: StorageError,
+) -> StorageError {
+    match guard.cleanup().await {
+        Ok(()) => operation,
+        Err(cleanup) => cleanup_failure(path, operation, cleanup),
+    }
+}
+
+async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
+    let mut guard = TempFileGuard::new(path.to_owned());
+    #[cfg(test)]
+    let injected_write_failure = take_write_new_failure(path);
+    let result = async {
+        #[cfg(test)]
+        if injected_write_failure {
+            return Err(write_failure(path));
+        }
+
+        file.write_all(contents)
+            .await
+            .map_err(BackendError::Local)
+            .context(OtherIoSnafu {
+                path: path.display().to_string(),
+            })?;
+
+        file.sync_all()
+            .await
+            .map_err(BackendError::Local)
+            .context(OtherIoSnafu {
+                path: path.display().to_string(),
+            })?;
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            guard.disarm();
+            Ok(())
+        }
+        Err(operation) => {
+            drop(file);
+            Err(cleanup_created_file(&mut guard, path, operation).await)
         }
     }
 }
@@ -174,10 +303,25 @@ pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> Stor
     }
 }
 
+pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> StorageResult<()> {
+    match location {
+        StorageLocation::Local(_) => {
+            let abs = join_local(location, rel_path);
+            fs::remove_file(&abs)
+                .await
+                .map_err(BackendError::Local)
+                .context(OtherIoSnafu {
+                    path: abs.display().to_string(),
+                })
+        }
+    }
+}
+
 /// Create a *new* file at `rel_path` and write `contents`, failing if the file
 /// already exists.
 ///
-/// This is used for commit files where we want per-version uniqueness.
+/// This is used for objects that must not overwrite existing data, including
+/// commit files and writer-owned sidecars.
 pub async fn write_new(
     location: &StorageLocation,
     rel_path: &Path,
@@ -197,7 +341,7 @@ pub async fn write_new(
                 .open(&abs)
                 .await;
 
-            let mut file = match open_result {
+            let file = match open_result {
                 Ok(f) => f,
                 Err(e) => {
                     let backend = BackendError::Local(e);
@@ -222,21 +366,7 @@ pub async fn write_new(
                 }
             };
 
-            file.write_all(contents)
-                .await
-                .map_err(BackendError::Local)
-                .context(OtherIoSnafu {
-                    path: abs.display().to_string(),
-                })?;
-
-            file.sync_all()
-                .await
-                .map_err(BackendError::Local)
-                .context(OtherIoSnafu {
-                    path: abs.display().to_string(),
-                })?;
-
-            Ok(())
+            write_created_file(file, &abs, contents).await
         }
     }
 }
@@ -437,6 +567,45 @@ mod tests {
         // Original content should be unchanged.
         let read_back = read_to_string(&location, rel_path).await?;
         assert_eq!(read_back, "first");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_new_removes_target_after_write_failure() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let rel_path = Path::new("failed.txt");
+        let path = tmp.path().join(rel_path);
+        inject_write_new_failure(path.clone(), false);
+
+        let err = write_new(&location, rel_path, b"contents")
+            .await
+            .expect_err("write should fail");
+
+        assert!(matches!(err, StorageError::OtherIo { .. }));
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_new_reports_cleanup_failure() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let rel_path = Path::new("orphaned.txt");
+        let path = tmp.path().join(rel_path);
+        inject_write_new_failure(path.clone(), true);
+
+        let err = write_new(&location, rel_path, b"contents")
+            .await
+            .expect_err("write and cleanup should fail");
+        let message = err.to_string();
+
+        assert!(matches!(err, StorageError::CleanupFailed { .. }));
+        assert!(message.contains("orphaned.txt"));
+        assert!(message.contains("injected write failure"));
+        assert!(message.contains("injected cleanup failure"));
+        assert!(path.exists());
+        tokio::fs::remove_file(path).await?;
         Ok(())
     }
 

@@ -105,6 +105,22 @@ pub enum CommitError {
         source: StorageError,
     },
 
+    /// A commit operation failed and its newly-created commit file may remain.
+    #[snafu(display(
+        "Commit outcome is ambiguous at {commit_path}: {operation_error}; failed to remove the commit file: {cleanup_error}"
+    ))]
+    AmbiguousOutcome {
+        /// Path of the commit file that may remain unpublished.
+        commit_path: String,
+        /// Write, sync, or publish failure that triggered cleanup.
+        #[snafu(source)]
+        operation_error: Box<StorageError>,
+        /// Failure encountered while removing the unpublished commit file.
+        cleanup_error: Box<StorageError>,
+        /// Backtrace for debugging.
+        backtrace: Backtrace,
+    },
+
     /// The log or CURRENT file is in an unexpected / malformed state.
     #[snafu(display("Corrupt log state: {msg}"))]
     CorruptState {

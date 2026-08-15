@@ -8,18 +8,19 @@
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use snafu::prelude::*;
+use uuid::Uuid;
 
 use crate::{
     coverage::serde::coverage_to_bytes,
     coverage::{
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
-            segment_coverage_id_v1, segment_coverage_path, table_coverage_id_v1,
-            table_snapshot_path,
+            coverage_file_id_for_attempt, segment_coverage_id_v1, segment_coverage_path,
+            table_coverage_id_v1, table_snapshot_path,
         },
     },
     formats::parquet::{
@@ -27,7 +28,7 @@ use crate::{
         segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::ensure_schema_exact_match,
-    storage::{self, StorageError},
+    storage,
     transaction_log::{LogAction, TableState, table_state::TableCoveragePointer},
 };
 
@@ -38,7 +39,7 @@ use super::{
         CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EntityMismatchSnafu,
         ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu,
         SegmentCoverageSnafu, SegmentEntityIdentitySnafu, SegmentMetaSnafu, StorageSnafu,
-        TableError, TransactionLogSnafu,
+        TableError,
     },
 };
 
@@ -56,6 +57,28 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
 }
 
 impl TimeSeriesTable {
+    async fn rollback_created_sidecars(
+        &self,
+        created_sidecars: &[PathBuf],
+        source: TableError,
+    ) -> TableError {
+        let mut cleanup_errors = Vec::new();
+        for path in created_sidecars.iter().rev() {
+            if let Err(error) = storage::remove_file(self.location().as_ref(), path).await {
+                cleanup_errors.push(format!("{}: {error}", path.display()));
+            }
+        }
+
+        if cleanup_errors.is_empty() {
+            source
+        } else {
+            TableError::AppendRollback {
+                source: Box::new(source),
+                cleanup_errors,
+            }
+        }
+    }
+
     async fn normalize_new_segment_path(&self, relative_path: &str) -> Result<String, TableError> {
         let supplied_path = Path::new(relative_path);
         let (normalized, native_path) =
@@ -181,7 +204,7 @@ impl TimeSeriesTable {
 
         // 3) Load current table snapshot coverage (or empty if first append).
         let step_start = Instant::now();
-        let table_cov = self.load_table_snapshot_coverage_with_heal().await?;
+        let table_cov = self.load_table_snapshot_coverage_readonly().await?;
         if let Some(r) = report.as_mut() {
             r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
         }
@@ -217,60 +240,58 @@ impl TimeSeriesTable {
                 source: CoverageError::Serde { source },
             })?;
 
-        // 6) Write sidecars BEFORE commit (orphan files OK on commit failure)
-        let coverage_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
-        let seg_cov_path =
-            segment_coverage_path(&coverage_id).map_err(|source| TableError::CoverageSidecar {
+        // 6) Give this append private sidecar paths, then write them before commit.
+        let attempt_id = Uuid::new_v4();
+        let segment_content_id = segment_coverage_id_v1(&bucket_spec, time_column, &seg_cov_bytes);
+        let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
+        let seg_cov_path = segment_coverage_path(&segment_file_id).map_err(|source| {
+            TableError::CoverageSidecar {
                 source: CoverageError::Layout { source },
-            })?;
-        let step_start = Instant::now();
-        match write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes).await
-        {
-            Ok(()) => {}
-            Err(CoverageError::Storage {
-                source: StorageError::AlreadyExists { .. },
-            }) => {
-                // ok: same id implies same intended content
             }
-            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
-        }
-        if let Some(r) = report.as_mut() {
-            r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
-        }
+        })?;
 
         let new_version_guess = expected_version + 1;
-
         let new_table_cov = table_cov.union(&segment_cov);
-
         let new_snap_cov_bytes =
             coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
                 source: CoverageError::Serde { source },
             })?;
-        let snapshot_id = table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
-
-        let snapshot_path = table_snapshot_path(new_version_guess, &snapshot_id).map_err(|e| {
-            TableError::CoverageSidecar {
-                source: CoverageError::Layout { source: e },
-            }
-        })?;
+        let snapshot_content_id =
+            table_coverage_id_v1(&bucket_spec, time_column, &new_snap_cov_bytes);
+        let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
+        let snapshot_path =
+            table_snapshot_path(new_version_guess, &snapshot_file_id).map_err(|source| {
+                TableError::CoverageSidecar {
+                    source: CoverageError::Layout { source },
+                }
+            })?;
 
         let step_start = Instant::now();
-        match write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
+        let mut created_sidecars = Vec::new();
+        write_coverage_sidecar_new_bytes(self.location(), &seg_cov_path, &seg_cov_bytes)
             .await
-        {
-            Ok(()) => {}
-            Err(CoverageError::Storage {
-                source: StorageError::AlreadyExists { .. },
-            }) => {
-                // ok: same id implies same intended content
-            }
-            Err(e) => return Err(TableError::CoverageSidecar { source: e }),
+            .map_err(|source| TableError::CoverageSidecar { source })?;
+        created_sidecars.push(seg_cov_path.clone());
+        if let Some(r) = report.as_mut() {
+            r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
         }
+
+        let step_start = Instant::now();
+        if let Err(source) =
+            write_coverage_sidecar_new_bytes(self.location(), &snapshot_path, &new_snap_cov_bytes)
+                .await
+        {
+            let error = TableError::CoverageSidecar { source };
+            return Err(self
+                .rollback_created_sidecars(&created_sidecars, error)
+                .await);
+        }
+        created_sidecars.push(snapshot_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_snapshot_sidecar", step_start.elapsed(), Vec::new());
         }
 
-        // 7) Build actions and commit.
+        // 7) Build actions and atomically publish the commit.
         segment_meta.coverage_path = Some(seg_cov_path.to_string_lossy().to_string());
 
         let mut actions = Vec::new();
@@ -285,11 +306,22 @@ impl TimeSeriesTable {
         });
 
         let step_start = Instant::now();
-        let new_version = self
+        let new_version = match self
             .log
             .commit_with_expected_version(expected_version, actions)
             .await
-            .context(TransactionLogSnafu)?;
+        {
+            Ok(version) => version,
+            Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
+                return Err(TableError::TransactionLog { source });
+            }
+            Err(source) => {
+                let error = TableError::TransactionLog { source };
+                return Err(self
+                    .rollback_created_sidecars(&created_sidecars, error)
+                    .await);
+            }
+        };
         if let Some(r) = report.as_mut() {
             r.push_step("commit_log", step_start.elapsed(), Vec::new());
         }
@@ -380,6 +412,28 @@ mod tests {
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
     use tempfile::TempDir;
+
+    fn coverage_files(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
+        let mut files = BTreeMap::new();
+        for rel_dir in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+            let dir = root.join(rel_dir);
+            if !dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.is_file() {
+                    files.insert(
+                        path.strip_prefix(root)
+                            .expect("coverage path under root")
+                            .to_owned(),
+                        std::fs::read(path)?,
+                    );
+                }
+            }
+        }
+        Ok(files)
+    }
 
     #[tokio::test]
     async fn append_parquet_segment_missing_time_column_errors() -> TestResult {
@@ -1069,7 +1123,7 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered = table.load_table_snapshot_coverage_with_heal().await?;
+        let recovered = table.load_table_snapshot_coverage_readonly().await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
@@ -1127,7 +1181,7 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered = table.load_table_snapshot_coverage_with_heal().await?;
+        let recovered = table.load_table_snapshot_coverage_readonly().await?;
 
         let mut expected = Coverage::empty();
         for seg in state.segments.values() {
@@ -1137,6 +1191,56 @@ mod tests {
         }
 
         assert_eq!(recovered.present(), expected.present());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_append_does_not_heal_corrupt_snapshot() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let existing = "data/existing.parquet";
+        write_test_parquet(
+            &tmp.path().join(existing),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 10.0,
+            }],
+        )?;
+        table.append_parquet_segment(existing, "ts").await?;
+
+        let snapshot_path = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer present")
+            .coverage_path
+            .clone();
+        let snapshot_abs = tmp.path().join(snapshot_path);
+        tokio::fs::write(&snapshot_abs, b"garbage").await?;
+
+        let overlapping = "data/overlapping.parquet";
+        write_test_parquet(
+            &tmp.path().join(overlapping),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 20.0,
+            }],
+        )?;
+
+        let err = table
+            .append_parquet_segment(overlapping, "ts")
+            .await
+            .expect_err("overlap must be rejected");
+        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        assert_eq!(tokio::fs::read(snapshot_abs).await?, b"garbage");
         Ok(())
     }
 
@@ -1180,7 +1284,7 @@ mod tests {
         table.state = state;
 
         let err = table
-            .load_table_snapshot_coverage_with_heal()
+            .load_table_snapshot_coverage_readonly()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -1246,7 +1350,7 @@ mod tests {
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
         let err = table
-            .load_table_snapshot_coverage_with_heal()
+            .load_table_snapshot_coverage_readonly()
             .await
             .expect_err("corrupt sidecar should error");
 
@@ -1298,6 +1402,7 @@ mod tests {
         )?;
 
         assert_eq!(winner.append_parquet_segment(winner_path, "ts").await?, 2);
+        let coverage_before = coverage_files(tmp.path())?;
 
         let err = loser
             .append_parquet_segment(loser_path, "ts")
@@ -1323,6 +1428,127 @@ mod tests {
         let committed = loser.load_latest_state().await?;
         assert!(committed.segments.contains_key(winner_path));
         assert!(!committed.segments.contains_key(loser_path));
+        assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        assert!(!tmp.path().join(layout::commit_rel_path(3)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_append_cleans_only_its_writer_owned_sidecars() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location).await?;
+        let winner_path = "data/writer-owned-winner.parquet";
+        let loser_path = "data/writer-owned-loser.parquet";
+
+        write_test_parquet(
+            &tmp.path().join(winner_path),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+        write_test_parquet(
+            &tmp.path().join(loser_path),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 20_000,
+                symbol: "X",
+                price: 200.0,
+            }],
+        )?;
+
+        winner.append_parquet_segment(winner_path, "ts").await?;
+        let coverage_before = coverage_files(tmp.path())?;
+
+        let err = loser
+            .append_parquet_segment(loser_path, "ts")
+            .await
+            .expect_err("stale append should conflict");
+
+        assert!(matches!(
+            err,
+            TableError::TransactionLog {
+                source: CommitError::Conflict { .. }
+            }
+        ));
+        assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambiguous_commit_retains_writer_owned_sidecars() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let state_before = table.state.clone();
+        let coverage_before = coverage_files(tmp.path())?;
+        let segment_path = "data/ambiguous.parquet";
+
+        write_test_parquet(
+            &tmp.path().join(segment_path),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 10_000,
+                symbol: "X",
+                price: 100.0,
+            }],
+        )?;
+
+        let commit_path = tmp.path().join(layout::commit_rel_path(2));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
+
+        let err = table
+            .append_parquet_segment(segment_path, "ts")
+            .await
+            .expect_err("failed commit cleanup should make the outcome ambiguous");
+
+        assert!(matches!(
+            err,
+            TableError::TransactionLog {
+                source: CommitError::AmbiguousOutcome { .. }
+            }
+        ));
+        assert_eq!(table.state, state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(commit_path.exists());
+        assert_eq!(coverage_files(tmp.path())?.len(), coverage_before.len() + 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sidecar_cleanup_failure_preserves_original_append_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let sidecar = PathBuf::from(layout::SEGMENT_COVERAGE_DIR).join("stuck.roar");
+        tokio::fs::create_dir_all(tmp.path().join(&sidecar)).await?;
+        let source = TableError::CoverageOverlap {
+            segment_path: "data/failed.parquet".to_string(),
+            overlap_count: 1,
+            example_bucket: Some(0),
+        };
+        let err = table
+            .rollback_created_sidecars(std::slice::from_ref(&sidecar), source)
+            .await;
+        let message = err.to_string();
+
+        assert!(matches!(
+            err,
+            TableError::AppendRollback {
+                source,
+                cleanup_errors,
+            } if matches!(*source, TableError::CoverageOverlap { .. })
+                && cleanup_errors.iter().any(|error| error.contains("stuck.roar"))
+        ));
+        assert!(message.contains("data/failed.parquet"));
+        assert!(message.contains("stuck.roar"));
         Ok(())
     }
 
