@@ -13,7 +13,7 @@ arrow-array = { workspace = true, features = ["ffi"]}
 arrow-ipc = { workspace = true }
 datafusion = { workspace = true }
 
-pyo3 = { version = "0.28", features = ["abi3-py310"] }
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
 
 futures-util = { workspace = true }
 
