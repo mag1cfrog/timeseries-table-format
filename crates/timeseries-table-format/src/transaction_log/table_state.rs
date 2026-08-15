@@ -29,10 +29,7 @@ pub fn reset_rebuild_table_state_count() {
 }
 
 use crate::{
-    metadata::{
-        schema_compat::ensure_index_matches_schema, segments::sort_segment_meta_by_index,
-        table_metadata::TABLE_FORMAT_VERSION,
-    },
+    metadata::{schema_compat::ensure_index_matches_schema, segments::sort_segment_meta_by_index},
     storage::normalize_relative_storage_path,
     transaction_log::*,
 };
@@ -168,15 +165,6 @@ impl TransactionLogStore {
                         segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
-                        if delta.format_version() != TABLE_FORMAT_VERSION {
-                            return CorruptStateSnafu {
-                                msg: format!(
-                                    "Unsupported table format version: expected {TABLE_FORMAT_VERSION}, found {}",
-                                    delta.format_version()
-                                ),
-                            }
-                            .fail();
-                        }
                         // v0.1: full replacement of TableMeta
                         table_meta = Some(delta);
                     }
@@ -243,6 +231,7 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
@@ -418,23 +407,41 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_table_state_rejects_old_format_version() -> TestResult {
-        let (_tmp, store) = create_test_log_store();
-        let mut meta = sample_table_meta();
-        meta.format_version = TABLE_FORMAT_VERSION - 1;
-
-        store
-            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
-            .await?;
+        let (tmp, store) = create_test_log_store();
+        let log_dir = tmp.path().join(layout::LOG_DIR_NAME);
+        tokio::fs::create_dir_all(&log_dir).await?;
+        tokio::fs::write(
+            tmp.path().join(layout::commit_rel_path(1)),
+            r#"{
+                "version": 1,
+                "base_version": 0,
+                "timestamp": "2025-01-01T00:00:00Z",
+                "actions": [{
+                    "UpdateTableMeta": {
+                        "kind": {"TimeSeries": {
+                            "timestamp_column": "ts",
+                            "entity_columns": ["symbol"],
+                            "bucket": {"Minutes": 1}
+                        }},
+                        "logical_schema": null,
+                        "created_at": "2025-01-01T00:00:00Z",
+                        "format_version": 2
+                    }
+                }]
+            }"#,
+        )
+        .await?;
+        tokio::fs::write(tmp.path().join(layout::current_rel_path()), "1\n").await?;
 
         let err = store
             .rebuild_table_state()
             .await
             .expect_err("old format version should be rejected");
         assert!(matches!(err, CommitError::CorruptState { .. }));
-        assert!(err.to_string().contains(&format!(
-            "expected {TABLE_FORMAT_VERSION}, found {}",
-            TABLE_FORMAT_VERSION - 1
-        )));
+        assert!(
+            err.to_string()
+                .contains(&format!("expected {TABLE_FORMAT_VERSION}, found 2"))
+        );
         Ok(())
     }
 
