@@ -1,4 +1,6 @@
-use arrow::datatypes::DataType;
+use std::sync::Arc;
+
+use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{DateTime, Duration, Months, TimeZone, Utc};
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::error::Result as DFResult;
@@ -106,6 +108,7 @@ fn normalize_comparison(expr: &Expr, index_column: &str, index_type: &DataType) 
     }
 
     normalize_interval_comparison(comparison, index_column, index_type)
+        .or_else(|| normalize_to_unixtime_comparison(comparison, index_column, index_type))
 }
 
 fn normalize_interval_comparison(
@@ -231,6 +234,133 @@ fn timestamp_literal(expr: &Expr) -> Option<DateTime<Utc>> {
     }
 }
 
+fn normalize_to_unixtime_comparison(
+    comparison: &BinaryExpr,
+    index_column: &str,
+    index_type: &DataType,
+) -> Option<Expr> {
+    if let Some(column) = to_unixtime_index(&comparison.left, index_column) {
+        return unix_second_comparison(
+            column,
+            comparison.op,
+            integer_literal(&comparison.right)?,
+            index_type,
+        );
+    }
+
+    let column = to_unixtime_index(&comparison.right, index_column)?;
+    unix_second_comparison(
+        column,
+        flip_comparison(comparison.op)?,
+        integer_literal(&comparison.left)?,
+        index_type,
+    )
+}
+
+fn to_unixtime_index(expr: &Expr, index_column: &str) -> Option<Expr> {
+    let Expr::ScalarFunction(function) = expr else {
+        return None;
+    };
+    if !function.name().eq_ignore_ascii_case("to_unixtime") || function.args.len() != 1 {
+        return None;
+    }
+    let Expr::Column(column) = &function.args[0] else {
+        return None;
+    };
+    (column.name == index_column).then(|| function.args[0].clone())
+}
+
+fn integer_literal(expr: &Expr) -> Option<i64> {
+    let Expr::Literal(value, _) = expr else {
+        return None;
+    };
+    match value {
+        ScalarValue::Int8(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::Int16(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::Int32(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::Int64(Some(value)) => Some(*value),
+        ScalarValue::UInt8(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt16(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt32(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt64(Some(value)) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn unix_second_comparison(
+    column: Expr,
+    operator: Operator,
+    second: i64,
+    index_type: &DataType,
+) -> Option<Expr> {
+    let DataType::Timestamp(unit, timezone) = index_type else {
+        return None;
+    };
+    let (lower, upper) = unix_second_bounds(second, unit)?;
+    let lower = timestamp_raw_literal(lower, unit, timezone.clone());
+    let upper = timestamp_raw_literal(upper, unit, timezone.clone());
+
+    match operator {
+        Operator::Eq => Some(binary(
+            binary(column.clone(), Operator::GtEq, lower),
+            Operator::And,
+            binary(column, Operator::LtEq, upper),
+        )),
+        Operator::NotEq => Some(binary(
+            binary(column.clone(), Operator::Lt, lower),
+            Operator::Or,
+            binary(column, Operator::Gt, upper),
+        )),
+        Operator::Lt => Some(binary(column, Operator::Lt, lower)),
+        Operator::LtEq => Some(binary(column, Operator::LtEq, upper)),
+        Operator::Gt => Some(binary(column, Operator::Gt, upper)),
+        Operator::GtEq => Some(binary(column, Operator::GtEq, lower)),
+        _ => None,
+    }
+}
+
+fn unix_second_bounds(second: i64, unit: &TimeUnit) -> Option<(i64, i64)> {
+    let units_per_second = match unit {
+        TimeUnit::Second => return Some((second, second)),
+        TimeUnit::Millisecond => 1_000,
+        TimeUnit::Microsecond => 1_000_000,
+        TimeUnit::Nanosecond => 1_000_000_000,
+    };
+
+    // Arrow narrows timestamps with signed integer division, which truncates
+    // toward zero. The zero-second bucket therefore spans both sides of epoch.
+    if second > 0 {
+        Some((
+            second.checked_mul(units_per_second)?,
+            second
+                .checked_add(1)?
+                .checked_mul(units_per_second)?
+                .checked_sub(1)?,
+        ))
+    } else if second < 0 {
+        Some((
+            second
+                .checked_sub(1)?
+                .checked_mul(units_per_second)?
+                .checked_add(1)?,
+            second.checked_mul(units_per_second)?,
+        ))
+    } else {
+        let edge = units_per_second - 1;
+        Some((-edge, edge))
+    }
+}
+
+fn timestamp_raw_literal(value: i64, unit: &TimeUnit, timezone: Option<Arc<str>>) -> Expr {
+    let value = match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), timezone),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), timezone),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), timezone),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), timezone),
+    };
+    Expr::Literal(value, None)
+}
+
 fn is_comparison(operator: Operator) -> bool {
     matches!(
         operator,
@@ -260,13 +390,13 @@ fn binary(left: Expr, operator: Operator, right: Expr) -> Expr {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow::array::types::IntervalMonthDayNano;
-    use arrow::datatypes::TimeUnit;
     use chrono::TimeZone;
     use datafusion::common::Column;
-    use datafusion::logical_expr::Expr;
+    use datafusion::logical_expr::expr::ScalarFunction;
+    use datafusion::logical_expr::expr_fn::create_udf;
+    use datafusion::logical_expr::{Expr, Volatility};
+    use datafusion::logical_expr_common::columnar_value::ColumnarValue;
 
     use super::*;
 
@@ -294,6 +424,19 @@ mod tests {
 
     fn timestamp_type(timezone: Option<Arc<str>>) -> DataType {
         DataType::Timestamp(TimeUnit::Millisecond, timezone)
+    }
+
+    fn to_unixtime(args: Vec<Expr>) -> Expr {
+        let udf = create_udf(
+            "to_unixtime",
+            vec![],
+            DataType::Int64,
+            Volatility::Immutable,
+            Arc::new(|_: &[ColumnarValue]| -> DFResult<ColumnarValue> {
+                unreachable!("UDF is not evaluated by normalizer tests")
+            }),
+        );
+        Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(udf), args))
     }
 
     #[test]
@@ -373,6 +516,124 @@ mod tests {
         for predicate in [direct, unsupported, overflow] {
             assert_eq!(
                 normalize_timestamp_predicate(predicate.clone(), "ts", &timestamp_type(None),)
+                    .unwrap(),
+                predicate
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_to_unixtime_with_exact_truncation_boundaries() {
+        let cases = [
+            (
+                binary(
+                    to_unixtime(vec![column("ts")]),
+                    Operator::Eq,
+                    Expr::Literal(ScalarValue::Int64(Some(60)), None),
+                ),
+                binary(
+                    binary(column("ts"), Operator::GtEq, timestamp_millis(60_000, None)),
+                    Operator::And,
+                    binary(column("ts"), Operator::LtEq, timestamp_millis(60_999, None)),
+                ),
+            ),
+            (
+                binary(
+                    to_unixtime(vec![column("ts")]),
+                    Operator::Eq,
+                    Expr::Literal(ScalarValue::Int64(Some(0)), None),
+                ),
+                binary(
+                    binary(column("ts"), Operator::GtEq, timestamp_millis(-999, None)),
+                    Operator::And,
+                    binary(column("ts"), Operator::LtEq, timestamp_millis(999, None)),
+                ),
+            ),
+            (
+                binary(
+                    to_unixtime(vec![column("ts")]),
+                    Operator::NotEq,
+                    Expr::Literal(ScalarValue::Int64(Some(-1)), None),
+                ),
+                binary(
+                    binary(column("ts"), Operator::Lt, timestamp_millis(-1_999, None)),
+                    Operator::Or,
+                    binary(column("ts"), Operator::Gt, timestamp_millis(-1_000, None)),
+                ),
+            ),
+            (
+                binary(
+                    Expr::Literal(ScalarValue::Int64(Some(60)), None),
+                    Operator::Lt,
+                    to_unixtime(vec![column("ts")]),
+                ),
+                binary(column("ts"), Operator::Gt, timestamp_millis(60_999, None)),
+            ),
+        ];
+
+        for (predicate, expected) in cases {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate, "ts", &timestamp_type(None)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn unix_second_bounds_match_arrow_truncation_for_every_timestamp_unit() {
+        let units = [
+            (TimeUnit::Second, 1),
+            (TimeUnit::Millisecond, 1_000),
+            (TimeUnit::Microsecond, 1_000_000),
+            (TimeUnit::Nanosecond, 1_000_000_000),
+        ];
+
+        for (unit, units_per_second) in units {
+            for second in -3..=3 {
+                let (lower, upper) = unix_second_bounds(second, &unit).unwrap();
+                for raw in [lower - 1, lower, upper, upper + 1] {
+                    assert_eq!(
+                        raw / units_per_second == second,
+                        (lower..=upper).contains(&raw)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_unsupported_to_unixtime_forms_unchanged() {
+        let predicates = [
+            binary(
+                to_unixtime(vec![column("ts"), column("other")]),
+                Operator::Lt,
+                Expr::Literal(ScalarValue::Int64(Some(60)), None),
+            ),
+            binary(
+                to_unixtime(vec![column("other")]),
+                Operator::Lt,
+                Expr::Literal(ScalarValue::Int64(Some(60)), None),
+            ),
+            binary(
+                to_unixtime(vec![column("ts")]),
+                Operator::Lt,
+                Expr::Literal(ScalarValue::Float64(Some(60.0)), None),
+            ),
+            binary(
+                to_unixtime(vec![column("ts")]),
+                Operator::Lt,
+                Expr::Literal(ScalarValue::Utf8(Some("60".to_string())), None),
+            ),
+            binary(
+                to_unixtime(vec![column("ts")]),
+                Operator::Lt,
+                Expr::Literal(ScalarValue::Int64(Some(i64::MAX)), None),
+            ),
+        ];
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &timestamp_type(None))
                     .unwrap(),
                 predicate
             );
