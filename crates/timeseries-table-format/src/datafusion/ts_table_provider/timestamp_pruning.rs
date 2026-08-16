@@ -545,13 +545,12 @@ fn bucket_comparison(
     aligned: bool,
 ) -> Option<Expr> {
     match operator {
-        Operator::Eq if !aligned => Some(Expr::Literal(ScalarValue::Boolean(Some(false)), None)),
+        Operator::Eq | Operator::NotEq if !aligned => None,
         Operator::Eq => Some(binary(
             binary(column.clone(), Operator::GtEq, start),
             Operator::And,
             binary(column, Operator::Lt, end),
         )),
-        Operator::NotEq if !aligned => Some(Expr::Literal(ScalarValue::Boolean(Some(true)), None)),
         Operator::NotEq => Some(binary(
             binary(column.clone(), Operator::Lt, start),
             Operator::Or,
@@ -1546,23 +1545,8 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_date_trunc_alignment_and_operand_reversal() {
+    fn normalizes_date_trunc_operand_reversal() {
         let timezone: Arc<str> = "UTC".into();
-        let non_aligned = binary(
-            date_trunc(string_literal("minute"), column("ts")),
-            Operator::Eq,
-            string_literal("1970-01-01T00:01:30Z"),
-        );
-        assert_eq!(
-            normalize_timestamp_predicate(
-                non_aligned,
-                "ts",
-                &timestamp_type(Some(timezone.clone())),
-            )
-            .unwrap(),
-            Expr::Literal(ScalarValue::Boolean(Some(false)), None)
-        );
-
         let reversed = binary(
             string_literal("1970-01-01T00:01:00Z"),
             Operator::Lt,
@@ -1753,23 +1737,8 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_date_bin_alignment_and_operand_reversal() {
+    fn normalizes_date_bin_operand_reversal() {
         let timezone: Arc<str> = "UTC".into();
-        let non_aligned = binary(
-            date_bin(interval(0, 0, 60_000_000_000), column("ts"), None),
-            Operator::Eq,
-            string_literal("1970-01-01T00:01:30Z"),
-        );
-        assert_eq!(
-            normalize_timestamp_predicate(
-                non_aligned,
-                "ts",
-                &timestamp_type(Some(timezone.clone())),
-            )
-            .unwrap(),
-            Expr::Literal(ScalarValue::Boolean(Some(false)), None)
-        );
-
         let reversed = binary(
             string_literal("1970-01-01T00:01:00Z"),
             Operator::Lt,
@@ -1784,6 +1753,30 @@ mod tests {
                 timestamp_millis(120_000, Some(timezone)),
             )
         );
+    }
+
+    #[test]
+    fn leaves_non_aligned_bucket_comparisons_unchanged() {
+        let predicates = [
+            Expr::IsNull(Box::new(binary(
+                date_trunc(string_literal("minute"), column("ts")),
+                Operator::Eq,
+                string_literal("1970-01-01T00:01:30Z"),
+            ))),
+            Expr::IsNull(Box::new(binary(
+                date_bin(interval(0, 0, 60_000_000_000), column("ts"), None),
+                Operator::NotEq,
+                string_literal("1970-01-01T00:01:30Z"),
+            ))),
+        ];
+        let index_type = timestamp_type(Some("UTC".into()));
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &index_type).unwrap(),
+                predicate
+            );
+        }
     }
 
     #[test]
