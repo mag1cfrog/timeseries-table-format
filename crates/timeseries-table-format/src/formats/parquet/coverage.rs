@@ -32,8 +32,8 @@ use snafu::{Backtrace, Snafu};
 use tokio::task::JoinSet;
 
 use crate::{
-    coverage::Coverage,
     coverage::bucket::{BucketError, bucket_id},
+    coverage::{Coverage, EntityIdentityError},
     metadata::{
         segments::ParquetIndexColumnError,
         table_metadata::{IndexKind, IndexSpec, IndexValue},
@@ -114,9 +114,60 @@ pub enum SegmentCoverageError {
         /// Bucket mapping failure.
         source: BucketError,
     },
+
+    /// A configured entity column is missing from the segment.
+    #[snafu(display("Entity column not found in {path}: {column}"))]
+    EntityColumnNotFound {
+        /// Path to the segment file.
+        path: String,
+        /// Missing configured entity column.
+        column: String,
+    },
+
+    /// A configured entity column has an unsupported Arrow type.
+    #[snafu(display("Unsupported entity column type in {path}: {column} has {datatype}"))]
+    EntityColumnUnsupportedType {
+        /// Path to the segment file.
+        path: String,
+        /// Configured entity column.
+        column: String,
+        /// Observed Arrow type.
+        datatype: String,
+    },
+
+    /// A configured entity column contains a null value.
+    #[snafu(display("Entity column contains nulls in {path}: {column}"))]
+    EntityColumnHasNull {
+        /// Path to the segment file.
+        path: String,
+        /// Configured entity column.
+        column: String,
+    },
+
+    /// The segment has no rows from which to construct an entity identity.
+    #[snafu(display("Entity column has no values (empty segment) in {path}: {column}"))]
+    EntityColumnEmpty {
+        /// Path to the segment file.
+        path: String,
+        /// First configured entity column.
+        column: String,
+    },
+
+    /// Ordered entity components could not form a complete identity.
+    #[snafu(display("Invalid entity identity in segment {path}: {source}"))]
+    EntityIdentity {
+        /// Path to the segment file.
+        path: String,
+        /// Identity validation failure.
+        source: EntityIdentityError,
+    },
 }
 
-fn arrow_index_error(path: &str, index: &IndexSpec, observed_type: String) -> SegmentCoverageError {
+pub(super) fn arrow_index_error(
+    path: &str,
+    index: &IndexSpec,
+    observed_type: String,
+) -> SegmentCoverageError {
     SegmentCoverageError::OrderedIndexColumn {
         source: ParquetIndexColumnError {
             path: path.to_string(),
@@ -127,7 +178,7 @@ fn arrow_index_error(path: &str, index: &IndexSpec, observed_type: String) -> Se
     }
 }
 
-fn timestamp_value(
+pub(super) fn timestamp_value(
     path: &str,
     index: &IndexSpec,
     unit: TimeUnit,
@@ -154,7 +205,7 @@ fn timestamp_value(
         })
 }
 
-fn insert_bucket(
+pub(super) fn insert_bucket(
     bitmap: &mut RoaringTreemap,
     path: &str,
     index: &IndexSpec,
