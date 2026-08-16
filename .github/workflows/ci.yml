@@ -107,9 +107,19 @@ jobs:
           echo "skip=${SKIP_PYTHON}" >> "$GITHUB_OUTPUT"
 
   rust-quality-gate:
+    name: rust-quality-gate / ${{ matrix.task }}
     runs-on: ubuntu-latest
     needs: [detect-rust-changes]
     if: ${{ needs['detect-rust-changes'].outputs.code == 'true' && needs['detect-rust-changes'].outputs.skip != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - RSS regression checks
+          - feature isolation
+          - lints and docs
+          - default tests
+          - all-feature tests
     defaults:
       run:
         working-directory: .
@@ -152,6 +162,7 @@ jobs:
           python-version: "3.12"
 
       - name: Setup uv
+        if: matrix.task == 'RSS regression checks'
         uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
         with:
           version: "0.10.0"
@@ -169,11 +180,13 @@ jobs:
       - run: rustc -Vv && cargo -V && cargo clippy -V
 
       - name: release version guard
+        if: matrix.task == 'lints and docs'
         run: |
           python scripts/test_check_release_version.py
           python scripts/check_release_version.py
 
       - name: process RSS regression checks
+        if: matrix.task == 'RSS regression checks'
         run: |
           uv sync --project crates/timeseries-table-python --locked --no-install-project
           crates/timeseries-table-python/.venv/bin/ruff check scripts/append_rss_regression.py scripts/test_append_rss_regression.py scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
@@ -190,9 +203,11 @@ jobs:
           crates/timeseries-table-python/.venv/bin/python scripts/test_scan_range_rss_regression.py
 
       - name: fmt
+        if: matrix.task == 'lints and docs'
         run: cargo fmt --all -- --check
 
       - name: feature isolation
+        if: matrix.task == 'feature isolation'
         shell: bash
         run: |
           set -euo pipefail
@@ -207,15 +222,19 @@ jobs:
           cargo check --locked -p timeseries-table-format --no-default-features --features cli --bin tstable
 
       - name: clippy
+        if: matrix.task == 'lints and docs'
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: test default features
+        if: matrix.task == 'default tests'
         run: cargo test --locked --workspace --no-fail-fast
 
       - name: test all features and targets
+        if: matrix.task == 'all-feature tests'
         run: cargo test --locked --workspace --all-targets --all-features --no-fail-fast
 
       - name: docs
+        if: matrix.task == 'lints and docs'
         run: cargo doc --locked --workspace --no-deps
 
   rust-msrv:
