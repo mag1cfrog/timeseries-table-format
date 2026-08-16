@@ -3,6 +3,15 @@
 `Session` is a DataFusion-backed SQL session. It supports registering multiple tables and running
 SQL queries that return `pyarrow.Table`.
 
+## Register data sources
+
+- `register_tstable(...)` registers every committed segment in a managed table root.
+- `register_parquet(...)` registers an unmanaged Parquet file or directory.
+
+Both sources use the same `Session.sql(...)` query API. See the
+[DataFusion SQL reference](https://datafusion.apache.org/user-guide/sql/index.html)
+for supported syntax and functions.
+
 ## Query ordered indexes
 
 Registered tables preserve their Timestamp, Int64, or UInt64 Arrow index type. Use SQL expressions
@@ -45,13 +54,13 @@ bindings are not exposed.
 
 `Session` provides two query APIs:
 
-- **`Session.sql(...)`** — returns a fully materialized `pyarrow.Table`. Simple and convenient;
+- **`Session.sql(...)`** - returns a fully materialized `pyarrow.Table`. Simple and convenient;
 use this when the result fits comfortably in memory.
-- **`Session.sql_reader(...)`** — returns a streaming `pyarrow.RecordBatchReader`. Batches arrive
+- **`Session.sql_reader(...)`** - returns a streaming `pyarrow.RecordBatchReader`. Batches arrive
 as the engine produces them; use this when you want lower memory usage or faster time-to-first-row.
 
 For large queries (~10M rows), benchmarks show `sql_reader(...)` delivers the first batch
-**~80% earlier** and uses **24–36% less peak RSS** in process-as-you-go workloads.
+**~80% earlier** and uses **24-36% less peak RSS** in process-as-you-go workloads.
 See [Performance](../performance.md) for full benchmark results.
 
 ## SQL result export mode
@@ -71,7 +80,7 @@ You can control the behavior via environment variables (set before calling `Sess
   - `auto`: try C Stream, fall back to IPC if C Stream export/import fails
   - `ipc`: force IPC
   - `c_stream`: force C Stream (no IPC fallback; errors propagate)
-- `TTF_SQL_EXPORT_DEBUG=1` to emit a debug warning when `auto` falls back from C Stream → IPC
+- `TTF_SQL_EXPORT_DEBUG=1` to emit a debug warning when `auto` falls back from C Stream to IPC
 - `TTF_SQL_EXPORT_AUTO_RERUN_FALLBACK=1` to re-run the query when C Stream fails in `auto` mode (avoids cloning the collected batches, but may change results for non-deterministic queries)
 
 ::: timeseries_table_format.Session
