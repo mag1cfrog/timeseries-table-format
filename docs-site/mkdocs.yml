@@ -79,5 +79,6 @@ nav:
   - Reference:
       - Session: reference/session.md
       - TimeSeriesTable: reference/timeseries_table.md
+      - Notebook display: reference/notebook_display.md
       - Exceptions: reference/exceptions.md
   - Help and troubleshooting: troubleshooting.md
