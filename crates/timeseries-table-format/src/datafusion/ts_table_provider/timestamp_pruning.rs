@@ -10,6 +10,11 @@ use chrono::{
 use chrono_tz::Tz;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::error::Result as DFResult;
+use datafusion::functions::datetime::{
+    date_bin::DateBinFunc, date_trunc::DateTruncFunc, to_date::ToDateFunc,
+    to_timestamp::ToTimestampFunc, to_unixtime::ToUnixtimeFunc,
+};
+use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::scalar::ScalarValue;
 
@@ -389,7 +394,7 @@ fn to_unixtime_index(expr: &Expr, index_column: &str) -> Option<Expr> {
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
-    if !function.name().eq_ignore_ascii_case("to_unixtime") || function.args.len() != 1 {
+    if !is_builtin_function::<ToUnixtimeFunc>(function) || function.args.len() != 1 {
         return None;
     }
     let Expr::Column(column) = &function.args[0] else {
@@ -516,7 +521,7 @@ fn to_date_index(expr: &Expr, index_column: &str) -> Option<Expr> {
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
-    if !function.name().eq_ignore_ascii_case("to_date") || function.args.len() != 1 {
+    if !is_builtin_function::<ToDateFunc>(function) || function.args.len() != 1 {
         return None;
     }
 
@@ -668,7 +673,7 @@ fn date_trunc_index(
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
-    if !function.name().eq_ignore_ascii_case("date_trunc") || function.args.len() != 2 {
+    if !is_builtin_function::<DateTruncFunc>(function) || function.args.len() != 2 {
         return None;
     }
     let unit = match &function.args[0] {
@@ -894,7 +899,7 @@ fn date_bin_index(
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
-    if !function.name().eq_ignore_ascii_case("date_bin") || !matches!(function.args.len(), 2 | 3) {
+    if !is_builtin_function::<DateBinFunc>(function) || !matches!(function.args.len(), 2 | 3) {
         return None;
     }
     let stride = date_bin_stride(&function.args[0])?;
@@ -938,7 +943,7 @@ fn date_bin_origin(expr: &Expr) -> Option<DateTime<Utc>> {
     let Expr::ScalarFunction(function) = expr else {
         return None;
     };
-    if !function.name().eq_ignore_ascii_case("to_timestamp") || function.args.len() != 1 {
+    if !is_builtin_function::<ToTimestampFunc>(function) || function.args.len() != 1 {
         return None;
     }
     timestamp_literal(&function.args[0])
@@ -1045,15 +1050,17 @@ fn binary(left: Expr, operator: Operator, right: Expr) -> Expr {
     Expr::BinaryExpr(BinaryExpr::new(Box::new(left), operator, Box::new(right)))
 }
 
+fn is_builtin_function<T: 'static>(function: &ScalarFunction) -> bool {
+    function.func.inner().as_any().is::<T>()
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::array::types::IntervalMonthDayNano;
     use chrono::TimeZone;
     use datafusion::common::Column;
-    use datafusion::logical_expr::expr::{Cast, ScalarFunction};
-    use datafusion::logical_expr::expr_fn::create_udf;
-    use datafusion::logical_expr::{Expr, Volatility};
-    use datafusion::logical_expr_common::columnar_value::ColumnarValue;
+    use datafusion::logical_expr::ScalarUDF;
+    use datafusion::logical_expr::expr::Cast;
 
     use super::*;
 
@@ -1083,51 +1090,33 @@ mod tests {
         DataType::Timestamp(TimeUnit::Millisecond, timezone)
     }
 
-    fn scalar_function(name: &str, args: Vec<Expr>, return_type: DataType) -> Expr {
-        let udf = create_udf(
-            name,
-            vec![],
-            return_type,
-            Volatility::Immutable,
-            Arc::new(|_: &[ColumnarValue]| -> DFResult<ColumnarValue> {
-                unreachable!("UDF is not evaluated by normalizer tests")
-            }),
-        );
-        Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(udf), args))
+    fn scalar_function(udf: Arc<ScalarUDF>, args: Vec<Expr>) -> Expr {
+        Expr::ScalarFunction(ScalarFunction::new_udf(udf, args))
     }
 
     fn to_unixtime(args: Vec<Expr>) -> Expr {
-        scalar_function("to_unixtime", args, DataType::Int64)
+        scalar_function(datafusion::functions::datetime::to_unixtime(), args)
     }
 
     fn to_date(args: Vec<Expr>) -> Expr {
-        scalar_function("to_date", args, DataType::Date32)
+        scalar_function(datafusion::functions::datetime::to_date(), args)
     }
 
     fn date_trunc(unit: Expr, index: Expr) -> Expr {
         scalar_function(
-            "date_trunc",
+            datafusion::functions::datetime::date_trunc(),
             vec![unit, index],
-            DataType::Timestamp(TimeUnit::Millisecond, None),
         )
     }
 
     fn date_bin(stride: Expr, index: Expr, origin: Option<Expr>) -> Expr {
         let mut args = vec![stride, index];
         args.extend(origin);
-        scalar_function(
-            "date_bin",
-            args,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-        )
+        scalar_function(datafusion::functions::datetime::date_bin(), args)
     }
 
     fn to_timestamp(value: Expr) -> Expr {
-        scalar_function(
-            "to_timestamp",
-            vec![value],
-            DataType::Timestamp(TimeUnit::Nanosecond, None),
-        )
+        scalar_function(datafusion::functions::datetime::to_timestamp(), vec![value])
     }
 
     fn string_cast(expr: Expr) -> Expr {
@@ -1644,9 +1633,8 @@ mod tests {
         let predicates = [
             binary(
                 scalar_function(
-                    "date_trunc",
+                    datafusion::functions::datetime::date_trunc(),
                     vec![string_literal("minute")],
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
                 ),
                 Operator::Eq,
                 string_literal("1970-01-01T00:01:00Z"),
@@ -1861,11 +1849,7 @@ mod tests {
         let literal = || string_literal("1970-01-01T00:01:00Z");
         let predicates = [
             binary(
-                scalar_function(
-                    "date_bin",
-                    vec![minute()],
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                ),
+                scalar_function(datafusion::functions::datetime::date_bin(), vec![minute()]),
                 Operator::Eq,
                 literal(),
             ),

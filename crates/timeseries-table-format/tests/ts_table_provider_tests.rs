@@ -16,11 +16,14 @@ use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
+use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr::TableProviderFilterPushDown;
-use datafusion::logical_expr::{Expr, Operator};
+use datafusion::logical_expr::expr_fn::create_udf;
+use datafusion::logical_expr::{Expr, Operator, Volatility};
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
+use datafusion::scalar::ScalarValue;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
@@ -1926,6 +1929,39 @@ async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_row
             "wrong rows for {predicate}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn overridden_builtin_name_does_not_enable_timestamp_pruning() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_utc_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let udf = create_udf(
+        "to_unixtime",
+        vec![DataType::Timestamp(TimeUnit::Millisecond, None)],
+        DataType::Int64,
+        Volatility::Immutable,
+        Arc::new(|args: &[ColumnarValue]| {
+            Ok(match &args[0] {
+                ColumnarValue::Array(array) => {
+                    ColumnarValue::Array(Arc::new(Int64Array::from(vec![1; array.len()])))
+                }
+                ColumnarValue::Scalar(_) => ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
+            })
+        }),
+    );
+    ctx.register_udf(udf);
+
+    let predicate = "to_unixtime(ts) = 1";
+    let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+    assert_eq!(files, UTC_PRUNING_FILES, "wrong files for {predicate}");
+    assert_eq!(
+        collect_i64_values(&batches)?,
+        vec![0, 59_999, 60_000, 119_999, 120_000, 179_999],
+        "wrong rows for {predicate}"
+    );
     Ok(())
 }
 
