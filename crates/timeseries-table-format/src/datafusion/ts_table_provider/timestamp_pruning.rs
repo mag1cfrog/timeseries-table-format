@@ -138,12 +138,20 @@ fn normalize_interval_comparison(
     index_column: &str,
     index_type: &DataType,
 ) -> Option<Expr> {
+    let left_month_terms = month_term_count(&comparison.left);
     if is_interval_arithmetic(&comparison.left)
         && let Some((column, interval)) =
             extract_index_with_interval(&comparison.left, index_column)
         && let Some(datetime) = timestamp_literal(&comparison.right)
     {
-        return shifted_comparison(column, comparison.op, datetime, interval, index_type);
+        return shifted_comparison(
+            column,
+            comparison.op,
+            datetime,
+            interval,
+            left_month_terms,
+            index_type,
+        );
     }
 
     if !is_interval_arithmetic(&comparison.right) {
@@ -156,6 +164,7 @@ fn normalize_interval_comparison(
         flip_comparison(comparison.op)?,
         datetime,
         interval,
+        month_term_count(&comparison.right),
         index_type,
     )
 }
@@ -167,19 +176,60 @@ fn is_interval_arithmetic(expr: &Expr) -> bool {
     )
 }
 
+fn month_term_count(expr: &Expr) -> usize {
+    match expr {
+        Expr::Literal(value, _) => {
+            usize::from(interval_from_scalar(value).is_some_and(|interval| interval.months != 0))
+        }
+        Expr::BinaryExpr(binary) if matches!(binary.op, Operator::Plus | Operator::Minus) => {
+            month_term_count(&binary.left).saturating_add(month_term_count(&binary.right))
+        }
+        _ => 0,
+    }
+}
+
 fn shifted_comparison(
     column: Expr,
     operator: Operator,
     datetime: DateTime<Utc>,
     interval: UnifiedInterval,
+    month_terms: usize,
     index_type: &DataType,
 ) -> Option<Expr> {
-    let datetime = add_interval(datetime, interval, -1)?;
+    let shifted = add_interval(datetime, interval, -1)?;
+    if month_terms != 0
+        && (month_terms != 1
+            || interval.days != 0
+            || interval.nanos != 0
+            || !month_shift_is_safe_to_invert(shifted, datetime, interval))
+    {
+        return None;
+    }
     let DataType::Timestamp(unit, timezone) = index_type else {
         return None;
     };
-    let literal = timestamp_scalar(datetime, unit, timezone.clone())?;
+    let literal = timestamp_scalar(shifted, unit, timezone.clone())?;
     Some(binary(column, operator, Expr::Literal(literal, None)))
+}
+
+fn month_shift_is_safe_to_invert(
+    source: DateTime<Utc>,
+    target: DateTime<Utc>,
+    interval: UnifiedInterval,
+) -> bool {
+    if add_interval(source, interval, 1) != Some(target) {
+        return false;
+    }
+    last_day_of_month(target).is_some_and(|last_day| target.day() != last_day)
+}
+
+fn last_day_of_month(datetime: DateTime<Utc>) -> Option<u32> {
+    datetime
+        .date_naive()
+        .with_day(1)
+        .and_then(|date| date.checked_add_months(Months::new(1)))
+        .and_then(|date| date.checked_sub_signed(Duration::days(1)))
+        .map(|date| date.day())
 }
 
 fn extract_index_with_interval(expr: &Expr, index_column: &str) -> Option<(Expr, UnifiedInterval)> {
@@ -1095,6 +1145,56 @@ mod tests {
             assert_eq!(
                 normalize_timestamp_predicate(predicate, "ts", &timestamp_type(None)).unwrap(),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_ambiguous_or_composed_month_arithmetic_unchanged() {
+        let timestamp = |value: &str| {
+            timestamp_millis(
+                DateTime::parse_from_rfc3339(value)
+                    .unwrap()
+                    .timestamp_millis(),
+                None,
+            )
+        };
+        let predicates = [
+            binary(
+                binary(column("ts"), Operator::Plus, interval(1, 0, 0)),
+                Operator::Eq,
+                timestamp("2024-02-29T00:00:00Z"),
+            ),
+            binary(
+                binary(
+                    binary(column("ts"), Operator::Plus, interval(1, 0, 0)),
+                    Operator::Plus,
+                    interval(1, 0, 0),
+                ),
+                Operator::Eq,
+                timestamp("2024-03-29T00:00:00Z"),
+            ),
+            binary(
+                binary(column("ts"), Operator::Plus, interval(1, 1, 0)),
+                Operator::Eq,
+                timestamp("2024-03-29T00:00:00Z"),
+            ),
+            binary(
+                binary(
+                    binary(column("ts"), Operator::Plus, interval(1, 0, 0)),
+                    Operator::Minus,
+                    interval(1, 0, 0),
+                ),
+                Operator::Eq,
+                timestamp("2024-01-31T00:00:00Z"),
+            ),
+        ];
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &timestamp_type(None))
+                    .unwrap(),
+                predicate
             );
         }
     }
