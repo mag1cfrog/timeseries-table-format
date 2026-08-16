@@ -165,7 +165,7 @@ impl TsTableProvider {
         &self,
         segments: Vec<&'a SegmentMeta>,
         filters: &[Expr],
-        predicate: &Arc<dyn PhysicalExpr>,
+        pruning_predicate: &Arc<dyn PhysicalExpr>,
     ) -> DFResult<Vec<&'a SegmentMeta>> {
         let mut columns = HashSet::new();
         for filter in filters {
@@ -178,7 +178,12 @@ impl TsTableProvider {
             return Ok(segments);
         }
 
-        segment_pruning::prune_segments(&self.schema, self.table.index_spec(), segments, predicate)
+        segment_pruning::prune_segments(
+            &self.schema,
+            self.table.index_spec(),
+            segments,
+            pruning_predicate,
+        )
     }
 }
 
@@ -224,7 +229,7 @@ impl TableProvider for TsTableProvider {
         let segments = snapshot.segments_sorted_by_index().map_err(df_external)?;
 
         let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
-        let predicate = conjunction(filters.to_vec())
+        let exact_predicate = conjunction(filters.to_vec())
             .map(|p| state.create_physical_expr(p, &df_schema))
             .transpose()?
             .unwrap_or_else(|| lit(true));
@@ -246,7 +251,7 @@ impl TableProvider for TsTableProvider {
                     .collect::<DFResult<Vec<_>>>()?;
 
                 if normalized_filters.as_slice() == filters {
-                    Arc::clone(&predicate)
+                    Arc::clone(&exact_predicate)
                 } else {
                     conjunction(normalized_filters)
                         .map(|p| state.create_physical_expr(p, &df_schema))
@@ -254,12 +259,12 @@ impl TableProvider for TsTableProvider {
                         .unwrap_or_else(|| lit(true))
                 }
             } else {
-                Arc::clone(&predicate)
+                Arc::clone(&exact_predicate)
             };
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
         let parquet_source =
-            Arc::new(ParquetSource::default().with_predicate(Arc::clone(&predicate)));
+            Arc::new(ParquetSource::default().with_predicate(Arc::clone(&exact_predicate)));
 
         let mut builder = FileScanConfigBuilder::new(
             self.object_store_url.clone(),
