@@ -67,7 +67,8 @@ with tempfile.TemporaryDirectory() as d:
     root = Path(d) / "prices_tbl"
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -109,18 +110,18 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
   "AddSegment": {
     "path": "data/nvda_1h.parquet",
     "format": "parquet",
-    "ts_min": "2024-06-01T00:00:00Z",
-    "ts_max": "2024-06-10T23:00:00Z",
+    "index_min": {"type": "timestamp", "value": "2024-06-01T00:00:00Z"},
+    "index_max": {"type": "timestamp", "value": "2024-06-10T23:00:00Z"},
     "row_count": 240,
     "file_size": 14272,
-    "coverage_path": "_coverage/segments/segcov-ca3cea172cc538ce04756e34beaea4a4.roar"
+    "coverage_path": "_coverage/segments/segcov-4612480d425b35a6b1c8152f52bf3ee2-3f1ca9f8-4993-44a4-9e2d-8aa4bb55fed2.roar"
   }
 }
 ```
 The canonical table-relative `path` is the segment identity. Notice the `coverage_path` -- we'll come back to that.
 
 If you squint, you can already see the reader-side wins:
-- ts_min/ts_max enable coarse pruning (skip files that can't match a time filter).
+- `index_min` and `index_max` enable coarse pruning (skip files that can't match a filter on the chronological index).
 - the log entry is human-inspectable and replayable.
 
 So far we've looked at one table, one append. But the more interesting question is: can you register multiple tables and query across them? That's what `Session` is for.
@@ -153,7 +154,8 @@ with tempfile.TemporaryDirectory() as d:
     prices_root = base / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(prices_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=tz_config,
@@ -177,7 +179,8 @@ with tempfile.TemporaryDirectory() as d:
     volumes_root = base / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
         table_root=str(volumes_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=tz_config,
@@ -224,7 +227,7 @@ That join worked because the same log + snapshot design extends naturally to mul
 Remember this field from the `AddSegment` JSON earlier?
 
 ```json
-"coverage_path": "_coverage/segments/segcov-ca3cea172cc538ce04756e34beaea4a4.roar"
+"coverage_path": "_coverage/segments/segcov-4612480d425b35a6b1c8152f52bf3ee2-3f1ca9f8-4993-44a4-9e2d-8aa4bb55fed2.roar"
 ```
 
 Time-series users keep asking questions like:
@@ -240,7 +243,7 @@ Coverage is how I solved it -- and it bought me two things I didn't expect to ge
 
 ### What "coverage" means (in one sentence)
 
-If you created a table with `bucket="1h"`, coverage is just "which 1-hour slots have data".
+Here, `bucket="1h"` tracks which one-hour slots have data. Int64 and UInt64 indexes use the same model with `bucket_width` in application-defined units.
 
 ### What `_coverage/` stores
 
@@ -256,7 +259,7 @@ The table snapshot is basically the union of segment coverages so far.
 ### How append uses coverage (end-to-end)
 
 When you append a Parquet file, the flow becomes:
-1. Map the segment's timestamps into bucket IDs (based on your `bucket`, like `1h`).
+1. Map the segment's chronological index values into bucket IDs using its configured `bucket` or `bucket_width`.
 2. Load the current table coverage snapshot (or empty for the first append).
 3. Check overlap: `segment_coverage & table_coverage`.
 4. If overlap is non-empty, reject the append (this surfaces as `CoverageOverlapError` in Python).
@@ -267,7 +270,7 @@ When you append a Parquet file, the flow becomes:
 
 The first time I saw the overlap check catch a duplicate ingest during testing, I knew this was the right abstraction -- it was doing exactly the kind of silent data corruption prevention that I'd always had to bolt on manually in other pipelines.
 
-That's why the `coverage_path` shows up right next to `ts_min`/`ts_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
+That's why the `coverage_path` shows up right next to `index_min` and `index_max` in the commit JSON: it's just more metadata that makes common time-series questions cheap.
 
 **"Why not just use Delta or Iceberg?"** Fair question. You should, if your workload needs what they're built for -- schema evolution, MERGE/upsert, cloud object stores, the full Spark ecosystem. They're battle-tested and general-purpose. This project exists because time-series append workloads have a narrower contract: you're writing immutable, time-ordered segments, and your most common questions are about coverage and gaps, not schema changes. A format designed for that specific contract can bake in overlap detection, instant coverage queries, and skip the complexity you don't need -- and that's where the speed comes from.
 
