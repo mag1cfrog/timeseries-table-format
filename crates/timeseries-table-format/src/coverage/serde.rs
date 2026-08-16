@@ -39,9 +39,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::{collections::BTreeSet, io::Cursor, str::Utf8Error};
+use std::{io::Cursor, str::Utf8Error};
 
-use roaring::RoaringTreemap;
+use roaring::{RoaringBitmap, RoaringTreemap};
 use snafu::{ResultExt, Snafu};
 
 use crate::coverage::{Coverage, EntityCoverage, EntityIdentity, EntityIdentityError};
@@ -232,7 +232,7 @@ pub fn entity_coverage_to_bytes(
             out.extend_from_slice(component.as_bytes());
         }
 
-        let nested_bytes = coverage_to_bytes(nested)
+        let nested_bytes = canonical_nested_coverage_to_bytes(nested)
             .map_err(|source| EntityCoverageSerdeError::SerializeCoverage { source })?;
         let nested_len = u64::try_from(nested_bytes.len()).map_err(|_| {
             EntityCoverageSerdeError::LengthOverflow {
@@ -261,15 +261,9 @@ pub fn entity_coverage_from_bytes(
     }
 
     let entity_count = read_u32(&mut remaining)? as usize;
-    let mut seen = BTreeSet::new();
     let mut coverage = EntityCoverage::empty();
     for _ in 0..entity_count {
         let component_count = read_u32(&mut remaining)? as usize;
-        if component_count == 0 {
-            return Err(EntityCoverageSerdeError::InvalidIdentity {
-                source: EntityIdentityError::Empty,
-            });
-        }
         if component_count > remaining.len().saturating_sub(8) / 8 {
             return Err(EntityCoverageSerdeError::InvalidLength {
                 field: "identity component count",
@@ -288,7 +282,7 @@ pub fn entity_coverage_from_bytes(
 
         let identity = EntityIdentity::try_new(components)
             .map_err(|source| EntityCoverageSerdeError::InvalidIdentity { source })?;
-        if !seen.insert(identity.clone()) {
+        if coverage.get(&identity).is_some() {
             return Err(EntityCoverageSerdeError::DuplicateIdentity { identity });
         }
 
@@ -303,6 +297,27 @@ pub fn entity_coverage_from_bytes(
         return Err(EntityCoverageSerdeError::TrailingBytes);
     }
     Ok(coverage)
+}
+
+/// Serialize after removing empty partitions and construction-history-dependent
+/// Roaring container choices from entity-aware nested coverage.
+fn canonical_nested_coverage_to_bytes(coverage: &Coverage) -> Result<Vec<u8>, CoverageSerdeError> {
+    let present = RoaringTreemap::from_bitmaps(
+        coverage
+            .present()
+            .bitmaps()
+            .filter(|(_, bitmap)| !bitmap.is_empty())
+            .map(|(key, bitmap)| {
+                let mut canonical = RoaringBitmap::new();
+                let mut ranges = bitmap.iter();
+                while let Some(range) = ranges.next_range() {
+                    canonical.insert_range(range);
+                }
+                canonical.optimize();
+                (key, canonical)
+            }),
+    );
+    coverage_to_bytes(&Coverage::from_treemap(present))
 }
 
 fn take<'a>(remaining: &mut &'a [u8], len: usize) -> Result<&'a [u8], EntityCoverageSerdeError> {
@@ -497,6 +512,45 @@ mod tests {
     }
 
     #[test]
+    fn entity_coverage_serialization_canonicalizes_roaring_storage() {
+        let partition = 1u64 << 32;
+        let inserted: Coverage = (1..=3).chain(partition + 1..=partition + 5_000).collect();
+        let mut ranged = RoaringTreemap::new();
+        ranged.insert_range(1..=3);
+        ranged.insert_range(partition + 1..=partition + 5_000);
+        let ranged = Coverage::from_treemap(ranged);
+        assert_eq!(inserted, ranged);
+        assert_ne!(
+            coverage_to_bytes(&inserted).unwrap(),
+            coverage_to_bytes(&ranged).unwrap()
+        );
+
+        let entity = identity(&["A"]);
+        let mut left = EntityCoverage::empty();
+        left.union_coverage(entity.clone(), inserted);
+        let mut right = EntityCoverage::empty();
+        right.union_coverage(entity, ranged);
+
+        assert_eq!(
+            entity_coverage_to_bytes(&left).unwrap(),
+            entity_coverage_to_bytes(&right).unwrap()
+        );
+
+        let empty_partition = Coverage::from_treemap(RoaringTreemap::from_bitmaps([(
+            7,
+            roaring::RoaringBitmap::new(),
+        )]));
+        let mut logically_empty = EntityCoverage::empty();
+        logically_empty.union_coverage(identity(&["empty"]), empty_partition);
+        let mut canonical_empty = EntityCoverage::empty();
+        canonical_empty.union_coverage(identity(&["empty"]), Coverage::empty());
+        assert_eq!(
+            entity_coverage_to_bytes(&logically_empty).unwrap(),
+            entity_coverage_to_bytes(&canonical_empty).unwrap()
+        );
+    }
+
+    #[test]
     fn entity_coverage_v1_golden_payload_is_stable() {
         let mut coverage = EntityCoverage::empty();
         coverage.union_coverage(
@@ -557,6 +611,13 @@ mod tests {
         invalid_count[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(entity_coverage_from_bytes(&invalid_count).is_err());
 
+        let mut empty_identity = bytes.clone();
+        empty_identity[12..16].copy_from_slice(&0u32.to_be_bytes());
+        assert!(matches!(
+            entity_coverage_from_bytes(&empty_identity),
+            Err(EntityCoverageSerdeError::InvalidIdentity { .. })
+        ));
+
         let mut invalid_length = bytes.clone();
         invalid_length[16..24].copy_from_slice(&u64::MAX.to_be_bytes());
         assert!(matches!(
@@ -575,7 +636,7 @@ mod tests {
     #[test]
     fn entity_coverage_decoder_rejects_duplicate_identities() {
         let mut coverage = EntityCoverage::empty();
-        coverage.union_coverage(identity(&["A"]), [1].into_iter().collect());
+        coverage.union_coverage(identity(&["A"]), Coverage::empty());
         let mut bytes = entity_coverage_to_bytes(&coverage).unwrap();
         let duplicate = bytes[12..].to_vec();
         bytes[8..12].copy_from_slice(&2u32.to_be_bytes());

@@ -277,7 +277,8 @@ impl EntityCoverage {
 
     /// Borrow one identity's coverage.
     ///
-    /// `None` means the identity has empty coverage.
+    /// `None` means the identity is absent. Set operations treat absence as
+    /// empty coverage.
     pub fn get(&self, identity: &EntityIdentity) -> Option<&Coverage> {
         self.by_identity.get(identity)
     }
@@ -578,6 +579,7 @@ mod tests {
 
         assert!(!coverage.is_empty());
         assert!(coverage.get(&entity).unwrap().is_empty());
+        assert!(coverage.get(&identity(&["absent"])).is_none());
         assert_eq!(coverage.identity_count(), 1);
     }
 }
