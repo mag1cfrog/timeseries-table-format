@@ -1,28 +1,23 @@
-# Tutorial: register multiple tables and join
+# Register and join tables
 
-**Goal:** Register multiple tables in one `Session` and join them with SQL.
+Register multiple tables in one `Session` to join them with DataFusion SQL.
+Complete the [first-table tutorial](create_append_query.md) before starting.
 
-**Prereqs:** Finished [Create, append, query](create_append_query.md) (or equivalent).
+## Run the example
 
-**What you’ll learn:**
-- How `Session` can hold multiple registered tables at once
-- How to structure joins on `(time, entity)` columns
-
-`Session` supports registering multiple tables into one SQL session and running joins.
-
-This tutorial creates two time-series tables, registers them as `prices` and `volumes`,
-and joins them on `(ts, symbol)`.
+Run this example from an empty working directory. It creates `prices` and
+`volumes` tables, registers both, and joins them on `(ts, symbol)`.
 
 ```python
 --8<-- "crates/timeseries-table-python/examples/register_and_join_two_tables.py"
 ```
 
-## Tips
+Use stable SQL names when registering tables so application queries do not
+depend on filesystem paths.
 
-- Keep your SQL table names stable (e.g. `prices`, `volumes`, `symbols`) and register them at startup.
-- You can mix time-series tables (`register_tstable`) and plain Parquet datasets (`register_parquet`) in
-  the same `Session`.
+You can also mix managed tables and plain Parquet data in one session:
 
-Next:
-- Tutorial: [Parameterized queries](parameterized_queries.md)
-- Reference: [Session](../reference/session.md)
+- `register_tstable(...)` registers a managed table root.
+- `register_parquet(...)` registers an unmanaged Parquet file or directory.
+
+See the [Session reference](../reference/session.md) for the complete API.
