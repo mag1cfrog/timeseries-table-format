@@ -47,6 +47,7 @@ def test_coverage_overlap_maps_to_specific_exception():
         assert isinstance(e.segment_path, str)
         assert isinstance(e.overlap_count, int)
         assert e.overlap_count > 0
+        assert e.example_entity_identity is None
         assert e.example_bucket is None or isinstance(e.example_bucket, int)
         assert os.path.exists(os.path.join(table_root, "data", "first.parquet"))
         assert not os.path.exists(os.path.join(table_root, "data", "second.parquet"))

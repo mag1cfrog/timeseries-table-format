@@ -162,10 +162,11 @@ mod _native {
     fn table_error_to_py_with_root(
         py: Python<'_>,
         table_root: &str,
+        entity_columns: &[String],
         err: timeseries_table_format::table::TableError,
     ) -> PyErr {
         let base_msg = err.to_string();
-        let py_err = crate::error_map::table_error_to_py(py, err);
+        let py_err = crate::error_map::table_error_to_py(py, err, entity_columns);
         let exc = py_err.value(py);
 
         if let Err(e) = exc.setattr("table_root", table_root.to_string()) {
@@ -619,7 +620,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
                 },
                 move |py, err| match err {
                     RegisterTsTableError::Table(e) => {
-                        table_error_to_py_with_root(py, &table_root_for_err, e)
+                        table_error_to_py_with_root(py, &table_root_for_err, &[], e)
                     }
                     RegisterTsTableError::DataFusion(e) => {
                         crate::error_map::datafusion_error_to_py(py, e)
@@ -1347,7 +1348,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
                     Ok::<_, TableError>(table)
                 },
-                move |py, err| table_error_to_py_with_root(py, &table_root_for_err_cp, err),
+                move |py, err| table_error_to_py_with_root(py, &table_root_for_err_cp, &[], err),
             )?;
 
             Ok(Self {
@@ -1384,7 +1385,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
                     Ok::<_, TableError>(table)
                 },
-                move |py, err| table_error_to_py_with_root(py, &table_root_for_err_cp, err),
+                move |py, err| table_error_to_py_with_root(py, &table_root_for_err_cp, &[], err),
             )?;
 
             Ok(Self {
@@ -1510,6 +1511,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             let rt = tokio_runner::global_runtime()?;
 
             let table_root_for_err = self.table_root.clone();
+            let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
 
             let table = &mut self.inner;
 
@@ -1526,7 +1528,14 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                         table.append_parquet_segment(&parquet_path).await
                     }
                 },
-                move |py, err| table_error_to_py_with_root(py, &table_root_for_err, err),
+                move |py, err| {
+                    table_error_to_py_with_root(
+                        py,
+                        &table_root_for_err,
+                        &entity_columns_for_err,
+                        err,
+                    )
+                },
             )
         }
     }
@@ -1587,7 +1596,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
                 Ok::<(), TableError>(())
             },
-            error_map::table_error_to_py,
+            move |py, err| error_map::table_error_to_py(py, err, &[]),
         )?;
 
         Ok(())
