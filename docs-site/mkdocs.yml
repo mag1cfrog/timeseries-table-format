@@ -51,6 +51,7 @@ nav:
       - Buckets and overlap: concepts/bucketing_and_overlap.md
       - Table root layout: concepts/table_root.md
       - Performance: performance.md
+      - SQL result export: guides/sql_result_export.md
   - Reference:
       - Session: reference/session.md
       - TimeSeriesTable: reference/timeseries_table.md

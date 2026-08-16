@@ -47,5 +47,8 @@ SELECT * FROM unsigned_counters
 WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED);
 ```
 
+Python query parameters accept integers only in the Int64 range. Write larger
+UInt64 constants with an explicit cast as shown above.
+
 See [Buckets and overlap](../concepts/bucketing_and_overlap.md) for integer
 bucketing semantics and current index limitations.
