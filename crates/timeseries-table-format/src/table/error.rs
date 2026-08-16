@@ -14,7 +14,7 @@ use parquet::errors::ParquetError;
 use snafu::prelude::*;
 
 use crate::{
-    coverage::{bucket::BucketError, io::CoverageError},
+    coverage::{EntityIdentity, bucket::BucketError, io::CoverageError},
     formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
     metadata::{
         schema_compat::SchemaCompatibilityError,
@@ -250,6 +250,21 @@ pub enum TableError {
         overlap_count: u64,
         /// Example overlapping bucket (if available) to aid debugging.
         example_bucket: Option<u64>,
+    },
+
+    /// Appending would overlap entity-scoped table coverage.
+    #[snafu(display(
+        "Entity coverage overlap while appending {segment_path}: {overlap_count} overlapping identity/bucket pairs (example_identity={example_identity:?}, example_bucket={example_bucket})"
+    ))]
+    EntityCoverageOverlap {
+        /// Relative path of the segment being appended.
+        segment_path: String,
+        /// Number of overlapping `(entity identity, bucket)` pairs.
+        overlap_count: u128,
+        /// First overlapping identity in canonical order.
+        example_identity: EntityIdentity,
+        /// Smallest overlapping bucket for `example_identity`.
+        example_bucket: u64,
     },
 
     /// A live segment already uses the normalized path supplied for append.

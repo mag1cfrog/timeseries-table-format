@@ -12,13 +12,22 @@ use std::path::Path;
 use log::warn;
 
 use crate::{
-    coverage::Coverage, coverage::io::read_coverage_sidecar,
+    coverage::{
+        Coverage, EntityCoverage,
+        io::{read_coverage_sidecar, read_entity_coverage_sidecar},
+    },
+    metadata::table_metadata::ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION,
     transaction_log::table_state::TableCoveragePointer,
 };
 
 use super::{TimeSeriesTable, error::TableError};
 
 impl TimeSeriesTable {
+    pub(crate) fn uses_entity_scoped_coverage(&self) -> bool {
+        self.state().table_meta.format_version() == ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION
+            && !self.index_spec().entity_columns.is_empty()
+    }
+
     /// Rebuild table coverage by reading each segment's coverage sidecar.
     ///
     /// This is used as a fallback when the table snapshot coverage is missing or
@@ -45,6 +54,31 @@ impl TimeSeriesTable {
 
             // Prefer an in-place union to avoid repeated allocations.
             acc.union_inplace(&cov);
+        }
+
+        Ok(acc)
+    }
+
+    pub(crate) async fn recover_table_entity_coverage_from_segments(
+        &self,
+    ) -> Result<EntityCoverage, TableError> {
+        let mut acc = EntityCoverage::empty();
+
+        for seg in self.state().segments.values() {
+            let path = seg.coverage_path.as_ref().ok_or_else(|| {
+                TableError::ExistingSegmentMissingCoverage {
+                    path: seg.path.clone(),
+                }
+            })?;
+
+            let coverage = read_entity_coverage_sidecar(self.location(), Path::new(path))
+                .await
+                .map_err(|source| TableError::SegmentCoverageSidecarRead {
+                    path: seg.path.clone(),
+                    coverage_path: path.clone(),
+                    source: Box::new(source),
+                })?;
+            acc.union_inplace(&coverage);
         }
 
         Ok(acc)
@@ -88,6 +122,25 @@ impl TimeSeriesTable {
         }
     }
 
+    pub(crate) async fn load_table_entity_coverage_snapshot_only(
+        &self,
+    ) -> Result<EntityCoverage, TableError> {
+        match &self.state().table_coverage {
+            None => {
+                if self.state().segments.is_empty() {
+                    return Ok(EntityCoverage::empty());
+                }
+                Err(TableError::MissingTableCoveragePointer)
+            }
+            Some(ptr) => {
+                self.ensure_table_coverage_index_matches(ptr)?;
+                read_entity_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
+                    .await
+                    .map_err(|source| TableError::CoverageSidecar { source })
+            }
+        }
+    }
+
     /// Load table coverage for read paths (no writes).
     ///
     /// - If snapshot pointer is absent:
@@ -117,6 +170,33 @@ impl TimeSeriesTable {
                             ptr.coverage_path, ptr.version, snapshot_err
                         );
                         self.recover_table_coverage_from_segments().await
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn load_table_entity_snapshot_coverage_readonly(
+        &self,
+    ) -> Result<EntityCoverage, TableError> {
+        match &self.state().table_coverage {
+            None => {
+                if self.state().segments.is_empty() {
+                    return Ok(EntityCoverage::empty());
+                }
+                self.recover_table_entity_coverage_from_segments().await
+            }
+            Some(ptr) => {
+                self.ensure_table_coverage_index_matches(ptr)?;
+                match self.load_table_entity_coverage_snapshot_only().await {
+                    Ok(coverage) => Ok(coverage),
+                    Err(snapshot_err) => {
+                        warn!(
+                            "Failed to read entity coverage snapshot at {} (version {}): {:?}. \
+                             Attempting recovery from segment sidecars (readonly).",
+                            ptr.coverage_path, ptr.version, snapshot_err
+                        );
+                        self.recover_table_entity_coverage_from_segments().await
                     }
                 }
             }
@@ -274,7 +354,9 @@ mod tests {
             bucket::{BucketError, bucket_id},
             io::write_coverage_sidecar_atomic,
         },
-        metadata::table_metadata::{IndexKind, IndexSpec, IndexValueError, TableMeta, TimeBucket},
+        metadata::table_metadata::{
+            IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeBucket,
+        },
         storage::TableLocation,
         table::test_util::{
             TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
@@ -294,7 +376,12 @@ mod tests {
     async fn make_table() -> HelperResult<(TempDir, TimeSeriesTable)> {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
-        let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let mut meta = make_basic_table_meta();
+        let TableKind::TimeSeries(index) = &mut meta.kind else {
+            unreachable!("test metadata is time series")
+        };
+        index.entity_columns.clear();
+        let table = TimeSeriesTable::create(location, meta).await?;
         Ok((tmp, table))
     }
 

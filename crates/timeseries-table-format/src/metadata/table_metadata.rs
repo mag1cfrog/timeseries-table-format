@@ -22,10 +22,13 @@ use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 /// Oldest table metadata / log format version this reader supports.
 pub const MIN_SUPPORTED_TABLE_FORMAT_VERSION: u32 = 3;
 
+/// Table format version that introduced entity-scoped coverage sidecars.
+pub(crate) const ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION: u32 = 4;
+
 /// Current table metadata / log format version written by new tables.
 ///
 /// Bumped when persisted table semantics require version-aware decoding.
-pub const TABLE_FORMAT_VERSION: u32 = 4;
+pub const TABLE_FORMAT_VERSION: u32 = ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION;
 
 /// The high-level "kind" of table.
 ///
