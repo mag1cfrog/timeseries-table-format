@@ -359,9 +359,9 @@ impl EntityCoverage {
         self.iter().find_map(|(identity, coverage)| {
             let other_coverage = other.get(identity)?;
             coverage
+                .intersect(other_coverage)
                 .present()
-                .iter()
-                .find(|bucket| other_coverage.present().contains(*bucket))
+                .min()
                 .map(|bucket| (identity, bucket))
         })
     }
@@ -573,6 +573,21 @@ mod tests {
         right.union_coverage(first.clone(), [3, 9].into_iter().collect());
 
         assert_eq!(left.overlap_example(&right), Some((&first, 3)));
+    }
+
+    #[test]
+    fn entity_coverage_overlap_example_does_not_enumerate_dense_buckets() {
+        let entity = identity(&["dense"]);
+        let last = u64::from(u32::MAX);
+        let mut dense = RoaringTreemap::new();
+        dense.insert_range(0..=last);
+
+        let mut left = EntityCoverage::empty();
+        left.union_coverage(entity.clone(), Coverage::from_treemap(dense));
+        let mut right = EntityCoverage::empty();
+        right.union_coverage(entity.clone(), [last].into_iter().collect());
+
+        assert_eq!(left.overlap_example(&right), Some((&entity, last)));
     }
 
     #[test]
