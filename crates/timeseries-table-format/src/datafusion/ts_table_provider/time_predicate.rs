@@ -11,6 +11,7 @@ use datafusion::scalar::ScalarValue;
 use std::ops::{Add, Sub};
 
 use super::ParsedTz;
+use super::timestamp_pruning::{UnifiedInterval, add_interval, interval_from_scalar};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TimePred {
@@ -64,34 +65,6 @@ impl TimePred {
             Unknown => Unknown,
             Not(inner) => *inner,
             other => Not(Box::new(other)),
-        }
-    }
-}
-
-// Unified interval representation (calendar-aware months + days + nanos).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct UnifiedInterval {
-    pub(crate) months: i32,
-    pub(crate) days: i32,
-    pub(crate) nanos: i64,
-}
-
-impl UnifiedInterval {
-    fn zero() -> Self {
-        Self {
-            months: 0,
-            days: 0,
-            nanos: 0,
-        }
-    }
-
-    fn add(self, rhs: Self, sign: i32) -> Self {
-        Self {
-            months: self.months.saturating_add(rhs.months.saturating_mul(sign)),
-            days: self.days.saturating_add(rhs.days.saturating_mul(sign)),
-            nanos: self
-                .nanos
-                .saturating_add(rhs.nanos.saturating_mul(sign as i64)),
         }
     }
 }
@@ -333,27 +306,6 @@ fn scalar_to_bool(v: &ScalarValue) -> Option<bool> {
     }
 }
 
-fn interval_from_scalar(v: &ScalarValue) -> Option<UnifiedInterval> {
-    match v {
-        ScalarValue::IntervalMonthDayNano(Some(v)) => Some(UnifiedInterval {
-            months: v.months,
-            days: v.days,
-            nanos: v.nanoseconds,
-        }),
-        ScalarValue::IntervalDayTime(Some(v)) => Some(UnifiedInterval {
-            months: 0,
-            days: v.days,
-            nanos: (v.milliseconds as i64) * 1_000_000,
-        }),
-        ScalarValue::IntervalYearMonth(Some(v)) => Some(UnifiedInterval {
-            months: *v,
-            days: 0,
-            nanos: 0,
-        }),
-        _ => None,
-    }
-}
-
 // Flatten an expression of +/- into a net interval applied to ts.
 // Supports: ts, ts + iv, iv + ts, ts + iv + iv, iv + ts - iv, etc.
 fn extract_ts_with_interval(expr: &Expr, ts_col: &str) -> Option<UnifiedInterval> {
@@ -377,15 +329,15 @@ fn extract_ts_with_interval(expr: &Expr, ts_col: &str) -> Option<UnifiedInterval
             if be.op == Operator::Plus {
                 // commutative: L + (ts + R) => ts + (R + L)
                 if left_has_ts {
-                    return Some((left_iv.add(right_iv, 1), true));
+                    return Some((left_iv.checked_add(right_iv, 1)?, true));
                 } else {
-                    return Some((right_iv.add(left_iv, 1), true));
+                    return Some((right_iv.checked_add(left_iv, 1)?, true));
                 }
             }
 
             // Minus: only allow ts on the left (ts - R)
             if left_has_ts {
-                return Some((left_iv.add(right_iv, -1), true));
+                return Some((left_iv.checked_add(right_iv, -1)?, true));
             }
             return None;
         }
@@ -401,36 +353,6 @@ fn extract_ts_with_interval(expr: &Expr, ts_col: &str) -> Option<UnifiedInterval
 
     let (net, has_ts) = walk(expr, ts_col)?;
     if has_ts { Some(net) } else { None }
-}
-
-pub(crate) fn add_interval(
-    dt: DateTime<Utc>,
-    iv: UnifiedInterval,
-    sign: i32,
-) -> Option<DateTime<Utc>> {
-    use chrono::{Duration, Months};
-
-    let mut out = dt;
-    let months = iv.months.saturating_mul(sign);
-    if months != 0 {
-        if months > 0 {
-            out = out.checked_add_months(Months::new(months as u32))?;
-        } else {
-            out = out.checked_sub_months(Months::new((-months) as u32))?;
-        }
-    }
-
-    let days = iv.days.saturating_mul(sign);
-    if days != 0 {
-        out = out.checked_add_signed(Duration::days(days as i64))?;
-    }
-
-    let nanos = iv.nanos.saturating_mul(sign as i64);
-    if nanos != 0 {
-        out = out.checked_add_signed(Duration::nanoseconds(nanos))?;
-    }
-
-    Some(out)
 }
 
 /// Flip comparison direction when operands are swapped.

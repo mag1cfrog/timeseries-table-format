@@ -16,11 +16,14 @@ use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
+use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr::TableProviderFilterPushDown;
-use datafusion::logical_expr::{Expr, Operator};
+use datafusion::logical_expr::expr_fn::create_udf;
+use datafusion::logical_expr::{Expr, Operator, Volatility};
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
+use datafusion::scalar::ScalarValue;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
@@ -1930,6 +1933,39 @@ async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_row
 }
 
 #[tokio::test]
+async fn overridden_builtin_name_does_not_enable_timestamp_pruning() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_utc_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let udf = create_udf(
+        "to_unixtime",
+        vec![DataType::Timestamp(TimeUnit::Millisecond, None)],
+        DataType::Int64,
+        Volatility::Immutable,
+        Arc::new(|args: &[ColumnarValue]| {
+            Ok(match &args[0] {
+                ColumnarValue::Array(array) => {
+                    ColumnarValue::Array(Arc::new(Int64Array::from(vec![1; array.len()])))
+                }
+                ColumnarValue::Scalar(_) => ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
+            })
+        }),
+    );
+    ctx.register_udf(udf);
+
+    let predicate = "to_unixtime(ts) = 1";
+    let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+    assert_eq!(files, UTC_PRUNING_FILES, "wrong files for {predicate}");
+    assert_eq!(
+        collect_i64_values(&batches)?,
+        vec![0, 59_999, 60_000, 119_999, 120_000, 179_999],
+        "wrong rows for {predicate}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn timestamp_calendar_date_transforms_select_expected_files_and_rows() -> TestResult {
     const FILES: &[&str] = &[
         "calendar-before.parquet",
@@ -1992,6 +2028,7 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
         "dst-before-jump.parquet",
         "dst-after-jump.parquet",
         "dst-after-day.parquet",
+        "dst-mixed-interval-source.parquet",
     ];
     let tmp = TempDir::new()?;
     let table = create_zoned_pruning_table(
@@ -2027,6 +2064,12 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
                 "2024-03-11T04:00:00Z",
                 "2024-03-11T04:59:59.999Z",
                 50.0,
+            ),
+            (
+                FILES[5],
+                "2024-03-09T06:30:00Z",
+                "2024-03-09T06:30:00.001Z",
+                60.0,
             ),
         ],
     )
@@ -2064,6 +2107,11 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
                 ts_millis("2024-03-10T07:59:59.999Z"),
             ],
         ),
+        (
+            "ts + interval '1 day' = '2024-03-11T01:00:00-04:00'",
+            vec![FILES[2]],
+            vec![ts_millis("2024-03-10T06:00:00Z")],
+        ),
     ];
 
     for (predicate, expected_files, expected_values) in cases {
@@ -2075,6 +2123,19 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
             "wrong rows for {predicate}"
         );
     }
+
+    let predicate = "(ts + interval '1 day') + interval '1 hour' = \
+                     '2024-03-10T03:30:00-04:00'";
+    let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+    assert!(
+        files.iter().any(|file| file == FILES[5]),
+        "matching file was pruned for {predicate}"
+    );
+    assert_eq!(
+        collect_i64_values(&batches)?,
+        vec![ts_millis("2024-03-09T06:30:00Z")],
+        "wrong rows for {predicate}"
+    );
     Ok(())
 }
 
