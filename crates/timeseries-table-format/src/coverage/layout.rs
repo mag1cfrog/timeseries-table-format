@@ -144,6 +144,64 @@ fn coverage_id_v2(
     format!("{output_prefix}-{}", &hex[..32])
 }
 
+fn entity_coverage_id_v1(
+    domain_prefix: &[u8],
+    output_prefix: &str,
+    index: &IndexSpec,
+    coverage_bytes: &[u8],
+) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(domain_prefix);
+    h.update(b"\0");
+
+    h.update(b"C");
+    hash_len_prefixed(&mut h, index.column.as_bytes());
+    h.update(b"E");
+    hash_usize(&mut h, index.entity_columns.len());
+    for column in &index.entity_columns {
+        hash_len_prefixed(&mut h, column.as_bytes());
+    }
+    h.update(b"K");
+    match &index.kind {
+        IndexKind::Timestamp { bucket, timezone } => {
+            h.update(b"T");
+            hash_time_bucket(&mut h, bucket);
+            match timezone {
+                Some(timezone) => {
+                    h.update(b"S");
+                    hash_len_prefixed(&mut h, timezone.as_bytes());
+                }
+                None => {
+                    h.update(b"N");
+                }
+            }
+        }
+        IndexKind::Int64 { bucket_width } => {
+            h.update(b"I");
+            h.update(&bucket_width.get().to_le_bytes());
+        }
+        IndexKind::UInt64 { bucket_width } => {
+            h.update(b"U");
+            h.update(&bucket_width.get().to_le_bytes());
+        }
+    }
+    h.update(b"\0");
+    h.update(coverage_bytes);
+
+    let hex = h.finalize().to_hex();
+    format!("{output_prefix}-{}", &hex[..32])
+}
+
+fn hash_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hash_usize(hasher, bytes.len());
+    hasher.update(bytes);
+}
+
+fn hash_usize(hasher: &mut blake3::Hasher, value: usize) {
+    hasher.update(value.to_string().as_bytes());
+    hasher.update(b":");
+}
+
 fn hash_time_bucket(hasher: &mut blake3::Hasher, bucket: &TimeBucket) {
     match bucket {
         TimeBucket::Seconds(n) => {
@@ -173,6 +231,16 @@ pub fn segment_coverage_id_v2(index: &IndexSpec, coverage_bytes: &[u8]) -> Strin
 /// Deterministically derive a safe content id for table snapshot coverage.
 pub fn table_coverage_id_v2(index: &IndexSpec, coverage_bytes: &[u8]) -> String {
     coverage_id_v2(b"tblcov-v2", "tblcov", index, coverage_bytes)
+}
+
+/// Derive a content id for an entity-scoped segment coverage sidecar.
+pub(crate) fn segment_entity_coverage_id_v1(index: &IndexSpec, coverage_bytes: &[u8]) -> String {
+    entity_coverage_id_v1(b"entity-segcov-v1", "segcov", index, coverage_bytes)
+}
+
+/// Derive a content id for an entity-scoped table coverage snapshot.
+pub(crate) fn table_entity_coverage_id_v1(index: &IndexSpec, coverage_bytes: &[u8]) -> String {
+    entity_coverage_id_v1(b"entity-tblcov-v1", "tblcov", index, coverage_bytes)
 }
 
 /// Add a writer-owned suffix to a deterministic coverage content id.
@@ -341,6 +409,31 @@ mod tests {
         assert_ne!(base, different_bucket, "bucket spec should affect id");
         assert_ne!(base, different_column, "index column should affect id");
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
+    }
+
+    #[test]
+    fn entity_coverage_ids_include_ordered_entity_columns() {
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string(), "venue".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        };
+        let mut renamed = index.clone();
+        renamed.entity_columns[0] = "device".to_string();
+        let mut reordered = index.clone();
+        reordered.entity_columns.reverse();
+        let bytes = b"entity-coverage-bytes";
+
+        let segment = segment_entity_coverage_id_v1(&index, bytes);
+        assert_ne!(segment, segment_entity_coverage_id_v1(&renamed, bytes));
+        assert_ne!(segment, segment_entity_coverage_id_v1(&reordered, bytes));
+
+        let table = table_entity_coverage_id_v1(&index, bytes);
+        assert_ne!(table, table_entity_coverage_id_v1(&renamed, bytes));
+        assert_ne!(table, table_entity_coverage_id_v1(&reordered, bytes));
     }
 
     #[test]

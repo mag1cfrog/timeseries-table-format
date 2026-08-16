@@ -20,7 +20,8 @@ use crate::{
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
-            table_coverage_id_v2, table_snapshot_key,
+            segment_entity_coverage_id_v1, table_coverage_id_v2, table_entity_coverage_id_v1,
+            table_snapshot_key,
         },
     },
     formats::parquet::{
@@ -345,7 +346,11 @@ impl TimeSeriesTable {
 
         // 6) Give this append private sidecar paths, then write them before commit.
         let attempt_id = Uuid::new_v4();
-        let segment_content_id = segment_coverage_id_v2(&self.index, &seg_cov_bytes);
+        let segment_content_id = if uses_entity_scoped_coverage {
+            segment_entity_coverage_id_v1(&self.index, &seg_cov_bytes)
+        } else {
+            segment_coverage_id_v2(&self.index, &seg_cov_bytes)
+        };
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
         let seg_cov_path = segment_coverage_key(&segment_file_id).map_err(|source| {
             TableError::CoverageSidecar {
@@ -354,7 +359,11 @@ impl TimeSeriesTable {
         })?;
 
         let new_version_guess = expected_version + 1;
-        let snapshot_content_id = table_coverage_id_v2(&self.index, &new_snap_cov_bytes);
+        let snapshot_content_id = if uses_entity_scoped_coverage {
+            table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
+        } else {
+            table_coverage_id_v2(&self.index, &new_snap_cov_bytes)
+        };
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
         let snapshot_path =
             table_snapshot_key(new_version_guess, &snapshot_file_id).map_err(|source| {

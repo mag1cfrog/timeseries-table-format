@@ -14,7 +14,7 @@ use log::warn;
 use crate::{
     coverage::{
         Coverage, EntityCoverage,
-        io::{read_coverage_sidecar, read_entity_coverage_sidecar},
+        io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
     metadata::table_metadata::ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION,
     transaction_log::table_state::TableCoveragePointer,
@@ -22,10 +22,35 @@ use crate::{
 
 use super::{TimeSeriesTable, error::TableError};
 
+fn ensure_entity_coverage_identity_arity(
+    coverage: &EntityCoverage,
+    expected: usize,
+) -> Result<(), CoverageError> {
+    if let Some((identity, _)) = coverage
+        .iter()
+        .find(|(identity, _)| identity.components().len() != expected)
+    {
+        return Err(CoverageError::EntityIdentityArityMismatch {
+            expected,
+            actual: identity.components().len(),
+        });
+    }
+    Ok(())
+}
+
 impl TimeSeriesTable {
     pub(crate) fn uses_entity_scoped_coverage(&self) -> bool {
         self.state().table_meta.format_version() == ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION
             && !self.index_spec().entity_columns.is_empty()
+    }
+
+    async fn read_validated_entity_coverage_sidecar(
+        &self,
+        path: &Path,
+    ) -> Result<EntityCoverage, CoverageError> {
+        let coverage = read_entity_coverage_sidecar(self.location(), path).await?;
+        ensure_entity_coverage_identity_arity(&coverage, self.index_spec().entity_columns.len())?;
+        Ok(coverage)
     }
 
     /// Rebuild table coverage by reading each segment's coverage sidecar.
@@ -71,7 +96,8 @@ impl TimeSeriesTable {
                 }
             })?;
 
-            let coverage = read_entity_coverage_sidecar(self.location(), Path::new(path))
+            let coverage = self
+                .read_validated_entity_coverage_sidecar(Path::new(path))
                 .await
                 .map_err(|source| TableError::SegmentCoverageSidecarRead {
                     path: seg.path.clone(),
@@ -134,7 +160,7 @@ impl TimeSeriesTable {
             }
             Some(ptr) => {
                 self.ensure_table_coverage_index_matches(ptr)?;
-                read_entity_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
+                self.read_validated_entity_coverage_sidecar(Path::new(&ptr.coverage_path))
                     .await
                     .map_err(|source| TableError::CoverageSidecar { source })
             }
@@ -350,9 +376,10 @@ mod tests {
     use super::*;
     use crate::{
         coverage::{
-            Coverage,
+            Coverage, EntityCoverage, EntityIdentity,
             bucket::{BucketError, bucket_id},
-            io::write_coverage_sidecar_atomic,
+            io::{write_coverage_sidecar_atomic, write_coverage_sidecar_new_bytes},
+            serde::entity_coverage_to_bytes,
         },
         metadata::table_metadata::{
             IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeBucket,
@@ -420,6 +447,86 @@ mod tests {
         let abs = tmp.path().join(rel_path);
         write_test_parquet(&abs, true, false, rows)?;
         table.append_parquet_segment(rel_path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn entity_sidecar_identity_arity_is_validated_for_snapshots_and_recovery() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut wrong_arity = EntityCoverage::empty();
+        wrong_arity.union_coverage(
+            EntityIdentity::try_new(vec!["A".to_string(), "X".to_string()])?,
+            Coverage::from_iter([0]),
+        );
+        let wrong_arity_bytes = entity_coverage_to_bytes(&wrong_arity)?;
+        let snapshot_path = "_coverage/table/wrong-arity.roar";
+        write_coverage_sidecar_new_bytes(&location, Path::new(snapshot_path), &wrong_arity_bytes)
+            .await?;
+        let version = table.state().version;
+        let index_kind = table.index_spec().kind.clone();
+        table.state_mut().table_coverage = Some(TableCoveragePointer {
+            index_kind,
+            coverage_path: snapshot_path.to_string(),
+            version,
+        });
+
+        let snapshot_error = table
+            .load_table_entity_coverage_snapshot_only()
+            .await
+            .expect_err("snapshot identity arity must match the table");
+        assert!(matches!(
+            snapshot_error,
+            TableError::CoverageSidecar {
+                source: CoverageError::EntityIdentityArityMismatch {
+                    expected: 1,
+                    actual: 2,
+                },
+            }
+        ));
+
+        table.state_mut().table_coverage = None;
+        let segment_path = "data/entity-arity.parquet";
+        append_segment(
+            &mut table,
+            &tmp,
+            segment_path,
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )
+        .await?;
+        let segment_coverage_path = table
+            .state()
+            .segments
+            .get(segment_path)
+            .and_then(|segment| segment.coverage_path.clone())
+            .expect("segment coverage path");
+        tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_arity_bytes).await?;
+
+        let recovery_error = table
+            .recover_table_entity_coverage_from_segments()
+            .await
+            .expect_err("segment identity arity must match the table");
+        assert!(matches!(
+            recovery_error,
+            TableError::SegmentCoverageSidecarRead {
+                path,
+                coverage_path,
+                source,
+            } if path == segment_path
+                && coverage_path == segment_coverage_path
+                && matches!(
+                    *source,
+                    CoverageError::EntityIdentityArityMismatch {
+                        expected: 1,
+                        actual: 2,
+                    }
+                )
+        ));
         Ok(())
     }
 
