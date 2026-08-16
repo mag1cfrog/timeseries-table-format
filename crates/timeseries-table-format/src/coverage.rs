@@ -5,12 +5,52 @@ pub mod io;
 pub mod layout;
 pub mod serde;
 
-use std::ops::RangeInclusive;
+use std::{
+    collections::{BTreeMap, btree_map},
+    ops::RangeInclusive,
+};
+
+use snafu::Snafu;
 
 pub use roaring::RoaringTreemap;
 
 /// Ordered 64-bit coverage bucket identity.
 pub type Bucket = u64;
+
+/// Ordered composite entity identity.
+///
+/// Component positions correspond to the table's configured entity-column
+/// order. Column names are deliberately not repeated in every identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityIdentity {
+    components: Vec<String>,
+}
+
+impl EntityIdentity {
+    /// Construct an identity from at least one ordered component.
+    ///
+    /// # Errors
+    /// Returns [`EntityIdentityError::Empty`] when `components` is empty.
+    pub fn try_new(components: Vec<String>) -> Result<Self, EntityIdentityError> {
+        if components.is_empty() {
+            return Err(EntityIdentityError::Empty);
+        }
+        Ok(Self { components })
+    }
+
+    /// Borrow components in configured entity-column order.
+    pub fn components(&self) -> &[String] {
+        &self.components
+    }
+}
+
+/// Invalid entity identity construction.
+#[derive(Debug, Clone, PartialEq, Eq, Snafu)]
+pub enum EntityIdentityError {
+    /// An entity-aware table requires at least one identity component.
+    #[snafu(display("entity identity must contain at least one component"))]
+    Empty,
+}
 
 /// In-memory coverage over a discrete set of bucket identities.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -62,6 +102,11 @@ impl Coverage {
     /// Number of present buckets.
     pub fn cardinality(&self) -> u64 {
         self.present.len()
+    }
+
+    /// Whether no buckets are present.
+    pub fn is_empty(&self) -> bool {
+        self.present.is_empty()
     }
 
     /// Number of bucket identities in an inclusive range.
@@ -215,6 +260,113 @@ impl Coverage {
     }
 }
 
+/// Independent bucket coverage for each ordered entity identity.
+///
+/// Explicit identities with empty coverage are preserved. An absent identity
+/// is still treated as empty and returned as `None` by [`EntityCoverage::get`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntityCoverage {
+    by_identity: BTreeMap<EntityIdentity, Coverage>,
+}
+
+impl EntityCoverage {
+    /// Construct empty entity-scoped coverage.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Borrow one identity's coverage.
+    ///
+    /// `None` means the identity is absent. Set operations treat absence as
+    /// empty coverage.
+    pub fn get(&self, identity: &EntityIdentity) -> Option<&Coverage> {
+        self.by_identity.get(identity)
+    }
+
+    /// Iterate identities and their coverage in canonical order.
+    pub fn iter(&self) -> btree_map::Iter<'_, EntityIdentity, Coverage> {
+        self.by_identity.iter()
+    }
+
+    /// Number of stored identities.
+    pub fn identity_count(&self) -> usize {
+        self.by_identity.len()
+    }
+
+    /// Whether no identities are stored.
+    pub fn is_empty(&self) -> bool {
+        self.by_identity.is_empty()
+    }
+
+    /// Merge coverage for one identity.
+    pub fn union_coverage(&mut self, identity: EntityIdentity, coverage: Coverage) {
+        self.by_identity
+            .entry(identity)
+            .and_modify(|current| current.union_inplace(&coverage))
+            .or_insert(coverage);
+    }
+
+    /// Return the union of two entity-scoped coverage values.
+    pub fn union(&self, other: &Self) -> Self {
+        let mut union = self.clone();
+        union.union_inplace(other);
+        union
+    }
+
+    /// Merge another entity-scoped coverage value into this one.
+    pub fn union_inplace(&mut self, other: &Self) {
+        for (identity, coverage) in other.iter() {
+            if let Some(current) = self.by_identity.get_mut(identity) {
+                current.union_inplace(coverage);
+            } else {
+                self.by_identity.insert(identity.clone(), coverage.clone());
+            }
+        }
+    }
+
+    /// Return overlap only where both identity and bucket match.
+    pub fn intersect(&self, other: &Self) -> Self {
+        let mut intersection = Self::empty();
+        for (identity, coverage) in self.iter() {
+            if let Some(other_coverage) = other.get(identity) {
+                intersection.union_coverage(identity.clone(), coverage.intersect(other_coverage));
+            }
+        }
+        intersection
+    }
+
+    /// Count covered `(entity identity, bucket)` pairs.
+    pub fn cardinality(&self) -> u128 {
+        self.by_identity
+            .values()
+            .map(|coverage| u128::from(coverage.cardinality()))
+            .sum()
+    }
+
+    /// Count overlapping `(entity identity, bucket)` pairs without materializing them.
+    pub fn intersection_cardinality(&self, other: &Self) -> u128 {
+        self.iter()
+            .filter_map(|(identity, coverage)| {
+                other.get(identity).map(|other_coverage| {
+                    u128::from(coverage.intersection_cardinality(other_coverage))
+                })
+            })
+            .sum()
+    }
+
+    /// Return the first canonical identity and smallest overlapping bucket.
+    pub fn overlap_example<'a>(&'a self, other: &Self) -> Option<(&'a EntityIdentity, Bucket)> {
+        self.iter().find_map(|(identity, coverage)| {
+            let other_coverage = other.get(identity)?;
+            coverage
+                .intersect(other_coverage)
+                .present()
+                .min()
+                .map(|bucket| (identity, bucket))
+        })
+    }
+}
+
 impl FromIterator<Bucket> for Coverage {
     fn from_iter<I>(iter: I) -> Self
     where
@@ -314,5 +466,139 @@ mod tests {
         );
         assert_eq!(coverage.last_window_at_or_before(1, 2), Some(0..=1));
         assert_eq!(coverage.last_window_at_or_before(u64::MAX, 0), None);
+    }
+
+    fn identity(components: &[&str]) -> EntityIdentity {
+        EntityIdentity::try_new(
+            components
+                .iter()
+                .map(|component| (*component).to_string())
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn entity_identity_preserves_component_order() {
+        assert_eq!(
+            identity(&["venue", "symbol"]).components(),
+            &["venue".to_string(), "symbol".to_string()]
+        );
+        assert!(identity(&["A", "Z"]) < identity(&["B", "A"]));
+        assert!(identity(&["A", "A"]) < identity(&["A", "Z"]));
+        assert_ne!(identity(&["A", "A"]), identity(&["A", "Z"]));
+        assert_eq!(
+            EntityIdentity::try_new(Vec::new()),
+            Err(EntityIdentityError::Empty)
+        );
+    }
+
+    #[test]
+    fn entity_coverage_unions_only_matching_identities() {
+        let a = identity(&["A"]);
+        let b = identity(&["B"]);
+        let c = identity(&["C"]);
+        let mut left = EntityCoverage::empty();
+        left.union_coverage(a.clone(), [1, 2].into_iter().collect());
+        left.union_coverage(b.clone(), [1].into_iter().collect());
+
+        let mut right = EntityCoverage::empty();
+        right.union_coverage(a.clone(), [2, 3].into_iter().collect());
+        right.union_coverage(c.clone(), [4].into_iter().collect());
+
+        let union = left.union(&right);
+        assert_eq!(union.identity_count(), 3);
+        assert_eq!(union.cardinality(), 5);
+        assert_eq!(
+            union.get(&a).unwrap().present().iter().collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            union.get(&b).unwrap().present().iter().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            union.get(&c).unwrap().present().iter().collect::<Vec<_>>(),
+            vec![4]
+        );
+    }
+
+    #[test]
+    fn entity_coverage_intersection_requires_identity_and_bucket() {
+        let a = identity(&["A"]);
+        let b = identity(&["B"]);
+        let mut left = EntityCoverage::empty();
+        left.union_coverage(a.clone(), [1, 2].into_iter().collect());
+        left.union_coverage(b.clone(), [7].into_iter().collect());
+
+        let mut right = EntityCoverage::empty();
+        right.union_coverage(a.clone(), [2, 7].into_iter().collect());
+        right.union_coverage(b.clone(), [1].into_iter().collect());
+
+        let intersection = left.intersect(&right);
+        assert_eq!(intersection.identity_count(), 2);
+        assert_eq!(intersection.cardinality(), 1);
+        assert_eq!(left.intersection_cardinality(&right), 1);
+        assert_eq!(
+            intersection
+                .get(&a)
+                .unwrap()
+                .present()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(intersection.get(&b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entity_coverage_counts_same_bucket_once_per_identity() {
+        let mut coverage = EntityCoverage::empty();
+        coverage.union_coverage(identity(&["A"]), [u64::MAX].into_iter().collect());
+        coverage.union_coverage(identity(&["B"]), [u64::MAX].into_iter().collect());
+
+        assert_eq!(coverage.cardinality(), 2);
+    }
+
+    #[test]
+    fn entity_coverage_overlap_example_is_deterministic() {
+        let first = identity(&["A", "one"]);
+        let later = identity(&["B", "one"]);
+        let mut left = EntityCoverage::empty();
+        left.union_coverage(later.clone(), [1].into_iter().collect());
+        left.union_coverage(first.clone(), [9, 3].into_iter().collect());
+
+        let mut right = EntityCoverage::empty();
+        right.union_coverage(later, [1].into_iter().collect());
+        right.union_coverage(first.clone(), [3, 9].into_iter().collect());
+
+        assert_eq!(left.overlap_example(&right), Some((&first, 3)));
+    }
+
+    #[test]
+    fn entity_coverage_overlap_example_does_not_enumerate_dense_buckets() {
+        let entity = identity(&["dense"]);
+        let last = u64::from(u32::MAX);
+        let mut dense = RoaringTreemap::new();
+        dense.insert_range(0..=last);
+
+        let mut left = EntityCoverage::empty();
+        left.union_coverage(entity.clone(), Coverage::from_treemap(dense));
+        let mut right = EntityCoverage::empty();
+        right.union_coverage(entity.clone(), [last].into_iter().collect());
+
+        assert_eq!(left.overlap_example(&right), Some((&entity, last)));
+    }
+
+    #[test]
+    fn explicit_empty_entity_coverage_is_preserved() {
+        let entity = identity(&["empty"]);
+        let mut coverage = EntityCoverage::empty();
+        coverage.union_coverage(entity.clone(), Coverage::empty());
+
+        assert!(!coverage.is_empty());
+        assert!(coverage.get(&entity).unwrap().is_empty());
+        assert!(coverage.get(&identity(&["absent"])).is_none());
+        assert_eq!(coverage.identity_count(), 1);
     }
 }
