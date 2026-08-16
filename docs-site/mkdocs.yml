@@ -1,12 +1,33 @@
 site_name: timeseries-table-format (Python)
+site_url: https://mag1cfrog.github.io/timeseries-table-format/
+site_description: Python documentation for a local time-series table format with coverage tracking and overlap-safe ingestion.
 repo_name: mag1cfrog/timeseries-table-format
 repo_url: https://github.com/mag1cfrog/timeseries-table-format
+edit_uri: edit/main/docs-site/docs/
 
 theme:
   name: material
   variant: modern
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: lucide/sun-moon
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: lucide/sun
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: lucide/moon
+        name: Switch to system preference
   features:
     - navigation.sections
+    - navigation.path
+    - navigation.footer
+    - content.action.edit
     - content.code.copy
     - search.suggest
     - search.highlight
@@ -25,6 +46,8 @@ plugins:
 
 markdown_extensions:
   - admonition
+  - toc:
+      permalink: true
   - pymdownx.details
   - pymdownx.superfences
   - pymdownx.inlinehilite
@@ -36,8 +59,8 @@ markdown_extensions:
       check_paths: true
 
 nav:
+  - Overview: index.md
   - Start here:
-      - Overview: index.md
       - Is this for you?: concepts/when_to_use_this.md
       - Installation: install.md
       - Create your first table: tutorials/create_append_query.md
