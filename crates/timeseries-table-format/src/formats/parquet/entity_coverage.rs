@@ -259,9 +259,20 @@ pub async fn compute_segment_entity_coverage(
             column: index.entity_columns[0].clone(),
         });
     }
-    validate_parquet_index(&path, metadata.parquet_schema(), index)
+    let validated_index = validate_parquet_index(&path, metadata.parquet_schema(), index)
         .map_err(|source| SegmentCoverageError::OrderedIndexColumn { source })?;
+    let parquet_schema = metadata.parquet_schema();
+    let root_fields = parquet_schema.root_schema().get_fields();
+    let mut projected_roots = Vec::with_capacity(index.entity_columns.len() + 1);
     for column in &index.entity_columns {
+        let root_index = root_fields
+            .iter()
+            .position(|field| field.name() == column)
+            .ok_or_else(|| SegmentCoverageError::EntityColumnNotFound {
+                path: path.clone(),
+                column: column.clone(),
+            })?;
+        projected_roots.push(root_index);
         let field = metadata.schema().field_with_name(column).map_err(|_| {
             SegmentCoverageError::EntityColumnNotFound {
                 path: path.clone(),
@@ -276,14 +287,10 @@ pub async fn compute_segment_entity_coverage(
             });
         }
     }
+    projected_roots.push(parquet_schema.get_column_root_idx(validated_index.leaf_index));
+    let mask = ProjectionMask::roots(parquet_schema, projected_roots);
     drop(file);
 
-    let projected = index
-        .entity_columns
-        .iter()
-        .map(String::as_str)
-        .chain(std::iter::once(index.column.as_str()));
-    let mask = ProjectionMask::columns(metadata.parquet_schema(), projected);
     let row_groups = metadata.metadata().num_row_groups();
     let (max_tasks, row_groups_per_task) = resolve_rg_settings(row_groups);
     let row_groups = (0..row_groups).collect::<Vec<_>>();
@@ -577,6 +584,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![EPOCH_BUCKET + 1]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dotted_top_level_names_are_resolved_literally() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("device.id", DataType::Utf8, false),
+            Field::new(
+                "event.ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "B"])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000])),
+            ],
+        )?;
+        write_batch(&temp.path().join(rel_path), &batch, None)?;
+        let index = IndexSpec {
+            column: "event.ts".to_string(),
+            entity_columns: vec!["device.id".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Hours(1),
+                timezone: None,
+            },
+        };
+
+        let coverage =
+            compute_segment_entity_coverage(&TableLocation::local(temp.path()), rel_path, &index)
+                .await?;
+
+        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
+        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
         Ok(())
     }
 
