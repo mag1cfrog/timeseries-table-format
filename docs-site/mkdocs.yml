@@ -47,6 +47,7 @@ nav:
       - Parameterized queries: tutorials/parameterized_queries.md
       - Configure notebook display: guides/notebook_display.md
   - Advanced:
+      - Integer ordered indexes: guides/integer_indexes.md
       - Buckets and overlap: concepts/bucketing_and_overlap.md
       - Table root layout: concepts/table_root.md
       - Performance: performance.md
