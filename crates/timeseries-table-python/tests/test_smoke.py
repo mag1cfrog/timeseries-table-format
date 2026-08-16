@@ -14,7 +14,8 @@ def test_smoke_constructs_session_and_table(tmp_path):
     root = tmp_path / "table"
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

@@ -38,7 +38,8 @@ def test_create_append_register_sql_roundtrip(tmp_path):
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -84,7 +85,8 @@ def test_register_tstable_before_first_append_fails_then_succeeds(tmp_path):
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -108,7 +110,8 @@ def test_append_rejects_time_column_wrong_type(tmp_path, bad_ts_type: pa.DataTyp
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -133,7 +136,8 @@ def test_append_rejects_time_column_unit_mismatch_after_schema_adoption(
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

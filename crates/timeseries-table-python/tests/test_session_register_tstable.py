@@ -21,7 +21,8 @@ def _write_parquet(path: str) -> None:
 def _make_table(root) -> ttf.TimeSeriesTable:
     return ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -31,7 +32,8 @@ def _make_table(root) -> ttf.TimeSeriesTable:
 def _make_table_with_schema(root, seg_path) -> ttf.TimeSeriesTable:
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -46,7 +48,8 @@ def test_register_tstable_succeeds_and_replaces(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -76,7 +79,8 @@ def test_register_tstable_empty_name_rejected(tmp_path):
     root = tmp_path / "table"
     ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

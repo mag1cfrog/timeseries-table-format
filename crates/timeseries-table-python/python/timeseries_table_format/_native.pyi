@@ -1,4 +1,5 @@
 from types import ModuleType
+from typing import Literal
 
 import pyarrow
 
@@ -130,9 +131,11 @@ class TimeSeriesTable:
         cls,
         *,
         table_root: str,
-        time_column: str,
-        bucket: str,
+        index_column: str,
+        index_type: Literal["timestamp", "int64", "uint64"],
         entity_columns: list[str] | None = None,
+        bucket: str | None = None,
+        bucket_width: int | None = None,
         timezone: str | None = None,
     ) -> TimeSeriesTable:
         """Create a new time-series table at `table_root`.
@@ -141,14 +144,18 @@ class TimeSeriesTable:
         ----------
         table_root:
             Filesystem directory where the table will be created.
-        time_column:
-            Name of the timestamp column.
-        bucket:
-            Time bucket specification string such as `"1h"`, `"5m"`, `"30s"`, `"1d"`.
+        index_column:
+            Name of the ascending ordered-index column.
+        index_type:
+            One of `"timestamp"`, `"int64"`, or `"uint64"`.
         entity_columns:
             Column names that define the entity identity for the table.
+        bucket:
+            Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
+        bucket_width:
+            Required positive integer width for `"int64"` and `"uint64"` indexes.
         timezone:
-            Optional timezone name for bucketing.
+            Optional timestamp timezone; rejected for integer indexes.
 
         Notes
         -----
@@ -187,7 +194,7 @@ class TimeSeriesTable:
         ...
 
     def index_spec(self) -> dict[str, object]:
-        """Return the index specification dict."""
+        """Return the variant-specific ordered-index specification dict."""
         ...
 
 class _TestingModule(ModuleType):

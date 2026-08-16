@@ -1196,23 +1196,27 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     #[pymethods]
     impl TimeSeriesTable {
         #[classmethod]
-        #[pyo3(signature = (*, table_root, time_column, bucket, entity_columns=None, timezone=None))]
+        #[pyo3(signature = (*, table_root, index_column, index_type, entity_columns=None, bucket=None, bucket_width=None, timezone=None))]
         /// Create a new time-series table at `table_root`.
         ///
         /// Parameters
         /// ----------
         /// table_root:
         ///     Filesystem directory where the table will be created.
-        /// time_column:
-        ///     Name of the timestamp column.
-        /// bucket:
-        ///     Time bucket specification string such as `"1h"`, `"5m"`, `"30s"`, `"1d"`.
+        /// index_column:
+        ///     Name of the ascending ordered-index column.
+        /// index_type:
+        ///     One of `"timestamp"`, `"int64"`, or `"uint64"`.
         /// entity_columns:
         ///     Column names that define the entity identity for this table. For v0, a table is
         ///     effectively scoped to a single entity identity; all appended segments must match the
         ///     entity values established by the first successful append.
+        /// bucket:
+        ///     Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
+        /// bucket_width:
+        ///     Required positive integer bucket width for `"int64"` and `"uint64"` indexes.
         /// timezone:
-        ///     Optional timezone name for bucketing; `None` means no timezone normalization.
+        ///     Optional timestamp timezone; rejected for integer indexes.
         ///
         /// Notes
         /// -----
@@ -1222,35 +1226,108 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// ------
         /// TimeseriesTableError:
         ///     If creation fails. The exception includes a `table_root` attribute.
+        #[allow(clippy::too_many_arguments)]
         fn create(
             _cls: &Bound<'_, PyType>,
             py: Python<'_>,
             table_root: String,
-            time_column: String,
-            bucket: String,
+            index_column: String,
+            index_type: String,
             entity_columns: Option<Vec<String>>,
+            bucket: Option<String>,
+            bucket_width: Option<&Bound<'_, PyAny>>,
             timezone: Option<String>,
         ) -> PyResult<Self> {
             use crate::tokio_runner;
 
+            use std::num::NonZeroU64;
             use timeseries_table_format::storage::TableLocation;
             use timeseries_table_format::table::TableError;
             use timeseries_table_format::transaction_log::{
                 IndexKind, IndexSpec, TableMeta, TimeBucket,
             };
 
-            let bucket = TimeBucket::parse(&bucket).map_err(|e| {
-                let msg = format!("invalid bucket spec {bucket:?} (table_root={table_root}): {e}");
+            let invalid = |field: &str, reason: String| {
+                let msg = format!(
+                    "invalid {field} for index_type {index_type:?} \
+                     (table_root={table_root}): {reason}"
+                );
                 let py_err = TimeseriesTableError::new_err(msg);
                 let exc = py_err.value(py);
                 let _ = exc.setattr("table_root", table_root.clone());
+                let _ = exc.setattr("index_type", index_type.clone());
                 py_err
-            })?;
+            };
+
+            let kind = match index_type.as_str() {
+                "timestamp" => {
+                    if bucket_width.is_some() {
+                        return Err(invalid(
+                            "bucket_width",
+                            "use bucket for timestamp indexes".to_string(),
+                        ));
+                    }
+                    let bucket = bucket.as_deref().ok_or_else(|| {
+                        invalid("bucket", "is required for timestamp indexes".to_string())
+                    })?;
+                    let bucket = TimeBucket::parse(bucket)
+                        .map_err(|error| invalid("bucket", error.to_string()))?;
+                    IndexKind::Timestamp { bucket, timezone }
+                }
+                "int64" | "uint64" => {
+                    if bucket.is_some() {
+                        return Err(invalid(
+                            "bucket",
+                            "is only valid for timestamp indexes".to_string(),
+                        ));
+                    }
+                    if timezone.is_some() {
+                        return Err(invalid(
+                            "timezone",
+                            "is only valid for timestamp indexes".to_string(),
+                        ));
+                    }
+                    let value = bucket_width.ok_or_else(|| {
+                        invalid(
+                            "bucket_width",
+                            "is required for integer indexes".to_string(),
+                        )
+                    })?;
+                    if value.is_instance_of::<pyo3::types::PyBool>()
+                        || !value.is_instance_of::<pyo3::types::PyInt>()
+                    {
+                        return Err(invalid(
+                            "bucket_width",
+                            "must be a Python int, not bool".to_string(),
+                        ));
+                    }
+                    let value = value.extract::<u64>().map_err(|_| {
+                        invalid(
+                            "bucket_width",
+                            format!("must be an integer in 1..={}", u64::MAX),
+                        )
+                    })?;
+                    let bucket_width = NonZeroU64::new(value)
+                        .ok_or_else(|| invalid("bucket_width", "must be at least 1".to_string()))?;
+
+                    if index_type == "int64" {
+                        IndexKind::Int64 { bucket_width }
+                    } else {
+                        IndexKind::UInt64 { bucket_width }
+                    }
+                }
+                _ => {
+                    return Err(invalid(
+                        "index_type",
+                        "expected 'timestamp', 'int64', or 'uint64'".to_string(),
+                    ));
+                }
+            };
 
             let index = IndexSpec {
-                column: time_column,
+                column: index_column,
                 entity_columns: entity_columns.unwrap_or_default(),
-                kind: IndexKind::Timestamp { bucket, timezone },
+                kind,
             };
             let meta = TableMeta::new_time_series(index);
 
@@ -1329,30 +1406,31 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
         /// Return the index specification as a Python dict.
         ///
-        /// Keys: `timestamp_column`, `entity_columns`, `bucket`, `timezone`.
+        /// Every variant contains `column`, `entity_columns`, and `kind`. Timestamp indexes also
+        /// contain `bucket` and `timezone`; integer indexes contain `bucket_width`.
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
             use timeseries_table_format::transaction_log::{IndexKind, TimeBucket};
 
             let spec = self.inner.index_spec();
-
-            let IndexKind::Timestamp { bucket, timezone } = &spec.kind else {
-                return Err(TimeseriesTableError::new_err(format!(
-                    "Python timestamp index_spec does not support {} indexes",
-                    spec.kind.name()
-                )));
-            };
-            let bucket = match bucket {
-                TimeBucket::Seconds(n) => format!("{n}s"),
-                TimeBucket::Minutes(n) => format!("{n}m"),
-                TimeBucket::Hours(n) => format!("{n}h"),
-                TimeBucket::Days(n) => format!("{n}d"),
-            };
-
             let d = PyDict::new(py);
-            d.set_item("timestamp_column", spec.column.clone())?;
+            d.set_item("column", spec.column.clone())?;
             d.set_item("entity_columns", spec.entity_columns.clone())?;
-            d.set_item("bucket", bucket)?;
-            d.set_item("timezone", timezone.clone())?;
+            d.set_item("kind", spec.kind.name())?;
+            match &spec.kind {
+                IndexKind::Timestamp { bucket, timezone } => {
+                    let bucket = match bucket {
+                        TimeBucket::Seconds(n) => format!("{n}s"),
+                        TimeBucket::Minutes(n) => format!("{n}m"),
+                        TimeBucket::Hours(n) => format!("{n}h"),
+                        TimeBucket::Days(n) => format!("{n}d"),
+                    };
+                    d.set_item("bucket", bucket)?;
+                    d.set_item("timezone", timezone.clone())?;
+                }
+                IndexKind::Int64 { bucket_width } | IndexKind::UInt64 { bucket_width } => {
+                    d.set_item("bucket_width", bucket_width.get())?;
+                }
+            }
 
             Ok(d)
         }

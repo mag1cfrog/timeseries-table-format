@@ -112,7 +112,8 @@ def test_session_tables_sorted_and_deregister(tmp_path):
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

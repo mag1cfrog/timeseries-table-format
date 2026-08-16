@@ -51,7 +51,8 @@ def test_append_parquet_outside_and_inside_root(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -93,7 +94,8 @@ def test_append_parquet_copy_if_outside_true_when_already_under_root_does_not_co
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -118,7 +120,8 @@ def test_append_parquet_copy_if_outside_true_failure_removes_copy(tmp_path):
     root = tmp_path / "table"
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -148,7 +151,8 @@ def test_append_parquet_copy_collision_raises_storage_error(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -190,7 +194,8 @@ def test_append_parquet_copy_if_outside_false_relative_path_and_traversal(tmp_pa
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -218,7 +223,8 @@ def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -258,7 +264,8 @@ def test_append_parquet_uses_registered_time_column(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -284,7 +291,8 @@ def test_append_parquet_schema_mismatch_raises_schema_mismatch_error(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -323,7 +331,8 @@ def test_append_parquet_windows_backslash_paths(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
