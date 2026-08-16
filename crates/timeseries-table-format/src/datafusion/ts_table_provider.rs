@@ -1,18 +1,9 @@
 mod segment_pruning;
 #[cfg(test)]
 mod tests;
-mod time_predicate;
 mod timestamp_pruning;
 
-use chrono::FixedOffset;
-
-use chrono_tz::Tz;
-pub(crate) use time_predicate::*;
-pub(crate) use timestamp_pruning::{UnifiedInterval, add_interval};
-
-mod pruning;
 use crate::storage::file_size;
-pub(crate) use pruning::*;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -63,26 +54,6 @@ pub struct TsTableProvider {
 struct Cache {
     version: Option<u64>,
     state: Option<TableState>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ParsedTz {
-    Utc,
-    Fixed(FixedOffset),
-    Olson(Tz),
-}
-
-fn parse_tz(tz: &str) -> Option<ParsedTz> {
-    if tz.eq_ignore_ascii_case("utc") {
-        return Some(ParsedTz::Utc);
-    }
-    if let Ok(offset) = tz.parse::<FixedOffset>() {
-        return Some(ParsedTz::Fixed(offset));
-    }
-    if let Ok(tz) = tz.parse::<Tz>() {
-        return Some(ParsedTz::Olson(tz));
-    }
-    None
 }
 
 /// Wrap a generic error for DataFusion APIs.

@@ -4,8 +4,8 @@ use arrow::array::timezone::Tz as ArrowTz;
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::offset::LocalResult;
 use chrono::{
-    DateTime, Datelike, Days, Duration, Months, NaiveDate, NaiveDateTime, Offset, TimeZone,
-    Timelike, Utc,
+    DateTime, Datelike, Days, Duration, FixedOffset, Months, NaiveDate, NaiveDateTime, Offset,
+    TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -19,13 +19,29 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::scalar::ScalarValue;
 
 use super::segment_pruning::timestamp_scalar;
-use super::{ParsedTz, parse_tz};
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct UnifiedInterval {
-    pub(crate) months: i32,
-    pub(crate) days: i32,
-    pub(crate) nanos: i64,
+enum ParsedTz {
+    Utc,
+    Fixed(FixedOffset),
+    Olson(Tz),
+}
+
+fn parse_tz(timezone: &str) -> Option<ParsedTz> {
+    if timezone.eq_ignore_ascii_case("utc") {
+        return Some(ParsedTz::Utc);
+    }
+    if let Ok(offset) = timezone.parse::<FixedOffset>() {
+        return Some(ParsedTz::Fixed(offset));
+    }
+    timezone.parse::<Tz>().ok().map(ParsedTz::Olson)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnifiedInterval {
+    months: i32,
+    days: i32,
+    nanos: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,7 +66,7 @@ struct IntervalShape {
 }
 
 impl UnifiedInterval {
-    pub(super) fn zero() -> Self {
+    fn zero() -> Self {
         Self {
             months: 0,
             days: 0,
@@ -58,7 +74,7 @@ impl UnifiedInterval {
         }
     }
 
-    pub(super) fn checked_add(self, rhs: Self, sign: i32) -> Option<Self> {
+    fn checked_add(self, rhs: Self, sign: i32) -> Option<Self> {
         Some(Self {
             months: self.months.checked_add(rhs.months.checked_mul(sign)?)?,
             days: self.days.checked_add(rhs.days.checked_mul(sign)?)?,
@@ -69,7 +85,7 @@ impl UnifiedInterval {
     }
 }
 
-pub(super) fn interval_from_scalar(value: &ScalarValue) -> Option<UnifiedInterval> {
+fn interval_from_scalar(value: &ScalarValue) -> Option<UnifiedInterval> {
     match value {
         ScalarValue::IntervalMonthDayNano(Some(value)) => Some(UnifiedInterval {
             months: value.months,
@@ -88,14 +104,6 @@ pub(super) fn interval_from_scalar(value: &ScalarValue) -> Option<UnifiedInterva
         }),
         _ => None,
     }
-}
-
-pub(crate) fn add_interval(
-    datetime: DateTime<Utc>,
-    interval: UnifiedInterval,
-    sign: i32,
-) -> Option<DateTime<Utc>> {
-    apply_interval(datetime, interval, sign)
 }
 
 fn apply_interval<Tz: TimeZone>(
@@ -1959,6 +1967,6 @@ mod tests {
             nanos: 0,
         };
 
-        assert!(add_interval(datetime, interval, -1).is_none());
+        assert!(apply_interval(datetime, interval, -1).is_none());
     }
 }
