@@ -2064,6 +2064,11 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
                 ts_millis("2024-03-10T07:59:59.999Z"),
             ],
         ),
+        (
+            "ts + interval '1 day' = '2024-03-11T01:00:00-04:00'",
+            vec![FILES[2]],
+            vec![ts_millis("2024-03-10T06:00:00Z")],
+        ),
     ];
 
     for (predicate, expected_files, expected_values) in cases {

@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+use arrow::array::timezone::Tz as ArrowTz;
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::offset::LocalResult;
 use chrono::{
-    DateTime, Datelike, Duration, Months, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+    DateTime, Datelike, Days, Duration, Months, NaiveDate, NaiveDateTime, Offset, TimeZone,
+    Timelike, Utc,
 };
 use chrono_tz::Tz;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -81,6 +83,14 @@ pub(crate) fn add_interval(
     interval: UnifiedInterval,
     sign: i32,
 ) -> Option<DateTime<Utc>> {
+    apply_interval(datetime, interval, sign)
+}
+
+fn apply_interval<Tz: TimeZone>(
+    datetime: DateTime<Tz>,
+    interval: UnifiedInterval,
+    sign: i32,
+) -> Option<DateTime<Tz>> {
     let mut result = datetime;
     let months = interval.months.checked_mul(sign)?;
     if months > 0 {
@@ -90,8 +100,10 @@ pub(crate) fn add_interval(
     }
 
     let days = interval.days.checked_mul(sign)?;
-    if days != 0 {
-        result = result.checked_add_signed(Duration::days(i64::from(days)))?;
+    if days > 0 {
+        result = result.checked_add_days(Days::new(days as u64))?;
+    } else if days < 0 {
+        result = result.checked_sub_days(Days::new(u64::from(days.unsigned_abs())))?;
     }
 
     let nanos = interval.nanos.checked_mul(i64::from(sign))?;
@@ -196,34 +208,51 @@ fn shifted_comparison(
     month_terms: usize,
     index_type: &DataType,
 ) -> Option<Expr> {
-    let shifted = add_interval(datetime, interval, -1)?;
+    let DataType::Timestamp(unit, timezone) = index_type else {
+        return None;
+    };
+    let shifted = apply_interval_in_index_timezone(datetime, interval, -1, timezone.as_deref())?;
     if month_terms != 0
         && (month_terms != 1
             || interval.days != 0
             || interval.nanos != 0
-            || !month_shift_is_safe_to_invert(shifted, datetime, interval))
+            || !month_shift_is_safe_to_invert(shifted, datetime, interval, timezone.as_deref()))
     {
         return None;
     }
-    let DataType::Timestamp(unit, timezone) = index_type else {
-        return None;
-    };
     let literal = timestamp_scalar(shifted, unit, timezone.clone())?;
     Some(binary(column, operator, Expr::Literal(literal, None)))
+}
+
+fn apply_interval_in_index_timezone(
+    datetime: DateTime<Utc>,
+    interval: UnifiedInterval,
+    sign: i32,
+    timezone: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    let timezone = timezone.unwrap_or("+00:00").parse::<ArrowTz>().ok()?;
+    apply_interval(datetime.with_timezone(&timezone), interval, sign)
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn month_shift_is_safe_to_invert(
     source: DateTime<Utc>,
     target: DateTime<Utc>,
     interval: UnifiedInterval,
+    timezone: Option<&str>,
 ) -> bool {
-    if add_interval(source, interval, 1) != Some(target) {
+    let Ok(timezone) = timezone.unwrap_or("+00:00").parse::<ArrowTz>() else {
+        return false;
+    };
+    let source = source.with_timezone(&timezone);
+    let target = target.with_timezone(&timezone);
+    if !apply_interval(source, interval, 1).is_some_and(|value| value == target) {
         return false;
     }
-    last_day_of_month(target).is_some_and(|last_day| target.day() != last_day)
+    last_day_of_month(&target).is_some_and(|last_day| target.day() != last_day)
 }
 
-fn last_day_of_month(datetime: DateTime<Utc>) -> Option<u32> {
+fn last_day_of_month<Tz: TimeZone>(datetime: &DateTime<Tz>) -> Option<u32> {
     datetime
         .date_naive()
         .with_day(1)
