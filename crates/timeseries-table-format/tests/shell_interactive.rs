@@ -1,6 +1,13 @@
 #![allow(missing_docs)]
 
-use std::{process::Stdio, time::Duration};
+use std::{num::NonZeroU64, process::Stdio, sync::Arc, time::Duration};
+
+use arrow::{
+    array::{ArrayRef, Int64Array, UInt64Array},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
+use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_format::{
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
@@ -37,12 +44,12 @@ async fn run_shell_with_input(args: &[&str], input: &str) -> TestResult<std::pro
 }
 
 fn make_table_meta(
-    time_column: &str,
+    index_column: &str,
     bucket: TimeBucket,
     entity_columns: Vec<String>,
 ) -> TableMeta {
     let index = IndexSpec {
-        column: time_column.to_string(),
+        column: index_column.to_string(),
         entity_columns,
         kind: IndexKind::Timestamp {
             bucket,
@@ -64,9 +71,26 @@ fn write_segment(path: &std::path::Path) -> TestResult<()> {
     Ok(())
 }
 
+fn write_numeric_segment(
+    path: &std::path::Path,
+    data_type: DataType,
+    values: ArrayRef,
+) -> TestResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let schema = Arc::new(Schema::new(vec![Field::new("idx", data_type, false)]));
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values])?;
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
 fn shell_input_for_create(
     table_root: &std::path::Path,
-    time_column: &str,
+    index_column: &str,
     bucket: &str,
     timezone: Option<&str>,
     entities: Option<&str>,
@@ -74,7 +98,8 @@ fn shell_input_for_create(
 ) -> String {
     let mut input = String::new();
     input.push_str(&format!("{}\n", table_root.display()));
-    input.push_str(&format!("{time_column}\n"));
+    input.push_str(&format!("{index_column}\n"));
+    input.push_str("timestamp\n");
     input.push_str(&format!("{bucket}\n"));
     if let Some(tz) = timezone {
         input.push_str(tz);
@@ -105,6 +130,98 @@ async fn shell_interactive_create_and_append() -> TestResult<()> {
 
     let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
     assert!(table.state().table_meta.logical_schema().is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
+    let tmp = TempDir::new()?;
+    let cases: Vec<(&str, &str, DataType, ArrayRef, IndexKind)> = vec![
+        (
+            "int64",
+            "4",
+            DataType::Int64,
+            Arc::new(Int64Array::from(vec![-4, 0, 4])),
+            IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(4).unwrap(),
+            },
+        ),
+        (
+            "uint64",
+            "8",
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![
+                i64::MAX as u64 + 1,
+                i64::MAX as u64 + 8,
+            ])),
+            IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(8).unwrap(),
+            },
+        ),
+    ];
+
+    for (index_type, bucket_width, data_type, values, expected_kind) in cases {
+        let table_root = tmp.path().join(index_type);
+        let segment = table_root.join("data/segment.parquet");
+        write_numeric_segment(&segment, data_type, values)?;
+        let input = format!(
+            "{}\nidx\n{index_type}\n{bucket_width}\n\n{}\nexit\n",
+            table_root.display(),
+            segment.display()
+        );
+
+        let output = run_shell_with_input(&["shell"], &input).await?;
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("timezone (optional"));
+        assert!(stdout.contains("integer bucket width"));
+
+        let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
+        assert_eq!(table.index_spec().column, "idx");
+        assert_eq!(table.index_spec().kind, expected_kind);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_interactive_reprompts_invalid_index_type_and_width() -> TestResult<()> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let segment = table_root.join("data/segment.parquet");
+    write_numeric_segment(
+        &segment,
+        DataType::Int64,
+        Arc::new(Int64Array::from(vec![-4, 0, 4])),
+    )?;
+    let input = format!(
+        "{}\nidx\ninteger\nint64\n0\n-1\n4\n\n{}\nexit\n",
+        table_root.display(),
+        segment.display()
+    );
+
+    let output = run_shell_with_input(&["shell"], &input).await?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Invalid index type 'integer'"));
+    assert!(stdout.contains("Invalid --bucket-width for --index-type int64"));
+
+    let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
+    assert_eq!(
+        table.index_spec().kind,
+        IndexKind::Int64 {
+            bucket_width: NonZeroU64::new(4).unwrap(),
+        }
+    );
 
     Ok(())
 }
@@ -167,6 +284,7 @@ async fn shell_interactive_reprompts_invalid_bucket() -> TestResult<()> {
     let mut input = String::new();
     input.push_str(&format!("{}\n", table_root.display()));
     input.push_str("ts\n");
+    input.push_str("timestamp\n");
     input.push_str("1x\n");
     input.push_str("1s\n");
     input.push('\n'); // timezone

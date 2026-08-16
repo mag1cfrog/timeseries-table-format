@@ -5,23 +5,22 @@ use std::{
 };
 
 use chrono::Local;
+use clap::ValueEnum;
 use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
 use terminal_size::terminal_size;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
 use tokio::runtime::Handle;
 
 use crate::{
-    BackendArg,
+    BackendArg, IndexTypeArg,
     engine::{Engine, QuerySession},
-    error::{
-        CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu, OpenTableSnafu, StorageSnafu,
-    },
-    make_engine, open_table,
+    error::{CliError, CliResult, CreateTableSnafu, OpenTableSnafu, StorageSnafu},
+    make_engine, open_table, parse_bucket_width, parse_time_bucket,
     query::{
         OutputFormat, QueryOpts, default_table_name, page_output, preview_message,
         print_query_result, quote_identifier, render_preview, write_query_summary,
@@ -249,23 +248,45 @@ fn prompt_optional(prompt: &str) -> CliResult<Option<String>> {
     }
 }
 
-fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
-    spec.parse::<TimeBucket>().context(InvalidBucketSnafu {
-        spec: spec.to_string(),
-    })
-}
-
 async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
     println!("table not found; creating new table...");
-    let time_column = prompt_non_empty("time column name: ")?;
-    let bucket = loop {
-        let spec = prompt_non_empty("time bucket (e.g. 1s, 1m, 1h, 1d): ")?;
-        match parse_time_bucket(&spec) {
-            Ok(b) => break b,
-            Err(e) => println!("{e}"),
+    let index_column = prompt_non_empty("index column name: ")?;
+    let index_type = loop {
+        let value = prompt_non_empty("index type (timestamp, int64, uint64): ")?;
+        match IndexTypeArg::from_str(&value, false) {
+            Ok(index_type) => break index_type,
+            Err(_) => {
+                println!("Invalid index type '{value}': expected timestamp, int64, or uint64")
+            }
         }
     };
-    let timezone = prompt_optional("timezone (optional, IANA TZ): ")?;
+    let kind = match index_type {
+        IndexTypeArg::Timestamp => {
+            let bucket = loop {
+                let spec = prompt_non_empty("time bucket (e.g. 1s, 1m, 1h, 1d): ")?;
+                match parse_time_bucket(&spec) {
+                    Ok(bucket) => break bucket,
+                    Err(error) => println!("{error}"),
+                }
+            };
+            let timezone = prompt_optional("timezone (optional, IANA TZ): ")?;
+            IndexKind::Timestamp { bucket, timezone }
+        }
+        IndexTypeArg::Int64 | IndexTypeArg::UInt64 => {
+            let bucket_width = loop {
+                let spec = prompt_non_empty("integer bucket width (positive index-value units): ")?;
+                match parse_bucket_width(&spec, index_type) {
+                    Ok(bucket_width) => break bucket_width,
+                    Err(error) => println!("{error}"),
+                }
+            };
+            match index_type {
+                IndexTypeArg::Int64 => IndexKind::Int64 { bucket_width },
+                IndexTypeArg::UInt64 => IndexKind::UInt64 { bucket_width },
+                IndexTypeArg::Timestamp => unreachable!(),
+            }
+        }
+    };
     let entities = prompt_optional("entity columns (comma-separated, optional): ")?
         .map(|s| {
             s.split(',')
@@ -277,9 +298,9 @@ async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
         .unwrap_or_default();
 
     let index = IndexSpec {
-        column: time_column,
+        column: index_column,
         entity_columns: entities,
-        kind: IndexKind::Timestamp { bucket, timezone },
+        kind,
     };
     let meta = TableMeta::new_time_series(index);
     let location =

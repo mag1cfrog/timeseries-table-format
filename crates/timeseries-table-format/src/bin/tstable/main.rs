@@ -205,6 +205,15 @@ fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
     })
 }
 
+fn parse_bucket_width(spec: &str, index_type: IndexTypeArg) -> CliResult<NonZeroU64> {
+    spec.parse::<NonZeroU64>()
+        .map_err(|_| CliError::InvalidIndexOption {
+            option: "--bucket-width",
+            index_type: index_type.name(),
+            reason: format!("'{spec}' is not an integer in 1..={}", u64::MAX),
+        })
+}
+
 async fn create_table(table_root: &Path, meta: TableMeta) -> CliResult<()> {
     let location =
         TableLocation::parse(table_root.to_string_lossy().as_ref()).context(StorageSnafu)?;
@@ -259,12 +268,7 @@ async fn cmd_create(
             let value = bucket_width
                 .as_deref()
                 .ok_or_else(|| invalid("--bucket-width", "is required"))?;
-            let bucket_width = value.parse::<NonZeroU64>().map_err(|_| {
-                invalid(
-                    "--bucket-width",
-                    &format!("'{value}' is not an integer in 1..={}", u64::MAX),
-                )
-            })?;
+            let bucket_width = parse_bucket_width(value, index_type)?;
 
             match index_type {
                 IndexTypeArg::Int64 => IndexKind::Int64 { bucket_width },
