@@ -316,7 +316,11 @@ impl EntityCoverage {
     /// Merge another entity-scoped coverage value into this one.
     pub fn union_inplace(&mut self, other: &Self) {
         for (identity, coverage) in other.iter() {
-            self.union_coverage(identity.clone(), coverage.clone());
+            if let Some(current) = self.by_identity.get_mut(identity) {
+                current.union_inplace(coverage);
+            } else {
+                self.by_identity.insert(identity.clone(), coverage.clone());
+            }
         }
     }
 
