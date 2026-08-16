@@ -53,10 +53,10 @@ Delta Lake and Apache Iceberg are great for general-purpose analytics. But if yo
 | | |
 |---|---|
 | **ACID-like transactions** | Append-only commit log with optimistic concurrency control—no more corrupted datasets from failed writes |
-| **Time-first layout** | Timestamp column, entity partitioning, and configurable bucket granularity baked into the format |
+| **Chronological layout** | One ascending Timestamp, Int64, or UInt64 index with configurable bucket granularity |
 | **Coverage tracking** | RoaringBitmap indexes answer "where are my gaps?" in milliseconds, not minutes |
 | **Overlap-safe appends** | Automatic detection prevents accidental duplicate data ingestion |
-| **DataFusion integration** | SQL queries with time-based segment pruning out of the box |
+| **DataFusion integration** | SQL queries with ordered-index segment pruning out of the box |
 | **Rust core + Python bindings** | Rust-first core (CLI + libraries) with Python bindings for local workflows |
 | **Fast ingest** | [7–27× faster](#performance-benchmarks) than ClickHouse/PostgreSQL on bulk loads and daily appends |
 
@@ -136,7 +136,8 @@ with tempfile.TemporaryDirectory() as d:
     prices_root = base_dir / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(prices_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -148,7 +149,8 @@ with tempfile.TemporaryDirectory() as d:
     volumes_root = base_dir / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
         table_root=str(volumes_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -176,20 +178,89 @@ with tempfile.TemporaryDirectory() as d:
 
 </details>
 
+### Integer chronological indexes
+
+Int64 and UInt64 use application-defined units. Cast SQL literals above `i64::MAX` as `BIGINT UNSIGNED`.
+
+```python
+import timeseries_table_format as ttf
+
+signed = ttf.TimeSeriesTable.create(
+    table_root="signed_ticks",
+    index_column="tick",
+    index_type="int64",
+    bucket_width=10,
+)
+signed.append_parquet("signed.parquet")  # tick must be Arrow int64
+
+unsigned = ttf.TimeSeriesTable.create(
+    table_root="unsigned_counters",
+    index_column="counter",
+    index_type="uint64",
+    bucket_width=100,
+)
+unsigned.append_parquet("unsigned.parquet")  # counter must be Arrow uint64
+assert unsigned.index_spec() == {
+    "column": "counter",
+    "entity_columns": [],
+    "kind": "uint64",
+    "bucket_width": 100,
+}
+
+session = ttf.Session()
+session.register_tstable("signed_ticks", "signed_ticks")
+session.register_tstable("unsigned_counters", "unsigned_counters")
+negative = session.sql(
+    "SELECT tick FROM signed_ticks WHERE tick >= -20 AND tick < 0 ORDER BY tick"
+)
+large = session.sql(
+    "SELECT counter FROM unsigned_counters "
+    "WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED) "
+    "ORDER BY counter"
+)
+```
+
 ---
 
 ## Core Concepts
 
-Read this once—these terms show up throughout the project.
+Every table has one ascending chronological index. It can be a physical Timestamp or an integer-valued logical clock, with units defined by the application. The public APIs and metadata call this the ordered index.
 
-**Bucket size (important):** `bucket=1h` does **not** resample your data to “hourly”.
+| Index domain | Required Parquet/Arrow type | Bucket configuration |
+|--------------|-----------------------------|----------------------|
+| Timestamp | `timestamp` with an explicit unit | A time duration such as `1m` or `1h` |
+| Int64 | Signed `int64` | A positive width in index-value units |
+| UInt64 | Unsigned `uint64` | A positive width in index-value units |
 
-The bucket is the time grid used for **coverage** (“do I have data for this range?”) and **overlap checks** (“did I already ingest this time window?”).
+The configured type must match the Parquet column exactly. The library does not infer timestamps from integers or convert between signed and unsigned values.
 
-Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00). In v0.1, appending two rows for the same entity in the same bucket is treated as **overlap** and will be rejected.
+### Buckets, ranges, and coverage
 
-Practical rule: choose a bucket that matches the **granularity you expect to be unique per entity**.
-Hourly bars → `1h`, minute bars → `1m`, etc. If you expect multiple rows per entity within an hour, don’t use `1h` in v0.1.
+Buckets drive coverage and overlap checks; they do not resample data.
+
+- For Timestamp indexes, `bucket=1h` groups values into one-hour buckets.
+- For integer indexes, `bucket_width=10` groups values in application-defined units.
+- Int64 uses Euclidean division. With width 10, `-11` belongs to `[-20, -10)` and `-1` belongs to `[-10, 0)`.
+- Core range operations use half-open intervals: the start is included and the end is excluded, written `[start, end)`.
+- Coverage records bucket-level evidence. A covered bucket means at least one segment contributes data to it, not that every possible index value is present.
+
+Choose a bucket at the granularity expected to be unique per entity; overlapping segments in the same entity bucket are rejected.
+
+### Current index limitations
+
+Indexes cannot currently use floats, decimals, strings, multiple columns, descending order, or implicit signedness conversion.
+
+### Migrating timestamp-only callers
+
+This release makes a clean source-breaking transition with no compatibility aliases.
+
+| Previous API | Current API |
+|--------------|-------------|
+| CLI create `--time-column ts` | `--index-column ts --index-type timestamp` |
+| CLI append `--time-column ts` | Remove the option; append uses the persisted index specification |
+| Python create `time_column="ts"` | `index_column="ts", index_type="timestamp"` |
+| Python append `time_column="ts"` | Remove the argument; append uses the persisted index specification |
+| Python `index_spec()["timestamp_column"]` | `index_spec()["column"]`; inspect `kind` for the domain |
 
 ---
 
@@ -237,15 +308,26 @@ Python users: see [Install (Python)](#install-python) and [Python Quickstart](#p
 # Install
 cargo install timeseries-table-format --features cli
 
-# Create a table with 1-hour buckets
-tstable create --table ./my_table --time-column ts --bucket 1h
+# Timestamp
+tstable create --table ./events --index-column ts --index-type timestamp --bucket 1h
+tstable append --table ./events --parquet ./events.parquet
+tstable query --table ./events \
+  --sql "SELECT * FROM events WHERE ts >= TIMESTAMP '2026-01-01 00:00:00' ORDER BY ts"
 
-# Append data (overlap-safe!)
-tstable append --table ./my_table --parquet ./data.parquet
+# Signed logical time
+tstable create --table ./signed_ticks --index-column tick --index-type int64 --bucket-width 10
+tstable append --table ./signed_ticks --parquet ./signed.parquet
+tstable query --table ./signed_ticks \
+  --sql "SELECT * FROM signed_ticks WHERE tick >= -20 AND tick < 0 ORDER BY tick"
 
-# Query with SQL
-tstable query --table ./my_table --sql "SELECT * FROM my_table LIMIT 5"
+# Unsigned logical time above i64::MAX
+tstable create --table ./unsigned_counters --index-column counter --index-type uint64 --bucket-width 100
+tstable append --table ./unsigned_counters --parquet ./unsigned.parquet
+tstable query --table ./unsigned_counters \
+  --sql "SELECT * FROM unsigned_counters WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED) ORDER BY counter"
 ```
+
+Run `tstable shell` without `--table` for guided creation; it prompts only for options relevant to the selected index type.
 
 See the [CLI documentation](crates/timeseries-table-format/CLI.md) for the full command reference.
 
@@ -342,15 +424,15 @@ Benchmarked on **73M rows** of NYC taxi data (bulk load + 90 days of daily appen
 A time-series table consists of:
 
 - **Parquet segments on disk**  
-  Each segment holds a chunk of time-sorted data (e.g., 1h bars for a symbol).
+  Each segment holds data addressed by the table's chronological index.
 
 - **Append-only metadata log (`_timeseries_log/`)**  
   - JSON commit files (`0000000001.json`, `0000000002.json`, ...) record segment additions/removals
   - `CURRENT` pointer tracks the latest committed version
   - **Version-guard OCC**: read version N → commit with expected_version=N → succeed only if CURRENT is still N
 
-- **Table metadata with time index**  
-  - `TableKind::TimeSeries(TimeIndexSpec)` with timestamp column, entity columns, bucket granularity
+- **Table metadata with ordered index**
+  - `IndexSpec` with one Timestamp, Int64, or UInt64 column, entity columns, and bucket granularity
   - Schema info and creation timestamp
 
 - **Coverage bitmaps (`_coverage/`)**  
