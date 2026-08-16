@@ -6,7 +6,10 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 use std::{io, result::Result as StdResult};
 
-use arrow::array::{Float64Builder, StringBuilder, TimestampMillisecondBuilder};
+use arrow::array::{
+    ArrayRef, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
+    TimestampMillisecondBuilder, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -90,6 +93,26 @@ fn write_parquet_rows(
     writer.write(&batch)?;
     writer.close()?;
 
+    Ok(())
+}
+
+fn write_indexed_parquet(
+    path: &Path,
+    index_type: DataType,
+    index_values: ArrayRef,
+    tags: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("idx", index_type, false),
+        Field::new("tag", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![index_values, Arc::new(StringArray::from(tags.to_vec()))],
+    )?;
+    let mut writer = ArrowWriter::try_new(std::fs::File::create(path)?, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
     Ok(())
 }
 
@@ -185,6 +208,110 @@ fn cli_create_supports_integer_index_domains() -> StdResult<(), Box<dyn std::err
         assert_eq!(table.index_spec().kind, expected_kind);
     }
 
+    Ok(())
+}
+
+#[test]
+fn cli_int64_create_append_query_and_wrong_domain_rollback()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("ordered_ints");
+    let output = run_cli(&[
+        "create",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--index-column",
+        "idx",
+        "--index-type",
+        "int64",
+        "--bucket-width",
+        "10",
+    ])?;
+    assert_cli_success(&output);
+
+    let state_before = open_table_blocking(&table_root)?.state().clone();
+    let wrong_domains: Vec<(&str, DataType, ArrayRef)> = vec![
+        (
+            "timestamp.parquet",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            Arc::new(TimestampMillisecondArray::from(vec![0, 1])),
+        ),
+        (
+            "uint64.parquet",
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![0, 1])),
+        ),
+    ];
+    for (filename, data_type, values) in wrong_domains {
+        let source = tmp.path().join(filename);
+        write_indexed_parquet(&source, data_type, values, &["wrong", "wrong"])?;
+        let source_before = std::fs::read(&source)?;
+
+        let output = run_cli(&[
+            "append",
+            "--table",
+            table_root.to_string_lossy().as_ref(),
+            "--parquet",
+            source.to_string_lossy().as_ref(),
+        ])?;
+
+        assert!(!output.status.success(), "wrong index domain should fail");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("expected int64"),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&source)?, source_before);
+        assert!(!table_root.join("data").join(filename).exists());
+        assert!(!table_root.join("_coverage").exists());
+        assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
+    }
+
+    let negative = tmp.path().join("negative.parquet");
+    write_indexed_parquet(
+        &negative,
+        DataType::Int64,
+        Arc::new(Int64Array::from(vec![-20, -11])),
+        &["negative", "negative"],
+    )?;
+    let nonnegative = tmp.path().join("nonnegative.parquet");
+    write_indexed_parquet(
+        &nonnegative,
+        DataType::Int64,
+        Arc::new(Int64Array::from(vec![0, 9, 20])),
+        &["nonnegative", "nonnegative", "nonnegative"],
+    )?;
+    for source in [&negative, &nonnegative] {
+        let output = run_cli(&[
+            "append",
+            "--table",
+            table_root.to_string_lossy().as_ref(),
+            "--parquet",
+            source.to_string_lossy().as_ref(),
+        ])?;
+        assert_cli_success(&output);
+    }
+
+    let query_output = tmp.path().join("result.csv");
+    let output = run_cli(&[
+        "query",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--sql",
+        "SELECT idx, tag FROM ordered_ints WHERE idx >= -12 AND idx < 10 ORDER BY idx",
+        "--output",
+        query_output.to_string_lossy().as_ref(),
+        "--format",
+        "csv",
+    ])?;
+    assert_cli_success(&output);
+    assert_eq!(
+        std::fs::read_to_string(query_output)?,
+        "idx,tag\n-11,negative\n0,nonnegative\n9,nonnegative\n"
+    );
+
+    let table = open_table_blocking(&table_root)?;
+    assert_eq!(table.state().segments.len(), 2);
     Ok(())
 }
 
