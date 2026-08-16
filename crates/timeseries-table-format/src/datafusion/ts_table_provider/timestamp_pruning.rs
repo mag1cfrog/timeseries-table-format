@@ -37,6 +37,13 @@ enum BinStride {
     Months(i64),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct IntervalShape {
+    month_terms: usize,
+    has_days: bool,
+    has_nanos: bool,
+}
+
 impl UnifiedInterval {
     pub(super) fn zero() -> Self {
         Self {
@@ -150,7 +157,7 @@ fn normalize_interval_comparison(
     index_column: &str,
     index_type: &DataType,
 ) -> Option<Expr> {
-    let left_month_terms = month_term_count(&comparison.left);
+    let left_shape = interval_shape(&comparison.left);
     if is_interval_arithmetic(&comparison.left)
         && let Some((column, interval)) =
             extract_index_with_interval(&comparison.left, index_column)
@@ -161,7 +168,7 @@ fn normalize_interval_comparison(
             comparison.op,
             datetime,
             interval,
-            left_month_terms,
+            left_shape,
             index_type,
         );
     }
@@ -176,7 +183,7 @@ fn normalize_interval_comparison(
         flip_comparison(comparison.op)?,
         datetime,
         interval,
-        month_term_count(&comparison.right),
+        interval_shape(&comparison.right),
         index_type,
     )
 }
@@ -188,15 +195,27 @@ fn is_interval_arithmetic(expr: &Expr) -> bool {
     )
 }
 
-fn month_term_count(expr: &Expr) -> usize {
+fn interval_shape(expr: &Expr) -> IntervalShape {
     match expr {
         Expr::Literal(value, _) => {
-            usize::from(interval_from_scalar(value).is_some_and(|interval| interval.months != 0))
+            interval_from_scalar(value).map_or_else(IntervalShape::default, |interval| {
+                IntervalShape {
+                    month_terms: usize::from(interval.months != 0),
+                    has_days: interval.days != 0,
+                    has_nanos: interval.nanos != 0,
+                }
+            })
         }
         Expr::BinaryExpr(binary) if matches!(binary.op, Operator::Plus | Operator::Minus) => {
-            month_term_count(&binary.left).saturating_add(month_term_count(&binary.right))
+            let left = interval_shape(&binary.left);
+            let right = interval_shape(&binary.right);
+            IntervalShape {
+                month_terms: left.month_terms.saturating_add(right.month_terms),
+                has_days: left.has_days || right.has_days,
+                has_nanos: left.has_nanos || right.has_nanos,
+            }
         }
-        _ => 0,
+        _ => IntervalShape::default(),
     }
 }
 
@@ -205,17 +224,20 @@ fn shifted_comparison(
     operator: Operator,
     datetime: DateTime<Utc>,
     interval: UnifiedInterval,
-    month_terms: usize,
+    shape: IntervalShape,
     index_type: &DataType,
 ) -> Option<Expr> {
     let DataType::Timestamp(unit, timezone) = index_type else {
         return None;
     };
+    if shape.has_days && shape.has_nanos {
+        return None;
+    }
     let shifted = apply_interval_in_index_timezone(datetime, interval, -1, timezone.as_deref())?;
-    if month_terms != 0
-        && (month_terms != 1
-            || interval.days != 0
-            || interval.nanos != 0
+    if shape.month_terms != 0
+        && (shape.month_terms != 1
+            || shape.has_days
+            || shape.has_nanos
             || !month_shift_is_safe_to_invert(shifted, datetime, interval, timezone.as_deref()))
     {
         return None;
@@ -1222,6 +1244,60 @@ mod tests {
             assert_eq!(
                 normalize_timestamp_predicate(predicate.clone(), "ts", &timestamp_type(None))
                     .unwrap(),
+                predicate
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_mixed_calendar_day_and_fixed_duration_arithmetic_unchanged() {
+        let timezone: Arc<str> = "America/New_York".into();
+        let target = || {
+            timestamp_millis(
+                DateTime::parse_from_rfc3339("2024-03-10T03:30:00-04:00")
+                    .unwrap()
+                    .timestamp_millis(),
+                Some(timezone.clone()),
+            )
+        };
+        let predicates = [
+            binary(
+                binary(
+                    column("ts"),
+                    Operator::Plus,
+                    interval(0, 1, 3_600_000_000_000),
+                ),
+                Operator::Eq,
+                target(),
+            ),
+            binary(
+                binary(
+                    binary(column("ts"), Operator::Plus, interval(0, 1, 0)),
+                    Operator::Plus,
+                    interval(0, 0, 3_600_000_000_000),
+                ),
+                Operator::Eq,
+                target(),
+            ),
+            binary(
+                binary(
+                    binary(
+                        binary(column("ts"), Operator::Plus, interval(0, 1, 0)),
+                        Operator::Plus,
+                        interval(0, 0, 3_600_000_000_000),
+                    ),
+                    Operator::Minus,
+                    interval(0, 1, 0),
+                ),
+                Operator::Eq,
+                target(),
+            ),
+        ];
+        let index_type = timestamp_type(Some(timezone));
+
+        for predicate in predicates {
+            assert_eq!(
+                normalize_timestamp_predicate(predicate.clone(), "ts", &index_type).unwrap(),
                 predicate
             );
         }

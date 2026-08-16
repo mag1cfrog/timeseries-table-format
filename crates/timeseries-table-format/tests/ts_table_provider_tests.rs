@@ -1992,6 +1992,7 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
         "dst-before-jump.parquet",
         "dst-after-jump.parquet",
         "dst-after-day.parquet",
+        "dst-mixed-interval-source.parquet",
     ];
     let tmp = TempDir::new()?;
     let table = create_zoned_pruning_table(
@@ -2027,6 +2028,12 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
                 "2024-03-11T04:00:00Z",
                 "2024-03-11T04:59:59.999Z",
                 50.0,
+            ),
+            (
+                FILES[5],
+                "2024-03-09T06:30:00Z",
+                "2024-03-09T06:30:00.001Z",
+                60.0,
             ),
         ],
     )
@@ -2080,6 +2087,19 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
             "wrong rows for {predicate}"
         );
     }
+
+    let predicate = "(ts + interval '1 day') + interval '1 hour' = \
+                     '2024-03-10T03:30:00-04:00'";
+    let (files, batches) = run_timestamp_query(&ctx, predicate).await?;
+    assert!(
+        files.iter().any(|file| file == FILES[5]),
+        "matching file was pruned for {predicate}"
+    );
+    assert_eq!(
+        collect_i64_values(&batches)?,
+        vec![ts_millis("2024-03-09T06:30:00Z")],
+        "wrong rows for {predicate}"
+    );
     Ok(())
 }
 
