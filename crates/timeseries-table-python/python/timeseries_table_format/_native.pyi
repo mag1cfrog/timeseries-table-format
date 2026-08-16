@@ -15,7 +15,7 @@ class CoverageOverlapError(TimeseriesTableError):
     overlap_count: int
     """Number of (entity, bucket) pairs that already have coverage."""
     example_bucket: int | None
-    """One example bucket (epoch microseconds) that overlapped, for debugging."""
+    """One overlapping bucket identifier, for debugging."""
 
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
