@@ -16,7 +16,8 @@ Both sources use the same SQL query API.
 | `sql(...)` | `pyarrow.Table` | The complete result fits in memory |
 | `sql_reader(...)` | `pyarrow.RecordBatchReader` | You want to process large results in batches |
 
-See [Performance](../performance.md) for benchmarks and streaming examples.
+See [Stream query results](../guides/stream_query_results.md) for usage and
+[Streaming query performance](../performance.md) for benchmarks.
 For integer-index query rules, see
 [Integer ordered indexes](../guides/integer_indexes.md).
 

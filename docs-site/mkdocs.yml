@@ -45,12 +45,13 @@ nav:
       - Incremental ingestion: tutorials/real_world_workflow.md
       - Register and join tables: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md
+      - Stream query results: guides/stream_query_results.md
       - Configure notebook display: guides/notebook_display.md
   - Advanced:
       - Integer ordered indexes: guides/integer_indexes.md
       - Buckets and overlap: concepts/bucketing_and_overlap.md
       - Table root layout: concepts/table_root.md
-      - Performance: performance.md
+      - Streaming performance: performance.md
       - SQL result export: guides/sql_result_export.md
   - Reference:
       - Session: reference/session.md
