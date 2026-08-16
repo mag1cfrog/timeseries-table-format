@@ -262,8 +262,8 @@ impl Coverage {
 
 /// Independent bucket coverage for each ordered entity identity.
 ///
-/// Empty per-entity bitmaps are omitted so an absent identity and an identity
-/// with empty coverage have one canonical in-memory representation.
+/// Explicit identities with empty coverage are preserved. An absent identity
+/// is still treated as empty and returned as `None` by [`EntityCoverage::get`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntityCoverage {
     by_identity: BTreeMap<EntityIdentity, Coverage>,
@@ -282,26 +282,23 @@ impl EntityCoverage {
         self.by_identity.get(identity)
     }
 
-    /// Iterate identities and their non-empty coverage in canonical order.
+    /// Iterate identities and their coverage in canonical order.
     pub fn iter(&self) -> btree_map::Iter<'_, EntityIdentity, Coverage> {
         self.by_identity.iter()
     }
 
-    /// Number of identities with non-empty coverage.
+    /// Number of stored identities.
     pub fn identity_count(&self) -> usize {
         self.by_identity.len()
     }
 
-    /// Whether no entity has covered buckets.
+    /// Whether no identities are stored.
     pub fn is_empty(&self) -> bool {
         self.by_identity.is_empty()
     }
 
     /// Merge coverage for one identity.
     pub fn union_coverage(&mut self, identity: EntityIdentity, coverage: Coverage) {
-        if coverage.is_empty() {
-            return;
-        }
         self.by_identity
             .entry(identity)
             .and_modify(|current| current.union_inplace(&coverage))
@@ -483,6 +480,8 @@ mod tests {
             &["venue".to_string(), "symbol".to_string()]
         );
         assert!(identity(&["A", "Z"]) < identity(&["B", "A"]));
+        assert!(identity(&["A", "A"]) < identity(&["A", "Z"]));
+        assert_ne!(identity(&["A", "A"]), identity(&["A", "Z"]));
         assert_eq!(
             EntityIdentity::try_new(Vec::new()),
             Err(EntityIdentityError::Empty)
@@ -493,17 +492,18 @@ mod tests {
     fn entity_coverage_unions_only_matching_identities() {
         let a = identity(&["A"]);
         let b = identity(&["B"]);
+        let c = identity(&["C"]);
         let mut left = EntityCoverage::empty();
         left.union_coverage(a.clone(), [1, 2].into_iter().collect());
         left.union_coverage(b.clone(), [1].into_iter().collect());
 
         let mut right = EntityCoverage::empty();
         right.union_coverage(a.clone(), [2, 3].into_iter().collect());
-        right.union_coverage(b.clone(), Coverage::empty());
+        right.union_coverage(c.clone(), [4].into_iter().collect());
 
         let union = left.union(&right);
-        assert_eq!(union.identity_count(), 2);
-        assert_eq!(union.cardinality(), 4);
+        assert_eq!(union.identity_count(), 3);
+        assert_eq!(union.cardinality(), 5);
         assert_eq!(
             union.get(&a).unwrap().present().iter().collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -511,6 +511,10 @@ mod tests {
         assert_eq!(
             union.get(&b).unwrap().present().iter().collect::<Vec<_>>(),
             vec![1]
+        );
+        assert_eq!(
+            union.get(&c).unwrap().present().iter().collect::<Vec<_>>(),
+            vec![4]
         );
     }
 
@@ -527,7 +531,7 @@ mod tests {
         right.union_coverage(b.clone(), [1].into_iter().collect());
 
         let intersection = left.intersect(&right);
-        assert_eq!(intersection.identity_count(), 1);
+        assert_eq!(intersection.identity_count(), 2);
         assert_eq!(intersection.cardinality(), 1);
         assert_eq!(left.intersection_cardinality(&right), 1);
         assert_eq!(
@@ -539,7 +543,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2]
         );
-        assert_eq!(intersection.get(&b), None);
+        assert!(intersection.get(&b).unwrap().is_empty());
     }
 
     #[test]
@@ -567,13 +571,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_entity_coverage_is_canonical() {
-        let missing = identity(&["missing"]);
+    fn explicit_empty_entity_coverage_is_preserved() {
+        let entity = identity(&["empty"]);
         let mut coverage = EntityCoverage::empty();
-        coverage.union_coverage(missing.clone(), Coverage::empty());
+        coverage.union_coverage(entity.clone(), Coverage::empty());
 
-        assert!(coverage.is_empty());
-        assert_eq!(coverage.get(&missing), None);
-        assert_eq!(coverage.iter().count(), 0);
+        assert!(!coverage.is_empty());
+        assert!(coverage.get(&entity).unwrap().is_empty());
+        assert_eq!(coverage.identity_count(), 1);
     }
 }

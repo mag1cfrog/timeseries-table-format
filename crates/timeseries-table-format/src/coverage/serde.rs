@@ -4,11 +4,27 @@
 //! [`EntityCoverage`] values use a separate, identified format that length
 //! prefixes identity components and nested coverage payloads.
 //!
-//! # Serialization Format
+//! # Global serialization format
 //!
 //! Coverage data is serialized to bytes using the RoaringTreemap binary format
 //! (portable across platforms). The byte format is opaque and should not be
 //! interpreted directly; always use [`coverage_from_bytes`] to deserialize.
+//!
+//! # Entity-aware V1 serialization format
+//!
+//! All integer fields outside nested coverage are big-endian:
+//!
+//! ```text
+//! "TSTECOV1"
+//! entity_count: u32
+//! repeated entity_count times:
+//!   component_count: u32
+//!   repeated component_count times:
+//!     component_byte_len: u64
+//!     component_utf8_bytes
+//!   nested_coverage_byte_len: u64
+//!   nested_historical_roaring_treemap_bytes
+//! ```
 //!
 //! # Example
 //!
@@ -31,7 +47,6 @@ use snafu::{ResultExt, Snafu};
 use crate::coverage::{Coverage, EntityCoverage, EntityIdentity, EntityIdentityError};
 
 const ENTITY_COVERAGE_MAGIC: &[u8; 8] = b"TSTECOV1";
-const MIN_ENTITY_ENTRY_LEN: usize = 20;
 
 /// Errors that can occur during coverage serialization or deserialization.
 ///
@@ -246,12 +261,6 @@ pub fn entity_coverage_from_bytes(
     }
 
     let entity_count = read_u32(&mut remaining)? as usize;
-    if entity_count > remaining.len() / MIN_ENTITY_ENTRY_LEN {
-        return Err(EntityCoverageSerdeError::InvalidLength {
-            field: "entity count",
-        });
-    }
-
     let mut seen = BTreeSet::new();
     let mut coverage = EntityCoverage::empty();
     for _ in 0..entity_count {
@@ -333,6 +342,25 @@ fn read_u64(remaining: &mut &[u8]) -> Result<u64, EntityCoverageSerdeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ROARING_ZERO: &[u8] = &[
+        1, 0, 0, 0, 0, 0, 0, 0, // Treemap entry count.
+        0, 0, 0, 0, // Treemap key.
+        0x3a, 0x30, 0, 0, // Bitmap cookie.
+        1, 0, 0, 0, // Bitmap container count.
+        0, 0, 0, 0, // Container key and cardinality minus one.
+        16, 0, 0, 0, // Container offset.
+        0, 0, // Array value.
+    ];
+    const ROARING_MAX: &[u8] = &[
+        1, 0, 0, 0, 0, 0, 0, 0, // Treemap entry count.
+        0xff, 0xff, 0xff, 0xff, // Treemap key.
+        0x3a, 0x30, 0, 0, // Bitmap cookie.
+        1, 0, 0, 0, // Bitmap container count.
+        0xff, 0xff, 0, 0, // Container key and cardinality minus one.
+        16, 0, 0, 0, // Container offset.
+        0xff, 0xff, // Array value.
+    ];
 
     fn identity(components: &[&str]) -> EntityIdentity {
         EntityIdentity::try_new(
@@ -423,7 +451,12 @@ mod tests {
         let entity = identity(&["venue", "symbol"]);
         let mut coverage = EntityCoverage::empty();
         coverage.union_coverage(entity.clone(), Coverage::empty());
-        assert_eq!(entity_coverage_to_bytes(&coverage).unwrap(), empty_bytes);
+        let empty_identity_bytes = entity_coverage_to_bytes(&coverage).unwrap();
+        assert_ne!(empty_identity_bytes, empty_bytes);
+        assert_eq!(
+            entity_coverage_from_bytes(&empty_identity_bytes).unwrap(),
+            coverage
+        );
 
         coverage.union_coverage(entity, [0, u64::MAX].into_iter().collect());
         let bytes = entity_coverage_to_bytes(&coverage).unwrap();
@@ -464,6 +497,39 @@ mod tests {
     }
 
     #[test]
+    fn entity_coverage_v1_golden_payload_is_stable() {
+        let mut coverage = EntityCoverage::empty();
+        coverage.union_coverage(
+            identity(&["A", "\u{6771}\u{4eac}"]),
+            [0].into_iter().collect(),
+        );
+        coverage.union_coverage(identity(&["B", "x:y"]), [u64::MAX].into_iter().collect());
+
+        let expected = [
+            b"TSTECOV1".as_slice(),
+            &[0, 0, 0, 2], // Entity count.
+            &[0, 0, 0, 2], // First identity component count.
+            &[0, 0, 0, 0, 0, 0, 0, 1],
+            b"A",
+            &[0, 0, 0, 0, 0, 0, 0, 6],
+            &[0xe6, 0x9d, 0xb1, 0xe4, 0xba, 0xac],
+            &[0, 0, 0, 0, 0, 0, 0, 30],
+            ROARING_ZERO,
+            &[0, 0, 0, 2], // Second identity component count.
+            &[0, 0, 0, 0, 0, 0, 0, 1],
+            b"B",
+            &[0, 0, 0, 0, 0, 0, 0, 3],
+            b"x:y",
+            &[0, 0, 0, 0, 0, 0, 0, 30],
+            ROARING_MAX,
+        ]
+        .concat();
+
+        assert_eq!(entity_coverage_to_bytes(&coverage).unwrap(), expected);
+        assert_eq!(entity_coverage_from_bytes(&expected).unwrap(), coverage);
+    }
+
+    #[test]
     fn entity_coverage_decoder_rejects_every_truncated_prefix() {
         let mut coverage = EntityCoverage::empty();
         coverage.union_coverage(identity(&["A"]), [1].into_iter().collect());
@@ -486,6 +552,10 @@ mod tests {
             entity_coverage_from_bytes(&invalid_magic),
             Err(EntityCoverageSerdeError::InvalidMagic)
         ));
+
+        let mut invalid_count = bytes.clone();
+        invalid_count[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(entity_coverage_from_bytes(&invalid_count).is_err());
 
         let mut invalid_length = bytes.clone();
         invalid_length[16..24].copy_from_slice(&u64::MAX.to_be_bytes());
@@ -546,6 +616,24 @@ mod tests {
             entity_coverage_from_bytes(&global_empty),
             Err(EntityCoverageSerdeError::InvalidMagic) | Err(EntityCoverageSerdeError::Truncated)
         ));
+
+        let global_extremes: Coverage = [0, u64::MAX].into_iter().collect();
+        let global_extremes_bytes = [
+            &[2, 0, 0, 0, 0, 0, 0, 0],
+            &ROARING_ZERO[8..],
+            &ROARING_MAX[8..],
+        ]
+        .concat();
+        assert_eq!(
+            coverage_to_bytes(&global_extremes).unwrap(),
+            global_extremes_bytes
+        );
+        assert_eq!(
+            coverage_from_bytes(&global_extremes_bytes)
+                .unwrap()
+                .present(),
+            global_extremes.present()
+        );
 
         let entity_empty = entity_coverage_to_bytes(&EntityCoverage::empty()).unwrap();
         assert!(coverage_from_bytes(&entity_empty).is_err());
