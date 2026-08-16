@@ -62,10 +62,33 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
 
         CommitError::Storage { source } => storage_error_to_py(py, source),
 
-        CommitError::AmbiguousOutcome { .. } | CommitError::CorruptState { .. } => {
-            TimeseriesTableError::new_err(msg)
-        }
+        CommitError::AmbiguousOutcome { .. }
+        | CommitError::UnsupportedFormatVersion { .. }
+        | CommitError::CorruptState { .. } => TimeseriesTableError::new_err(msg),
     }
+}
+
+fn coverage_overlap_error_to_py(
+    py: Python<'_>,
+    msg: String,
+    segment_path: String,
+    overlap_count: u128,
+    example_bucket: Option<u64>,
+) -> PyErr {
+    let py_err = CoverageOverlapError::new_err(msg);
+    let exc = py_err.value(py);
+
+    if let Err(error) = exc.setattr("segment_path", segment_path) {
+        return error;
+    }
+    if let Err(error) = exc.setattr("overlap_count", overlap_count) {
+        return error;
+    }
+    if let Err(error) = exc.setattr("example_bucket", example_bucket) {
+        return error;
+    }
+
+    py_err
 }
 
 #[allow(dead_code)]
@@ -81,32 +104,21 @@ pub(crate) fn table_error_to_py(py: Python<'_>, err: TableError) -> PyErr {
             segment_path,
             overlap_count,
             example_bucket,
+        } => coverage_overlap_error_to_py(
+            py,
+            msg,
+            segment_path,
+            u128::from(overlap_count),
+            example_bucket,
+        ),
+
+        TableError::EntityCoverageOverlap {
+            segment_path,
+            overlap_count,
+            example_bucket,
+            ..
         } => {
-            let py_err = CoverageOverlapError::new_err(msg);
-            let exc = py_err.value(py);
-
-            if let Err(e) = exc.setattr("segment_path", segment_path) {
-                return e;
-            }
-
-            if let Err(e) = exc.setattr("overlap_count", overlap_count) {
-                return e;
-            }
-
-            match example_bucket {
-                Some(b) => {
-                    if let Err(e) = exc.setattr("example_bucket", b) {
-                        return e;
-                    }
-                }
-                None => {
-                    if let Err(e) = exc.setattr("example_bucket", py.None()) {
-                        return e;
-                    }
-                }
-            }
-
-            py_err
+            coverage_overlap_error_to_py(py, msg, segment_path, overlap_count, Some(example_bucket))
         }
 
         TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),

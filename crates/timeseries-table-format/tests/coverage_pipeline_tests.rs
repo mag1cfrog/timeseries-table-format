@@ -10,8 +10,8 @@ use chrono::{TimeZone, Utc};
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_format::{
-    coverage::Coverage,
-    coverage::io::read_coverage_sidecar,
+    coverage::EntityCoverage,
+    coverage::io::read_entity_coverage_sidecar,
     metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     },
@@ -32,7 +32,7 @@ fn ts_from_secs(secs: i64) -> Result<chrono::DateTime<Utc>, &'static str> {
 async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
     let tmp = TempDir::new()?;
     let location = TableLocation::local(tmp.path());
-    let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()?).await?;
+    let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta(true)?).await?;
 
     let rel1 = "data/cov-pipeline-a.parquet";
     let rel2 = "data/cov-pipeline-b.parquet";
@@ -76,10 +76,12 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
     let expected = union_segment_coverages(&location, table.state().segments.values()).await?;
 
-    let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
-    assert_eq!(snapshot_cov.present(), expected.present());
+    let snapshot_cov =
+        read_entity_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+    assert_eq!(snapshot_cov, expected);
 
     let mut reopened = TimeSeriesTable::open(location.clone()).await?;
+    assert_eq!(reopened.state(), table.state());
     let reopened_ptr = reopened
         .state()
         .table_coverage
@@ -88,8 +90,8 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .clone();
     assert_eq!(reopened_ptr.index_kind, table.index_spec().kind);
     let reopened_cov =
-        read_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
-    assert_eq!(reopened_cov.present(), expected.present());
+        read_entity_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
+    assert_eq!(reopened_cov, expected);
     for (id, seg) in reopened.state().segments.iter() {
         if seg.coverage_path.is_none() {
             return Err(format!("reopened segment {id:?} missing coverage_path").into());
@@ -101,11 +103,11 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .append_parquet_segment(rel_overlap)
         .await
         .expect_err("overlapping append should fail");
-    assert!(matches!(err, TableError::CoverageOverlap { .. }));
+    assert!(matches!(err, TableError::EntityCoverageOverlap { .. }));
 
     let snapshot_after =
-        read_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
-    assert_eq!(snapshot_after.present(), expected.present());
+        read_entity_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
+    assert_eq!(snapshot_after, expected);
     Ok(())
 }
 
@@ -114,7 +116,8 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     // Build a table with coverage over buckets 0, 1, 3, 4, and 5 (gap at 2).
     let tmp = TempDir::new()?;
     let location = TableLocation::local(tmp.path());
-    let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()?).await?;
+    let mut table =
+        TimeSeriesTable::create(location.clone(), make_basic_table_meta(false)?).await?;
 
     write_parquet_rows(
         &tmp.path().join("data/cov-query-a.parquet"),
@@ -207,26 +210,32 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
 async fn union_segment_coverages<'a, I>(
     location: &TableLocation,
     segments: I,
-) -> Result<Coverage, Box<dyn std::error::Error>>
+) -> Result<EntityCoverage, Box<dyn std::error::Error>>
 where
     I: IntoIterator<Item = &'a timeseries_table_format::transaction_log::SegmentMeta>,
 {
-    let mut acc = Coverage::empty();
+    let mut acc = EntityCoverage::empty();
     for seg in segments {
         let cov_path = seg
             .coverage_path
             .as_ref()
             .ok_or_else(|| format!("missing coverage_path for segment {}", seg.path))?;
-        let cov = read_coverage_sidecar(location, Path::new(cov_path)).await?;
+        let cov = read_entity_coverage_sidecar(location, Path::new(cov_path)).await?;
         acc.union_inplace(&cov);
     }
     Ok(acc)
 }
 
-fn make_basic_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
+fn make_basic_table_meta(
+    with_entity_column: bool,
+) -> Result<TableMeta, Box<dyn std::error::Error>> {
     let index = IndexSpec {
         column: "ts".to_string(),
-        entity_columns: vec!["symbol".to_string()],
+        entity_columns: if with_entity_column {
+            vec!["symbol".to_string()]
+        } else {
+            Vec::new()
+        },
         kind: IndexKind::Timestamp {
             bucket: TimeBucket::Minutes(1),
             timezone: None,

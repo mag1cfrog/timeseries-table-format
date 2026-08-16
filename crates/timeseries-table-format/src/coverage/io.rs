@@ -27,8 +27,11 @@ use snafu::{ResultExt, Snafu};
 use crate::{
     coverage::layout::CoverageLayoutError,
     coverage::{
-        Coverage,
-        serde::{CoverageSerdeError, coverage_from_bytes, coverage_to_bytes},
+        Coverage, EntityCoverage,
+        serde::{
+            CoverageSerdeError, EntityCoverageSerdeError, coverage_from_bytes, coverage_to_bytes,
+            entity_coverage_from_bytes,
+        },
     },
     storage::{self, StorageError, TableLocation},
 };
@@ -52,6 +55,22 @@ pub enum CoverageError {
     Serde {
         /// The underlying serde error.
         source: CoverageSerdeError,
+    },
+
+    /// Entity-scoped coverage serialization or deserialization error.
+    #[snafu(display("{source}"))]
+    EntitySerde {
+        /// The underlying entity coverage codec error.
+        source: EntityCoverageSerdeError,
+    },
+
+    /// An entity identity does not match the table's configured component count.
+    #[snafu(display("Entity coverage identity has {actual} components, expected {expected}"))]
+    EntityIdentityArityMismatch {
+        /// Number of components required by the table's entity columns.
+        expected: usize,
+        /// Number of components found in the sidecar identity.
+        actual: usize,
     },
 
     /// Coverage sidecar file was not found at the expected path.
@@ -192,10 +211,33 @@ pub async fn read_coverage_sidecar(
     }
 }
 
+/// Read entity-scoped coverage from a sidecar file.
+///
+/// # Errors
+///
+/// Returns [`CoverageError`] when storage or entity coverage decoding fails.
+pub async fn read_entity_coverage_sidecar(
+    location: &TableLocation,
+    rel_path: &Path,
+) -> Result<EntityCoverage, CoverageError> {
+    match storage::read_all_bytes(location.as_ref(), rel_path).await {
+        Ok(bytes) => entity_coverage_from_bytes(&bytes)
+            .map_err(|source| CoverageError::EntitySerde { source }),
+        Err(StorageError::NotFound { path, .. }) => Err(CoverageError::NotFound { path }),
+        Err(source) => Err(CoverageError::Storage { source }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{coverage::serde::coverage_from_bytes, storage::StorageLocation};
+    use crate::{
+        coverage::{
+            EntityIdentity,
+            serde::{coverage_from_bytes, entity_coverage_to_bytes},
+        },
+        storage::StorageLocation,
+    };
     use tempfile::TempDir;
 
     fn temp_location() -> (TempDir, TableLocation) {
@@ -266,6 +308,28 @@ mod tests {
             .await
             .expect("read sidecar");
         assert_eq!(cov.present(), restored.present());
+    }
+
+    #[tokio::test]
+    async fn read_entity_sidecar_round_trip() {
+        let (_tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/table/entity.roar");
+        let mut coverage = EntityCoverage::empty();
+        coverage.union_coverage(
+            EntityIdentity::try_new(vec!["A".to_string()]).unwrap(),
+            Coverage::from_iter([1, 2]),
+        );
+        let bytes = entity_coverage_to_bytes(&coverage).unwrap();
+        write_coverage_sidecar_new_bytes(&loc, rel, &bytes)
+            .await
+            .expect("write entity sidecar");
+
+        assert_eq!(
+            read_entity_coverage_sidecar(&loc, rel)
+                .await
+                .expect("read entity sidecar"),
+            coverage
+        );
     }
 
     #[tokio::test]

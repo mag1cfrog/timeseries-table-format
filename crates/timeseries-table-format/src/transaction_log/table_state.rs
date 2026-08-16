@@ -277,7 +277,6 @@ mod tests {
                 .single()
                 .expect("valid sample table metadata timestamp"),
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         }
     }
 
@@ -417,7 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_table_state_rejects_old_format_version() -> TestResult {
+    async fn rebuild_table_state_rejects_unsupported_format_version() -> TestResult {
         let (tmp, store) = create_test_log_store();
         let log_dir = tmp.path().join(layout::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
@@ -448,11 +447,13 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("old format version should be rejected");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
-        assert!(
-            err.to_string()
-                .contains(&format!("expected {TABLE_FORMAT_VERSION}, found 2"))
-        );
+        assert!(matches!(
+            err,
+            CommitError::UnsupportedFormatVersion {
+                expected: TABLE_FORMAT_VERSION,
+                found: 2,
+            }
+        ));
         Ok(())
     }
 

@@ -15,17 +15,18 @@ use snafu::prelude::*;
 use uuid::Uuid;
 
 use crate::{
-    coverage::serde::coverage_to_bytes,
+    coverage::serde::{coverage_to_bytes, entity_coverage_to_bytes},
     coverage::{
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
-            table_coverage_id_v2, table_snapshot_key,
+            segment_entity_coverage_id_v1, table_coverage_id_v2, table_entity_coverage_id_v1,
+            table_snapshot_key,
         },
     },
     formats::parquet::{
-        coverage::compute_segment_coverage, logical_schema_from_parquet,
-        segment_entity_identity_from_parquet, segment_meta::segment_meta_from_parquet,
+        compute_segment_entity_coverage, coverage::compute_segment_coverage,
+        logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
     storage,
@@ -36,10 +37,9 @@ use super::{
     TimeSeriesTable,
     append_report::{AppendReport, AppendReportBuilder},
     error::{
-        CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EntityMismatchSnafu,
+        CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EntityCoverageOverlapSnafu,
         ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu,
-        SegmentCoverageSnafu, SegmentEntityIdentitySnafu, SegmentMetaSnafu, StorageSnafu,
-        TableError,
+        SegmentCoverageSnafu, SegmentMetaSnafu, StorageSnafu, TableError,
     },
 };
 
@@ -200,7 +200,7 @@ impl TimeSeriesTable {
         //     enforce “no schema evolution” via ensure_schema_exact_match.
         let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
 
-        let mut maybe_updated_meta = match maybe_table_schema {
+        let maybe_updated_meta = match maybe_table_schema {
             None if expected_version == 1 => {
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
@@ -219,80 +219,102 @@ impl TimeSeriesTable {
             }
         };
 
-        // 2.5) Entity identity enforcement / pinning (v0.1 single-entity-per-table)
-        if !self.index.entity_columns.is_empty() {
+        let has_entity_columns = !self.index.entity_columns.is_empty();
+
+        // 3-5) Load, compute, and compare coverage using the entity-column mode.
+        let (seg_cov_bytes, new_snap_cov_bytes) = if has_entity_columns {
             let step_start = Instant::now();
-            let seg_ident = segment_entity_identity_from_parquet(
-                self.location(),
-                rel_path,
-                &self.index.entity_columns,
-            )
-            .await
-            .context(SegmentEntityIdentitySnafu)?;
+            let table_cov = self.load_table_entity_snapshot_coverage_readonly().await?;
             if let Some(r) = report.as_mut() {
-                r.push_step("entity_identity", step_start.elapsed(), Vec::new());
+                r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
             }
 
-            match &self.state.table_meta.entity_identity {
-                Some(expected) => {
-                    if expected != &seg_ident {
-                        return EntityMismatchSnafu {
-                            segment_path: relative_path.to_string(),
-                            expected: expected.clone(),
-                            found: seg_ident,
-                        }
-                        .fail();
-                    }
+            let step_start = Instant::now();
+            let segment_cov =
+                compute_segment_entity_coverage(self.location(), rel_path, &self.index)
+                    .await
+                    .context(SegmentCoverageSnafu)?;
+            if let Some(r) = report.as_mut() {
+                r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
+            }
+
+            let step_start = Instant::now();
+            if let Some((identity, bucket)) = segment_cov.overlap_example(&table_cov) {
+                return EntityCoverageOverlapSnafu {
+                    segment_path: relative_path.to_string(),
+                    overlap_count: segment_cov.intersection_cardinality(&table_cov),
+                    example_identity: identity.clone(),
+                    example_bucket: bucket,
                 }
-                None => {
-                    // pin the first append that includes entity columns
-                    let updated =
-                        maybe_updated_meta.get_or_insert_with(|| self.state.table_meta.clone());
-                    updated.entity_identity = Some(seg_ident);
+                .fail();
+            }
+            if let Some(r) = report.as_mut() {
+                r.push_step("overlap_check", step_start.elapsed(), Vec::new());
+            }
+
+            let seg_bytes = entity_coverage_to_bytes(&segment_cov).map_err(|source| {
+                TableError::CoverageSidecar {
+                    source: CoverageError::EntitySerde { source },
                 }
-            }
-        }
-
-        // 3) Load current table snapshot coverage (or empty if first append).
-        let step_start = Instant::now();
-        let table_cov = self.load_table_snapshot_coverage_readonly().await?;
-        if let Some(r) = report.as_mut() {
-            r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
-        }
-
-        // 4) Compute segment coverage.
-        let step_start = Instant::now();
-        let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
-            .await
-            .context(SegmentCoverageSnafu)?;
-        if let Some(r) = report.as_mut() {
-            r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
-        }
-
-        // 5) Overlap detection.
-        let step_start = Instant::now();
-        let overlap = segment_cov.intersect(&table_cov);
-        let overlap_count = overlap.cardinality();
-        if overlap_count > 0 {
-            let example_bucket = overlap.present().iter().next();
-            return CoverageOverlapSnafu {
-                segment_path: relative_path.to_string(),
-                overlap_count,
-                example_bucket,
-            }
-            .fail();
-        }
-        if let Some(r) = report.as_mut() {
-            r.push_step("overlap_check", step_start.elapsed(), Vec::new());
-        }
-        let seg_cov_bytes =
-            coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
-                source: CoverageError::Serde { source },
             })?;
+            let snapshot_bytes =
+                entity_coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
+                    TableError::CoverageSidecar {
+                        source: CoverageError::EntitySerde { source },
+                    }
+                })?;
+            (seg_bytes, snapshot_bytes)
+        } else {
+            let step_start = Instant::now();
+            let table_cov = self.load_table_snapshot_coverage_readonly().await?;
+            if let Some(r) = report.as_mut() {
+                r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
+            }
+
+            let step_start = Instant::now();
+            let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
+                .await
+                .context(SegmentCoverageSnafu)?;
+            if let Some(r) = report.as_mut() {
+                r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
+            }
+
+            let step_start = Instant::now();
+            let overlap = segment_cov.intersect(&table_cov);
+            let overlap_count = overlap.cardinality();
+            if overlap_count > 0 {
+                let example_bucket = overlap.present().iter().next();
+                return CoverageOverlapSnafu {
+                    segment_path: relative_path.to_string(),
+                    overlap_count,
+                    example_bucket,
+                }
+                .fail();
+            }
+            if let Some(r) = report.as_mut() {
+                r.push_step("overlap_check", step_start.elapsed(), Vec::new());
+            }
+
+            let seg_bytes =
+                coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
+                    source: CoverageError::Serde { source },
+                })?;
+            let snapshot_bytes =
+                coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
+                    TableError::CoverageSidecar {
+                        source: CoverageError::Serde { source },
+                    }
+                })?;
+            (seg_bytes, snapshot_bytes)
+        };
 
         // 6) Give this append private sidecar paths, then write them before commit.
         let attempt_id = Uuid::new_v4();
-        let segment_content_id = segment_coverage_id_v2(&self.index, &seg_cov_bytes);
+        let segment_content_id = if has_entity_columns {
+            segment_entity_coverage_id_v1(&self.index, &seg_cov_bytes)
+        } else {
+            segment_coverage_id_v2(&self.index, &seg_cov_bytes)
+        };
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
         let seg_cov_path = segment_coverage_key(&segment_file_id).map_err(|source| {
             TableError::CoverageSidecar {
@@ -301,12 +323,11 @@ impl TimeSeriesTable {
         })?;
 
         let new_version_guess = expected_version + 1;
-        let new_table_cov = table_cov.union(&segment_cov);
-        let new_snap_cov_bytes =
-            coverage_to_bytes(&new_table_cov).map_err(|source| TableError::CoverageSidecar {
-                source: CoverageError::Serde { source },
-            })?;
-        let snapshot_content_id = table_coverage_id_v2(&self.index, &new_snap_cov_bytes);
+        let snapshot_content_id = if has_entity_columns {
+            table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
+        } else {
+            table_coverage_id_v2(&self.index, &new_snap_cov_bytes)
+        };
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
         let snapshot_path =
             table_snapshot_key(new_version_guess, &snapshot_file_id).map_err(|source| {
@@ -467,19 +488,24 @@ impl TimeSeriesTable {
 mod tests {
     use super::super::test_util::*;
     use super::*;
-    use crate::coverage::Coverage;
-    use crate::coverage::io::read_coverage_sidecar;
-    use crate::metadata::logical_schema::{LogicalDataType, LogicalTimestampUnit};
+    use crate::coverage::io::{read_coverage_sidecar, read_entity_coverage_sidecar};
+    use crate::coverage::serde::entity_coverage_from_bytes;
+    use crate::coverage::{EntityCoverage, EntityIdentity};
+    use crate::metadata::logical_schema::{
+        LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
+    };
     use crate::metadata::segments::ParquetIndexColumnError;
     use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
-        Commit, CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
+        CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
     };
     use arrow::{
-        array::{ArrayRef, Int64Array, UInt64Array},
+        array::{
+            ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray, UInt64Array,
+        },
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
@@ -511,6 +537,43 @@ mod tests {
         }
         let schema = Arc::new(Schema::new(vec![Field::new("ts", data_type, false)]));
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values])?;
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    }
+
+    fn write_composite_entity_parquet(path: &Path, rows: &[(i64, &str, &str, f64)]) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("venue", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(
+                    rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|row| row.3).collect::<Vec<_>>(),
+                )),
+            ],
+        )?;
         let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
         writer.write(&batch)?;
         writer.close()?;
@@ -577,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_from_path_removes_failed_external_copy() -> TestResult {
+    async fn entity_aware_validation_failure_leaves_no_state_or_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         let location = TableLocation::local(&table_root);
@@ -599,6 +662,7 @@ mod tests {
         assert_eq!(table.state, state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
         assert_eq!(coverage_files(&table_root)?, coverage_before);
+        assert!(!table_root.join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 
@@ -654,12 +718,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_from_path_retains_copy_for_ambiguous_commit() -> TestResult {
+    async fn entity_aware_ambiguous_commit_retains_copy_and_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         let location = TableLocation::local(&table_root);
         let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
         let state_before = table.state.clone();
+        let coverage_before = coverage_files(&table_root)?;
         let source = tmp.path().join("ambiguous-external.parquet");
         write_test_parquet(
             &source,
@@ -672,7 +737,8 @@ mod tests {
             }],
         )?;
         let source_bytes = std::fs::read(&source)?;
-        crate::storage::inject_write_new_failure(table_root.join(layout::commit_rel_path(2)), true);
+        let commit_path = table_root.join(layout::commit_rel_path(2));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
 
         let err = table
             .append_parquet_from_path(&source)
@@ -692,6 +758,12 @@ mod tests {
         assert_eq!(std::fs::read(source)?, source_bytes);
         assert_eq!(table.state, state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(commit_path.exists());
+        let coverage_after = coverage_files(&table_root)?;
+        assert_eq!(coverage_after.len(), coverage_before.len() + 2);
+        for bytes in coverage_after.values() {
+            entity_coverage_from_bytes(bytes)?;
+        }
         Ok(())
     }
 
@@ -777,7 +849,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_supports_registered_int64_index() -> TestResult {
+    async fn version_four_no_entity_int64_append_uses_global_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
@@ -799,15 +871,12 @@ mod tests {
         let segment = table.state.segments.get(rel_path).expect("segment present");
         assert_eq!(segment.index_min, IndexValue::Int64(i64::MIN));
         assert_eq!(segment.index_max, IndexValue::Int64(i64::MAX));
-        assert_eq!(
-            table
-                .state
-                .table_coverage
-                .as_ref()
-                .expect("table coverage")
-                .index_kind,
-            index.kind
-        );
+        let pointer = table.state.table_coverage.as_ref().expect("table coverage");
+        assert_eq!(pointer.index_kind, index.kind);
+        let persisted = read_coverage_sidecar(&location, Path::new(&pointer.coverage_path)).await?;
+        let expected =
+            compute_segment_coverage(&location, Path::new(rel_path), table.index_spec()).await?;
+        assert_eq!(persisted, expected);
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state, table.state);
         Ok(())
@@ -1022,7 +1091,6 @@ mod tests {
             vec![
                 "segment_meta",
                 "logical_schema",
-                "entity_identity",
                 "load_table_snapshot",
                 "segment_coverage",
                 "overlap_check",
@@ -1045,166 +1113,143 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_pins_entity_identity_and_commits_actions() -> TestResult {
+    async fn version_four_allows_different_identities_in_the_same_bucket() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
-        let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
 
-        let rel_path = "data/seg-entity-a.parquet";
-        let abs_path = tmp.path().join(rel_path);
-        write_test_parquet(
-            &abs_path,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-
-        let version = table.append_parquet_segment(rel_path).await?;
-        assert_eq!(version, 2);
-
-        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
-        assert_eq!(
-            table.state.table_meta.entity_identity,
-            Some(expected_identity.clone())
-        );
-
-        let commit_path = tmp.path().join(layout::commit_rel_path(2));
-        let contents = tokio::fs::read_to_string(&commit_path).await?;
-        let commit: Commit = serde_json::from_str(&contents)?;
-
-        assert_eq!(commit.actions.len(), 3);
-        match &commit.actions[0] {
-            LogAction::UpdateTableMeta(meta) => {
-                assert_eq!(meta.entity_identity.as_ref(), Some(&expected_identity));
-            }
-            other => panic!("expected UpdateTableMeta, got {other:?}"),
+        for (path, symbol) in [
+            ("data/entity-a.parquet", "A"),
+            ("data/entity-b.parquet", "B"),
+        ] {
+            write_test_parquet(
+                &tmp.path().join(path),
+                true,
+                false,
+                &[TestRow {
+                    ts_millis: 1_000,
+                    symbol,
+                    price: 10.0,
+                }],
+            )?;
+            table.append_parquet_segment(path).await?;
         }
-        assert!(matches!(commit.actions[1], LogAction::AddSegment(_)));
-        assert!(matches!(
-            commit.actions[2],
-            LogAction::UpdateTableCoverage { .. }
-        ));
 
+        assert_eq!(table.state.version, 3);
+        let pointer = table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("table coverage pointer");
+        let coverage =
+            read_entity_coverage_sidecar(&location, Path::new(&pointer.coverage_path)).await?;
+        assert_eq!(coverage.identity_count(), 2);
+        assert_eq!(coverage.cardinality(), 2);
         Ok(())
     }
 
     #[tokio::test]
-    async fn append_allows_same_entity_identity() -> TestResult {
+    async fn version_four_accepts_one_segment_with_multiple_identities() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
-        let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
-
-        let rel_path1 = "data/seg-entity-a-1.parquet";
-        let abs_path1 = tmp.path().join(rel_path1);
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let path = "data/multiple-identities.parquet";
         write_test_parquet(
-            &abs_path1,
+            &tmp.path().join(path),
             true,
             false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "B",
+                    price: 20.0,
+                },
+            ],
         )?;
 
-        table.append_parquet_segment(rel_path1).await?;
+        table.append_parquet_segment(path).await?;
 
-        let rel_path2 = "data/seg-entity-a-2.parquet";
-        let abs_path2 = tmp.path().join(rel_path2);
-        write_test_parquet(
-            &abs_path2,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 120_000,
-                symbol: "A",
-                price: 20.0,
-            }],
-        )?;
-
-        let version = table.append_parquet_segment(rel_path2).await?;
-        assert_eq!(version, 3);
-
-        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
-        assert_eq!(
-            table.state.table_meta.entity_identity,
-            Some(expected_identity.clone())
-        );
-
-        let commit_path = tmp.path().join(layout::commit_rel_path(3));
-        let contents = tokio::fs::read_to_string(&commit_path).await?;
-        let commit: Commit = serde_json::from_str(&contents)?;
-        assert_eq!(commit.actions.len(), 2);
-        assert!(matches!(commit.actions[0], LogAction::AddSegment(_)));
-        assert!(matches!(
-            commit.actions[1],
-            LogAction::UpdateTableCoverage { .. }
-        ));
-
+        let segment = table.state.segments.get(path).expect("segment present");
+        let coverage = read_entity_coverage_sidecar(
+            &location,
+            Path::new(segment.coverage_path.as_ref().expect("coverage path")),
+        )
+        .await?;
+        assert_eq!(coverage.identity_count(), 2);
+        assert_eq!(coverage.cardinality(), 2);
         Ok(())
     }
 
     #[tokio::test]
-    async fn append_rejects_mismatched_entity_identity() -> TestResult {
+    async fn version_four_composite_identities_isolate_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
-        let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string(), "venue".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        };
+        let schema = LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "symbol".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: false,
+            },
+            LogicalField {
+                name: "venue".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: false,
+            },
+            LogicalField {
+                name: "price".to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: false,
+            },
+        ])?;
+        let mut table = TimeSeriesTable::create(
+            location,
+            TableMeta::new_time_series_with_schema(index, schema),
+        )
+        .await?;
 
-        let rel_path1 = "data/seg-entity-a.parquet";
-        let abs_path1 = tmp.path().join(rel_path1);
-        write_test_parquet(
-            &abs_path1,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-        table.append_parquet_segment(rel_path1).await?;
+        for (path, venue) in [
+            ("data/composite-x.parquet", "X"),
+            ("data/composite-y.parquet", "Y"),
+        ] {
+            write_composite_entity_parquet(&tmp.path().join(path), &[(1_000, "A", venue, 10.0)])?;
+            table.append_parquet_segment(path).await?;
+        }
 
-        let rel_path2 = "data/seg-entity-b.parquet";
-        let abs_path2 = tmp.path().join(rel_path2);
-        write_test_parquet(
-            &abs_path2,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 120_000,
-                symbol: "B",
-                price: 20.0,
-            }],
-        )?;
-
-        let err = table
-            .append_parquet_segment(rel_path2)
+        let overlap_path = "data/composite-x-overlap.parquet";
+        write_composite_entity_parquet(&tmp.path().join(overlap_path), &[(1_500, "A", "X", 20.0)])?;
+        let error = table
+            .append_parquet_segment(overlap_path)
             .await
-            .expect_err("expected entity identity mismatch");
-
-        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
-        let found_identity = BTreeMap::from([("symbol".to_string(), "B".to_string())]);
-
-        match err {
-            TableError::EntityMismatch {
-                expected, found, ..
-            } => {
-                assert_eq!(expected, expected_identity);
-                assert_eq!(found, found_identity);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let commit_path = tmp.path().join(layout::commit_rel_path(3));
-        assert!(!commit_path.exists());
-
+            .expect_err("matching composite identity and bucket must overlap");
+        assert!(matches!(
+            error,
+            TableError::EntityCoverageOverlap {
+                overlap_count: 1,
+                example_identity,
+                ..
+            } if example_identity.components() == ["A", "X"]
+        ));
         Ok(())
     }
 
@@ -1226,7 +1271,6 @@ mod tests {
             logical_schema: None,
             created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         };
 
         let mut table = TimeSeriesTable::create(location, meta).await?;
@@ -1423,8 +1467,10 @@ mod tests {
         assert!(seg1.coverage_path.is_some());
         assert!(seg2.coverage_path.is_some());
 
-        let cov1 = compute_segment_coverage(&location, Path::new(rel1), table.index_spec()).await?;
-        let cov2 = compute_segment_coverage(&location, Path::new(rel2), table.index_spec()).await?;
+        let cov1 =
+            compute_segment_entity_coverage(&location, Path::new(rel1), table.index_spec()).await?;
+        let cov2 =
+            compute_segment_entity_coverage(&location, Path::new(rel2), table.index_spec()).await?;
         let expected_snapshot = cov1.union(&cov2);
 
         let ptr = table
@@ -1435,9 +1481,10 @@ mod tests {
         assert_eq!(ptr.version, v3);
         assert_eq!(ptr.index_kind, table.index_spec().kind);
 
-        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        let snapshot_cov =
+            read_entity_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
 
-        assert_eq!(snapshot_cov.present(), expected_snapshot.present());
+        assert_eq!(snapshot_cov, expected_snapshot);
         Ok(())
     }
 
@@ -1456,21 +1503,45 @@ mod tests {
             &path1,
             true,
             false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "B",
+                    price: 10.0,
+                },
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 20.0,
+                },
+                TestRow {
+                    ts_millis: 61_000,
+                    symbol: "A",
+                    price: 30.0,
+                },
+            ],
         )?;
         write_test_parquet(
             &path2,
             true,
             false,
-            &[TestRow {
-                ts_millis: 1_500,
-                symbol: "A",
-                price: 20.0,
-            }],
+            &[
+                TestRow {
+                    ts_millis: 1_500,
+                    symbol: "B",
+                    price: 40.0,
+                },
+                TestRow {
+                    ts_millis: 1_500,
+                    symbol: "A",
+                    price: 50.0,
+                },
+                TestRow {
+                    ts_millis: 61_500,
+                    symbol: "A",
+                    price: 60.0,
+                },
+            ],
         )?;
 
         table.append_parquet_segment(rel1).await?;
@@ -1480,7 +1551,16 @@ mod tests {
             .await
             .expect_err("overlapping append should fail");
 
-        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        assert!(matches!(
+            err,
+            TableError::EntityCoverageOverlap {
+                segment_path,
+                overlap_count: 3,
+                example_identity,
+                example_bucket: 0x8000_0000_0000_0000,
+            } if segment_path == rel2
+                && example_identity.components() == ["A"]
+        ));
         Ok(())
     }
 
@@ -1529,13 +1609,16 @@ mod tests {
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
         let cov1 =
-            compute_segment_coverage(&location, Path::new(rel1), reopened.index_spec()).await?;
+            compute_segment_entity_coverage(&location, Path::new(rel1), reopened.index_spec())
+                .await?;
         let cov2 =
-            compute_segment_coverage(&location, Path::new(rel2), reopened.index_spec()).await?;
+            compute_segment_entity_coverage(&location, Path::new(rel2), reopened.index_spec())
+                .await?;
         let expected = cov1.union(&cov2);
 
-        let snapshot_cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
-        assert_eq!(snapshot_cov.present(), expected.present());
+        let snapshot_cov =
+            read_entity_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        assert_eq!(snapshot_cov, expected);
         Ok(())
     }
 
@@ -1585,16 +1668,16 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered = table.load_table_snapshot_coverage_readonly().await?;
+        let recovered = table.load_table_entity_snapshot_coverage_readonly().await?;
 
-        let mut expected = Coverage::empty();
+        let mut expected = EntityCoverage::empty();
         for seg in state.segments.values() {
             let cov_path = seg.coverage_path.as_ref().expect("coverage path");
-            let cov = read_coverage_sidecar(&location, Path::new(cov_path)).await?;
+            let cov = read_entity_coverage_sidecar(&location, Path::new(cov_path)).await?;
             expected.union_inplace(&cov);
         }
 
-        assert_eq!(recovered.present(), expected.present());
+        assert_eq!(recovered, expected);
         Ok(())
     }
 
@@ -1643,16 +1726,16 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered = table.load_table_snapshot_coverage_readonly().await?;
+        let recovered = table.load_table_entity_snapshot_coverage_readonly().await?;
 
-        let mut expected = Coverage::empty();
+        let mut expected = EntityCoverage::empty();
         for seg in state.segments.values() {
             let cov_path = seg.coverage_path.as_ref().expect("coverage path");
-            let cov = read_coverage_sidecar(&location, Path::new(cov_path)).await?;
+            let cov = read_entity_coverage_sidecar(&location, Path::new(cov_path)).await?;
             expected.union_inplace(&cov);
         }
 
-        assert_eq!(recovered.present(), expected.present());
+        assert_eq!(recovered, expected);
         Ok(())
     }
 
@@ -1701,7 +1784,7 @@ mod tests {
             .append_parquet_segment(overlapping)
             .await
             .expect_err("overlap must be rejected");
-        assert!(matches!(err, TableError::CoverageOverlap { .. }));
+        assert!(matches!(err, TableError::EntityCoverageOverlap { .. }));
         assert_eq!(tokio::fs::read(snapshot_abs).await?, b"garbage");
         Ok(())
     }
@@ -1746,7 +1829,7 @@ mod tests {
         table.state = state;
 
         let err = table
-            .load_table_snapshot_coverage_readonly()
+            .load_table_entity_snapshot_coverage_readonly()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -1812,7 +1895,7 @@ mod tests {
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
         let err = table
-            .load_table_snapshot_coverage_readonly()
+            .load_table_entity_snapshot_coverage_readonly()
             .await
             .expect_err("corrupt sidecar should error");
 
@@ -1832,7 +1915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_append_of_different_path_fails_occ_without_state_mutation() -> TestResult {
+    async fn entity_aware_stale_append_cleans_sidecars_without_state_mutation() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1891,6 +1974,9 @@ mod tests {
         assert!(committed.segments.contains_key(winner_path));
         assert!(!committed.segments.contains_key(loser_path));
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        for bytes in coverage_before.values() {
+            entity_coverage_from_bytes(bytes)?;
+        }
         assert!(!tmp.path().join(layout::commit_rel_path(3)).exists());
         Ok(())
     }
@@ -1966,20 +2052,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidecar_cleanup_failure_preserves_original_append_error() -> TestResult {
+    async fn entity_sidecar_cleanup_failures_preserve_error_and_reverse_order() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let sidecar = format!("{}/stuck.roar", layout::SEGMENT_COVERAGE_DIR);
-        tokio::fs::create_dir_all(tmp.path().join(&sidecar)).await?;
-        let source = TableError::CoverageOverlap {
+        let sidecars = [
+            format!("{}/first-stuck.roar", layout::SEGMENT_COVERAGE_DIR),
+            format!("{}/second-stuck.roar", layout::TABLE_SNAPSHOT_DIR),
+        ];
+        for sidecar in &sidecars {
+            tokio::fs::create_dir_all(tmp.path().join(sidecar)).await?;
+        }
+        let source = TableError::EntityCoverageOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
-            example_bucket: Some(0),
+            example_identity: EntityIdentity::try_new(vec!["A".to_string()])?,
+            example_bucket: 0,
         };
-        let err = table
-            .rollback_created_sidecars(std::slice::from_ref(&sidecar), source)
-            .await;
+        let err = table.rollback_created_sidecars(&sidecars, source).await;
         let message = err.to_string();
 
         assert!(matches!(
@@ -1987,11 +2077,14 @@ mod tests {
             TableError::AppendRollback {
                 source,
                 cleanup_errors,
-            } if matches!(*source, TableError::CoverageOverlap { .. })
-                && cleanup_errors.iter().any(|error| error.contains("stuck.roar"))
+            } if matches!(*source, TableError::EntityCoverageOverlap { .. })
+                && cleanup_errors.len() == 2
+                && cleanup_errors[0].contains("second-stuck.roar")
+                && cleanup_errors[1].contains("first-stuck.roar")
         ));
         assert!(message.contains("data/failed.parquet"));
-        assert!(message.contains("stuck.roar"));
+        assert!(message.contains("first-stuck.roar"));
+        assert!(message.contains("second-stuck.roar"));
         Ok(())
     }
 
@@ -2095,16 +2188,16 @@ mod tests {
             .as_ref()
             .expect("snapshot pointer restored");
 
-        let cov = read_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
+        let cov = read_entity_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
 
-        let mut expected = Coverage::empty();
+        let mut expected = EntityCoverage::empty();
         for seg in table.state.segments.values() {
             let path = seg.coverage_path.as_ref().expect("coverage path");
-            let seg_cov = read_coverage_sidecar(&location, Path::new(path)).await?;
+            let seg_cov = read_entity_coverage_sidecar(&location, Path::new(path)).await?;
             expected.union_inplace(&seg_cov);
         }
 
-        assert_eq!(cov.present(), expected.present());
+        assert_eq!(cov, expected);
         Ok(())
     }
 

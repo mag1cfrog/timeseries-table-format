@@ -251,7 +251,7 @@ mod tests {
 
     use crate::storage::{StorageLocation, layout};
     use crate::table::test_util::*;
-    use crate::transaction_log::{IndexKind, TimeBucket, TransactionLogStore};
+    use crate::transaction_log::{CommitError, IndexKind, TimeBucket, TransactionLogStore};
 
     use tempfile::TempDir;
 
@@ -265,6 +265,7 @@ mod tests {
 
         // State should be at version 1 with no segments.
         assert_eq!(table.state().version, 1);
+        assert_eq!(table.state().table_meta.format_version(), 4);
         assert!(table.state().segments.is_empty());
 
         // Verify that the log layout exists on disk.
@@ -319,6 +320,34 @@ mod tests {
 
         assert_eq!(created.state().version, reopened.state().version);
         assert_eq!(created.index_spec(), reopened.index_spec());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_rejects_every_non_current_format_with_typed_error() -> TestResult {
+        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+            let tmp = TempDir::new()?;
+            let location = TableLocation::local(tmp.path());
+            let log = TransactionLogStore::new(location.clone());
+            let mut meta = make_basic_table_meta();
+            meta.format_version = found;
+            log.commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+                .await?;
+
+            let error = TimeSeriesTable::open(location)
+                .await
+                .expect_err("non-current table format must fail");
+
+            assert!(matches!(
+                error,
+                TableError::TransactionLog {
+                    source: CommitError::UnsupportedFormatVersion {
+                        expected: TABLE_FORMAT_VERSION,
+                        found: actual,
+                    },
+                } if actual == u64::from(found)
+            ));
+        }
         Ok(())
     }
 

@@ -1,17 +1,15 @@
 //! Parquet format helpers.
 //!
 //! This module centralizes Parquet-specific logic (schema extraction, segment
-//! metadata derivation, coverage compute, and entity identity extraction).
+//! metadata derivation and coverage computation).
 
 pub mod coverage;
 pub mod entity_coverage;
-pub mod entity_identity;
 pub mod rg_parallel;
 pub mod schema;
 pub(crate) mod segment_meta;
 
 pub use coverage::*;
 pub use entity_coverage::*;
-pub use entity_identity::*;
 pub use rg_parallel::*;
 pub use schema::*;

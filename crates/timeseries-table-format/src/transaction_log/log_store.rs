@@ -104,12 +104,10 @@ impl TransactionLogStore {
             })
             .find(|&found| found != u64::from(TABLE_FORMAT_VERSION))
         {
-            return CorruptStateSnafu {
-                msg: format!(
-                    "Unsupported table format version: expected {TABLE_FORMAT_VERSION}, found {found}"
-                ),
-            }
-            .fail();
+            return Err(CommitError::UnsupportedFormatVersion {
+                expected: TABLE_FORMAT_VERSION,
+                found,
+            });
         }
 
         let commit = serde_json::from_value(value).map_err(|e| CommitError::CorruptState {
