@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ fn run_cli_strings(args: &[String]) -> io::Result<Output> {
     Command::new(cli_bin()).args(args).output()
 }
 
-fn assert_cli_success(output: Output) {
+fn assert_cli_success(output: &Output) {
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
@@ -102,8 +103,10 @@ fn create_table_via_cli(
         "create".to_string(),
         "--table".to_string(),
         table_root_str,
-        "--time-column".to_string(),
+        "--index-column".to_string(),
         "ts".to_string(),
+        "--index-type".to_string(),
+        "timestamp".to_string(),
         "--bucket".to_string(),
         bucket.to_string(),
         "--timezone".to_string(),
@@ -115,7 +118,7 @@ fn create_table_via_cli(
     }
 
     let output = run_cli_strings(&args)?;
-    assert_cli_success(output);
+    assert_cli_success(&output);
     Ok(())
 }
 
@@ -143,6 +146,180 @@ fn cli_create_creates_table() -> StdResult<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn cli_create_supports_integer_index_domains() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let cases = [
+        (
+            "int64",
+            "4",
+            IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(4).unwrap(),
+            },
+        ),
+        (
+            "uint64",
+            "18446744073709551615",
+            IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(u64::MAX).unwrap(),
+            },
+        ),
+    ];
+
+    for (index_type, bucket_width, expected_kind) in cases {
+        let table_root = tmp.path().join(index_type);
+        let output = run_cli(&[
+            "create",
+            "--table",
+            table_root.to_string_lossy().as_ref(),
+            "--index-column",
+            "idx",
+            "--index-type",
+            index_type,
+            "--bucket-width",
+            bucket_width,
+        ])?;
+        assert_cli_success(&output);
+
+        let table = open_table_blocking(&table_root)?;
+        assert_eq!(table.index_spec().column, "idx");
+        assert_eq!(table.index_spec().kind, expected_kind);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn cli_create_rejects_invalid_index_option_combinations_before_io()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let cases: &[(&str, &[&str], &str)] = &[
+        (
+            "timestamp",
+            &[],
+            "Invalid --bucket for --index-type timestamp",
+        ),
+        (
+            "timestamp",
+            &["--bucket", "1m", "--bucket-width", "1"],
+            "Invalid --bucket-width for --index-type timestamp",
+        ),
+        (
+            "int64",
+            &[],
+            "Invalid --bucket-width for --index-type int64",
+        ),
+        (
+            "int64",
+            &["--bucket-width", "1", "--bucket", "1m"],
+            "Invalid --bucket for --index-type int64",
+        ),
+        (
+            "int64",
+            &["--bucket-width", "1", "--timezone", "UTC"],
+            "Invalid --timezone for --index-type int64",
+        ),
+        (
+            "uint64",
+            &["--bucket", "1m"],
+            "Invalid --bucket for --index-type uint64",
+        ),
+        (
+            "uint64",
+            &["--bucket-width", "1", "--timezone", "UTC"],
+            "Invalid --timezone for --index-type uint64",
+        ),
+    ];
+
+    for (position, (index_type, options, expected_error)) in cases.iter().enumerate() {
+        let table_root = tmp.path().join(format!("invalid-{position}"));
+        let table_arg = table_root.to_string_lossy().into_owned();
+        let mut args = vec![
+            "create",
+            "--table",
+            table_arg.as_str(),
+            "--index-column",
+            "idx",
+            "--index-type",
+            index_type,
+        ];
+        args.extend_from_slice(options);
+
+        let output = run_cli(&args)?;
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_error),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!table_root.exists(), "invalid create performed storage I/O");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn cli_create_validates_integer_bucket_width_before_io() -> StdResult<(), Box<dyn std::error::Error>>
+{
+    let tmp = TempDir::new()?;
+    for (position, value) in ["0", "-1", "18446744073709551616", "1.5", "1e3", ""]
+        .into_iter()
+        .enumerate()
+    {
+        let table_root = tmp.path().join(format!("invalid-width-{position}"));
+        let output = run_cli(&[
+            "create",
+            "--table",
+            table_root.to_string_lossy().as_ref(),
+            "--index-column",
+            "idx",
+            "--index-type",
+            "int64",
+            "--bucket-width",
+            value,
+        ])?;
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Invalid --bucket-width for --index-type int64"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(!table_root.exists(), "invalid create performed storage I/O");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn cli_create_help_uses_only_ordered_index_names() -> StdResult<(), Box<dyn std::error::Error>> {
+    let output = run_cli(&["create", "--help"])?;
+    assert_cli_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--index-column"));
+    assert!(stdout.contains("--index-type <INDEX_TYPE>"));
+    assert!(stdout.contains("timestamp, int64, uint64"));
+    assert!(stdout.contains("--bucket-width"));
+    assert!(!stdout.contains("--time-column"));
+
+    let tmp = TempDir::new()?;
+    let output = run_cli(&[
+        "create",
+        "--table",
+        tmp.path().join("table").to_string_lossy().as_ref(),
+        "--time-column",
+        "ts",
+        "--index-type",
+        "timestamp",
+        "--bucket",
+        "1m",
+    ])?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--time-column"));
+
+    Ok(())
+}
+
+#[test]
 fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
@@ -159,7 +336,7 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
         "--parquet",
         parquet_path.to_string_lossy().as_ref(),
     ])?;
-    assert_cli_success(output);
+    assert_cli_success(&output);
 
     let table = open_table_blocking(&table_root)?;
     assert_eq!(table.state().segments.len(), 1);
@@ -189,7 +366,7 @@ fn cli_append_outside_root_copies_and_appends() -> StdResult<(), Box<dyn std::er
         "--parquet",
         source_path.to_string_lossy().as_ref(),
     ])?;
-    assert_cli_success(output);
+    assert_cli_success(&output);
 
     let expected_rel = PathBuf::from("data/outside.parquet");
     let expected_dst = table_root.join(&expected_rel);
@@ -215,12 +392,14 @@ fn cli_failed_external_append_removes_its_copy() -> StdResult<(), Box<dyn std::e
         "create",
         "--table",
         table_root.to_string_lossy().as_ref(),
-        "--time-column",
+        "--index-column",
         "event_time",
+        "--index-type",
+        "timestamp",
         "--bucket",
         "1m",
     ])?;
-    assert_cli_success(output);
+    assert_cli_success(&output);
 
     let source_path = tmp.path().join("invalid-external.parquet");
     write_parquet_rows(&source_path, &[(0, "A", 1.0)])?;
@@ -290,7 +469,7 @@ fn cli_append_uses_registered_time_column() -> StdResult<(), Box<dyn std::error:
         "--parquet",
         parquet_path.to_string_lossy().as_ref(),
     ])?;
-    assert_cli_success(output);
+    assert_cli_success(&output);
 
     let table = open_table_blocking(&table_root)?;
     assert_eq!(table.state().segments.len(), 1);
@@ -306,8 +485,10 @@ fn cli_invalid_bucket_reports_user_friendly_error() -> StdResult<(), Box<dyn std
         "create",
         "--table",
         table_root.to_string_lossy().as_ref(),
-        "--time-column",
+        "--index-column",
         "ts",
+        "--index-type",
+        "timestamp",
         "--bucket",
         "1x",
     ])?;

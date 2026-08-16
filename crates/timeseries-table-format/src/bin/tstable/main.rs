@@ -5,6 +5,7 @@ mod error;
 mod query;
 mod shell;
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -53,6 +54,24 @@ enum BackendArg {
     DataFusion,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum IndexTypeArg {
+    Timestamp,
+    Int64,
+    #[value(name = "uint64")]
+    UInt64,
+}
+
+impl IndexTypeArg {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Timestamp => "timestamp",
+            Self::Int64 => "int64",
+            Self::UInt64 => "uint64",
+        }
+    }
+}
+
 impl From<BackendArg> for BackendKind {
     fn from(value: BackendArg) -> Self {
         match value {
@@ -77,16 +96,25 @@ enum Command {
         #[arg(long)]
         table: PathBuf,
 
-        #[arg(long = "time-column")]
-        time_column: String,
+        /// Ascending ordered-index column
+        #[arg(long = "index-column")]
+        index_column: String,
 
-        /// e.g. 1h, 15m, 1d
+        /// Ordered-index value domain
+        #[arg(long = "index-type", value_enum)]
+        index_type: IndexTypeArg,
+
+        /// Timestamp coverage bucket, e.g. 1h, 15m, 1d
         #[arg(long)]
-        bucket: String,
+        bucket: Option<String>,
 
-        /// Optional IANA timezone string
+        /// Optional timestamp IANA timezone
         #[arg(long)]
         timezone: Option<String>,
+
+        /// Positive integer coverage bucket width in index-value units
+        #[arg(long = "bucket-width", allow_hyphen_values = true)]
+        bucket_width: Option<String>,
 
         /// Repeatable entity column names
         #[arg(long = "entity")]
@@ -192,17 +220,64 @@ async fn create_table(table_root: &Path, meta: TableMeta) -> CliResult<()> {
 
 async fn cmd_create(
     table: &Path,
-    time_column: String,
-    bucket: String,
+    index_column: String,
+    index_type: IndexTypeArg,
+    bucket: Option<String>,
+    bucket_width: Option<String>,
     timezone: Option<String>,
     entity_columns: Vec<String>,
 ) -> CliResult<()> {
-    let bucket = parse_time_bucket(&bucket)?;
+    let invalid = |option, reason: &str| CliError::InvalidIndexOption {
+        option,
+        index_type: index_type.name(),
+        reason: reason.to_string(),
+    };
+
+    let kind = match index_type {
+        IndexTypeArg::Timestamp => {
+            if bucket_width.is_some() {
+                return Err(invalid(
+                    "--bucket-width",
+                    "use --bucket for timestamp indexes",
+                ));
+            }
+            let bucket = bucket
+                .as_deref()
+                .ok_or_else(|| invalid("--bucket", "is required"))?;
+            IndexKind::Timestamp {
+                bucket: parse_time_bucket(bucket)?,
+                timezone,
+            }
+        }
+        IndexTypeArg::Int64 | IndexTypeArg::UInt64 => {
+            if bucket.is_some() {
+                return Err(invalid("--bucket", "is only valid for timestamp indexes"));
+            }
+            if timezone.is_some() {
+                return Err(invalid("--timezone", "is only valid for timestamp indexes"));
+            }
+            let value = bucket_width
+                .as_deref()
+                .ok_or_else(|| invalid("--bucket-width", "is required"))?;
+            let bucket_width = value.parse::<NonZeroU64>().map_err(|_| {
+                invalid(
+                    "--bucket-width",
+                    &format!("'{value}' is not an integer in 1..={}", u64::MAX),
+                )
+            })?;
+
+            match index_type {
+                IndexTypeArg::Int64 => IndexKind::Int64 { bucket_width },
+                IndexTypeArg::UInt64 => IndexKind::UInt64 { bucket_width },
+                IndexTypeArg::Timestamp => unreachable!(),
+            }
+        }
+    };
 
     let index = IndexSpec {
-        column: time_column,
+        column: index_column,
         entity_columns,
-        kind: IndexKind::Timestamp { bucket, timezone },
+        kind,
     };
 
     let meta = TableMeta::new_time_series(index);
@@ -289,11 +364,24 @@ async fn run() -> CliResult<()> {
     match cli.cmd {
         Command::Create {
             table,
-            time_column,
+            index_column,
+            index_type,
             bucket,
             timezone,
+            bucket_width,
             entity,
-        } => cmd_create(&table, time_column, bucket, timezone, entity).await,
+        } => {
+            cmd_create(
+                &table,
+                index_column,
+                index_type,
+                bucket,
+                bucket_width,
+                timezone,
+                entity,
+            )
+            .await
+        }
 
         Command::Append {
             table,
