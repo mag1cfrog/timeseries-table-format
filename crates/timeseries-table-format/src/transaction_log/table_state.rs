@@ -242,7 +242,9 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
+    use crate::metadata::table_metadata::{
+        MIN_SUPPORTED_TABLE_FORMAT_VERSION, TABLE_FORMAT_VERSION,
+    };
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
@@ -417,7 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_table_state_rejects_old_format_version() -> TestResult {
+    async fn rebuild_table_state_rejects_unsupported_format_version() -> TestResult {
         let (tmp, store) = create_test_log_store();
         let log_dir = tmp.path().join(layout::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
@@ -448,11 +450,14 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("old format version should be rejected");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
-        assert!(
-            err.to_string()
-                .contains(&format!("expected {TABLE_FORMAT_VERSION}, found 2"))
-        );
+        assert!(matches!(
+            err,
+            CommitError::UnsupportedFormatVersion {
+                minimum_supported: MIN_SUPPORTED_TABLE_FORMAT_VERSION,
+                maximum_supported: TABLE_FORMAT_VERSION,
+                found: 2,
+            }
+        ));
         Ok(())
     }
 

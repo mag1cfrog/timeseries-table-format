@@ -105,6 +105,19 @@ pub enum CommitError {
         source: StorageError,
     },
 
+    /// Table metadata uses a format version this reader cannot interpret.
+    #[snafu(display(
+        "Unsupported table format version: supported {minimum_supported} through {maximum_supported}, found {found}"
+    ))]
+    UnsupportedFormatVersion {
+        /// Oldest readable table format version.
+        minimum_supported: u32,
+        /// Newest readable table format version.
+        maximum_supported: u32,
+        /// Version found in persisted table metadata.
+        found: u64,
+    },
+
     /// A commit operation failed and its newly-created commit file may remain.
     #[snafu(display(
         "Commit outcome is ambiguous at {commit_path}: {operation_error}; failed to remove the commit file: {cleanup_error}"
@@ -218,7 +231,7 @@ mod tests {
 
         // Serialize to JSON.
         let json = serde_json::to_string_pretty(&commit).expect("serialize commit");
-        assert!(json.contains("\"format_version\": 3"));
+        assert!(json.contains(&format!("\"format_version\": {TABLE_FORMAT_VERSION}")));
         // println!("{json}");
 
         // Deserialize back.

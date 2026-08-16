@@ -19,10 +19,13 @@ use snafu::prelude::*;
 
 use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 
-/// Current table metadata / log format version.
+/// Oldest table metadata / log format version this reader supports.
+pub const MIN_SUPPORTED_TABLE_FORMAT_VERSION: u32 = 3;
+
+/// Current table metadata / log format version written by new tables.
 ///
-/// Bumped only when we make a breaking change to the on-disk JSON format.
-pub const TABLE_FORMAT_VERSION: u32 = 3;
+/// Bumped when persisted table semantics require version-aware decoding.
+pub const TABLE_FORMAT_VERSION: u32 = 4;
 
 /// The high-level "kind" of table.
 ///
@@ -62,8 +65,7 @@ pub struct TableMeta {
     /// Writers set this to [`TABLE_FORMAT_VERSION`].
     pub(crate) format_version: u32,
 
-    /// If IndexSpec.entity_columns is non-empty, we pin a single entity identity
-    /// per table (map keyed by column name).
+    /// Historical version 3 single-entity identity pinned by column name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_identity: Option<BTreeMap<String, String>>,
 }
