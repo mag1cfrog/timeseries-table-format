@@ -1186,7 +1186,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Parquet). For SQL
     /// querying across one or more registered tables, use `Session`.
     ///
-    /// Appends are overlap-checked according to the table's time bucket configuration.
+    /// Appends are overlap-checked according to the table's persisted ordered-index bucket.
     #[pyclass]
     struct TimeSeriesTable {
         inner: timeseries_table_format::table::TimeSeriesTable,
@@ -1406,8 +1406,44 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
         /// Return the index specification as a Python dict.
         ///
-        /// Every variant contains `column`, `entity_columns`, and `kind`. Timestamp indexes also
-        /// contain `bucket` and `timezone`; integer indexes contain `bucket_width`.
+        /// Returns
+        /// -------
+        /// dict[str, object]
+        ///     Exactly one variant-specific shape:
+        ///
+        ///     Timestamp:
+        ///
+        ///     ```python
+        ///     {
+        ///         "column": str,
+        ///         "entity_columns": list[str],
+        ///         "kind": "timestamp",
+        ///         "bucket": str,
+        ///         "timezone": str | None,
+        ///     }
+        ///     ```
+        ///
+        ///     Int64:
+        ///
+        ///     ```python
+        ///     {
+        ///         "column": str,
+        ///         "entity_columns": list[str],
+        ///         "kind": "int64",
+        ///         "bucket_width": int,
+        ///     }
+        ///     ```
+        ///
+        ///     UInt64:
+        ///
+        ///     ```python
+        ///     {
+        ///         "column": str,
+        ///         "entity_columns": list[str],
+        ///         "kind": "uint64",
+        ///         "bucket_width": int,
+        ///     }
+        ///     ```
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
             use timeseries_table_format::transaction_log::{IndexKind, TimeBucket};
 
@@ -1437,6 +1473,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
         #[pyo3(signature = (parquet_path, copy_if_outside=true))]
         /// Append a Parquet segment to the table.
+        ///
+        /// The persisted ordered-index specification determines the required column and exact
+        /// Arrow type; append accepts no index override.
         ///
         /// Parameters
         /// ----------

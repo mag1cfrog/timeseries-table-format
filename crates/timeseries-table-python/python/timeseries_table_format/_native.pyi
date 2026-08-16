@@ -175,6 +175,9 @@ class TimeSeriesTable:
     ) -> int:
         """Append a Parquet segment to the table and return the new table version.
 
+        The persisted ordered-index specification determines the required column and exact
+        Arrow type; append accepts no index override.
+
         Parameters
         ----------
         parquet_path:
@@ -194,7 +197,36 @@ class TimeSeriesTable:
         ...
 
     def index_spec(self) -> dict[str, object]:
-        """Return the variant-specific ordered-index specification dict."""
+        """Return exactly one variant-specific ordered-index specification.
+
+        Timestamp:
+
+            {
+                "column": str,
+                "entity_columns": list[str],
+                "kind": "timestamp",
+                "bucket": str,
+                "timezone": str | None,
+            }
+
+        Int64:
+
+            {
+                "column": str,
+                "entity_columns": list[str],
+                "kind": "int64",
+                "bucket_width": int,
+            }
+
+        UInt64:
+
+            {
+                "column": str,
+                "entity_columns": list[str],
+                "kind": "uint64",
+                "bucket_width": int,
+            }
+        """
         ...
 
 class _TestingModule(ModuleType):
