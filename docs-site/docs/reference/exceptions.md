@@ -7,11 +7,11 @@ error with a single `except ttf.TimeseriesTableError`.
 
 ```
 TimeseriesTableError
-├── StorageError          — filesystem or I/O problem (e.g. missing path, permission denied)
-├── ConflictError         — concurrent modification conflict on table metadata
-├── CoverageOverlapError  — append rejected because its time window is already covered
-├── SchemaMismatchError   — Parquet schema does not match the table's established schema
-└── DataFusionError       — SQL query failed inside the DataFusion engine
+|-- StorageError          - filesystem or I/O problem (e.g. missing path, permission denied)
+|-- ConflictError         - concurrent modification conflict on table metadata
+|-- CoverageOverlapError  - append rejected because its coverage overlaps existing data
+|-- SchemaMismatchError   - Parquet schema does not match the table's established schema
+`-- DataFusionError       - SQL query failed inside the DataFusion engine
 ```
 
 ## When you'll see each error
@@ -20,12 +20,13 @@ TimeseriesTableError
 directory doesn't exist, a file is missing, or a permissions problem. The error message includes
 the path that caused the problem.
 
-**`CoverageOverlapError`** — raised by `append_parquet(...)` when the incoming segment covers a
-time bucket that is already occupied for the same entity. This is intentional — it protects you
-from double-ingesting data. The exception carries:
-- `segment_path` — which file triggered the rejection
-- `overlap_count` — how many (entity, bucket) pairs already had coverage
-- `example_bucket` — one example overlapping bucket timestamp (epoch microseconds), useful for debugging
+**`CoverageOverlapError`** - raised by `append_parquet(...)` when the incoming segment covers a
+bucket that is already occupied for the same entity. This is intentional - it protects you from
+double-ingesting data. The exception carries:
+
+- `segment_path` - which file triggered the rejection
+- `overlap_count` - how many (entity, bucket) pairs already had coverage
+- `example_bucket` - one overlapping bucket identifier, useful for debugging
 
 See [Buckets + overlap](../concepts/bucketing_and_overlap.md) for background.
 
@@ -66,4 +67,3 @@ SQL error (syntax error, type error, unknown column, etc.).
 ::: timeseries_table_format.DataFusionError
     options:
       show_source: false
-

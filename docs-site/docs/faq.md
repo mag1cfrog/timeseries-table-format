@@ -22,10 +22,11 @@ See [Table root layout](concepts/table_root.md).
 Your incoming segment overlaps existing coverage at the configured bucket granularity. See
 [Buckets + overlap](concepts/bucketing_and_overlap.md).
 
-## How do I choose `bucket`?
+## How do I choose `bucket` or `bucket_width`?
 
-Pick a bucket that matches the granularity where you expect coverage to be unique for an entity
-(e.g. hourly bars → `bucket="1h"`). See [Buckets + overlap](concepts/bucketing_and_overlap.md).
+Choose the granularity where coverage must be unique for an entity. Timestamp indexes use `bucket`
+(for example, `bucket="1h"` for hourly bars). Int64 and UInt64 indexes use `bucket_width` in
+application-defined units. See [Buckets + overlap](concepts/bucketing_and_overlap.md).
 
 ## Where does the data live after append?
 

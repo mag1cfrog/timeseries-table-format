@@ -2,7 +2,7 @@
 
 `timeseries-table-format` helps you manage **local, append-only time-series tables** on disk.
 You append new data files over time and query across all of them with SQL, getting results back as
-a Python table object. It also prevents you from accidentally loading the same time window twice.
+a Python table object. It also prevents you from loading the same chronological window twice.
 
 !!! tip "New here? Start with the [Key concepts](#key-concepts-quick-reference) table below, then jump into the [Quickstart](#quickstart-create-append-query)."
 
@@ -11,7 +11,7 @@ a Python table object. It also prevents you from accidentally loading the same t
 Imagine you collect hourly price bars (open/high/low/close/volume) for a set of stock symbols — one Parquet file arrives each day.
 You want to query across 90 days of history with SQL, without building your own directory-scanning
 logic and without accidentally re-ingesting a day you already loaded. That's exactly the problem
-this library handles: it tracks what time windows are already covered (per symbol) and rejects
+this library handles: it tracks what chronological windows are already covered (per symbol) and rejects
 duplicates automatically.
 
 ## When to use this
@@ -31,7 +31,8 @@ duplicates automatically.
 |---|---|
 | **table root** | A local directory that holds a time-series table: metadata, segments, and coverage data. |
 | **segment** | A single Parquet file appended to a table. A table is made up of one or more segments. |
-| **bucket** | The time granularity used for overlap detection (e.g. `"1h"`, `"1d"`). Does not resample data. |
+| **chronological index** | One ascending Timestamp, Int64, or UInt64 column that orders the table's logical time. Public APIs call it the ordered index. |
+| **bucket** | The coverage granularity: a duration for Timestamp or an index-value width for Int64 and UInt64. Does not resample data. |
 | **entity** | The logical identity of a time series (e.g. a stock symbol). Defined by `entity_columns`. |
 | **overlap detection** | The guard that prevents you from appending data for the same entity + bucket twice. |
 | **Session** | A DataFusion SQL session. Register tables into it and run SQL queries returning `pyarrow.Table`. |
@@ -63,5 +64,5 @@ Next:
 - Tutorial: [Register + join](tutorials/register_and_join.md)
 - Tutorial: [Parameterized queries](tutorials/parameterized_queries.md)
 - Tutorial: [Real-world workflow](tutorials/real_world_workflow.md)
-- Concept: [Buckets + overlap](concepts/bucketing_and_overlap.md)
+- Concept: [Chronological indexes, buckets + overlap](concepts/bucketing_and_overlap.md)
 - Reference: [Session](reference/session.md)

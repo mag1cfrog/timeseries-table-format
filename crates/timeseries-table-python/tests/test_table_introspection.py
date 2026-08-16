@@ -29,7 +29,8 @@ def test_table_introspection_matches_expected_spec(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="2hours",  # alias input; expect canonical "2h"
         entity_columns=["symbol"],
         timezone=None,
@@ -43,14 +44,16 @@ def test_table_introspection_matches_expected_spec(tmp_path):
 
     spec = tbl.index_spec()
     assert set(spec.keys()) == {
-        "timestamp_column",
+        "column",
         "entity_columns",
+        "kind",
         "bucket",
         "timezone",
     }
     assert spec == {
-        "timestamp_column": "ts",
+        "column": "ts",
         "entity_columns": ["symbol"],
+        "kind": "timestamp",
         "bucket": "2h",
         "timezone": None,
     }
@@ -66,7 +69,8 @@ def test_table_introspection_defaults_and_timezone(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="timestamp",
+        index_column="timestamp",
+        index_type="timestamp",
         bucket="15min",  # alias input; expect canonical "15m"
         entity_columns=None,
         timezone="America/New_York",
@@ -74,23 +78,48 @@ def test_table_introspection_defaults_and_timezone(tmp_path):
 
     spec = tbl.index_spec()
     assert set(spec.keys()) == {
-        "timestamp_column",
+        "column",
         "entity_columns",
+        "kind",
         "bucket",
         "timezone",
     }
     assert spec == {
-        "timestamp_column": "timestamp",
+        "column": "timestamp",
         "entity_columns": [],
+        "kind": "timestamp",
         "bucket": "15m",
         "timezone": "America/New_York",
     }
 
-    assert isinstance(spec["timestamp_column"], str)
+    assert isinstance(spec["column"], str)
     assert isinstance(spec["entity_columns"], list)
     assert all(isinstance(x, str) for x in spec["entity_columns"])
     assert isinstance(spec["bucket"], str)
     assert isinstance(spec["timezone"], str)
+
+
+@pytest.mark.parametrize(
+    ("index_type", "bucket_width"),
+    [("int64", 4), ("uint64", 2**64 - 1)],
+)
+def test_integer_index_spec_has_only_variant_keys(tmp_path, index_type, bucket_width):
+    root = tmp_path / index_type
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="idx",
+        index_type=index_type,
+        entity_columns=["symbol"],
+        bucket_width=bucket_width,
+    )
+
+    assert table.index_spec() == {
+        "column": "idx",
+        "entity_columns": ["symbol"],
+        "kind": index_type,
+        "bucket_width": bucket_width,
+    }
+    assert ttf.TimeSeriesTable.open(str(root)).index_spec() == table.index_spec()
 
 
 @pytest.mark.parametrize(
@@ -118,7 +147,8 @@ def test_table_introspection_bucket_formatting_canonical(
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket=bucket_spec,
         entity_columns=["symbol"],
         timezone=None,
@@ -133,7 +163,8 @@ def test_table_introspection_entity_columns_preserves_order(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["b", "a"],
         timezone=None,
@@ -148,7 +179,8 @@ def test_table_introspection_version_updates_after_append(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -178,7 +210,8 @@ def test_table_introspection_returns_python_native_types(tmp_path):
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -189,12 +222,13 @@ def test_table_introspection_returns_python_native_types(tmp_path):
 
     spec = tbl.index_spec()
     assert set(spec.keys()) == {
-        "timestamp_column",
+        "column",
         "entity_columns",
+        "kind",
         "bucket",
         "timezone",
     }
-    assert isinstance(spec["timestamp_column"], str)
+    assert isinstance(spec["column"], str)
     assert isinstance(spec["entity_columns"], list)
     assert all(isinstance(x, str) for x in spec["entity_columns"])
     assert isinstance(spec["bucket"], str)

@@ -3,6 +3,9 @@
 Python-first workflow for managing local, append-only time-series tables stored as Parquet
 segments on disk, with SQL querying (DataFusion) that returns `pyarrow.Table`.
 
+Each table has one ascending chronological index: a physical Timestamp or an Int64/UInt64
+logical clock with application-defined units.
+
 - PyPI: `timeseries-table-format`
 - Import: `timeseries_table_format`
 - Docs: https://mag1cfrog.github.io/timeseries-table-format/
@@ -93,7 +96,8 @@ with tempfile.TemporaryDirectory() as d:
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -126,6 +130,51 @@ with tempfile.TemporaryDirectory() as d:
 > Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00).
 > See https://mag1cfrog.github.io/timeseries-table-format/concepts/bucketing_and_overlap/
 
+## Integer chronological indexes
+
+Integer Parquet columns must be Arrow `int64` or `uint64` exactly; signedness is not converted.
+
+```python
+import timeseries_table_format as ttf
+
+signed = ttf.TimeSeriesTable.create(
+    table_root="signed_ticks",
+    index_column="tick",
+    index_type="int64",
+    bucket_width=10,
+)
+signed.append_parquet("signed.parquet")
+
+unsigned = ttf.TimeSeriesTable.create(
+    table_root="unsigned_counters",
+    index_column="counter",
+    index_type="uint64",
+    bucket_width=100,
+)
+unsigned.append_parquet("unsigned.parquet")
+assert unsigned.index_spec() == {
+    "column": "counter",
+    "entity_columns": [],
+    "kind": "uint64",
+    "bucket_width": 100,
+}
+
+session = ttf.Session()
+session.register_tstable("signed_ticks", "signed_ticks")
+session.register_tstable("unsigned_counters", "unsigned_counters")
+negative = session.sql(
+    "SELECT tick FROM signed_ticks WHERE tick >= -20 AND tick < 0 ORDER BY tick"
+)
+large = session.sql(
+    "SELECT counter FROM unsigned_counters "
+    "WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED) "
+    "ORDER BY counter"
+)
+```
+
+See the [ordered-index migration table](https://github.com/mag1cfrog/timeseries-table-format#migrating-timestamp-only-callers)
+when upgrading timestamp-only code.
+
 ## Join multiple tables
 
 ```python
@@ -144,7 +193,8 @@ with tempfile.TemporaryDirectory() as d:
     prices_root = base_dir / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(prices_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -165,7 +215,8 @@ with tempfile.TemporaryDirectory() as d:
     volumes_root = base_dir / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
         table_root=str(volumes_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -321,6 +372,6 @@ directory and cleans it up on exit).
 
 - `pip` is building from source / fails with Rust errors: no wheel is available for your platform/Python; install Rust and retry, or use a supported Python/platform combination.
 - `DataFusionError` about an unknown table name: call `sess.register_tstable("name", "/path/to/table")` first; use `sess.tables()` to list registrations.
-- Append fails with a time column error: the timestamp column must be an Arrow `timestamp(...)`, and the unit should remain consistent across segments (e.g. `timestamp("us")`).
+- Append fails with an ordered-index error: the column must exactly match the configured Arrow `timestamp(...)`, `int64`, or `uint64` type; Timestamp units must also remain consistent across segments.
 - `SchemaMismatchError` on append: the new Parquet segment schema must match the table's adopted schema (column names and types).
 - SQL errors / parameter placeholders: try an explicit `CAST(...)` for placeholders used in `SELECT` projections.

@@ -10,10 +10,17 @@ pub type CliResult<T> = std::result::Result<T, CliError>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum CliError {
-    #[snafu(display("Invalid --bucket '{spec}': {source}"))]
+    #[snafu(display("Invalid --bucket '{spec}' for --index-type timestamp: {source}"))]
     InvalidBucket {
         spec: String,
         source: ParseTimeBucketError,
+    },
+
+    #[snafu(display("Invalid {option} for --index-type {index_type}: {reason}"))]
+    InvalidIndexOption {
+        option: &'static str,
+        index_type: &'static str,
+        reason: String,
     },
 
     #[snafu(display("Parquet path has no filename: {path}"))]

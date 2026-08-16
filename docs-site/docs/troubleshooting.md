@@ -24,6 +24,5 @@ sess.sql("select cast($1 as bigint) as x", params=[1])
 If `append_parquet(...)` raises `CoverageOverlapError`, your segment overlaps existing coverage at
 the configured bucket granularity.
 
-- Use a finer `bucket=...` if appropriate for your data
-- Ensure you aren’t accidentally re-ingesting the same time window
-
+- Use a finer `bucket=...` or smaller `bucket_width=...` if appropriate for your data
+- Ensure you are not accidentally re-ingesting the same covered buckets

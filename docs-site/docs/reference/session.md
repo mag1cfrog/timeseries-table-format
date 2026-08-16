@@ -3,6 +3,44 @@
 `Session` is a DataFusion-backed SQL session. It supports registering multiple tables and running
 SQL queries that return `pyarrow.Table`.
 
+## Query ordered indexes
+
+Registered tables preserve their Timestamp, Int64, or UInt64 Arrow index type. Use SQL expressions
+that match the domain:
+
+```sql
+-- Timestamp
+SELECT ts FROM events
+WHERE ts >= TIMESTAMP '2026-01-01 00:00:00';
+
+-- Int64
+SELECT tick FROM signed_ticks
+WHERE tick >= -20 AND tick < 0;
+
+-- UInt64 above i64::MAX
+SELECT counter FROM unsigned_counters
+WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED);
+```
+
+Given `2**63`, `2**63 + 1`, and `2**64 - 1` in `unsigned_counters`, the default Arrow
+result path remains exact:
+
+```python
+import pyarrow as pa
+
+out = sess.sql(
+    "SELECT counter FROM unsigned_counters "
+    "WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED) "
+    "ORDER BY counter"
+)
+assert out.schema.field("counter").type == pa.uint64()
+assert out["counter"].to_pylist() == [2**63, 2**63 + 1, 2**64 - 1]
+```
+
+Python query parameters accept integers in the Int64 range. Use the explicit unsigned cast above
+for larger literals. `Session` SQL is the Python query surface; direct range-scan and coverage
+bindings are not exposed.
+
 ## `sql` vs `sql_reader`: which to use?
 
 `Session` provides two query APIs:

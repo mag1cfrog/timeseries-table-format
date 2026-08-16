@@ -32,7 +32,8 @@ def run(*, table_root: Path, rows: int) -> pa.Table:
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

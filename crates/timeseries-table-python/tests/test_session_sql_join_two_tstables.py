@@ -30,7 +30,8 @@ def test_session_sql_join_two_tstables(tmp_path):
     prices_root = tmp_path / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(prices_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -42,7 +43,8 @@ def test_session_sql_join_two_tstables(tmp_path):
     volumes_root = tmp_path / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
         table_root=str(volumes_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

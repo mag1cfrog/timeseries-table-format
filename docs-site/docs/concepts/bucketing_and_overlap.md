@@ -1,35 +1,53 @@
-# Concept: buckets and overlap detection
+# Concept: chronological indexes, buckets, and overlap
 
-`bucket="1h"` (or `"5m"`, `"1d"`, etc.) defines the **time granularity at which coverage is
-tracked per entity**. When you append a segment, the table checks which bucket windows are
-covered for each entity in that segment, and rejects the append if any of those windows are
-already occupied.
+Every table has one ascending chronological index. It can be a physical Timestamp or an
+integer-valued logical clock with application-defined units. Public APIs and metadata call this
+the ordered index.
 
-With `bucket="1h"`, each entity (e.g. `"NVDA"`) can appear in the 10:00–11:00 window at most
-once across all appended segments. A second append that covers that same window for the same
-entity raises `CoverageOverlapError`.
+| Index domain | Required Arrow type | Bucket configuration |
+|---|---|---|
+| Timestamp | `timestamp` with an explicit unit | A duration such as `"1m"` or `"1h"` |
+| Int64 | Signed `int64` | A positive width in index-value units |
+| UInt64 | Unsigned `uint64` | A positive width in index-value units |
 
-!!! note "Buckets do not resample your data"
-    Changing `bucket` does not reshuffle or aggregate your rows. It only affects how the table
-    decides whether two segments conflict. Your underlying data is stored as-is.
+The Parquet column must match the configured Arrow type exactly. The library does not infer
+timestamps from integers or convert between signed and unsigned values.
 
-**Example:** with `bucket="1h"`, timestamps `10:05` and `10:55` fall into the same bucket window
-(10:00–11:00). In v0, appending two rows for the same entity in the same bucket is treated as
-overlap and will be rejected.
+## Buckets
 
-## Overlap behavior (v0)
+Buckets drive coverage and overlap checks; they do not resample data.
 
-When you append a segment, the table computes which time buckets are covered (per entity identity)
-and rejects the append if it would overlap existing coverage at the bucket granularity.
+- `bucket="1h"` groups Timestamp values into one-hour windows.
+- `bucket_width=10` groups integer values in application-defined units.
+- Int64 uses Euclidean division. With width 10, `-11` belongs to `[-20, -10)` and `-1`
+  belongs to `[-10, 0)`.
 
-If an overlap is detected, `append_parquet(...)` raises `CoverageOverlapError`.
+Bucket boundaries and core range operations are half-open: the start is included and the end is
+excluded, written `[start, end)`.
+
+## Coverage and overlap
+
+Coverage is bucket-level evidence. A covered bucket contains at least one value, but coverage does
+not prove that every possible value inside the bucket exists.
+
+When a segment is appended, the table computes its covered buckets for each entity. The append is
+rejected with `CoverageOverlapError` if a bucket is already covered for the same entity.
+
+For example, Timestamp values `10:05` and `10:55` share the `10:00` to `11:00` bucket when
+`bucket="1h"`. If an existing segment covers that bucket for `NVDA`, a later segment covering it
+for `NVDA` is rejected. Coverage for another entity remains independent.
 
 ## Choosing a bucket
 
-Pick a bucket that matches the granularity where you expect coverage to be unique for an entity.
+Choose the granularity expected to be unique per entity:
 
-Examples:
-- Hourly bars → `bucket="1h"`
-- Minute bars → `bucket="1m"`
+- Hourly bars: `bucket="1h"`
+- Minute bars: `bucket="1m"`
+- Integer ticks grouped by hundreds: `bucket_width=100`
 
-If you expect multiple rows per entity within the same bucket window, choose a finer bucket.
+Use a finer bucket when independent segments may contain values in the same wider bucket.
+
+## Current limitations
+
+Indexes cannot currently use floats, decimals, strings, multiple columns, descending order, or
+implicit signedness conversion.

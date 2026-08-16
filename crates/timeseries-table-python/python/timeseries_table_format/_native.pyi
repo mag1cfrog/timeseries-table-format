@@ -1,4 +1,5 @@
 from types import ModuleType
+from typing import Literal
 
 import pyarrow
 
@@ -14,7 +15,7 @@ class CoverageOverlapError(TimeseriesTableError):
     overlap_count: int
     """Number of (entity, bucket) pairs that already have coverage."""
     example_bucket: int | None
-    """One example bucket (epoch microseconds) that overlapped, for debugging."""
+    """One overlapping bucket identifier, for debugging."""
 
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
@@ -130,9 +131,11 @@ class TimeSeriesTable:
         cls,
         *,
         table_root: str,
-        time_column: str,
-        bucket: str,
+        index_column: str,
+        index_type: Literal["timestamp", "int64", "uint64"],
         entity_columns: list[str] | None = None,
+        bucket: str | None = None,
+        bucket_width: int | None = None,
         timezone: str | None = None,
     ) -> TimeSeriesTable:
         """Create a new time-series table at `table_root`.
@@ -141,14 +144,18 @@ class TimeSeriesTable:
         ----------
         table_root:
             Filesystem directory where the table will be created.
-        time_column:
-            Name of the timestamp column.
-        bucket:
-            Time bucket specification string such as `"1h"`, `"5m"`, `"30s"`, `"1d"`.
+        index_column:
+            Name of the ascending ordered-index column.
+        index_type:
+            One of `"timestamp"`, `"int64"`, or `"uint64"`.
         entity_columns:
             Column names that define the entity identity for the table.
+        bucket:
+            Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
+        bucket_width:
+            Required positive integer width for `"int64"` and `"uint64"` indexes.
         timezone:
-            Optional timezone name for bucketing.
+            Optional timestamp timezone; rejected for integer indexes.
 
         Notes
         -----
@@ -167,6 +174,9 @@ class TimeSeriesTable:
         copy_if_outside: bool = True,
     ) -> int:
         """Append a Parquet segment to the table and return the new table version.
+
+        The persisted ordered-index specification determines the required column and exact
+        Arrow type; append accepts no index override.
 
         Parameters
         ----------
@@ -187,7 +197,36 @@ class TimeSeriesTable:
         ...
 
     def index_spec(self) -> dict[str, object]:
-        """Return the index specification dict."""
+        """Return exactly one variant-specific ordered-index specification.
+
+        Timestamp:
+
+            {
+                "column": str,
+                "entity_columns": list[str],
+                "kind": "timestamp",
+                "bucket": str,
+                "timezone": str | None,
+            }
+
+        Int64:
+
+            {
+                "column": str,
+                "entity_columns": list[str],
+                "kind": "int64",
+                "bucket_width": int,
+            }
+
+        UInt64:
+
+            {
+                "column": str,
+                "entity_columns": list[str],
+                "kind": "uint64",
+                "bucket_width": int,
+            }
+        """
         ...
 
 class _TestingModule(ModuleType):

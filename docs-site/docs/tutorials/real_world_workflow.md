@@ -36,7 +36,8 @@ def open_or_create_table(table_root: Path) -> ttf.TimeSeriesTable:
     except ttf.TimeseriesTableError:
         return ttf.TimeSeriesTable.create(
             table_root=str(table_root),
-            time_column="ts",
+            index_column="ts",
+            index_type="timestamp",
             bucket="1h",
             entity_columns=["symbol"],
         )
@@ -108,7 +109,8 @@ def open_or_create_table(table_root: Path) -> ttf.TimeSeriesTable:
     except ttf.TimeseriesTableError:
         return ttf.TimeSeriesTable.create(
             table_root=str(table_root),
-            time_column="ts",
+            index_column="ts",
+            index_type="timestamp",
             bucket="1h",
             entity_columns=["symbol"],
         )

@@ -418,7 +418,8 @@ def test_session_sql_reader_registered_tstable_and_join(tmp_path):
     table_root = tmp_path / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,

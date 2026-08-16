@@ -39,6 +39,36 @@ The full example below is the exact code used in docs (kept in sync with the rep
     That means AAPL at 10:00 and NVDA at 10:00 are considered separate coverage — appending data
     for one symbol never blocks appends for a different symbol in the same time window.
 
+#### Use an integer index
+
+The main example uses a Timestamp. For logical time, use these index configurations:
+
+```python
+signed = ttf.TimeSeriesTable.create(
+    table_root="signed_ticks",
+    index_column="tick",
+    index_type="int64",
+    bucket_width=10,
+)
+
+unsigned = ttf.TimeSeriesTable.create(
+    table_root="unsigned_counters",
+    index_column="counter",
+    index_type="uint64",
+    bucket_width=100,
+)
+```
+
+The Parquet columns must be Arrow `int64` and `uint64`, respectively. Append and register these
+tables exactly as in the main example. Use signed SQL expressions for Int64 and an explicit cast
+for UInt64 literals above `i64::MAX`:
+
+```sql
+SELECT * FROM signed_ticks WHERE tick >= -20 AND tick < 0;
+SELECT * FROM unsigned_counters
+WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED);
+```
+
 ### Append a Parquet segment
 
 `append_parquet(...)` adds the Parquet file as a new segment.

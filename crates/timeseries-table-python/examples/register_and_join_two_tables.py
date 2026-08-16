@@ -34,7 +34,8 @@ def run(*, base_dir: Path) -> pa.Table:
     prices_root = base_dir / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(prices_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
@@ -46,7 +47,8 @@ def run(*, base_dir: Path) -> pa.Table:
     volumes_root = base_dir / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
         table_root=str(volumes_root),
-        time_column="ts",
+        index_column="ts",
+        index_type="timestamp",
         bucket="1h",
         entity_columns=["symbol"],
         timezone=None,
