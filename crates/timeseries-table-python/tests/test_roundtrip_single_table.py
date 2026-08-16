@@ -81,6 +81,71 @@ def test_create_append_register_sql_roundtrip(tmp_path):
     assert out3.schema == out2.schema
 
 
+def test_uint64_create_append_session_roundtrip_and_signed_rollback(tmp_path):
+    table_root = tmp_path / "counters_tbl"
+    bucket_width = 2**64 - 1
+    tstable = ttf.TimeSeriesTable.create(
+        table_root=str(table_root),
+        index_column="idx",
+        index_type="uint64",
+        bucket_width=bucket_width,
+        entity_columns=["symbol"],
+    )
+    assert tstable.index_spec() == {
+        "column": "idx",
+        "entity_columns": ["symbol"],
+        "kind": "uint64",
+        "bucket_width": bucket_width,
+    }
+
+    signed = tmp_path / "signed.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "idx": pa.array([0, 1], type=pa.int64()),
+                "symbol": pa.array(["NVDA", "NVDA"], type=pa.string()),
+            }
+        ),
+        signed,
+    )
+    source_before = signed.read_bytes()
+    version_before = tstable.version()
+
+    with pytest.raises(ttf.TimeseriesTableError, match="expected uint64"):
+        tstable.append_parquet(str(signed))
+
+    assert tstable.version() == version_before
+    assert ttf.TimeSeriesTable.open(str(table_root)).version() == version_before
+    assert signed.read_bytes() == source_before
+    assert not (table_root / "data" / signed.name).exists()
+    assert not (table_root / "_coverage").exists()
+
+    values = [2**63, 2**63 + 1, 2**64 - 1]
+    unsigned = tmp_path / "unsigned.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "idx": pa.array(values, type=pa.uint64()),
+                "symbol": pa.array(["NVDA"] * len(values), type=pa.string()),
+            }
+        ),
+        unsigned,
+    )
+    tstable.append_parquet(str(unsigned))
+
+    sess = ttf.Session()
+    sess.register_tstable("counters", str(table_root))
+    out = sess.sql(
+        "select idx from counters "
+        "where idx >= cast('9223372036854775808' as bigint unsigned) "
+        "and idx < cast('18446744073709551615' as bigint unsigned) "
+        "order by idx"
+    )
+    assert isinstance(out, pa.Table)
+    assert out.schema.field("idx").type == pa.uint64()
+    assert out["idx"].to_pylist() == values[:2]
+
+
 def test_register_tstable_before_first_append_fails_then_succeeds(tmp_path):
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
