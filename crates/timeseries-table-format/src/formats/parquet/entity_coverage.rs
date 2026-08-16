@@ -345,15 +345,17 @@ pub async fn compute_segment_entity_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, sync::Arc};
+    use std::{fs::File, num::NonZeroU64, sync::Arc};
 
     use arrow::{
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
     };
-    use arrow_array::{Int32Array, LargeStringArray, TimestampMillisecondArray};
+    use arrow_array::{
+        Int32Array, Int64Array, LargeStringArray, TimestampMillisecondArray, UInt64Array,
+    };
     use parquet::arrow::ArrowWriter;
-    use parquet::file::properties::WriterProperties;
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::TempDir;
 
     use crate::metadata::table_metadata::TimeBucket;
@@ -379,13 +381,8 @@ mod tests {
     fn write_batch(
         path: &Path,
         batch: &RecordBatch,
-        max_row_group_size: Option<usize>,
+        properties: Option<WriterProperties>,
     ) -> TestResult {
-        let properties = max_row_group_size.map(|size| {
-            WriterProperties::builder()
-                .set_max_row_group_size(size)
-                .build()
-        });
         let mut writer = ArrowWriter::try_new(File::create(path)?, batch.schema(), properties)?;
         writer.write(batch)?;
         writer.close()?;
@@ -412,7 +409,12 @@ mod tests {
                 Arc::new(StringArray::from(entities)),
             ],
         )?;
-        write_batch(path, &batch, max_row_group_size)
+        let properties = max_row_group_size.map(|size| {
+            WriterProperties::builder()
+                .set_max_row_group_size(size)
+                .build()
+        });
+        write_batch(path, &batch, properties)
     }
 
     fn buckets(coverage: &EntityCoverage, entity: &str) -> Vec<u64> {
@@ -617,17 +619,13 @@ mod tests {
         let rel_path = Path::new("segment.parquet");
         let schema = Arc::new(Schema::new(vec![
             Field::new("entity", DataType::Utf8, true),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
             vec![
                 Arc::new(StringArray::from(vec![Some("A"), None])),
-                Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000])),
+                Arc::new(TimestampMillisecondArray::from(vec![Some(0), None])),
             ],
         )?;
         write_batch(&temp.path().join(rel_path), &batch, None)?;
@@ -751,6 +749,152 @@ mod tests {
             SegmentCoverageError::EntityColumnEmpty { path, column }
                 if path == "segment.parquet" && column == "entity"
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integer_indexes_use_registered_bucket_semantics() -> TestResult {
+        let temp = TempDir::new()?;
+        let signed_path = Path::new("signed.parquet");
+        let signed_schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        let signed_batch = RecordBatch::try_new(
+            signed_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A"; 6])),
+                Arc::new(Int64Array::from(vec![-11, -10, -1, 0, 9, 10])),
+            ],
+        )?;
+        write_batch(&temp.path().join(signed_path), &signed_batch, None)?;
+        let signed_index = IndexSpec {
+            column: "value".to_string(),
+            entity_columns: vec!["entity".to_string()],
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(10).expect("nonzero bucket width"),
+            },
+        };
+
+        let signed = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            signed_path,
+            &signed_index,
+        )
+        .await?;
+        assert_eq!(
+            buckets(&signed, "A"),
+            vec![
+                EPOCH_BUCKET - 2,
+                EPOCH_BUCKET - 1,
+                EPOCH_BUCKET,
+                EPOCH_BUCKET + 1
+            ]
+        );
+
+        let unsigned_path = Path::new("unsigned.parquet");
+        let unsigned_schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("value", DataType::UInt64, false),
+        ]));
+        let unsigned_batch = RecordBatch::try_new(
+            unsigned_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A"; 4])),
+                Arc::new(UInt64Array::from(vec![0, 9, 10, u64::MAX])),
+            ],
+        )?;
+        write_batch(&temp.path().join(unsigned_path), &unsigned_batch, None)?;
+        let unsigned_index = IndexSpec {
+            column: "value".to_string(),
+            entity_columns: vec!["entity".to_string()],
+            kind: IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(10).expect("nonzero bucket width"),
+            },
+        };
+
+        let unsigned = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            unsigned_path,
+            &unsigned_index,
+        )
+        .await?;
+        assert_eq!(buckets(&unsigned, "A"), vec![0, 1, u64::MAX / 10]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicates_collapse_and_null_indexes_preserve_empty_identities() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        write_timestamp_segment(
+            &temp.path().join(rel_path),
+            vec!["A", "A", "B", "C"],
+            vec![Some(0), Some(0), None, None],
+            None,
+        )?;
+
+        let coverage = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await?;
+
+        assert_eq!(coverage.identity_count(), 3);
+        assert_eq!(coverage.cardinality(), 1);
+        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
+        assert!(coverage.get(&identity("B")).expect("B coverage").is_empty());
+        assert!(coverage.get(&identity("C")).expect("C coverage").is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn statistics_presence_does_not_change_coverage() -> TestResult {
+        let temp = TempDir::new()?;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "B", "A"])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 0, 3_600_000])),
+            ],
+        )?;
+        let with_stats = Path::new("with-stats.parquet");
+        let without_stats = Path::new("without-stats.parquet");
+        write_batch(
+            &temp.path().join(with_stats),
+            &batch,
+            Some(
+                WriterProperties::builder()
+                    .set_statistics_enabled(EnabledStatistics::Chunk)
+                    .build(),
+            ),
+        )?;
+        write_batch(
+            &temp.path().join(without_stats),
+            &batch,
+            Some(
+                WriterProperties::builder()
+                    .set_statistics_enabled(EnabledStatistics::None)
+                    .build(),
+            ),
+        )?;
+
+        let location = TableLocation::local(temp.path());
+        let with_stats =
+            compute_segment_entity_coverage(&location, with_stats, &timestamp_index()).await?;
+        let without_stats =
+            compute_segment_entity_coverage(&location, without_stats, &timestamp_index()).await?;
+
+        assert_eq!(with_stats, without_stats);
         Ok(())
     }
 }
