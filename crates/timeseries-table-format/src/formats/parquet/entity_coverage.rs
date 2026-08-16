@@ -359,7 +359,8 @@ mod tests {
         record_batch::RecordBatch,
     };
     use arrow_array::{
-        Int32Array, Int64Array, LargeStringArray, TimestampMillisecondArray, UInt64Array,
+        Int32Array, Int64Array, LargeStringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array,
     };
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -622,6 +623,54 @@ mod tests {
 
         assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
         assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timestamp_indexes_support_every_parquet_unit() -> TestResult {
+        let temp = TempDir::new()?;
+        let cases: Vec<(&str, DataType, Arc<dyn Array>)> = vec![
+            (
+                "milliseconds.parquet",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000])),
+            ),
+            (
+                "microseconds.parquet",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 3_600_000_000])),
+            ),
+            (
+                "nanoseconds.parquet",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                Arc::new(TimestampNanosecondArray::from(vec![0, 3_600_000_000_000])),
+            ),
+        ];
+
+        for (file_name, data_type, timestamps) in cases {
+            let rel_path = Path::new(file_name);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("entity", DataType::Utf8, false),
+                Field::new("ts", data_type, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![Arc::new(StringArray::from(vec!["A", "A"])), timestamps],
+            )?;
+            write_batch(&temp.path().join(rel_path), &batch, None)?;
+
+            let coverage = compute_segment_entity_coverage(
+                &TableLocation::local(temp.path()),
+                rel_path,
+                &timestamp_index(),
+            )
+            .await?;
+
+            assert_eq!(
+                buckets(&coverage, "A"),
+                vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]
+            );
+        }
         Ok(())
     }
 
