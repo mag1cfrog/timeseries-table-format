@@ -151,6 +151,40 @@ pub enum TableError {
         source: IndexValueError,
     },
 
+    /// An identity-free coverage query was used on an entity-aware table.
+    #[snafu(display(
+        "Entity identity is required for coverage queries; configured entity columns: {entity_columns:?}"
+    ))]
+    EntityIdentityRequired {
+        /// Entity columns that require values from the caller.
+        entity_columns: Vec<String>,
+    },
+
+    /// An entity-aware coverage query was used on a table with global coverage.
+    #[snafu(display("Table has no configured entity columns"))]
+    EntityIdentityNotConfigured,
+
+    /// A required entity column has no caller-provided value.
+    #[snafu(display("Missing entity identity component for column {column}"))]
+    MissingEntityIdentityColumn {
+        /// Configured entity column missing from the caller input.
+        column: String,
+    },
+
+    /// Caller input repeats one entity column.
+    #[snafu(display("Duplicate entity identity component for column {column}"))]
+    DuplicateEntityIdentityColumn {
+        /// Repeated entity column name.
+        column: String,
+    },
+
+    /// Caller input contains a column that is not part of the entity identity.
+    #[snafu(display("Unexpected entity identity component for column {column}"))]
+    UnexpectedEntityIdentityColumn {
+        /// Unknown entity column name.
+        column: String,
+    },
+
     /// Parquet read/IO error during scanning or schema extraction.
     #[snafu(display("Parquet read error for segment {path}: {source}"))]
     ParquetRead {
