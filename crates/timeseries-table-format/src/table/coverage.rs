@@ -7,13 +7,13 @@
 //! - Falling back to unioning segment coverage sidecars when the snapshot
 //!   pointer is missing or unreadable (strict vs recovery modes).
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use log::warn;
 
 use crate::{
     coverage::{
-        Coverage, EntityCoverage,
+        Coverage, EntityCoverage, EntityIdentity,
         io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
     transaction_log::table_state::TableCoveragePointer,
@@ -38,6 +38,54 @@ fn ensure_entity_coverage_identity_arity(
 }
 
 impl TimeSeriesTable {
+    fn ensure_global_coverage_query(&self) -> Result<(), TableError> {
+        if self.index_spec().entity_columns.is_empty() {
+            Ok(())
+        } else {
+            Err(TableError::EntityIdentityRequired {
+                entity_columns: self.index_spec().entity_columns.clone(),
+            })
+        }
+    }
+
+    fn resolve_entity_identity(
+        &self,
+        components: &[(&str, &str)],
+    ) -> Result<EntityIdentity, TableError> {
+        let entity_columns = &self.index_spec().entity_columns;
+        if entity_columns.is_empty() {
+            return Err(TableError::EntityIdentityNotConfigured);
+        }
+
+        let mut provided = BTreeMap::new();
+        for &(column, value) in components {
+            if !entity_columns.iter().any(|expected| expected == column) {
+                return Err(TableError::UnexpectedEntityIdentityColumn {
+                    column: column.to_string(),
+                });
+            }
+            if provided.insert(column, value).is_some() {
+                return Err(TableError::DuplicateEntityIdentityColumn {
+                    column: column.to_string(),
+                });
+            }
+        }
+
+        let ordered = entity_columns
+            .iter()
+            .map(|column| {
+                provided
+                    .get(column.as_str())
+                    .map(|value| (*value).to_string())
+                    .ok_or_else(|| TableError::MissingEntityIdentityColumn {
+                        column: column.clone(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        EntityIdentity::try_new(ordered).map_err(|_| TableError::EntityIdentityNotConfigured)
+    }
+
     async fn read_validated_entity_coverage_sidecar(
         &self,
         path: &Path,
@@ -284,9 +332,38 @@ impl TimeSeriesTable {
         S: Into<IndexValue>,
         E: Into<IndexValue>,
     {
+        self.ensure_global_coverage_query()?;
         let range = self.bucket_range_for_index_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.coverage_ratio(&range))
+    }
+
+    /// Coverage ratio in `[0.0, 1.0]` for one entity over `[start, end)`.
+    ///
+    /// Entity components are supplied by column name and canonicalized into the
+    /// configured entity-column order. Coverage from other identities is never
+    /// included. A complete identity not present in the table has zero coverage.
+    ///
+    /// # Errors
+    /// Returns a typed entity identity error for missing, duplicate, unexpected,
+    /// or unconfigured entity columns. Range and sidecar errors retain the same
+    /// behavior as [`TimeSeriesTable::coverage_ratio_for_range`].
+    pub async fn coverage_ratio_for_entity_range<S, E>(
+        &self,
+        entity: &[(&str, &str)],
+        start: S,
+        end: E,
+    ) -> Result<f64, TableError>
+    where
+        S: Into<IndexValue>,
+        E: Into<IndexValue>,
+    {
+        let identity = self.resolve_entity_identity(entity)?;
+        let range = self.bucket_range_for_index_range(start, end)?;
+        let coverage = self.load_table_entity_snapshot_coverage_readonly().await?;
+        Ok(coverage
+            .get(&identity)
+            .map_or(0.0, |coverage| coverage.coverage_ratio(&range)))
     }
 
     /// Maximum contiguous missing run length in buckets for `[start, end)`.
@@ -520,6 +597,115 @@ mod tests {
                         actual: 2,
                     }
                 )
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn entity_coverage_ratio_selects_only_the_requested_identity() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        append_segment(
+            &mut table,
+            &tmp,
+            "data/entity-ratio.parquet",
+            &[
+                TestRow {
+                    ts_millis: 1_000,
+                    symbol: "A",
+                    price: 1.0,
+                },
+                TestRow {
+                    ts_millis: 61_000,
+                    symbol: "B",
+                    price: 2.0,
+                },
+            ],
+        )
+        .await?;
+        let state_before = table.state().clone();
+        let start = ts_from_secs(0);
+        let end = ts_from_secs(120);
+
+        assert_eq!(
+            table
+                .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+                .await?,
+            0.5
+        );
+        assert_eq!(
+            table
+                .coverage_ratio_for_entity_range(&[("symbol", "B")], start, end)
+                .await?,
+            0.5
+        );
+        assert_eq!(
+            table
+                .coverage_ratio_for_entity_range(&[("symbol", "unseen")], start, end)
+                .await?,
+            0.0
+        );
+        assert!(matches!(
+            table.coverage_ratio_for_range(start, end).await,
+            Err(TableError::EntityIdentityRequired { entity_columns })
+                if entity_columns == ["symbol"]
+        ));
+        assert_eq!(table.state(), &state_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn entity_identity_input_is_validated_and_canonicalized() -> TestResult {
+        let tmp = TempDir::new()?;
+        let mut meta = make_basic_table_meta();
+        let TableKind::TimeSeries(index) = &mut meta.kind else {
+            unreachable!("test metadata is time series")
+        };
+        index.entity_columns = vec!["symbol".to_string(), "venue".to_string()];
+        let table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
+
+        let identity = table.resolve_entity_identity(&[("venue", "X"), ("symbol", "A")])?;
+        assert_eq!(identity.components(), ["A", "X"]);
+        let start = ts_from_secs(0);
+        let end = ts_from_secs(60);
+        assert!(matches!(
+            table
+                .coverage_ratio_for_entity_range(&[("venue", "X")], start, end)
+                .await,
+            Err(TableError::MissingEntityIdentityColumn { column }) if column == "symbol"
+        ));
+        assert!(matches!(
+            table
+                .coverage_ratio_for_entity_range(
+                    &[("device", "A"), ("venue", "X")],
+                    start,
+                    end,
+                )
+                .await,
+            Err(TableError::UnexpectedEntityIdentityColumn { column }) if column == "device"
+        ));
+        assert!(matches!(
+            table
+                .coverage_ratio_for_entity_range(
+                    &[
+                        ("symbol", "A"),
+                        ("symbol", "B"),
+                        ("venue", "X"),
+                    ],
+                    start,
+                    end,
+                )
+                .await,
+            Err(TableError::DuplicateEntityIdentityColumn { column }) if column == "symbol"
+        ));
+
+        let (_tmp, global_table) = make_table().await?;
+        assert!(matches!(
+            global_table
+                .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+                .await,
+            Err(TableError::EntityIdentityNotConfigured)
         ));
         Ok(())
     }
