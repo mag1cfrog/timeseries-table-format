@@ -93,8 +93,8 @@ Log actions:
 ## Schema rules (v0.1)
 - No schema evolution: all segments must match the canonical schema exactly.
 - Time column must exist and have a supported timestamp type.
-- If entity columns are configured, each segment must be single-entity and match
-  the pinned table identity.
+- If entity columns are configured, segments may contain multiple identities.
+  Coverage overlap is checked independently for each `(identity, bucket)` pair.
 
 ## Error behavior (high level)
 - Missing coverage snapshot when segments exist yields a clear error.

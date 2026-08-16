@@ -242,9 +242,7 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::table_metadata::{
-        MIN_SUPPORTED_TABLE_FORMAT_VERSION, TABLE_FORMAT_VERSION,
-    };
+    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
@@ -279,7 +277,6 @@ mod tests {
                 .single()
                 .expect("valid sample table metadata timestamp"),
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         }
     }
 
@@ -453,8 +450,7 @@ mod tests {
         assert!(matches!(
             err,
             CommitError::UnsupportedFormatVersion {
-                minimum_supported: MIN_SUPPORTED_TABLE_FORMAT_VERSION,
-                maximum_supported: TABLE_FORMAT_VERSION,
+                expected: TABLE_FORMAT_VERSION,
                 found: 2,
             }
         ));

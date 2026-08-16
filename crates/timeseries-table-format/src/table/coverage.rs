@@ -16,7 +16,6 @@ use crate::{
         Coverage, EntityCoverage,
         io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
-    metadata::table_metadata::ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION,
     transaction_log::table_state::TableCoveragePointer,
 };
 
@@ -39,11 +38,6 @@ fn ensure_entity_coverage_identity_arity(
 }
 
 impl TimeSeriesTable {
-    pub(crate) fn uses_entity_scoped_coverage(&self) -> bool {
-        self.state().table_meta.format_version() == ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION
-            && !self.index_spec().entity_columns.is_empty()
-    }
-
     async fn read_validated_entity_coverage_sidecar(
         &self,
         path: &Path,

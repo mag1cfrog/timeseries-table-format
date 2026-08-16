@@ -11,7 +11,7 @@
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the
 //! caller.
-use crate::metadata::table_metadata::{MIN_SUPPORTED_TABLE_FORMAT_VERSION, TABLE_FORMAT_VERSION};
+use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
 use crate::storage::{self, StorageError, TableLocation};
 use crate::transaction_log::actions::{Commit, LogAction};
 use crate::transaction_log::*;
@@ -102,14 +102,10 @@ impl TransactionLogStore {
                     .pointer("/UpdateTableMeta/format_version")
                     .and_then(serde_json::Value::as_u64)
             })
-            .find(|&found| {
-                !(u64::from(MIN_SUPPORTED_TABLE_FORMAT_VERSION)..=u64::from(TABLE_FORMAT_VERSION))
-                    .contains(&found)
-            })
+            .find(|&found| found != u64::from(TABLE_FORMAT_VERSION))
         {
             return Err(CommitError::UnsupportedFormatVersion {
-                minimum_supported: MIN_SUPPORTED_TABLE_FORMAT_VERSION,
-                maximum_supported: TABLE_FORMAT_VERSION,
+                expected: TABLE_FORMAT_VERSION,
                 found,
             });
         }

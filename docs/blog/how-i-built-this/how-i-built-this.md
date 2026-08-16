@@ -114,7 +114,7 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
     "index_max": {"type": "timestamp", "value": "2024-06-10T23:00:00Z"},
     "row_count": 240,
     "file_size": 14272,
-    "coverage_path": "_coverage/segments/segcov-4612480d425b35a6b1c8152f52bf3ee2-3f1ca9f8-4993-44a4-9e2d-8aa4bb55fed2.roar"
+    "coverage_path": "_coverage/segments/segcov-738cffb9d4ae1f5ce014c4beda6dfd6b-5c2deace-0d7f-4de0-a7c5-088bb8990c9b.roar"
   }
 }
 ```
@@ -227,7 +227,7 @@ That join worked because the same log + snapshot design extends naturally to mul
 Remember this field from the `AddSegment` JSON earlier?
 
 ```json
-"coverage_path": "_coverage/segments/segcov-4612480d425b35a6b1c8152f52bf3ee2-3f1ca9f8-4993-44a4-9e2d-8aa4bb55fed2.roar"
+"coverage_path": "_coverage/segments/segcov-738cffb9d4ae1f5ce014c4beda6dfd6b-5c2deace-0d7f-4de0-a7c5-088bb8990c9b.roar"
 ```
 
 Time-series users keep asking questions like:

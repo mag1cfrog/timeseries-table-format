@@ -4,13 +4,7 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashSet},
-    fmt,
-    num::NonZeroU64,
-    str::FromStr,
-};
+use std::{cmp::Ordering, collections::HashSet, fmt, num::NonZeroU64, str::FromStr};
 
 use arrow::datatypes::SchemaRef;
 use chrono::{DateTime, Utc};
@@ -19,16 +13,10 @@ use snafu::prelude::*;
 
 use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 
-/// Oldest table metadata / log format version this reader supports.
-pub const MIN_SUPPORTED_TABLE_FORMAT_VERSION: u32 = 3;
-
-/// Table format version that introduced entity-scoped coverage sidecars.
-pub(crate) const ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION: u32 = 4;
-
 /// Current table metadata / log format version written by new tables.
 ///
 /// Bumped when persisted table semantics require version-aware decoding.
-pub const TABLE_FORMAT_VERSION: u32 = ENTITY_SCOPED_COVERAGE_TABLE_FORMAT_VERSION;
+pub const TABLE_FORMAT_VERSION: u32 = 4;
 
 /// The high-level "kind" of table.
 ///
@@ -67,10 +55,6 @@ pub struct TableMeta {
     ///
     /// Writers set this to [`TABLE_FORMAT_VERSION`].
     pub(crate) format_version: u32,
-
-    /// Historical version 3 single-entity identity pinned by column name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entity_identity: Option<BTreeMap<String, String>>,
 }
 
 /// Errors encountered while retrieving or converting a table's logical schema.
@@ -121,7 +105,6 @@ impl TableMeta {
             logical_schema: None,
             created_at: Utc::now(),
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         }
     }
 
@@ -132,7 +115,6 @@ impl TableMeta {
             logical_schema: Some(logical_schema),
             created_at: Utc::now(),
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         }
     }
 
@@ -330,7 +312,7 @@ pub struct IndexSpec {
     /// Name of the single ordered index column.
     pub column: String,
 
-    /// Optional entity columns used by the existing single-entity table policy.
+    /// Optional ordered entity columns used for entity-scoped coverage.
     #[serde(default)]
     pub entity_columns: Vec<String>,
 
@@ -592,20 +574,6 @@ mod tests {
 
     use super::*;
     use chrono::TimeZone;
-    use serde_json::Value;
-
-    fn utc_datetime(
-        year: i32,
-        month: u32,
-        day: u32,
-        hour: u32,
-        minute: u32,
-        second: u32,
-    ) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
-            .single()
-            .expect("valid UTC timestamp")
-    }
 
     fn sample_time_index_spec() -> IndexSpec {
         IndexSpec {
@@ -734,48 +702,6 @@ mod tests {
             validate_index_range(&kind, &IndexValue::UInt64(1), &IndexValue::UInt64(1)),
             Err(IndexValueError::InvalidRange { .. })
         ));
-    }
-
-    #[test]
-    fn table_meta_json_roundtrip_with_entity_identity_none() {
-        let meta = TableMeta {
-            kind: TableKind::TimeSeries(sample_time_index_spec()),
-            logical_schema: None,
-            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-            format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
-        };
-
-        let json = serde_json::to_string(&meta).unwrap();
-        let value: Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("entity_identity").is_none());
-
-        let back: TableMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.entity_identity, None);
-        assert_eq!(back, meta);
-    }
-
-    #[test]
-    fn table_meta_json_roundtrip_with_entity_identity_some() {
-        let entity_identity = BTreeMap::from([
-            ("symbol".to_string(), "AAPL".to_string()),
-            ("venue".to_string(), "NASDAQ".to_string()),
-        ]);
-        let meta = TableMeta {
-            kind: TableKind::TimeSeries(sample_time_index_spec()),
-            logical_schema: None,
-            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-            format_version: TABLE_FORMAT_VERSION,
-            entity_identity: Some(entity_identity.clone()),
-        };
-
-        let json = serde_json::to_string(&meta).unwrap();
-        let value: Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("entity_identity").is_some());
-
-        let back: TableMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.entity_identity, Some(entity_identity));
-        assert_eq!(back, meta);
     }
 
     #[test]

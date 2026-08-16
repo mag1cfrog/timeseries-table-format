@@ -249,7 +249,6 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
 
-    use crate::metadata::table_metadata::MIN_SUPPORTED_TABLE_FORMAT_VERSION;
     use crate::storage::{StorageLocation, layout};
     use crate::table::test_util::*;
     use crate::transaction_log::{CommitError, IndexKind, TimeBucket, TransactionLogStore};
@@ -325,52 +324,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_reads_version_three_without_migrating_it() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let log = TransactionLogStore::new(location.clone());
-        let mut meta = make_basic_table_meta();
-        meta.format_version = MIN_SUPPORTED_TABLE_FORMAT_VERSION;
-        log.commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
-            .await?;
-        let commit_path = tmp.path().join(layout::commit_rel_path(1));
-        let commit_before = tokio::fs::read(&commit_path).await?;
+    async fn open_rejects_every_non_current_format_with_typed_error() -> TestResult {
+        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+            let tmp = TempDir::new()?;
+            let location = TableLocation::local(tmp.path());
+            let log = TransactionLogStore::new(location.clone());
+            let mut meta = make_basic_table_meta();
+            meta.format_version = found;
+            log.commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+                .await?;
 
-        let table = TimeSeriesTable::open(location).await?;
+            let error = TimeSeriesTable::open(location)
+                .await
+                .expect_err("non-current table format must fail");
 
-        assert_eq!(
-            table.state().table_meta.format_version(),
-            MIN_SUPPORTED_TABLE_FORMAT_VERSION
-        );
-        assert_eq!(table.state().version, 1);
-        assert_eq!(tokio::fs::read(commit_path).await?, commit_before);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn open_rejects_unknown_future_format_with_typed_error() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let log = TransactionLogStore::new(location.clone());
-        let mut meta = make_basic_table_meta();
-        meta.format_version = TABLE_FORMAT_VERSION + 1;
-        log.commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
-            .await?;
-
-        let error = TimeSeriesTable::open(location)
-            .await
-            .expect_err("future table format must fail");
-
-        assert!(matches!(
-            error,
-            TableError::TransactionLog {
-                source: CommitError::UnsupportedFormatVersion {
-                    minimum_supported: MIN_SUPPORTED_TABLE_FORMAT_VERSION,
-                    maximum_supported: TABLE_FORMAT_VERSION,
-                    found,
-                },
-            } if found == u64::from(TABLE_FORMAT_VERSION + 1)
-        ));
+            assert!(matches!(
+                error,
+                TableError::TransactionLog {
+                    source: CommitError::UnsupportedFormatVersion {
+                        expected: TABLE_FORMAT_VERSION,
+                        found: actual,
+                    },
+                } if actual == u64::from(found)
+            ));
+        }
         Ok(())
     }
 

@@ -1208,9 +1208,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// index_type:
         ///     One of `"timestamp"`, `"int64"`, or `"uint64"`.
         /// entity_columns:
-        ///     Column names that define the entity identity for this table. For v0, a table is
-        ///     effectively scoped to a single entity identity; all appended segments must match the
-        ///     entity values established by the first successful append.
+        ///     Column names that define ordered entity identities for this table. Segments may
+        ///     contain multiple identities; coverage is tracked independently for each identity.
         /// bucket:
         ///     Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
         /// bucket_width:

@@ -26,8 +26,7 @@ use crate::{
     },
     formats::parquet::{
         compute_segment_entity_coverage, coverage::compute_segment_coverage,
-        logical_schema_from_parquet, segment_entity_identity_from_parquet,
-        segment_meta::segment_meta_from_parquet,
+        logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
     storage,
@@ -39,9 +38,8 @@ use super::{
     append_report::{AppendReport, AppendReportBuilder},
     error::{
         CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EntityCoverageOverlapSnafu,
-        EntityMismatchSnafu, ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu,
-        SchemaCompatibilitySnafu, SegmentCoverageSnafu, SegmentEntityIdentitySnafu,
-        SegmentMetaSnafu, StorageSnafu, TableError,
+        ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu,
+        SegmentCoverageSnafu, SegmentMetaSnafu, StorageSnafu, TableError,
     },
 };
 
@@ -202,7 +200,7 @@ impl TimeSeriesTable {
         //     enforce “no schema evolution” via ensure_schema_exact_match.
         let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
 
-        let mut maybe_updated_meta = match maybe_table_schema {
+        let maybe_updated_meta = match maybe_table_schema {
             None if expected_version == 1 => {
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
@@ -221,44 +219,10 @@ impl TimeSeriesTable {
             }
         };
 
-        let uses_entity_scoped_coverage = self.uses_entity_scoped_coverage();
+        let has_entity_columns = !self.index.entity_columns.is_empty();
 
-        // Version 3 pins one entity identity and uses global coverage.
-        if !uses_entity_scoped_coverage && !self.index.entity_columns.is_empty() {
-            let step_start = Instant::now();
-            let seg_ident = segment_entity_identity_from_parquet(
-                self.location(),
-                rel_path,
-                &self.index.entity_columns,
-            )
-            .await
-            .context(SegmentEntityIdentitySnafu)?;
-            if let Some(r) = report.as_mut() {
-                r.push_step("entity_identity", step_start.elapsed(), Vec::new());
-            }
-
-            match &self.state.table_meta.entity_identity {
-                Some(expected) => {
-                    if expected != &seg_ident {
-                        return EntityMismatchSnafu {
-                            segment_path: relative_path.to_string(),
-                            expected: expected.clone(),
-                            found: seg_ident,
-                        }
-                        .fail();
-                    }
-                }
-                None => {
-                    // pin the first append that includes entity columns
-                    let updated =
-                        maybe_updated_meta.get_or_insert_with(|| self.state.table_meta.clone());
-                    updated.entity_identity = Some(seg_ident);
-                }
-            }
-        }
-
-        // 3-5) Load, compute, and compare coverage using the table format.
-        let (seg_cov_bytes, new_snap_cov_bytes) = if uses_entity_scoped_coverage {
+        // 3-5) Load, compute, and compare coverage using the entity-column mode.
+        let (seg_cov_bytes, new_snap_cov_bytes) = if has_entity_columns {
             let step_start = Instant::now();
             let table_cov = self.load_table_entity_snapshot_coverage_readonly().await?;
             if let Some(r) = report.as_mut() {
@@ -346,7 +310,7 @@ impl TimeSeriesTable {
 
         // 6) Give this append private sidecar paths, then write them before commit.
         let attempt_id = Uuid::new_v4();
-        let segment_content_id = if uses_entity_scoped_coverage {
+        let segment_content_id = if has_entity_columns {
             segment_entity_coverage_id_v1(&self.index, &seg_cov_bytes)
         } else {
             segment_coverage_id_v2(&self.index, &seg_cov_bytes)
@@ -359,7 +323,7 @@ impl TimeSeriesTable {
         })?;
 
         let new_version_guess = expected_version + 1;
-        let snapshot_content_id = if uses_entity_scoped_coverage {
+        let snapshot_content_id = if has_entity_columns {
             table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
         } else {
             table_coverage_id_v2(&self.index, &new_snap_cov_bytes)
@@ -531,15 +495,12 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
     use crate::metadata::segments::ParquetIndexColumnError;
-    use crate::metadata::table_metadata::{
-        IndexValue, MIN_SUPPORTED_TABLE_FORMAT_VERSION, TABLE_FORMAT_VERSION,
-    };
+    use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{
-        Commit, CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
-        TransactionLogStore,
+        CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
     };
     use arrow::{
         array::{
@@ -564,18 +525,6 @@ mod tests {
             entity_columns: Vec::new(),
             kind,
         }
-    }
-
-    async fn open_version_three_table(
-        location: TableLocation,
-    ) -> Result<TimeSeriesTable, TableError> {
-        let mut meta = make_basic_table_meta();
-        meta.format_version = MIN_SUPPORTED_TABLE_FORMAT_VERSION;
-        TransactionLogStore::new(location.clone())
-            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
-            .await
-            .map_err(|source| TableError::TransactionLog { source })?;
-        TimeSeriesTable::open(location).await
     }
 
     fn write_single_index_parquet(
@@ -1164,207 +1113,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_three_append_pins_entity_and_reopens_without_rewrite() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let mut table = open_version_three_table(location.clone()).await?;
-
-        let rel_path = "data/seg-entity-a.parquet";
-        let abs_path = tmp.path().join(rel_path);
-        write_test_parquet(
-            &abs_path,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-
-        let version = table.append_parquet_segment(rel_path).await?;
-        assert_eq!(version, 2);
-
-        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
-        assert_eq!(
-            table.state.table_meta.entity_identity,
-            Some(expected_identity.clone())
-        );
-
-        let commit_path = tmp.path().join(layout::commit_rel_path(2));
-        let contents = tokio::fs::read_to_string(&commit_path).await?;
-        let commit: Commit = serde_json::from_str(&contents)?;
-
-        assert_eq!(commit.actions.len(), 3);
-        match &commit.actions[0] {
-            LogAction::UpdateTableMeta(meta) => {
-                assert_eq!(meta.entity_identity.as_ref(), Some(&expected_identity));
-            }
-            other => panic!("expected UpdateTableMeta, got {other:?}"),
-        }
-        assert!(matches!(commit.actions[1], LogAction::AddSegment(_)));
-        assert!(matches!(
-            commit.actions[2],
-            LogAction::UpdateTableCoverage { .. }
-        ));
-
-        let segment_coverage_path = table
-            .state
-            .segments
-            .get(rel_path)
-            .and_then(|segment| segment.coverage_path.as_ref())
-            .expect("segment coverage path");
-        let snapshot_coverage_path = &table
-            .state
-            .table_coverage
-            .as_ref()
-            .expect("table coverage pointer")
-            .coverage_path;
-        assert_eq!(
-            read_coverage_sidecar(&location, Path::new(segment_coverage_path)).await?,
-            read_coverage_sidecar(&location, Path::new(snapshot_coverage_path)).await?
-        );
-        let state_before_open = table.state.clone();
-        let commits_before_open = [
-            tokio::fs::read(tmp.path().join(layout::commit_rel_path(1))).await?,
-            tokio::fs::read(&commit_path).await?,
-        ];
-
-        let reopened = TimeSeriesTable::open(location).await?;
-
-        assert_eq!(reopened.state, state_before_open);
-        assert_eq!(
-            reopened
-                .coverage_ratio_for_range(
-                    utc_datetime(1970, 1, 1, 0, 0, 0),
-                    utc_datetime(1970, 1, 1, 0, 1, 0),
-                )
-                .await?,
-            1.0
-        );
-        assert_eq!(
-            tokio::fs::read(tmp.path().join(layout::commit_rel_path(1))).await?,
-            commits_before_open[0]
-        );
-        assert_eq!(tokio::fs::read(commit_path).await?, commits_before_open[1]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_allows_same_entity_identity() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let mut table = open_version_three_table(location.clone()).await?;
-
-        let rel_path1 = "data/seg-entity-a-1.parquet";
-        let abs_path1 = tmp.path().join(rel_path1);
-        write_test_parquet(
-            &abs_path1,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-
-        table.append_parquet_segment(rel_path1).await?;
-
-        let rel_path2 = "data/seg-entity-a-2.parquet";
-        let abs_path2 = tmp.path().join(rel_path2);
-        write_test_parquet(
-            &abs_path2,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 120_000,
-                symbol: "A",
-                price: 20.0,
-            }],
-        )?;
-
-        let version = table.append_parquet_segment(rel_path2).await?;
-        assert_eq!(version, 3);
-
-        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
-        assert_eq!(
-            table.state.table_meta.entity_identity,
-            Some(expected_identity.clone())
-        );
-
-        let commit_path = tmp.path().join(layout::commit_rel_path(3));
-        let contents = tokio::fs::read_to_string(&commit_path).await?;
-        let commit: Commit = serde_json::from_str(&contents)?;
-        assert_eq!(commit.actions.len(), 2);
-        assert!(matches!(commit.actions[0], LogAction::AddSegment(_)));
-        assert!(matches!(
-            commit.actions[1],
-            LogAction::UpdateTableCoverage { .. }
-        ));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_rejects_mismatched_entity_identity() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let mut table = open_version_three_table(location.clone()).await?;
-
-        let rel_path1 = "data/seg-entity-a.parquet";
-        let abs_path1 = tmp.path().join(rel_path1);
-        write_test_parquet(
-            &abs_path1,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-        table.append_parquet_segment(rel_path1).await?;
-
-        let rel_path2 = "data/seg-entity-b.parquet";
-        let abs_path2 = tmp.path().join(rel_path2);
-        write_test_parquet(
-            &abs_path2,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 120_000,
-                symbol: "B",
-                price: 20.0,
-            }],
-        )?;
-
-        let err = table
-            .append_parquet_segment(rel_path2)
-            .await
-            .expect_err("expected entity identity mismatch");
-
-        let expected_identity = BTreeMap::from([("symbol".to_string(), "A".to_string())]);
-        let found_identity = BTreeMap::from([("symbol".to_string(), "B".to_string())]);
-
-        match err {
-            TableError::EntityMismatch {
-                expected, found, ..
-            } => {
-                assert_eq!(expected, expected_identity);
-                assert_eq!(found, found_identity);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let commit_path = tmp.path().join(layout::commit_rel_path(3));
-        assert!(!commit_path.exists());
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn version_four_allows_different_identities_in_the_same_bucket() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -1388,7 +1136,6 @@ mod tests {
         }
 
         assert_eq!(table.state.version, 3);
-        assert_eq!(table.state.table_meta.entity_identity, None);
         let pointer = table
             .state
             .table_coverage
@@ -1435,7 +1182,6 @@ mod tests {
         .await?;
         assert_eq!(coverage.identity_count(), 2);
         assert_eq!(coverage.cardinality(), 2);
-        assert_eq!(table.state.table_meta.entity_identity, None);
         Ok(())
     }
 
@@ -1525,7 +1271,6 @@ mod tests {
             logical_schema: None,
             created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         };
 
         let mut table = TimeSeriesTable::create(location, meta).await?;

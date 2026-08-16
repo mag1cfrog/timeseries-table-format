@@ -106,14 +106,10 @@ pub enum CommitError {
     },
 
     /// Table metadata uses a format version this reader cannot interpret.
-    #[snafu(display(
-        "Unsupported table format version: supported {minimum_supported} through {maximum_supported}, found {found}"
-    ))]
+    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
     UnsupportedFormatVersion {
-        /// Oldest readable table format version.
-        minimum_supported: u32,
-        /// Newest readable table format version.
-        maximum_supported: u32,
+        /// The only table format version this reader supports.
+        expected: u32,
         /// Version found in persisted table metadata.
         found: u64,
     },
@@ -206,7 +202,6 @@ mod tests {
             ),
             created_at: ts0,
             format_version: TABLE_FORMAT_VERSION,
-            entity_identity: None,
         };
 
         let seg_meta = SegmentMeta {

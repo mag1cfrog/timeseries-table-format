@@ -6,8 +6,6 @@
 //! re-exporting everything at the crate root. Keep new variants here to ensure
 //! consistent user-facing messages and to avoid scattering selectors.
 
-use std::collections::BTreeMap;
-
 use arrow::{datatypes::DataType, error::ArrowError};
 use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
@@ -15,7 +13,7 @@ use snafu::prelude::*;
 
 use crate::{
     coverage::{EntityIdentity, bucket::BucketError, io::CoverageError},
-    formats::parquet::{SegmentCoverageError, SegmentEntityIdentityError},
+    formats::parquet::SegmentCoverageError,
     metadata::{
         schema_compat::SchemaCompatibilityError,
         table_metadata::{IndexKind, IndexSpecError, IndexValueError},
@@ -302,25 +300,4 @@ pub enum TableError {
         "Cannot append because table has segments but no table coverage snapshot pointer in state"
     ))]
     MissingTableCoveragePointer,
-
-    /// Failed to read or validate the entity identity stored in a segment.
-    #[snafu(display("Segment entity identity error: {source}"))]
-    SegmentEntityIdentity {
-        /// Underlying entity identity extraction error.
-        #[snafu(source, backtrace)]
-        source: SegmentEntityIdentityError,
-    },
-
-    /// Segment entity identity does not match the expected table identity.
-    #[snafu(display(
-        "Entity mismatch while appending {segment_path}: expected={expected:?}, found={found:?}"
-    ))]
-    EntityMismatch {
-        /// Relative path of the segment being appended.
-        segment_path: String,
-        /// Expected entity identity derived from table metadata or state.
-        expected: BTreeMap<String, String>,
-        /// Entity identity observed in the segment.
-        found: BTreeMap<String, String>,
-    },
 }
