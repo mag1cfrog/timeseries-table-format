@@ -4,7 +4,7 @@
 
 **Prereqs:** Installed `timeseries-table-format` (see [Installation](../install.md)).
 
-**What you’ll learn:**
+**What you'll learn:**
 - How a table root is created and stays self-contained on disk
 - How appends work (and what overlap detection is protecting you from)
 - How `Session` queries registered tables and returns a `pyarrow.Table`
@@ -20,7 +20,7 @@
 3) Append it (`append_parquet`)
 4) Create a SQL session (`Session`)
 5) Register the table (`register_tstable`)
-6) Query (`Session.sql`) → `pyarrow.Table`
+6) Query (`Session.sql`) -> `pyarrow.Table`
 
 The full example below is the exact code used in docs (kept in sync with the repo):
 
@@ -36,7 +36,7 @@ The full example below is the exact code used in docs (kept in sync with the rep
 
 !!! note "`entity_columns` explained"
     `entity_columns=["symbol"]` tells the table that coverage is tracked **per symbol independently**.
-    That means AAPL at 10:00 and NVDA at 10:00 are considered separate coverage — appending data
+    That means AAPL at 10:00 and NVDA at 10:00 are considered separate coverage - appending data
     for one symbol never blocks appends for a different symbol in the same time window.
 
 #### Use an integer index
@@ -78,7 +78,7 @@ before being committed (so the table is self-contained on disk).
 
 !!! warning "What happens if you run this twice?"
     If you run the example a second time against the same table root, `append_parquet(...)` will
-    raise `CoverageOverlapError`. That's intentional — the table already has coverage for those
+    raise `CoverageOverlapError`. That's intentional - the table already has coverage for those
     hour buckets, so it refuses to re-ingest the same window. This is the overlap detection
     working as designed.
 
@@ -95,12 +95,9 @@ before being committed (so the table is self-contained on disk).
     instead of materializing the full result into memory. See [Reference: Session](../reference/session.md).
 
 !!! tip "Notebook display"
-    In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results display as a bounded HTML preview by default (the return type is still a real `pyarrow.Table`).
-
-    - Opt-out: set `TTF_NOTEBOOK_DISPLAY=0` before importing `timeseries_table_format`, or call `timeseries_table_format.disable_notebook_display()`
-    - Configure: call `timeseries_table_format.enable_notebook_display(max_rows=..., max_cols=..., max_cell_chars=..., align=...)`
-    - Alignment: set `TTF_NOTEBOOK_ALIGN=auto|left|right` before importing `timeseries_table_format` (or pass `align=...` to `enable_notebook_display(...)`)
-    - Config file (TOML): set `TTF_NOTEBOOK_CONFIG=path/to/ttf.toml` before importing `timeseries_table_format` (on Python 3.10, install `tomli` to enable TOML parsing)
+    Notebook results use a bounded HTML preview by default. See
+    [Configure notebook display](../guides/notebook_display.md) to change or
+    disable it.
 
 !!! note
     The Python API is synchronous. Internally, long-running Rust operations run on an internal

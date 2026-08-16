@@ -45,6 +45,7 @@ nav:
       - Incremental ingestion: tutorials/real_world_workflow.md
       - Register and join tables: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md
+      - Configure notebook display: guides/notebook_display.md
   - Advanced:
       - Buckets and overlap: concepts/bucketing_and_overlap.md
       - Table root layout: concepts/table_root.md
