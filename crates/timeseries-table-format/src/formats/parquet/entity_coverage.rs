@@ -351,7 +351,7 @@ mod tests {
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
     };
-    use arrow_array::{Int32Array, TimestampMillisecondArray};
+    use arrow_array::{Int32Array, LargeStringArray, TimestampMillisecondArray};
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
     use tempfile::TempDir;
@@ -376,6 +376,22 @@ mod tests {
         EntityIdentity::try_new(vec![value.to_string()]).expect("test identity")
     }
 
+    fn write_batch(
+        path: &Path,
+        batch: &RecordBatch,
+        max_row_group_size: Option<usize>,
+    ) -> TestResult {
+        let properties = max_row_group_size.map(|size| {
+            WriterProperties::builder()
+                .set_max_row_group_size(size)
+                .build()
+        });
+        let mut writer = ArrowWriter::try_new(File::create(path)?, batch.schema(), properties)?;
+        writer.write(batch)?;
+        writer.close()?;
+        Ok(())
+    }
+
     fn write_timestamp_segment(
         path: &Path,
         entities: Vec<&str>,
@@ -396,15 +412,7 @@ mod tests {
                 Arc::new(StringArray::from(entities)),
             ],
         )?;
-        let properties = max_row_group_size.map(|size| {
-            WriterProperties::builder()
-                .set_max_row_group_size(size)
-                .build()
-        });
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, properties)?;
-        writer.write(&batch)?;
-        writer.close()?;
-        Ok(())
+        write_batch(path, &batch, max_row_group_size)
     }
 
     fn buckets(coverage: &EntityCoverage, entity: &str) -> Vec<u64> {
@@ -533,10 +541,7 @@ mod tests {
                 Arc::new(StringArray::from(vec!["us", "eu"])),
             ],
         )?;
-        let mut writer =
-            ArrowWriter::try_new(File::create(temp.path().join(rel_path))?, schema, None)?;
-        writer.write(&batch)?;
-        writer.close()?;
+        write_batch(&temp.path().join(rel_path), &batch, None)?;
         let index = IndexSpec {
             column: "ts".to_string(),
             entity_columns: vec!["region".to_string(), "symbol".to_string()],
@@ -570,6 +575,182 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![EPOCH_BUCKET + 1]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn large_utf8_entity_succeeds() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::LargeUtf8, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(LargeStringArray::from(vec!["A", "B"])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000])),
+            ],
+        )?;
+        write_batch(&temp.path().join(rel_path), &batch, None)?;
+
+        let coverage = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await?;
+
+        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
+        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn null_entity_returns_typed_error() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("A"), None])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000])),
+            ],
+        )?;
+        write_batch(&temp.path().join(rel_path), &batch, None)?;
+
+        let error = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await
+        .expect_err("null entity must fail");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::EntityColumnHasNull { path, column }
+                if path == "segment.parquet" && column == "entity"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn each_missing_composite_entity_column_returns_typed_error() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut index = timestamp_index();
+        index.entity_columns = vec!["region".to_string(), "symbol".to_string()];
+
+        for (missing, present) in [("region", "symbol"), ("symbol", "region")] {
+            let filename = format!("missing-{missing}.parquet");
+            let rel_path = Path::new(&filename);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(present, DataType::Utf8, false),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["value"])),
+                    Arc::new(TimestampMillisecondArray::from(vec![0])),
+                ],
+            )?;
+            write_batch(&temp.path().join(rel_path), &batch, None)?;
+
+            let error = compute_segment_entity_coverage(
+                &TableLocation::local(temp.path()),
+                rel_path,
+                &index,
+            )
+            .await
+            .expect_err("missing entity column must fail");
+
+            assert!(matches!(
+                error,
+                SegmentCoverageError::EntityColumnNotFound { path, column }
+                    if path == filename && column == missing
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_entity_type_returns_typed_error() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Int32, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(TimestampMillisecondArray::from(vec![0])),
+            ],
+        )?;
+        write_batch(&temp.path().join(rel_path), &batch, None)?;
+
+        let error = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await
+        .expect_err("unsupported entity type must fail");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::EntityColumnUnsupportedType { path, column, datatype }
+                if path == "segment.parquet" && column == "entity" && datatype == "Int32"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_segment_returns_typed_entity_error() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ]));
+        ArrowWriter::try_new(File::create(temp.path().join(rel_path))?, schema, None)?.close()?;
+
+        let error = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await
+        .expect_err("empty entity data must fail");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::EntityColumnEmpty { path, column }
+                if path == "segment.parquet" && column == "entity"
+        ));
         Ok(())
     }
 }
