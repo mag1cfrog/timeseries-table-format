@@ -515,8 +515,9 @@ impl TimeSeriesTable {
 mod tests {
     use super::super::test_util::*;
     use super::*;
-    use crate::coverage::EntityCoverage;
     use crate::coverage::io::read_entity_coverage_sidecar;
+    use crate::coverage::serde::entity_coverage_from_bytes;
+    use crate::coverage::{EntityCoverage, EntityIdentity};
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
@@ -681,7 +682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_from_path_removes_failed_external_copy() -> TestResult {
+    async fn entity_aware_validation_failure_leaves_no_state_or_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         let location = TableLocation::local(&table_root);
@@ -703,6 +704,7 @@ mod tests {
         assert_eq!(table.state, state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
         assert_eq!(coverage_files(&table_root)?, coverage_before);
+        assert!(!table_root.join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 
@@ -758,12 +760,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_from_path_retains_copy_for_ambiguous_commit() -> TestResult {
+    async fn entity_aware_ambiguous_commit_retains_copy_and_sidecars() -> TestResult {
         let tmp = TempDir::new()?;
         let table_root = tmp.path().join("table");
         let location = TableLocation::local(&table_root);
         let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
         let state_before = table.state.clone();
+        let coverage_before = coverage_files(&table_root)?;
         let source = tmp.path().join("ambiguous-external.parquet");
         write_test_parquet(
             &source,
@@ -776,7 +779,8 @@ mod tests {
             }],
         )?;
         let source_bytes = std::fs::read(&source)?;
-        crate::storage::inject_write_new_failure(table_root.join(layout::commit_rel_path(2)), true);
+        let commit_path = table_root.join(layout::commit_rel_path(2));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
 
         let err = table
             .append_parquet_from_path(&source)
@@ -796,6 +800,12 @@ mod tests {
         assert_eq!(std::fs::read(source)?, source_bytes);
         assert_eq!(table.state, state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(commit_path.exists());
+        let coverage_after = coverage_files(&table_root)?;
+        assert_eq!(coverage_after.len(), coverage_before.len() + 2);
+        for bytes in coverage_after.values() {
+            entity_coverage_from_bytes(bytes)?;
+        }
         Ok(())
     }
 
@@ -2114,7 +2124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_append_of_different_path_fails_occ_without_state_mutation() -> TestResult {
+    async fn entity_aware_stale_append_cleans_sidecars_without_state_mutation() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -2173,6 +2183,9 @@ mod tests {
         assert!(committed.segments.contains_key(winner_path));
         assert!(!committed.segments.contains_key(loser_path));
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
+        for bytes in coverage_before.values() {
+            entity_coverage_from_bytes(bytes)?;
+        }
         assert!(!tmp.path().join(layout::commit_rel_path(3)).exists());
         Ok(())
     }
@@ -2248,20 +2261,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidecar_cleanup_failure_preserves_original_append_error() -> TestResult {
+    async fn entity_sidecar_cleanup_failures_preserve_error_and_reverse_order() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let sidecar = format!("{}/stuck.roar", layout::SEGMENT_COVERAGE_DIR);
-        tokio::fs::create_dir_all(tmp.path().join(&sidecar)).await?;
-        let source = TableError::CoverageOverlap {
+        let sidecars = [
+            format!("{}/first-stuck.roar", layout::SEGMENT_COVERAGE_DIR),
+            format!("{}/second-stuck.roar", layout::TABLE_SNAPSHOT_DIR),
+        ];
+        for sidecar in &sidecars {
+            tokio::fs::create_dir_all(tmp.path().join(sidecar)).await?;
+        }
+        let source = TableError::EntityCoverageOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
-            example_bucket: Some(0),
+            example_identity: EntityIdentity::try_new(vec!["A".to_string()])?,
+            example_bucket: 0,
         };
-        let err = table
-            .rollback_created_sidecars(std::slice::from_ref(&sidecar), source)
-            .await;
+        let err = table.rollback_created_sidecars(&sidecars, source).await;
         let message = err.to_string();
 
         assert!(matches!(
@@ -2269,11 +2286,14 @@ mod tests {
             TableError::AppendRollback {
                 source,
                 cleanup_errors,
-            } if matches!(*source, TableError::CoverageOverlap { .. })
-                && cleanup_errors.iter().any(|error| error.contains("stuck.roar"))
+            } if matches!(*source, TableError::EntityCoverageOverlap { .. })
+                && cleanup_errors.len() == 2
+                && cleanup_errors[0].contains("second-stuck.roar")
+                && cleanup_errors[1].contains("first-stuck.roar")
         ));
         assert!(message.contains("data/failed.parquet"));
-        assert!(message.contains("stuck.roar"));
+        assert!(message.contains("first-stuck.roar"));
+        assert!(message.contains("second-stuck.roar"));
         Ok(())
     }
 
