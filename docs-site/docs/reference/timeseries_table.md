@@ -1,4 +1,4 @@
-# Reference: TimeSeriesTable
+# TimeSeriesTable reference
 
 `TimeSeriesTable` manages table lifecycle (create/open/append) on the local filesystem.
 
@@ -6,4 +6,3 @@
     options:
       members: true
       show_source: false
-

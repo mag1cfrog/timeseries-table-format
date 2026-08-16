@@ -1,4 +1,4 @@
-# Concept: table root layout
+# Table root layout
 
 A time-series table is stored under a local directory called the *table root*.
 

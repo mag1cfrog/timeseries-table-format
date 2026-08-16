@@ -1,4 +1,4 @@
-# Reference: exceptions
+# Exceptions reference
 
 All library-specific errors inherit from `TimeseriesTableError`, so you can catch any library
 error with a single `except ttf.TimeseriesTableError`.
@@ -16,7 +16,7 @@ TimeseriesTableError
 
 ## When you'll see each error
 
-**`StorageError`** — raised when the filesystem operation fails. Common causes: the table root
+**`StorageError`** - raised when the filesystem operation fails. Common causes: the table root
 directory doesn't exist, a file is missing, or a permissions problem. The error message includes
 the path that caused the problem.
 
@@ -30,14 +30,14 @@ double-ingesting data. The exception carries:
 
 See [Buckets + overlap](../concepts/bucketing_and_overlap.md) for background.
 
-**`SchemaMismatchError`** — raised when a Parquet file you try to append has a schema that
+**`SchemaMismatchError`** - raised when a Parquet file you try to append has a schema that
 conflicts with the table's established schema (set on the first successful append).
 
-**`ConflictError`** — raised when a concurrent modification to the table metadata is detected.
+**`ConflictError`** - raised when a concurrent modification to the table metadata is detected.
 In typical single-process usage this is rare; it can happen if two processes are appending to the
 same table root simultaneously.
 
-**`DataFusionError`** — raised when `Session.sql(...)` or `Session.sql_reader(...)` encounters a
+**`DataFusionError`** - raised when `Session.sql(...)` or `Session.sql_reader(...)` encounters a
 SQL error (syntax error, type error, unknown column, etc.).
 
 ---
