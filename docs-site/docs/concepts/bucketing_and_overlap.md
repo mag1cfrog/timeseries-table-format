@@ -1,4 +1,4 @@
-# Concept: chronological indexes, buckets, and overlap
+# Ordered indexes, buckets, and overlap
 
 Every table has one ascending chronological index. It can be a physical Timestamp or an
 integer-valued logical clock with application-defined units. Public APIs and metadata call this

@@ -216,11 +216,26 @@ def _column_width_ch(
 
 
 def load_notebook_display_config(path: str) -> bool:
-    """
-    Load a TOML config file and apply its `notebook_display` section.
+    """Load notebook display settings from a TOML file.
 
-    This updates the in-memory configuration used by the notebook HTML formatter.
-    It does not force-enable display outside IPython/Jupyter.
+    Parameters
+    ----------
+    path:
+        Path to the TOML configuration file.
+
+    Returns
+    -------
+    bool
+        `True` when a non-empty notebook display section was found and
+        processed; `False` when the file could not be read or did not contain
+        settings.
+
+    Notes
+    -----
+    The file may use `[notebook_display]` or
+    `[timeseries_table_format.notebook_display]`. Loading settings does not
+    enable the formatter outside IPython or Jupyter.
+
     """
     data = load_notebook_display_config_file(path)
     if not data:
@@ -719,6 +734,26 @@ def enable_notebook_display(
     max_cell_chars: int = 2000,
     align: str = "right",
 ) -> bool:
+    """Configure and enable bounded HTML previews for Arrow tables.
+
+    Parameters
+    ----------
+    max_rows:
+        Maximum number of rows shown in a preview.
+    max_cols:
+        Maximum number of columns shown in a preview.
+    max_cell_chars:
+        Maximum number of characters shown for each cell.
+    align:
+        Cell alignment: `"right"`, `"left"`, or `"auto"`. Automatic
+        alignment left-aligns text and right-aligns numeric values.
+
+    Returns
+    -------
+    bool
+        `True` when the formatter is active after the call; `False` when no
+        compatible IPython HTML formatter is available.
+    """
     _STATE.config = _NotebookDisplayConfig(
         max_rows=_safe_int(max_rows, default=20),
         max_cols=_safe_int(max_cols, default=50),
@@ -742,6 +777,19 @@ def enable_notebook_display(
 
 
 def disable_notebook_display() -> bool:
+    """Disable bounded HTML previews for Arrow tables.
+
+    Returns
+    -------
+    bool
+        `True` when the custom formatter was removed; `False` when it was not
+        active or no compatible IPython HTML formatter was available.
+
+    Notes
+    -----
+    If another formatter was active before this package installed its own,
+    that formatter is restored.
+    """
     html_formatter = _get_ipython_html_formatter()
     changed = _uninstall_from_html_formatter(html_formatter)
     return changed

@@ -1,37 +1,25 @@
-# Concept: when to use this
+# Decide if this project fits
 
-## TL;DR
+`timeseries-table-format` manages local, append-only time-series tables built
+from Parquet segments. It tracks coverage, rejects overlapping appends, and
+queries committed segments with DataFusion SQL.
 
-`timeseries-table-format` gives you:
+## A good fit
 
-- Local filesystem **table roots** (a stable directory layout for a table).
-- Append Parquet segments with **overlap detection**.
-- **SQL** via DataFusion, with results returned as a `pyarrow.Table`.
+Use it when:
 
-## Use it when…
+- New time-series Parquet files arrive over time.
+- You want one managed table root instead of custom file-discovery code.
+- Each entity and time bucket should be ingested at most once.
+- You want SQL results as `pyarrow.Table` or `pyarrow.RecordBatchReader` objects.
 
-- You have time-series Parquet files arriving over time and want a consistent on-disk table layout.
-- You want to query across segments (and across multiple tables) with SQL.
-- You want overlap detection to catch accidental duplicate ingestion.
+## Choose another tool when
 
-## Don’t use it when… (v0)
+- You only need ad hoc queries over a few files. Query Parquet directly with a
+  tool such as DuckDB or Polars.
+- You need row updates or a central database server. Use a database.
+- You need object storage, compaction, schema evolution, or merge operations.
+  Use a lakehouse format designed for those workflows.
 
-- You need S3/object storage backends.
-- You need compaction, schema evolution, or upserts/merges.
-- You want a centralized database/server.
-
-## How it fits
-
-Think of this as a thin **metadata + storage layer** on top of Parquet segment files: it defines a
-table root layout, tracks what segments are part of the table, and enforces overlap rules during
-appends. **DataFusion** provides the SQL engine, and query results come back as `pyarrow.Table`.
-
-## Alternatives (quick intuition)
-
-- If you only need ad-hoc queries over a few files: DuckDB / Polars directly over Parquet.
-- If you need a database with updates and concurrent writers: a real database (server-based).
-- If you need object storage + compaction/transactions: tools built for S3 + lakehouse workflows.
-
-Next:
-- Tutorial: [Create, append, query](../tutorials/create_append_query.md)
-- Concept: [Buckets + overlap](bucketing_and_overlap.md)
+The current release supports local filesystems and append-only ingestion. If
+that matches your workload, continue with [Installation](../install.md).

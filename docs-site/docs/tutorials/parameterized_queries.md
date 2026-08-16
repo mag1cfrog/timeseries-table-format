@@ -1,33 +1,31 @@
-# Tutorial: parameterized queries
+# Use SQL parameters
 
-**Goal:** Use placeholders in SQL safely (positional and named) with `Session.sql(...)`.
+Pass values through `params` instead of inserting them into a SQL string.
+`Session.sql(...)` and `Session.sql_reader(...)` support the same placeholder
+styles.
 
-**Prereqs:** Comfortable running basic `Session.sql(...)` queries (see [Create, append, query](create_append_query.md)).
+| Style | SQL placeholder | Python value |
+|---|---|---|
+| Positional | `$1`, `$2`, ... | `list` or `tuple` |
+| Named | `$name` | `dict` |
 
-**What you’ll learn:**
-- Positional (`$1`, `$2`, …) vs named (`$name`) placeholders
-- Which Python types are supported for parameters in v0
-
-DataFusion SQL supports placeholders:
-
-- Positional: `$1`, `$2`, ...
-- Named: `$name`
-
-This example shows both styles:
+This example runs one query with each style:
 
 ```python
 --8<-- "crates/timeseries-table-python/examples/parameterized_queries.py"
 ```
 
-## Supported parameter types
+## Supported values
 
-For v0, parameter values must be one of:
-- `None`, `bool`, `int` (i64 range), `float`, `str`, `bytes`
+Parameters accept `None`, `bool`, `int` in the Int64 range, `float`, `str`, and
+`bytes`.
 
-!!! note
-    If you use placeholders in a `SELECT` projection without type context, you may need an explicit
-    cast (as shown in the example).
+DataFusion usually infers a parameter type from its context. A placeholder in
+a `SELECT` projection may need an explicit cast:
 
-Next:
-- Concept: [Buckets + overlap](../concepts/bucketing_and_overlap.md)
-- Reference: [Exceptions](../reference/exceptions.md)
+```sql
+SELECT CAST($1 AS BIGINT) AS value;
+```
+
+For UInt64 values above `i64::MAX`, see
+[Integer ordered indexes](../guides/integer_indexes.md).

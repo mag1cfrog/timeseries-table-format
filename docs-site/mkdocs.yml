@@ -1,13 +1,33 @@
 site_name: timeseries-table-format (Python)
+site_url: https://mag1cfrog.github.io/timeseries-table-format/
+site_description: Python documentation for a local time-series table format with coverage tracking and overlap-safe ingestion.
 repo_name: mag1cfrog/timeseries-table-format
 repo_url: https://github.com/mag1cfrog/timeseries-table-format
+edit_uri: edit/main/docs-site/docs/
 
 theme:
   name: material
   variant: modern
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: lucide/sun-moon
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: lucide/sun
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: lucide/moon
+        name: Switch to system preference
   features:
-    - navigation.tabs
     - navigation.sections
+    - navigation.path
+    - navigation.footer
+    - content.action.edit
     - content.code.copy
     - search.suggest
     - search.highlight
@@ -26,6 +46,8 @@ plugins:
 
 markdown_extensions:
   - admonition
+  - toc:
+      permalink: true
   - pymdownx.details
   - pymdownx.superfences
   - pymdownx.inlinehilite
@@ -37,21 +59,26 @@ markdown_extensions:
       check_paths: true
 
 nav:
-  - Home: index.md
-  - Installation: install.md
-  - Tutorials:
-      - Create, append, query: tutorials/create_append_query.md
-      - Register + join: tutorials/register_and_join.md
+  - Overview: index.md
+  - Start here:
+      - Is this for you?: concepts/when_to_use_this.md
+      - Installation: install.md
+      - Create your first table: tutorials/create_append_query.md
+  - Common tasks:
+      - Incremental ingestion: tutorials/real_world_workflow.md
+      - Register and join tables: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md
-      - Real-world workflow: tutorials/real_world_workflow.md
-  - Concepts:
-      - When to use this: concepts/when_to_use_this.md
-      - Buckets + overlap: concepts/bucketing_and_overlap.md
+      - Stream query results: guides/stream_query_results.md
+      - Configure notebook display: guides/notebook_display.md
+  - Advanced:
+      - Integer ordered indexes: guides/integer_indexes.md
+      - Buckets and overlap: concepts/bucketing_and_overlap.md
       - Table root layout: concepts/table_root.md
+      - Streaming performance: performance.md
+      - SQL result export: guides/sql_result_export.md
   - Reference:
       - Session: reference/session.md
       - TimeSeriesTable: reference/timeseries_table.md
+      - Notebook display: reference/notebook_display.md
       - Exceptions: reference/exceptions.md
-  - Performance: performance.md
-  - Troubleshooting: troubleshooting.md
-  - FAQ: faq.md
+  - Help and troubleshooting: troubleshooting.md
