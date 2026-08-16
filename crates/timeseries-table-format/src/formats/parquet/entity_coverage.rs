@@ -353,6 +353,7 @@ mod tests {
     };
     use arrow_array::{Int32Array, TimestampMillisecondArray};
     use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
     use tempfile::TempDir;
 
     use crate::metadata::table_metadata::TimeBucket;
@@ -379,6 +380,7 @@ mod tests {
         path: &Path,
         entities: Vec<&str>,
         timestamps: Vec<Option<i64>>,
+        max_row_group_size: Option<usize>,
     ) -> TestResult {
         let schema = Arc::new(Schema::new(vec![
             Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
@@ -394,7 +396,12 @@ mod tests {
                 Arc::new(StringArray::from(entities)),
             ],
         )?;
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
+        let properties = max_row_group_size.map(|size| {
+            WriterProperties::builder()
+                .set_max_row_group_size(size)
+                .build()
+        });
+        let mut writer = ArrowWriter::try_new(File::create(path)?, schema, properties)?;
         writer.write(&batch)?;
         writer.close()?;
         Ok(())
@@ -417,6 +424,7 @@ mod tests {
             &temp.path().join(rel_path),
             vec!["A", "B", "A", "B", "A"],
             vec![Some(0), Some(7_200_000), Some(3_600_000), None, Some(0)],
+            None,
         )?;
 
         let coverage = compute_segment_entity_coverage(
@@ -443,6 +451,7 @@ mod tests {
             &temp.path().join(rel_path),
             vec!["A", "B"],
             vec![Some(0), Some(0)],
+            None,
         )?;
 
         let coverage = compute_segment_entity_coverage(
@@ -455,6 +464,112 @@ mod tests {
         assert_eq!(coverage.cardinality(), 2);
         assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
         assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identities_change_across_record_batches() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let mut entities = vec!["A"; INSPECTION_BATCH_SIZE];
+        entities.push("B");
+        let mut timestamps = vec![Some(0); INSPECTION_BATCH_SIZE];
+        timestamps.push(Some(3_600_000));
+        write_timestamp_segment(&temp.path().join(rel_path), entities, timestamps, None)?;
+
+        let coverage = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await?;
+
+        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
+        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identities_change_across_row_groups() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        write_timestamp_segment(
+            &temp.path().join(rel_path),
+            vec!["A", "B"],
+            vec![Some(0), Some(3_600_000)],
+            Some(1),
+        )?;
+
+        let coverage = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await?;
+
+        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
+        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn composite_identity_preserves_configured_component_order() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("region", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A"])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000])),
+                Arc::new(StringArray::from(vec!["us", "eu"])),
+            ],
+        )?;
+        let mut writer =
+            ArrowWriter::try_new(File::create(temp.path().join(rel_path))?, schema, None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["region".to_string(), "symbol".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Hours(1),
+                timezone: None,
+            },
+        };
+
+        let coverage =
+            compute_segment_entity_coverage(&TableLocation::local(temp.path()), rel_path, &index)
+                .await?;
+
+        let us_a = EntityIdentity::try_new(vec!["us".to_string(), "A".to_string()])?;
+        let eu_a = EntityIdentity::try_new(vec!["eu".to_string(), "A".to_string()])?;
+        assert_eq!(
+            coverage
+                .get(&us_a)
+                .expect("us/A coverage")
+                .present()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![EPOCH_BUCKET]
+        );
+        assert_eq!(
+            coverage
+                .get(&eu_a)
+                .expect("eu/A coverage")
+                .present()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![EPOCH_BUCKET + 1]
+        );
         Ok(())
     }
 }
