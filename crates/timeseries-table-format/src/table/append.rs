@@ -515,7 +515,7 @@ impl TimeSeriesTable {
 mod tests {
     use super::super::test_util::*;
     use super::*;
-    use crate::coverage::io::read_entity_coverage_sidecar;
+    use crate::coverage::io::{read_coverage_sidecar, read_entity_coverage_sidecar};
     use crate::coverage::serde::entity_coverage_from_bytes;
     use crate::coverage::{EntityCoverage, EntityIdentity};
     use crate::metadata::logical_schema::{
@@ -891,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_supports_registered_int64_index() -> TestResult {
+    async fn version_four_no_entity_int64_append_uses_global_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
@@ -913,15 +913,12 @@ mod tests {
         let segment = table.state.segments.get(rel_path).expect("segment present");
         assert_eq!(segment.index_min, IndexValue::Int64(i64::MIN));
         assert_eq!(segment.index_max, IndexValue::Int64(i64::MAX));
-        assert_eq!(
-            table
-                .state
-                .table_coverage
-                .as_ref()
-                .expect("table coverage")
-                .index_kind,
-            index.kind
-        );
+        let pointer = table.state.table_coverage.as_ref().expect("table coverage");
+        assert_eq!(pointer.index_kind, index.kind);
+        let persisted = read_coverage_sidecar(&location, Path::new(&pointer.coverage_path)).await?;
+        let expected =
+            compute_segment_coverage(&location, Path::new(rel_path), table.index_spec()).await?;
+        assert_eq!(persisted, expected);
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state, table.state);
         Ok(())
@@ -1158,7 +1155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_pins_entity_identity_and_commits_actions() -> TestResult {
+    async fn version_three_append_pins_entity_and_reopens_without_rewrite() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = open_version_three_table(location.clone()).await?;
@@ -1201,6 +1198,46 @@ mod tests {
             commit.actions[2],
             LogAction::UpdateTableCoverage { .. }
         ));
+
+        let segment_coverage_path = table
+            .state
+            .segments
+            .get(rel_path)
+            .and_then(|segment| segment.coverage_path.as_ref())
+            .expect("segment coverage path");
+        let snapshot_coverage_path = &table
+            .state
+            .table_coverage
+            .as_ref()
+            .expect("table coverage pointer")
+            .coverage_path;
+        assert_eq!(
+            read_coverage_sidecar(&location, Path::new(segment_coverage_path)).await?,
+            read_coverage_sidecar(&location, Path::new(snapshot_coverage_path)).await?
+        );
+        let state_before_open = table.state.clone();
+        let commits_before_open = [
+            tokio::fs::read(tmp.path().join(layout::commit_rel_path(1))).await?,
+            tokio::fs::read(&commit_path).await?,
+        ];
+
+        let reopened = TimeSeriesTable::open(location).await?;
+
+        assert_eq!(reopened.state, state_before_open);
+        assert_eq!(
+            reopened
+                .coverage_ratio_for_range(
+                    utc_datetime(1970, 1, 1, 0, 0, 0),
+                    utc_datetime(1970, 1, 1, 0, 1, 0),
+                )
+                .await?,
+            1.0
+        );
+        assert_eq!(
+            tokio::fs::read(tmp.path().join(layout::commit_rel_path(1))).await?,
+            commits_before_open[0]
+        );
+        assert_eq!(tokio::fs::read(commit_path).await?, commits_before_open[1]);
 
         Ok(())
     }

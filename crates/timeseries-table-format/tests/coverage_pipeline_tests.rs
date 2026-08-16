@@ -81,6 +81,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
     assert_eq!(snapshot_cov, expected);
 
     let mut reopened = TimeSeriesTable::open(location.clone()).await?;
+    assert_eq!(reopened.state(), table.state());
     let reopened_ptr = reopened
         .state()
         .table_coverage
