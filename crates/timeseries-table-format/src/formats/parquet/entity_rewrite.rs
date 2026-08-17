@@ -749,6 +749,10 @@ mod tests {
         Ok(bytes)
     }
 
+    fn assert_nothing_staged(fixture: &RewriteFixture) {
+        assert!(!fixture.temp.path().join("data/_staged").exists());
+    }
+
     #[tokio::test]
     async fn mixed_rewrite_stages_one_bounded_output_per_identity() -> TestResult {
         let temp = TempDir::new()?;
@@ -1135,6 +1139,140 @@ mod tests {
         ));
         assert!(!fixture.temp.path().join(data_path).exists());
         assert!(!fixture.temp.path().join(coverage_path).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_rejects_wrong_layout_and_missing_pointer_before_staging() -> TestResult {
+        let mut fixture = rewrite_fixture().await?;
+        let identity = fixture
+            .source_coverage
+            .iter()
+            .next()
+            .expect("fixture identity")
+            .0
+            .clone();
+        fixture.source.entity_layout = SegmentEntityLayout::Single(identity);
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("single-entity source must be rejected");
+        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+
+        fixture.source.entity_layout = SegmentEntityLayout::Mixed;
+        fixture.source.coverage_path = None;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("missing coverage pointer must be rejected");
+        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+        assert_nothing_staged(&fixture);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_rejects_stale_metadata_and_schema_before_staging() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let mut stale_source = fixture.source.clone();
+        stale_source.row_count += 1;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &stale_source,
+        )
+        .await
+        .expect_err("stale row count must be rejected");
+        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+
+        let mut columns = fixture.table_schema.columns().to_vec();
+        columns[2].nullable = true;
+        let wrong_schema = LogicalSchema::new(columns)?;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &wrong_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("schema mismatch must be rejected");
+        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+        assert_nothing_staged(&fixture);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_rejects_missing_corrupt_and_stale_coverage_before_staging() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let coverage_path = fixture
+            .source
+            .coverage_path
+            .as_deref()
+            .expect("fixture coverage path");
+        let absolute_coverage_path = fixture.temp.path().join(coverage_path);
+        std::fs::remove_file(&absolute_coverage_path)?;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("missing coverage object must fail");
+        assert!(matches!(
+            error,
+            EntityRewriteError::CoverageSidecar {
+                source: CoverageError::NotFound { .. }
+            }
+        ));
+
+        std::fs::write(&absolute_coverage_path, b"not entity coverage")?;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("corrupt coverage object must fail");
+        assert!(matches!(
+            error,
+            EntityRewriteError::CoverageSidecar {
+                source: CoverageError::EntitySerde { .. }
+            }
+        ));
+
+        let mut stale_coverage = EntityCoverage::empty();
+        for (ordinal, (identity, coverage)) in fixture.source_coverage.iter().enumerate() {
+            let coverage = if ordinal == 0 {
+                coverage.union(&std::iter::once(u64::MAX).collect())
+            } else {
+                coverage.clone()
+            };
+            stale_coverage.union_coverage(identity.clone(), coverage);
+        }
+        std::fs::write(
+            &absolute_coverage_path,
+            entity_coverage_to_bytes(&stale_coverage)?,
+        )?;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("stale coverage object must fail");
+        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+        assert_nothing_staged(&fixture);
         Ok(())
     }
 }
