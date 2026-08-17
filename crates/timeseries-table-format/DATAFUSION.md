@@ -101,7 +101,8 @@ WHERE symbol = 'A'
 
 - A `Single(identity)` segment is retained when its `symbol` component is `A`.
 - A `Single(identity)` segment is skipped when its `symbol` component conflicts.
-- A `Mixed` segment is always retained as a candidate because it may contain `A`.
+- Entity metadata alone never excludes a `Mixed` segment because it may contain
+  `A`; ordered-index metadata may still exclude it independently.
 
 Composite entities follow the configured entity-column order. A predicate may
 specify every component or only some components. Any specified conflict can

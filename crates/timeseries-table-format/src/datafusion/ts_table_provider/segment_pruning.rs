@@ -117,14 +117,12 @@ pub(super) fn prune_segments<'a>(
     let pruning_predicate = PruningPredicate::try_new(Arc::clone(predicate), Arc::clone(schema))
         .map_err(|source| {
             DataFusionError::Execution(format!(
-                "cannot create segment pruning predicate for ordered index {}: {source}",
-                index.column
+                "cannot create segment metadata pruning predicate: {source}"
             ))
         })?;
     let keep = pruning_predicate.prune(&statistics).map_err(|source| {
         DataFusionError::Execution(format!(
-            "cannot evaluate segment pruning predicate for ordered index {}: {source}",
-            index.column
+            "cannot evaluate segment metadata pruning predicate: {source}"
         ))
     })?;
     if keep.len() != segments.len() {

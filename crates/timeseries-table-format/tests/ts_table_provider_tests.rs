@@ -1283,7 +1283,7 @@ async fn explain_prunes_segments_on_time_filter() -> TestResult {
 }
 
 #[tokio::test]
-async fn explain_does_not_prune_on_unrecognized_predicate() -> TestResult {
+async fn explain_retains_matching_single_entity_segments() -> TestResult {
     let tmp = TempDir::new()?;
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);

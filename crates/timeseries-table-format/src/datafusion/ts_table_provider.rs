@@ -272,10 +272,14 @@ impl TableProvider for TsTableProvider {
         } else {
             metadata_filters.clone()
         };
-        let pruning_predicate = conjunction(pruning_filters)
-            .map(|p| state.create_physical_expr(p, &df_schema))
-            .transpose()?
-            .unwrap_or_else(|| lit(true));
+        let pruning_predicate = if pruning_filters.as_slice() == filters {
+            Arc::clone(&exact_predicate)
+        } else {
+            conjunction(pruning_filters)
+                .map(|p| state.create_physical_expr(p, &df_schema))
+                .transpose()?
+                .unwrap_or_else(|| lit(true))
+        };
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
         let parquet_source =
