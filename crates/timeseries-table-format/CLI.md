@@ -50,7 +50,10 @@ tstable append \
   --table ./my_stocks \
   --parquet ./data/aapl_bars.parquet
 
-# 3. Query with SQL
+# 3. Optionally rewrite mixed-entity segments
+tstable optimize --table ./my_stocks
+
+# 4. Query with SQL
 tstable query \
   --table ./my_stocks \
   --sql "SELECT symbol, COUNT(*) FROM my_stocks GROUP BY symbol"
@@ -123,6 +126,43 @@ tstable append \
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
 - Overlapping index buckets with existing segments will cause an error
 - Schema must be compatible with existing data (if any)
+
+---
+
+### `optimize` - Rewrite mixed-entity segments
+
+Explicitly rewrites each mixed-entity source segment into one replacement segment per complete
+entity identity. This operation is optional; mixed-entity segments remain valid table data.
+
+```bash
+tstable optimize --table ./data/my_table
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--table` | Yes | Path to an existing table |
+
+The command prints the complete optimization report using stable field names:
+
+```text
+starting_version: 1
+committed_version: 2
+candidate_source_segments: 1
+source_segments_replaced: 1
+replacement_segments_written: 2
+distinct_identities_materialized: 2
+rows_read: 4
+rows_written: 4
+no_op: false
+```
+
+A successful no-op prints the same fields with `no_op: true`, equal starting and committed
+versions, and zero counts. It exits successfully and does not create a table version. Failures
+exit nonzero with table and operation context.
+
+Optimization preserves logical rows, schema, and per-entity coverage. It does not combine small
+files or accept a target file size. Replaced source files may remain on disk until a future vacuum
+operation removes unreferenced files.
 
 ---
 
