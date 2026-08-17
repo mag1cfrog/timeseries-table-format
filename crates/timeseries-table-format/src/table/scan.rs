@@ -4,16 +4,15 @@
 //! segment metadata and Parquet readers:
 //! - Pick candidate segments whose ordered `index_min`/`index_max` intersects the requested
 //!   half-open range `[start, end)`.
-//! - Stream those segments in index order with Parquet's native async,
+//! - Visit candidate segments deterministically with Parquet's native async,
 //!   file-backed reader.
 //! - Filter each batch by its ordered-index column with native Arrow scalar
 //!   comparisons and half-open semantics.
 //!
 //! The filtering path uses Arrow's scalar comparison kernels to avoid
 //! allocating full-length bound arrays, and treats null index values as
-//! "drop row" via `filter_record_batch`. The implementation assumes v0.1
-//! invariants (non-overlapping segments) so index ordering is a simple
-//! sort by typed index bounds.
+//! "drop row" via `filter_record_batch`. Input rows need not be ordered, and
+//! the returned batches and rows have no ordering guarantee.
 use std::path::Path;
 
 use arrow::array::{Datum, Scalar};
@@ -309,6 +308,9 @@ struct ScanState {
 impl TimeSeriesTable {
     /// Scan the time-series table for record batches overlapping `[start, end)`,
     /// returning a stream of filtered batches from the segments covering that range.
+    ///
+    /// Input rows need not be ordered. The returned batches and rows have no
+    /// ordering guarantee; callers that need ordered results must sort them.
     pub async fn scan_range<S, E>(&self, start: S, end: E) -> Result<TimeSeriesScan, TableError>
     where
         S: Into<IndexValue>,
@@ -1243,7 +1245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_range_filters_and_orders_across_segments() -> TestResult {
+    async fn scan_range_filters_across_segments() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1296,7 +1298,8 @@ mod tests {
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
         let end = Utc.timestamp_millis_opt(61_500).single().expect("valid ts");
 
-        let rows = collect_scan_rows(&table, start, end).await?;
+        let mut rows = collect_scan_rows(&table, start, end).await?;
+        rows.sort_by_key(|row| row.0);
 
         assert_eq!(
             rows,
@@ -1672,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_range_orders_segments_by_ts_min() -> TestResult {
+    async fn scan_range_reads_segments_independent_of_append_order() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -1704,13 +1707,14 @@ mod tests {
             }],
         )?;
 
-        // Append in reverse index_min order to exercise the segment comparator.
+        // Append in reverse index order to exercise segment discovery.
         table.append_parquet_segment(rel_b).await?;
         table.append_parquet_segment(rel_a).await?;
 
         let start = Utc.timestamp_millis_opt(50_000).single().unwrap();
         let end = Utc.timestamp_millis_opt(150_000).single().unwrap();
-        let rows = collect_scan_rows(&table, start, end).await?;
+        let mut rows = collect_scan_rows(&table, start, end).await?;
+        rows.sort_by_key(|row| row.0);
 
         assert_eq!(
             rows,

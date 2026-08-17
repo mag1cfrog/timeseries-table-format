@@ -269,6 +269,9 @@ impl TimeSeriesTable {
     /// Replace every live mixed-entity segment with verified single-entity
     /// Parquet segments in one expected-version commit.
     ///
+    /// Optimization preserves logical rows, schema, and per-entity coverage,
+    /// but may change physical row order.
+    ///
     /// # Errors
     ///
     /// Returns [`TableError`] when optimization is not applicable, staging or

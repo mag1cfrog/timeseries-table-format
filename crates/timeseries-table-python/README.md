@@ -138,7 +138,11 @@ are ordinary columns that can be filtered or grouped.
 Entity columns support Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`. Actual
 entity values must be non-null. Composite identity components follow the configured
 `entity_columns` order. Signed and unsigned integers keep their exact types and are not compared
-as strings. Unsupported domains and mismatched types are rejected rather than cast.
+as strings. Entity column names must be unique and cannot also be the ordered index column.
+Unsupported domains and mismatched types are rejected rather than cast.
+
+Parquet rows need not be sorted by the ordered index. SQL query results are unordered unless the
+query uses `ORDER BY`.
 
 ## Optimize mixed-entity segments
 
@@ -153,6 +157,8 @@ For each mixed source segment, optimization writes one replacement segment per c
 identity. It preserves logical rows, schema, and per-entity coverage. If no mixed live segments
 need rewriting, `report.no_op` is `True`, `starting_version` equals `committed_version`, and no new
 table version is created.
+
+Optimization may change physical row order.
 
 Optimization does not combine small files or accept a target file size. Replaced source files may
 remain on disk until a future vacuum operation removes unreferenced files.
