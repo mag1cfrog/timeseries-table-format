@@ -588,17 +588,22 @@ pub async fn rewrite_mixed_parquet_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, fs::File};
+    use std::{collections::BTreeMap, fs::File, sync::Arc};
 
     use arrow::{
-        array::{Float64Array, StringArray, TimestampMillisecondArray},
-        datatypes::TimeUnit,
+        array::{
+            ArrayRef, Float64Array, Int64Array, StringArray, StructArray, TimestampMillisecondArray,
+        },
+        datatypes::{DataType, Field, Fields, Schema, TimeUnit},
+        record_batch::RecordBatch,
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::file::properties::WriterProperties;
     use tempfile::TempDir;
 
     use crate::{
         coverage::{io::write_coverage_sidecar_new_bytes, serde::entity_coverage_to_bytes},
+        metadata::table_metadata::{IndexKind, TimeBucket},
         table::test_util::{make_table_meta_with_unit, write_arrow_parquet_with_unit},
         transaction_log::TableKind,
     };
@@ -634,6 +639,13 @@ mod tests {
             }
         }
         Ok(rows)
+    }
+
+    fn read_batch(path: &Path) -> TestResult<RecordBatch> {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
+        let schema = builder.schema().clone();
+        let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
+        Ok(arrow_select::concat::concat_batches(&schema, &batches)?)
     }
 
     #[tokio::test]
@@ -747,6 +759,125 @@ mod tests {
                 (6_000, "tenant-secret-c".to_string(), 31.0),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_preserves_composite_rows_across_batches_and_row_groups() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let source_path = "data/composite-mixed.parquet";
+        std::fs::create_dir_all(temp.path().join("data"))?;
+
+        let row_count = INSPECTION_BATCH_SIZE + 17;
+        let regions = (0..row_count)
+            .map(|row| if row % 4 < 2 { "eu" } else { "us" })
+            .collect::<Vec<_>>();
+        let symbols = (0..row_count)
+            .map(|row| if row % 2 == 0 { "A" } else { "B" })
+            .collect::<Vec<_>>();
+        let readings = (0..row_count)
+            .map(|row| (row % 5 != 0).then_some(row as i64))
+            .collect::<Vec<_>>();
+        let notes = (0..row_count)
+            .map(|row| (row % 7 != 0).then(|| format!("note-{row}")))
+            .collect::<Vec<_>>();
+        let payload_fields = Fields::from(vec![
+            Arc::new(Field::new("reading", DataType::Int64, true)),
+            Arc::new(Field::new("note", DataType::Utf8, true)),
+        ]);
+        let payload = StructArray::new(
+            payload_fields.clone(),
+            vec![
+                Arc::new(Int64Array::from(readings)) as ArrayRef,
+                Arc::new(StringArray::from(notes)) as ArrayRef,
+            ],
+            None,
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("payload", DataType::Struct(payload_fields), false),
+            Field::new("sequence", DataType::Int64, false),
+        ]));
+        let source_batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(regions)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    (0..row_count).map(|row| row as i64 * 1_000),
+                )),
+                Arc::new(StringArray::from(symbols)),
+                Arc::new(payload),
+                Arc::new(Int64Array::from_iter_values(
+                    (0..row_count).map(|row| row as i64),
+                )),
+            ],
+        )?;
+        let mut writer = ArrowWriter::try_new(
+            File::create(temp.path().join(source_path))?,
+            schema,
+            Some(
+                WriterProperties::builder()
+                    .set_max_row_group_size(513)
+                    .build(),
+            ),
+        )?;
+        writer.write(&source_batch)?;
+        writer.close()?;
+        assert!(
+            ParquetRecordBatchReaderBuilder::try_new(File::open(temp.path().join(source_path))?)?
+                .metadata()
+                .num_row_groups()
+                > 1
+        );
+
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["region".to_string(), "symbol".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        };
+        let table_schema = logical_schema_from_parquet(&location, Path::new(source_path)).await?;
+        let source_coverage =
+            compute_segment_entity_coverage(&location, Path::new(source_path), &index).await?;
+        let source_coverage_path = "_coverage/segments/composite-source.roar";
+        write_coverage_sidecar_new_bytes(
+            &location,
+            Path::new(source_coverage_path),
+            &entity_coverage_to_bytes(&source_coverage)?,
+        )
+        .await?;
+        let (mut source, _) =
+            segment_meta_from_parquet(&location, Path::new(source_path), &index).await?;
+        source.entity_layout = SegmentEntityLayout::Mixed;
+        source.coverage_path = Some(source_coverage_path.to_string());
+
+        let rewrite =
+            rewrite_mixed_parquet_segment(&location, &table_schema, &index, &source).await?;
+
+        assert_eq!(rewrite.replacements.len(), 4);
+        assert_eq!(rewrite.rows_read, source.row_count * 4);
+        let source_batch = read_batch(&temp.path().join(source_path))?;
+        let source_entities = entity_arrays(&source_batch, source_path, &index.entity_columns)?;
+        for replacement in rewrite.replacements {
+            let mut mask = BooleanBuilder::with_capacity(source_batch.num_rows());
+            for row in 0..source_batch.num_rows() {
+                mask.append_value(
+                    entity_identity_at(&source_entities, row, source_path)? == replacement.identity,
+                );
+            }
+            let expected = filter_record_batch(&source_batch, &mask.finish())?;
+            let actual = read_batch(&temp.path().join(&replacement.meta.path))?;
+            assert_eq!(actual, expected);
+        }
         Ok(())
     }
 }
