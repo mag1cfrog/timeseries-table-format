@@ -49,8 +49,15 @@ For example, Timestamp values `10:05` and `10:55` share the `10:00` to `11:00` b
 `bucket="1h"`. If an existing segment covers that bucket for `NVDA`, a later segment covering it
 for `NVDA` is rejected. Coverage for another entity remains independent.
 
-The table does not physically repartition a mixed-entity Parquet file. Compaction, repartitioning,
-and an `optimize` command are outside the current feature.
+Mixed-entity segments remain valid and queryable after append. To rewrite them into a
+single-entity physical layout, call Rust `TimeSeriesTable::optimize`, Python `table.optimize()`,
+or CLI `tstable optimize --table <path>`. Each mixed source segment is replaced in the logical
+table by one segment per complete entity identity while preserving the schema and rows. If no
+mixed segments need rewriting, optimization succeeds as a no-op without changing the table
+version.
+
+Entity-layout optimization is not small-file compaction and does not accept a target file size.
+Removed source objects may remain in storage, so optimization is not vacuum.
 
 ## Choosing a bucket
 
