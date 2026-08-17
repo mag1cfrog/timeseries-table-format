@@ -51,11 +51,6 @@ impl OptimizeReport {
     }
 }
 
-struct StagedCandidate {
-    source: SegmentMeta,
-    rewrite: StagedEntityRewrite,
-}
-
 struct PlanCounts {
     candidates: u64,
     replacements: u64,
@@ -105,7 +100,7 @@ fn ensure_canonical(path: &str, description: &str) -> Result<(), TableError> {
 async fn validate_staged_plan(
     table: &TimeSeriesTable,
     candidates: &[SegmentMeta],
-    staged: &[StagedCandidate],
+    staged: &[StagedEntityRewrite],
 ) -> Result<PlanCounts, TableError> {
     if candidates.len() != staged.len() {
         return Err(invalid_plan(format!(
@@ -134,10 +129,8 @@ async fn validate_staged_plan(
     let mut replacement_rows = 0u64;
     let mut replacement_count = 0u64;
 
-    for (candidate, staged_candidate) in candidates.iter().zip(staged) {
-        if candidate != &staged_candidate.source
-            || staged_candidate.rewrite.source_path != candidate.path
-        {
+    for (candidate, rewrite) in candidates.iter().zip(staged) {
+        if rewrite.source_path != candidate.path {
             return Err(invalid_plan(format!(
                 "candidate {} is not represented exactly once by its staged rewrite",
                 candidate.path
@@ -170,7 +163,7 @@ async fn validate_staged_plan(
         let mut candidate_replacement_coverage = EntityCoverage::empty();
         let mut candidate_rows = 0u64;
 
-        for replacement in &staged_candidate.rewrite.replacements {
+        for replacement in &rewrite.replacements {
             let coverage_path = replacement.meta.coverage_path.as_deref().ok_or_else(|| {
                 invalid_plan(format!(
                     "replacement {} has no coverage sidecar",
@@ -182,7 +175,7 @@ async fn validate_staged_plan(
                 (coverage_path, "replacement coverage"),
             ] {
                 ensure_canonical(path, description)?;
-                if !object_paths.insert(path.to_string()) {
+                if !object_paths.insert(path) {
                     return Err(invalid_plan(format!(
                         "staged object path {path} appears more than once"
                     )));
@@ -314,10 +307,7 @@ impl TimeSeriesTable {
             {
                 Ok(rewrite) => {
                     staged_paths.extend(rewrite.staged_object_paths.iter().cloned());
-                    staged.push(StagedCandidate {
-                        source: source.clone(),
-                        rewrite,
-                    });
+                    staged.push(rewrite);
                 }
                 Err(source) => {
                     let error = TableError::OptimizeRewrite { source };
@@ -339,10 +329,9 @@ impl TimeSeriesTable {
                 path: source.path.clone(),
             });
         }
-        for staged_candidate in &staged {
+        for rewrite in &staged {
             actions.extend(
-                staged_candidate
-                    .rewrite
+                rewrite
                     .replacements
                     .iter()
                     .map(|replacement| LogAction::AddSegment(replacement.meta.clone())),
@@ -371,8 +360,8 @@ impl TimeSeriesTable {
         for source in &candidates {
             self.state.segments.remove(&source.path);
         }
-        for staged_candidate in staged {
-            for replacement in staged_candidate.rewrite.replacements {
+        for rewrite in staged {
+            for replacement in rewrite.replacements {
                 self.state
                     .segments
                     .insert(replacement.meta.path.clone(), replacement.meta);
@@ -843,6 +832,7 @@ mod tests {
             .expect("table coverage bytes");
         let snapshot_files =
             files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files");
+        let table_meta = table.state().table_meta.clone();
         let starting_version = table.state().version;
 
         let report = table.optimize().await?;
@@ -862,6 +852,7 @@ mod tests {
             }
         );
         assert_eq!(table.state().segments.len(), 4);
+        assert_eq!(table.state().table_meta, table_meta);
         assert!(
             table
                 .state()
@@ -898,7 +889,11 @@ mod tests {
         assert!(
             commit.actions[..2]
                 .iter()
-                .all(|action| matches!(action, LogAction::RemoveSegment { .. }))
+                .zip(source_paths)
+                .all(|(action, expected)| matches!(
+                    action,
+                    LogAction::RemoveSegment { path } if path == expected
+                ))
         );
         assert!(
             commit.actions[2..]
