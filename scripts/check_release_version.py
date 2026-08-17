@@ -66,21 +66,21 @@ def validate_tag(tag: str, version: str) -> None:
         raise RuntimeError(f"expected release tag {expected}, found {tag or '<missing>'}")
 
 
-def tag_points_at_head(tag: str) -> None:
+def tag_matches_head_tree(tag: str) -> None:
     try:
-        tag_commit = subprocess.check_output(
-            ["git", "rev-list", "-n", "1", f"refs/tags/{tag}"],
+        tag_tree = subprocess.check_output(
+            ["git", "rev-parse", f"refs/tags/{tag}^{{tree}}"],
             cwd=REPO_ROOT,
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
     except subprocess.CalledProcessError as error:
         raise RuntimeError(f"release tag does not exist: {tag}") from error
-    head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+    head_tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=REPO_ROOT, text=True
     ).strip()
-    if tag_commit != head:
-        raise RuntimeError(f"release tag {tag} does not point at HEAD")
+    if tag_tree != head_tree:
+        raise RuntimeError(f"release tag {tag} does not match HEAD's tree")
 
 
 def main() -> int:
@@ -99,7 +99,7 @@ def main() -> int:
         tag = f"{TAG_PREFIX}{version}" if args.require_tag else args.tag
         if tag is not None:
             validate_tag(tag, version)
-            tag_points_at_head(tag)
+            tag_matches_head_tree(tag)
     except (RuntimeError, subprocess.CalledProcessError) as error:
         sys.stderr.write(f"release version check failed: {error}\n")
         return 1
