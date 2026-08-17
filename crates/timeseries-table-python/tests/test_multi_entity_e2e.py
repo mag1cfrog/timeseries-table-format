@@ -19,7 +19,24 @@ def _write_segment(path, rows: list[tuple[int, str, int]]) -> None:
     )
 
 
-def test_multi_entity_append_reopen_and_sql(tmp_path):
+def _query_results(root) -> tuple[dict, dict, dict]:
+    session = ttf.Session()
+    session.register_tstable("frames", str(root))
+    all_rows = session.sql(
+        "select device_id, tick, reading from frames order by device_id, tick"
+    )
+    device_a_rows = session.sql(
+        "select tick, reading from frames "
+        "where device_id = 'A' and tick >= 20 order by tick"
+    )
+    grouped = session.sql(
+        "select device_id, count(*) as n, sum(reading) as total "
+        "from frames group by device_id order by device_id"
+    )
+    return all_rows.to_pydict(), device_a_rows.to_pydict(), grouped.to_pydict()
+
+
+def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
     root = tmp_path / "frames"
     table = ttf.TimeSeriesTable.create(
         table_root=str(root),
@@ -53,37 +70,43 @@ def test_multi_entity_append_reopen_and_sql(tmp_path):
     assert error.example_bucket == 0
     assert table.version() == version
 
+    expected = (
+        {
+            "device_id": ["A", "A", "A", "A", "B", "B", "B", "B"],
+            "tick": [0, 10, 20, 30, 0, 10, 20, 30],
+            "reading": [1, 2, 5, 7, 3, 4, 6, 8],
+        },
+        {"tick": [20, 30], "reading": [5, 7]},
+        {"device_id": ["A", "B"], "n": [4, 4], "total": [15, 21]},
+    )
+    before = _query_results(root)
+    assert before == expected
+
+    report = table.optimize()
+    assert report.starting_version == 4
+    assert report.committed_version == 5
+    assert report.candidate_source_segments == 1
+    assert report.source_segments_replaced == 1
+    assert report.replacement_segments_written == 2
+    assert report.distinct_identities_materialized == 2
+    assert report.rows_read == 4
+    assert report.rows_written == 4
+    assert report.no_op is False
+
     del table
     reopened = ttf.TimeSeriesTable.open(str(root))
-    assert reopened.version() == version
+    assert reopened.version() == 5
     assert reopened.index_spec()["entity_columns"] == ["device_id"]
+    assert _query_results(root) == before
 
-    session = ttf.Session()
-    session.register_tstable("frames", str(root))
-    all_rows = session.sql(
-        "select device_id, tick, reading from frames order by device_id, tick"
-    )
-    assert all_rows.to_pydict() == {
-        "device_id": ["A", "A", "A", "A", "B", "B", "B", "B"],
-        "tick": [0, 10, 20, 30, 0, 10, 20, 30],
-        "reading": [1, 2, 5, 7, 3, 4, 6, 8],
-    }
-
-    device_a_rows = session.sql(
-        "select tick, reading from frames "
-        "where device_id = 'A' and tick >= 20 order by tick"
-    )
-    assert device_a_rows.to_pydict() == {
-        "tick": [20, 30],
-        "reading": [5, 7],
-    }
-
-    grouped = session.sql(
-        "select device_id, count(*) as n, sum(reading) as total "
-        "from frames group by device_id order by device_id"
-    )
-    assert grouped.to_pydict() == {
-        "device_id": ["A", "B"],
-        "n": [4, 4],
-        "total": [15, 21],
-    }
+    no_op = reopened.optimize()
+    assert no_op.starting_version == 5
+    assert no_op.committed_version == 5
+    assert no_op.candidate_source_segments == 0
+    assert no_op.source_segments_replaced == 0
+    assert no_op.replacement_segments_written == 0
+    assert no_op.distinct_identities_materialized == 0
+    assert no_op.rows_read == 0
+    assert no_op.rows_written == 0
+    assert no_op.no_op is True
+    assert reopened.version() == 5
