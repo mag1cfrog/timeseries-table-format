@@ -411,10 +411,10 @@ async fn rewrite_inner(
     table_schema: &LogicalSchema,
     index: &IndexSpec,
     source: &SegmentMeta,
+    attempt_id: Uuid,
     created_paths: &mut Vec<String>,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
     let source_coverage = validate_source(location, table_schema, index, source).await?;
-    let attempt_id = Uuid::new_v4();
     let mut replacements = Vec::with_capacity(source_coverage.identity_count());
     let mut materialized_identities = Vec::with_capacity(source_coverage.identity_count());
     let mut output_coverage = EntityCoverage::empty();
@@ -551,6 +551,39 @@ async fn rewrite_inner(
     })
 }
 
+async fn rewrite_with_attempt_id(
+    location: &TableLocation,
+    table_schema: &LogicalSchema,
+    index: &IndexSpec,
+    source: &SegmentMeta,
+    attempt_id: Uuid,
+) -> Result<StagedEntityRewrite, EntityRewriteError> {
+    let mut created_paths = Vec::new();
+    match rewrite_inner(
+        location,
+        table_schema,
+        index,
+        source,
+        attempt_id,
+        &mut created_paths,
+    )
+    .await
+    {
+        Ok(rewrite) => Ok(rewrite),
+        Err(source) => {
+            let cleanup_errors = cleanup_created(location, &created_paths).await;
+            if cleanup_errors.is_empty() {
+                Err(source)
+            } else {
+                Err(EntityRewriteError::Cleanup {
+                    source: Box::new(source),
+                    cleanup_errors,
+                })
+            }
+        }
+    }
+}
+
 /// Rewrite one committed mixed Parquet segment into verified staged
 /// single-entity replacements without changing table state.
 ///
@@ -568,21 +601,7 @@ pub async fn rewrite_mixed_parquet_segment(
     index: &IndexSpec,
     source: &SegmentMeta,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
-    let mut created_paths = Vec::new();
-    match rewrite_inner(location, table_schema, index, source, &mut created_paths).await {
-        Ok(rewrite) => Ok(rewrite),
-        Err(source) => {
-            let cleanup_errors = cleanup_created(location, &created_paths).await;
-            if cleanup_errors.is_empty() {
-                Err(source)
-            } else {
-                Err(EntityRewriteError::Cleanup {
-                    source: Box::new(source),
-                    cleanup_errors,
-                })
-            }
-        }
-    }
+    rewrite_with_attempt_id(location, table_schema, index, source, Uuid::new_v4()).await
 }
 
 #[cfg(test)]
@@ -646,6 +665,88 @@ mod tests {
         let schema = builder.schema().clone();
         let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
         Ok(arrow_select::concat::concat_batches(&schema, &batches)?)
+    }
+
+    struct RewriteFixture {
+        temp: TempDir,
+        location: TableLocation,
+        table_schema: LogicalSchema,
+        index: IndexSpec,
+        source: SegmentMeta,
+        source_coverage: EntityCoverage,
+    }
+
+    async fn rewrite_fixture() -> TestResult<RewriteFixture> {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let source_path = "data/failure-source.parquet";
+        write_arrow_parquet_with_unit(
+            &temp.path().join(source_path),
+            TimeUnit::Millisecond,
+            &[Some(1_000), Some(2_000), Some(3_000), Some(4_000)],
+            &["A", "B", "A", "B"],
+            &[10.0, 20.0, 11.0, 21.0],
+        )?;
+        let table_meta = make_table_meta_with_unit(
+            crate::metadata::logical_schema::LogicalTimestampUnit::Millis,
+        );
+        let TableKind::TimeSeries(index) = table_meta.kind else {
+            unreachable!("test metadata is time-series");
+        };
+        let table_schema = table_meta.logical_schema.expect("test table schema");
+        let source_coverage =
+            compute_segment_entity_coverage(&location, Path::new(source_path), &index).await?;
+        let source_coverage_path = "_coverage/segments/failure-source.roar";
+        write_coverage_sidecar_new_bytes(
+            &location,
+            Path::new(source_coverage_path),
+            &entity_coverage_to_bytes(&source_coverage)?,
+        )
+        .await?;
+        let (mut source, _) =
+            segment_meta_from_parquet(&location, Path::new(source_path), &index).await?;
+        source.entity_layout = SegmentEntityLayout::Mixed;
+        source.coverage_path = Some(source_coverage_path.to_string());
+        Ok(RewriteFixture {
+            temp,
+            location,
+            table_schema,
+            index,
+            source,
+            source_coverage,
+        })
+    }
+
+    fn staged_data_path(attempt_id: Uuid, ordinal: usize) -> String {
+        format!("data/_staged/entity-rewrite/{attempt_id}/{ordinal:010}.parquet")
+    }
+
+    fn staged_coverage_path(
+        fixture: &RewriteFixture,
+        attempt_id: Uuid,
+        ordinal: usize,
+    ) -> TestResult<String> {
+        let (identity, coverage) = fixture
+            .source_coverage
+            .iter()
+            .nth(ordinal)
+            .expect("fixture identity");
+        let mut output_coverage = EntityCoverage::empty();
+        output_coverage.union_coverage(identity.clone(), coverage.clone());
+        let bytes = entity_coverage_to_bytes(&output_coverage)?;
+        let coverage_id = coverage_file_id_for_attempt(
+            &segment_entity_coverage_id_v1(&fixture.index, &bytes),
+            &attempt_id,
+        );
+        Ok(segment_coverage_key(&coverage_id)?)
+    }
+
+    fn write_sentinel(root: &Path, path: &str) -> TestResult<Vec<u8>> {
+        let bytes = b"preexisting-object".to_vec();
+        let absolute = root.join(path);
+        std::fs::create_dir_all(absolute.parent().expect("object parent"))?;
+        std::fs::write(absolute, &bytes)?;
+        Ok(bytes)
     }
 
     #[tokio::test]
@@ -878,6 +979,162 @@ mod tests {
             let actual = read_batch(&temp.path().join(&replacement.meta.path))?;
             assert_eq!(actual, expected);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_never_overwrites_a_colliding_data_path() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let attempt_id = Uuid::from_u128(1);
+        let collision_path = staged_data_path(attempt_id, 0);
+        let sentinel = write_sentinel(fixture.temp.path(), &collision_path)?;
+
+        let error = rewrite_with_attempt_id(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+            attempt_id,
+        )
+        .await
+        .expect_err("data collision must fail");
+
+        assert!(matches!(
+            error,
+            EntityRewriteError::Storage {
+                source: StorageError::AlreadyExists { .. }
+            }
+        ));
+        assert_eq!(
+            std::fs::read(fixture.temp.path().join(collision_path))?,
+            sentinel
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sidecar_collision_preserves_existing_object_and_cleans_owned_outputs() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let attempt_id = Uuid::from_u128(2);
+        let data_paths = [
+            staged_data_path(attempt_id, 0),
+            staged_data_path(attempt_id, 1),
+        ];
+        let first_coverage_path = staged_coverage_path(&fixture, attempt_id, 0)?;
+        let collision_path = staged_coverage_path(&fixture, attempt_id, 1)?;
+        let sentinel = write_sentinel(fixture.temp.path(), &collision_path)?;
+
+        let error = rewrite_with_attempt_id(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+            attempt_id,
+        )
+        .await
+        .expect_err("sidecar collision must fail");
+
+        assert!(matches!(
+            error,
+            EntityRewriteError::CoverageSidecar {
+                source: CoverageError::Storage {
+                    source: StorageError::AlreadyExists { .. }
+                }
+            }
+        ));
+        assert_eq!(
+            std::fs::read(fixture.temp.path().join(collision_path))?,
+            sentinel
+        );
+        for path in data_paths.iter().chain([&first_coverage_path]) {
+            assert!(!fixture.temp.path().join(path).exists(), "{path} leaked");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_every_failure_without_hiding_primary_error() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let attempt_id = Uuid::from_u128(3);
+        let owned_paths = [
+            staged_data_path(attempt_id, 0),
+            staged_coverage_path(&fixture, attempt_id, 0)?,
+            staged_data_path(attempt_id, 1),
+        ];
+        let collision_path = staged_coverage_path(&fixture, attempt_id, 1)?;
+        let sentinel = write_sentinel(fixture.temp.path(), &collision_path)?;
+        for path in &owned_paths {
+            crate::storage::inject_cleanup_failure(fixture.temp.path().join(path));
+        }
+
+        let error = rewrite_with_attempt_id(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+            attempt_id,
+        )
+        .await
+        .expect_err("rewrite and cleanup must fail");
+
+        let EntityRewriteError::Cleanup {
+            source,
+            cleanup_errors,
+        } = error
+        else {
+            panic!("expected cleanup error");
+        };
+        assert!(matches!(
+            *source,
+            EntityRewriteError::CoverageSidecar {
+                source: CoverageError::Storage {
+                    source: StorageError::AlreadyExists { .. }
+                }
+            }
+        ));
+        assert_eq!(cleanup_errors.len(), owned_paths.len());
+        for path in &owned_paths {
+            assert!(
+                cleanup_errors.iter().any(|error| error.contains(path)),
+                "cleanup failure omitted {path}"
+            );
+            assert!(fixture.temp.path().join(path).exists());
+        }
+        assert_eq!(
+            std::fs::read(fixture.temp.path().join(collision_path))?,
+            sentinel
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_cleans_a_sidecar_left_by_failed_write_cleanup() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let attempt_id = Uuid::from_u128(4);
+        let data_path = staged_data_path(attempt_id, 0);
+        let coverage_path = staged_coverage_path(&fixture, attempt_id, 0)?;
+        crate::storage::inject_write_new_failure(fixture.temp.path().join(&coverage_path), true);
+
+        let error = rewrite_with_attempt_id(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+            attempt_id,
+        )
+        .await
+        .expect_err("sidecar write and its first cleanup must fail");
+
+        assert!(matches!(
+            error,
+            EntityRewriteError::CoverageSidecar {
+                source: CoverageError::Storage {
+                    source: StorageError::CleanupFailed { .. }
+                }
+            }
+        ));
+        assert!(!fixture.temp.path().join(data_path).exists());
+        assert!(!fixture.temp.path().join(coverage_path).exists());
         Ok(())
     }
 }
