@@ -122,9 +122,14 @@ with tempfile.TemporaryDirectory() as d:
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))
 
-    out = sess.sql("select ts, symbol, close from prices order by ts")
+    out = sess.sql("select ts, symbol, close from prices order by symbol, ts")
     print(out)  # pyarrow.Table
 ```
+
+`entity_columns` defines independent identities within one logical table. Different symbols may
+reuse the same timestamp bucket, and one Parquet file may contain multiple symbols. An append is
+rejected only when the same complete identity already covers a bucket. In SQL, entity columns are
+ordinary columns that can be filtered or grouped.
 
 > **Bucket size (important):** `bucket=1h` does **not** resample your data. It defines the time grid used for overlap detection and coverage tracking.
 > Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00).

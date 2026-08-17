@@ -25,8 +25,14 @@ bucket that is already occupied for the same entity. This is intentional - it pr
 double-ingesting data. The exception carries:
 
 - `segment_path` - which file triggered the rejection
-- `overlap_count` - how many (entity, bucket) pairs already had coverage
+- `overlap_count` - how many entity/bucket pairs overlap on an entity-aware table, or how many
+  buckets overlap on a table without entity columns
+- `example_entity_identity` - one overlapping identity as a dictionary in configured
+  entity-column order, or `None` for a table without entity columns
 - `example_bucket` - one overlapping bucket identifier, useful for debugging
+
+These attributes are stable diagnostics. Inspect them directly instead of parsing the exception
+message.
 
 See [Buckets + overlap](../concepts/bucketing_and_overlap.md) for background.
 

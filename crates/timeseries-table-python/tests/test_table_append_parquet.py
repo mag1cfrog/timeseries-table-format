@@ -259,6 +259,55 @@ def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
     assert getattr(e, "table_root", None) == str(root)
 
 
+def test_entity_overlap_exposes_ordered_identity_and_pair_count(tmp_path):
+    root = tmp_path / "table"
+    tbl = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="ts",
+        index_type="timestamp",
+        bucket="1h",
+        entity_columns=["venue", "symbol"],
+    )
+    (root / "data").mkdir(parents=True)
+    first = root / "data" / "first.parquet"
+    second = root / "data" / "second.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array([0, 0], type=pa.timestamp("us")),
+                "venue": pa.array(["X", "Y"]),
+                "symbol": pa.array(["A", "B"]),
+                "close": pa.array([1.0, 2.0]),
+            }
+        ),
+        first,
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array([0, 0, 0], type=pa.timestamp("us")),
+                "venue": pa.array(["X", "Y", "Y"]),
+                "symbol": pa.array(["A", "B", "C"]),
+                "close": pa.array([3.0, 4.0, 5.0]),
+            }
+        ),
+        second,
+    )
+    tbl.append_parquet("data/first.parquet", copy_if_outside=False)
+
+    with pytest.raises(ttf.CoverageOverlapError) as excinfo:
+        tbl.append_parquet("data/second.parquet", copy_if_outside=False)
+
+    error = excinfo.value
+    assert error.segment_path == "data/second.parquet"
+    assert error.overlap_count == 2
+    assert error.example_entity_identity is not None
+    assert error.example_entity_identity == {"venue": "X", "symbol": "A"}
+    assert list(error.example_entity_identity) == ["venue", "symbol"]
+    assert isinstance(error.example_bucket, int)
+    assert getattr(error, "table_root", None) == str(root)
+
+
 def test_append_parquet_uses_registered_time_column(tmp_path):
     root = tmp_path / "table"
 

@@ -1,4 +1,7 @@
-use pyo3::{PyErr, Python, types::PyAnyMethods};
+use pyo3::{
+    PyErr, Python,
+    types::{PyAnyMethods, PyDict, PyDictMethods},
+};
 
 use crate::exceptions::{
     ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError, StorageError,
@@ -74,6 +77,7 @@ fn coverage_overlap_error_to_py(
     segment_path: String,
     overlap_count: u128,
     example_bucket: Option<u64>,
+    example_entity_identity: Option<(&[String], &[String])>,
 ) -> PyErr {
     let py_err = CoverageOverlapError::new_err(msg);
     let exc = py_err.value(py);
@@ -87,12 +91,39 @@ fn coverage_overlap_error_to_py(
     if let Err(error) = exc.setattr("example_bucket", example_bucket) {
         return error;
     }
+    match example_entity_identity {
+        Some((columns, components)) => {
+            if columns.len() != components.len() {
+                return TimeseriesTableError::new_err(
+                    "entity overlap identity does not match configured entity columns",
+                );
+            }
+            let identity = PyDict::new(py);
+            for (column, component) in columns.iter().zip(components) {
+                if let Err(error) = identity.set_item(column, component) {
+                    return error;
+                }
+            }
+            if let Err(error) = exc.setattr("example_entity_identity", identity) {
+                return error;
+            }
+        }
+        None => {
+            if let Err(error) = exc.setattr("example_entity_identity", py.None()) {
+                return error;
+            }
+        }
+    }
 
     py_err
 }
 
 #[allow(dead_code)]
-pub(crate) fn table_error_to_py(py: Python<'_>, err: TableError) -> PyErr {
+pub(crate) fn table_error_to_py(
+    py: Python<'_>,
+    err: TableError,
+    entity_columns: &[String],
+) -> PyErr {
     let msg = err.to_string();
 
     match err {
@@ -110,16 +141,22 @@ pub(crate) fn table_error_to_py(py: Python<'_>, err: TableError) -> PyErr {
             segment_path,
             u128::from(overlap_count),
             example_bucket,
+            None,
         ),
 
         TableError::EntityCoverageOverlap {
             segment_path,
             overlap_count,
+            example_identity,
             example_bucket,
-            ..
-        } => {
-            coverage_overlap_error_to_py(py, msg, segment_path, overlap_count, Some(example_bucket))
-        }
+        } => coverage_overlap_error_to_py(
+            py,
+            msg,
+            segment_path,
+            overlap_count,
+            Some(example_bucket),
+            Some((entity_columns, example_identity.components())),
+        ),
 
         TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),
 

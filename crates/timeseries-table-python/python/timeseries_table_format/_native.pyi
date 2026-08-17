@@ -13,7 +13,9 @@ class CoverageOverlapError(TimeseriesTableError):
     segment_path: str
     """Path to the Parquet segment that triggered the overlap."""
     overlap_count: int
-    """Number of (entity, bucket) pairs that already have coverage."""
+    """Number of overlapping buckets, or entity/bucket pairs for an entity-aware table."""
+    example_entity_identity: dict[str, str] | None
+    """One overlapping identity in configured column order, or `None` for global coverage."""
     example_bucket: int | None
     """One overlapping bucket identifier, for debugging."""
 
@@ -149,7 +151,8 @@ class TimeSeriesTable:
         index_type:
             One of `"timestamp"`, `"int64"`, or `"uint64"`.
         entity_columns:
-            Column names that define the entity identity for the table.
+            Ordered column names that define independent identities within the table. One
+            Parquet segment may contain multiple identities.
         bucket:
             Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
         bucket_width:
@@ -185,6 +188,12 @@ class TimeSeriesTable:
         copy_if_outside:
             If `True`, copies the file under the table root before appending.
             If `False`, `parquet_path` must be a table-relative storage key.
+
+        Raises
+        ------
+        CoverageOverlapError:
+            If the same complete entity identity already covers an incoming bucket. Different
+            identities may reuse the same bucket.
         """
         ...
 
