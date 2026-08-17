@@ -1318,6 +1318,50 @@ async fn entity_equality_prunes_conflicting_single_entity_segments() -> TestResu
     let (files, batches) = run_timestamp_query(&ctx, "symbol = 'missing'").await?;
     assert_eq!(files, ["entity-mixed.parquet"]);
     assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+
+    let (files, batches) = run_timestamp_query(&ctx, "'B' = t.symbol").await?;
+    assert_eq!(files, ["entity-b.parquet", "entity-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [60_000, 180_000]);
+
+    let (files, batches) = run_timestamp_query(&ctx, "symbol > 'A'").await?;
+    assert_eq!(
+        files,
+        [
+            "entity-a.parquet",
+            "entity-b.parquet",
+            "entity-mixed.parquet"
+        ]
+    );
+    assert_eq!(collect_i64_values(&batches)?, [60_000, 180_000]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn entity_pruning_composes_safely_with_other_predicates() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_entity_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+
+    let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A' AND price < 35.0").await?;
+    assert_eq!(files, ["entity-a.parquet", "entity-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [0, 120_000]);
+
+    let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A' OR price >= 20.0").await?;
+    assert_eq!(
+        files,
+        [
+            "entity-a.parquet",
+            "entity-b.parquet",
+            "entity-mixed.parquet"
+        ]
+    );
+    assert_eq!(collect_i64_values(&batches)?, [0, 60_000, 120_000, 180_000]);
+
+    let (files, batches) =
+        run_timestamp_query(&ctx, "symbol = 'A' AND ts >= '1970-01-01T00:02:00Z'").await?;
+    assert_eq!(files, ["entity-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [120_000]);
     Ok(())
 }
 

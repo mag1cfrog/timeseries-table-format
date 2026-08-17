@@ -256,6 +256,36 @@ mod tests {
         }
     }
 
+    fn single_entity_segment(path: &str, min: i64, max: i64, components: &[&str]) -> SegmentMeta {
+        let mut segment = segment(path, IndexValue::Int64(min), IndexValue::Int64(max));
+        segment.entity_layout = SegmentEntityLayout::Single(
+            EntityIdentity::try_new(
+                components
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        segment
+    }
+
+    fn binary(
+        left: Arc<dyn PhysicalExpr>,
+        op: Operator,
+        right: Arc<dyn PhysicalExpr>,
+    ) -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(left, op, right))
+    }
+
+    fn string_eq(name: &str, position: usize, value: &str) -> Arc<dyn PhysicalExpr> {
+        binary(
+            Arc::new(PhysicalColumn::new(name, position)),
+            Operator::Eq,
+            Arc::new(Literal::new(ScalarValue::Utf8(Some(value.to_string())))),
+        )
+    }
+
     fn scalar_at(
         statistics: &PrunableStatistics,
         column: &str,
@@ -381,6 +411,92 @@ mod tests {
         assert!(error.to_string().contains("data/unsupported.parquet"));
         assert!(error.to_string().contains("device"));
         assert!(error.to_string().contains("Int64"));
+    }
+
+    #[test]
+    fn composite_and_boolean_predicates_prune_without_false_negatives() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Int64, false),
+            Field::new("device", DataType::Utf8, false),
+            Field::new("region", DataType::Utf8, false),
+            Field::new("payload", DataType::Utf8, true),
+        ]));
+        let index = IndexSpec {
+            column: "idx".to_string(),
+            entity_columns: vec!["region".to_string(), "device".to_string()],
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let west_a = single_entity_segment("west-a.parquet", 0, 9, &["west", "a"]);
+        let east_a = single_entity_segment("east-a.parquet", 10, 19, &["east", "a"]);
+        let west_b = single_entity_segment("west-b.parquet", 20, 29, &["west", "b"]);
+        let mut mixed = segment(
+            "mixed.parquet",
+            IndexValue::Int64(30),
+            IndexValue::Int64(39),
+        );
+        mixed.entity_layout = SegmentEntityLayout::Mixed;
+        let segments = [&west_a, &east_a, &west_b, &mixed];
+
+        let cases = [
+            (
+                binary(
+                    string_eq("region", 2, "west"),
+                    Operator::And,
+                    string_eq("device", 1, "a"),
+                ),
+                vec!["west-a.parquet", "mixed.parquet"],
+            ),
+            (
+                string_eq("device", 1, "a"),
+                vec!["west-a.parquet", "east-a.parquet", "mixed.parquet"],
+            ),
+            (
+                binary(
+                    string_eq("device", 1, "a"),
+                    Operator::And,
+                    binary(
+                        Arc::new(PhysicalColumn::new("idx", 0)),
+                        Operator::GtEq,
+                        Arc::new(Literal::new(ScalarValue::Int64(Some(15)))),
+                    ),
+                ),
+                vec!["east-a.parquet", "mixed.parquet"],
+            ),
+            (
+                binary(
+                    string_eq("device", 1, "a"),
+                    Operator::Or,
+                    string_eq("region", 2, "east"),
+                ),
+                vec!["west-a.parquet", "east-a.parquet", "mixed.parquet"],
+            ),
+            (
+                binary(
+                    string_eq("device", 1, "a"),
+                    Operator::Or,
+                    string_eq("payload", 3, "unknown"),
+                ),
+                vec![
+                    "west-a.parquet",
+                    "east-a.parquet",
+                    "west-b.parquet",
+                    "mixed.parquet",
+                ],
+            ),
+        ];
+
+        for (predicate, expected) in cases {
+            let selected = prune_segments(&schema, &index, segments.to_vec(), &predicate).unwrap();
+            assert_eq!(
+                selected
+                    .into_iter()
+                    .map(|segment| segment.path.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]
