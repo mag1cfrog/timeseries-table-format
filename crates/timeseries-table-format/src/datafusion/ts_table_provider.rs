@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, SchemaRef};
 use async_trait::async_trait;
 
 use datafusion::catalog::Session;
@@ -65,20 +65,20 @@ where
     DataFusionError::External(Box::new(e))
 }
 
-fn metadata_pruning_expr(expr: &Expr, index: &IndexSpec) -> DFResult<Option<Expr>> {
-    let exact_entity_equality = matches!(expr, Expr::BinaryExpr(binary)
-        if binary.op == Operator::Eq
-            && ((is_entity_column(&binary.left, index) && is_string_literal(&binary.right))
-                || (is_string_literal(&binary.left) && is_entity_column(&binary.right, index))));
-    if exact_entity_equality {
+fn metadata_pruning_expr(
+    expr: &Expr,
+    index: &IndexSpec,
+    schema: &SchemaRef,
+) -> DFResult<Option<Expr>> {
+    if is_exact_entity_equality(expr, index, schema) {
         return Ok(Some(expr.clone()));
     }
 
     if let Expr::BinaryExpr(binary) = expr
         && matches!(binary.op, Operator::And | Operator::Or)
     {
-        let left = metadata_pruning_expr(&binary.left, index)?;
-        let right = metadata_pruning_expr(&binary.right, index)?;
+        let left = metadata_pruning_expr(&binary.left, index, schema)?;
+        let right = metadata_pruning_expr(&binary.right, index, schema)?;
         return Ok(if binary.op == Operator::And {
             match (left, right) {
                 (Some(left), Some(right)) => Some(left.and(right)),
@@ -98,17 +98,40 @@ fn metadata_pruning_expr(expr: &Expr, index: &IndexSpec) -> DFResult<Option<Expr
     )
 }
 
-fn is_entity_column(expr: &Expr, index: &IndexSpec) -> bool {
-    matches!(expr, Expr::Column(column) if index.entity_columns.contains(&column.name))
+fn is_exact_entity_equality(expr: &Expr, index: &IndexSpec, schema: &SchemaRef) -> bool {
+    let Expr::BinaryExpr(binary) = expr else {
+        return false;
+    };
+    if binary.op != Operator::Eq {
+        return false;
+    }
+    let (column, literal) = match (&*binary.left, &*binary.right) {
+        (Expr::Column(column), Expr::Literal(literal, _))
+        | (Expr::Literal(literal, _), Expr::Column(column)) => (column, literal),
+        _ => return false,
+    };
+    entity_literal_matches(column.name.as_str(), literal, index, schema)
 }
 
-fn is_string_literal(expr: &Expr) -> bool {
+fn entity_literal_matches(
+    column: &str,
+    literal: &ScalarValue,
+    index: &IndexSpec,
+    schema: &SchemaRef,
+) -> bool {
+    if !index.entity_columns.iter().any(|entity| entity == column) {
+        return false;
+    }
+    let Ok(field) = schema.field_with_name(column) else {
+        return false;
+    };
     matches!(
-        expr,
-        Expr::Literal(
-            ScalarValue::Utf8(Some(_)) | ScalarValue::LargeUtf8(Some(_)),
-            _
-        )
+        (field.data_type(), literal),
+        (DataType::Utf8, ScalarValue::Utf8(Some(_)))
+            | (DataType::LargeUtf8, ScalarValue::LargeUtf8(Some(_)))
+            | (DataType::Int32, ScalarValue::Int32(Some(_)))
+            | (DataType::Int64, ScalarValue::Int64(Some(_)))
+            | (DataType::UInt64, ScalarValue::UInt64(Some(_)))
     )
 }
 
@@ -248,7 +271,7 @@ impl TableProvider for TsTableProvider {
 
         let metadata_filters = filters
             .iter()
-            .map(|filter| metadata_pruning_expr(filter, self.table.index_spec()))
+            .map(|filter| metadata_pruning_expr(filter, self.table.index_spec(), &self.schema))
             .collect::<DFResult<Vec<_>>>()?
             .into_iter()
             .flatten()

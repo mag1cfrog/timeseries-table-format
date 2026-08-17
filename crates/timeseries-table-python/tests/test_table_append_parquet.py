@@ -308,6 +308,40 @@ def test_entity_overlap_exposes_ordered_identity_and_pair_count(tmp_path):
     assert getattr(error, "table_root", None) == str(root)
 
 
+def test_numeric_entity_overlap_preserves_python_integer_types_and_order(tmp_path):
+    root = tmp_path / "table"
+    tbl = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="ts",
+        index_type="timestamp",
+        bucket="1h",
+        entity_columns=["device_id", "account_id"],
+    )
+    (root / "data").mkdir(parents=True)
+    maximum = 2**64 - 1
+    for name, close in [("first.parquet", 1.0), ("second.parquet", 2.0)]:
+        pq.write_table(
+            pa.table(
+                {
+                    "ts": pa.array([0], type=pa.timestamp("us")),
+                    "device_id": pa.array([-1], type=pa.int32()),
+                    "account_id": pa.array([maximum], type=pa.uint64()),
+                    "close": pa.array([close]),
+                }
+            ),
+            root / "data" / name,
+        )
+
+    tbl.append_parquet("data/first.parquet", copy_if_outside=False)
+    with pytest.raises(ttf.CoverageOverlapError) as excinfo:
+        tbl.append_parquet("data/second.parquet", copy_if_outside=False)
+
+    identity = excinfo.value.example_entity_identity
+    assert identity == {"device_id": -1, "account_id": maximum}
+    assert list(identity) == ["device_id", "account_id"]
+    assert all(isinstance(value, int) for value in identity.values())
+
+
 def test_append_parquet_uses_registered_time_column(tmp_path):
     root = tmp_path / "table"
 
