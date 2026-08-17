@@ -210,7 +210,7 @@ mod tests {
             path: "data/nvda_1h_0001.parquet".to_string(),
             format: FileFormat::Parquet,
             entity_layout: SegmentEntityLayout::Single(
-                EntityIdentity::try_new(vec!["NVDA".to_string()]).expect("valid identity"),
+                EntityIdentity::try_new(vec!["NVDA".into()]).expect("valid identity"),
             ),
             index_min: (ts0).into(),
             index_max: (ts1).into(),

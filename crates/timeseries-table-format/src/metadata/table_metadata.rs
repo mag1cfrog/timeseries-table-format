@@ -16,7 +16,7 @@ use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 /// Current table metadata / log format version written by new tables.
 ///
 /// Bumped when persisted table semantics require version-aware decoding.
-pub const TABLE_FORMAT_VERSION: u32 = 5;
+pub const TABLE_FORMAT_VERSION: u32 = 6;
 
 /// The high-level "kind" of table.
 ///

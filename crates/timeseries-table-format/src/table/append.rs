@@ -528,7 +528,7 @@ mod tests {
     use super::*;
     use crate::coverage::io::{read_coverage_sidecar, read_entity_coverage_sidecar};
     use crate::coverage::serde::entity_coverage_from_bytes;
-    use crate::coverage::{EntityCoverage, EntityIdentity};
+    use crate::coverage::{EntityCoverage, EntityIdentity, EntityValue};
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
@@ -877,7 +877,7 @@ mod tests {
         assert_eq!(seg.row_count, 1);
         assert_eq!(
             seg.entity_layout,
-            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?)
+            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".into()])?)
         );
         assert!(matches!(
             &seg.index_min,
@@ -900,7 +900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_no_entity_int64_append_uses_global_coverage() -> TestResult {
+    async fn version_six_no_entity_int64_append_uses_global_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_records_single_layout_for_each_entity_segment() -> TestResult {
+    async fn version_six_records_single_layout_for_each_entity_segment() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1192,7 +1192,7 @@ mod tests {
                     .get(path)
                     .expect("segment present")
                     .entity_layout,
-                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.to_string()])?)
+                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.into()])?)
             );
         }
 
@@ -1210,7 +1210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_records_mixed_layout_for_multiple_identities() -> TestResult {
+    async fn version_six_records_mixed_layout_for_multiple_identities() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_preserves_composite_identity_order_in_layout() -> TestResult {
+    async fn version_six_preserves_composite_identity_order_in_layout() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = IndexSpec {
@@ -1304,8 +1304,8 @@ mod tests {
                     .expect("segment present")
                     .entity_layout,
                 SegmentEntityLayout::Single(EntityIdentity::try_new(vec![
-                    "A".to_string(),
-                    venue.to_string(),
+                    "A".into(),
+                    venue.into(),
                 ])?)
             );
         }
@@ -1322,7 +1322,8 @@ mod tests {
                 overlap_count: 1,
                 example_identity,
                 ..
-            } if example_identity.components() == ["A", "X"]
+            } if example_identity.components()
+                == [EntityValue::from("A"), EntityValue::from("X")]
         ));
         Ok(())
     }
@@ -1357,7 +1358,7 @@ mod tests {
                 identity,
             } => {
                 assert_eq!(segment_path, path);
-                assert_eq!(identity.components(), ["B"]);
+                assert_eq!(identity.components(), [EntityValue::from("B")]);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1672,7 +1673,7 @@ mod tests {
                 example_identity,
                 example_bucket: 0x8000_0000_0000_0000,
             } if segment_path == rel2
-                && example_identity.components() == ["A"]
+                && example_identity.components() == [EntityValue::from("A")]
         ));
         Ok(())
     }
@@ -2179,7 +2180,7 @@ mod tests {
         let source = TableError::EntityCoverageOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
-            example_identity: EntityIdentity::try_new(vec!["A".to_string()])?,
+            example_identity: EntityIdentity::try_new(vec!["A".into()])?,
             example_bucket: 0,
         };
         let err = table.rollback_created_sidecars(&sidecars, source).await;

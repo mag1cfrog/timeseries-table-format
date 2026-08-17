@@ -10,18 +10,22 @@
 //! (portable across platforms). The byte format is opaque and should not be
 //! interpreted directly; always use [`coverage_from_bytes`] to deserialize.
 //!
-//! # Entity-aware V1 serialization format
+//! # Entity-aware V2 serialization format
 //!
 //! All integer fields outside nested coverage are big-endian:
 //!
 //! ```text
-//! "TSTECOV1"
+//! "TSTECOV2"
 //! entity_count: u32
 //! repeated entity_count times:
 //!   component_count: u32
 //!   repeated component_count times:
-//!     component_byte_len: u64
-//!     component_utf8_bytes
+//!     component_type: u8
+//!     component_value:
+//!       Utf8: byte_len: u64, then UTF-8 bytes
+//!       Int32: big-endian i32
+//!       Int64: big-endian i64
+//!       UInt64: big-endian u64
 //!   nested_coverage_byte_len: u64
 //!   nested_historical_roaring_treemap_bytes
 //! ```
@@ -44,9 +48,13 @@ use std::{io::Cursor, str::Utf8Error};
 use roaring::{RoaringBitmap, RoaringTreemap};
 use snafu::{ResultExt, Snafu};
 
-use crate::coverage::{Coverage, EntityCoverage, EntityIdentity, EntityIdentityError};
+use crate::coverage::{Coverage, EntityCoverage, EntityIdentity, EntityIdentityError, EntityValue};
 
-const ENTITY_COVERAGE_MAGIC: &[u8; 8] = b"TSTECOV1";
+const ENTITY_COVERAGE_MAGIC: &[u8; 8] = b"TSTECOV2";
+const ENTITY_VALUE_UTF8: u8 = 1;
+const ENTITY_VALUE_INT32: u8 = 2;
+const ENTITY_VALUE_INT64: u8 = 3;
+const ENTITY_VALUE_UINT64: u8 = 4;
 
 /// Errors that can occur during coverage serialization or deserialization.
 ///
@@ -107,6 +115,13 @@ pub enum EntityCoverageSerdeError {
     InvalidString {
         /// The UTF-8 validation error.
         source: Utf8Error,
+    },
+
+    /// An identity component uses an unknown scalar type tag.
+    #[snafu(display("Unknown entity identity value type tag: {tag}"))]
+    UnknownValueType {
+        /// Unrecognized encoded type tag.
+        tag: u8,
     },
 
     /// An encoded identity is incomplete.
@@ -223,13 +238,30 @@ pub fn entity_coverage_to_bytes(
         out.extend_from_slice(&component_count.to_be_bytes());
 
         for component in identity.components() {
-            let component_len = u64::try_from(component.len()).map_err(|_| {
-                EntityCoverageSerdeError::LengthOverflow {
-                    field: "identity component length",
+            match component {
+                EntityValue::Utf8(value) => {
+                    out.push(ENTITY_VALUE_UTF8);
+                    let component_len = u64::try_from(value.len()).map_err(|_| {
+                        EntityCoverageSerdeError::LengthOverflow {
+                            field: "identity component length",
+                        }
+                    })?;
+                    out.extend_from_slice(&component_len.to_be_bytes());
+                    out.extend_from_slice(value.as_bytes());
                 }
-            })?;
-            out.extend_from_slice(&component_len.to_be_bytes());
-            out.extend_from_slice(component.as_bytes());
+                EntityValue::Int32(value) => {
+                    out.push(ENTITY_VALUE_INT32);
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+                EntityValue::Int64(value) => {
+                    out.push(ENTITY_VALUE_INT64);
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+                EntityValue::UInt64(value) => {
+                    out.push(ENTITY_VALUE_UINT64);
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+            }
         }
 
         let nested_bytes = canonical_nested_coverage_to_bytes(nested)
@@ -264,7 +296,7 @@ pub fn entity_coverage_from_bytes(
     let mut coverage = EntityCoverage::empty();
     for _ in 0..entity_count {
         let component_count = read_u32(&mut remaining)? as usize;
-        if component_count > remaining.len().saturating_sub(8) / 8 {
+        if component_count > remaining.len().saturating_sub(8) / 5 {
             return Err(EntityCoverageSerdeError::InvalidLength {
                 field: "identity component count",
             });
@@ -272,12 +304,22 @@ pub fn entity_coverage_from_bytes(
 
         let mut components = Vec::new();
         for _ in 0..component_count {
-            let component_len = read_u64(&mut remaining)?;
-            let component_bytes =
-                take_declared(&mut remaining, component_len, "identity component length")?;
-            let component = std::str::from_utf8(component_bytes)
-                .map_err(|source| EntityCoverageSerdeError::InvalidString { source })?;
-            components.push(component.to_owned());
+            let tag = take(&mut remaining, 1)?[0];
+            let component = match tag {
+                ENTITY_VALUE_UTF8 => {
+                    let component_len = read_u64(&mut remaining)?;
+                    let component_bytes =
+                        take_declared(&mut remaining, component_len, "identity component length")?;
+                    let component = std::str::from_utf8(component_bytes)
+                        .map_err(|source| EntityCoverageSerdeError::InvalidString { source })?;
+                    EntityValue::Utf8(component.to_owned())
+                }
+                ENTITY_VALUE_INT32 => EntityValue::Int32(read_i32(&mut remaining)?),
+                ENTITY_VALUE_INT64 => EntityValue::Int64(read_i64(&mut remaining)?),
+                ENTITY_VALUE_UINT64 => EntityValue::UInt64(read_u64(&mut remaining)?),
+                tag => return Err(EntityCoverageSerdeError::UnknownValueType { tag }),
+            };
+            components.push(component);
         }
 
         let identity = EntityIdentity::try_new(components)
@@ -348,6 +390,18 @@ fn read_u32(remaining: &mut &[u8]) -> Result<u32, EntityCoverageSerdeError> {
     Ok(u32::from_be_bytes(encoded))
 }
 
+fn read_i32(remaining: &mut &[u8]) -> Result<i32, EntityCoverageSerdeError> {
+    let mut encoded = [0; 4];
+    encoded.copy_from_slice(take(remaining, 4)?);
+    Ok(i32::from_be_bytes(encoded))
+}
+
+fn read_i64(remaining: &mut &[u8]) -> Result<i64, EntityCoverageSerdeError> {
+    let mut encoded = [0; 8];
+    encoded.copy_from_slice(take(remaining, 8)?);
+    Ok(i64::from_be_bytes(encoded))
+}
+
 fn read_u64(remaining: &mut &[u8]) -> Result<u64, EntityCoverageSerdeError> {
     let mut encoded = [0; 8];
     encoded.copy_from_slice(take(remaining, 8)?);
@@ -381,7 +435,7 @@ mod tests {
         EntityIdentity::try_new(
             components
                 .iter()
-                .map(|component| (*component).to_owned())
+                .map(|component| EntityValue::from(*component))
                 .collect(),
         )
         .unwrap()
@@ -551,31 +605,34 @@ mod tests {
     }
 
     #[test]
-    fn entity_coverage_v1_golden_payload_is_stable() {
+    fn entity_coverage_v2_golden_payload_is_stable() {
         let mut coverage = EntityCoverage::empty();
         coverage.union_coverage(
-            identity(&["A", "\u{6771}\u{4eac}"]),
+            EntityIdentity::try_new(vec![
+                EntityValue::from("\u{6771}\u{4eac}"),
+                EntityValue::Int32(-1),
+                EntityValue::Int64(i64::MIN),
+                EntityValue::UInt64(u64::MAX),
+            ])
+            .unwrap(),
             [0].into_iter().collect(),
         );
-        coverage.union_coverage(identity(&["B", "x:y"]), [u64::MAX].into_iter().collect());
 
         let expected = [
-            b"TSTECOV1".as_slice(),
-            &[0, 0, 0, 2], // Entity count.
-            &[0, 0, 0, 2], // First identity component count.
-            &[0, 0, 0, 0, 0, 0, 0, 1],
-            b"A",
+            b"TSTECOV2".as_slice(),
+            &[0, 0, 0, 1], // Entity count.
+            &[0, 0, 0, 4], // Identity component count.
+            &[ENTITY_VALUE_UTF8],
             &[0, 0, 0, 0, 0, 0, 0, 6],
             &[0xe6, 0x9d, 0xb1, 0xe4, 0xba, 0xac],
+            &[ENTITY_VALUE_INT32],
+            &(-1i32).to_be_bytes(),
+            &[ENTITY_VALUE_INT64],
+            &i64::MIN.to_be_bytes(),
+            &[ENTITY_VALUE_UINT64],
+            &u64::MAX.to_be_bytes(),
             &[0, 0, 0, 0, 0, 0, 0, 30],
             ROARING_ZERO,
-            &[0, 0, 0, 2], // Second identity component count.
-            &[0, 0, 0, 0, 0, 0, 0, 1],
-            b"B",
-            &[0, 0, 0, 0, 0, 0, 0, 3],
-            b"x:y",
-            &[0, 0, 0, 0, 0, 0, 0, 30],
-            ROARING_MAX,
         ]
         .concat();
 
@@ -607,6 +664,13 @@ mod tests {
             Err(EntityCoverageSerdeError::InvalidMagic)
         ));
 
+        let mut version_one = bytes.clone();
+        version_one[..8].copy_from_slice(b"TSTECOV1");
+        assert!(matches!(
+            entity_coverage_from_bytes(&version_one),
+            Err(EntityCoverageSerdeError::InvalidMagic)
+        ));
+
         let mut invalid_count = bytes.clone();
         invalid_count[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(entity_coverage_from_bytes(&invalid_count).is_err());
@@ -619,17 +683,24 @@ mod tests {
         ));
 
         let mut invalid_length = bytes.clone();
-        invalid_length[16..24].copy_from_slice(&u64::MAX.to_be_bytes());
+        invalid_length[17..25].copy_from_slice(&u64::MAX.to_be_bytes());
         assert!(matches!(
             entity_coverage_from_bytes(&invalid_length),
             Err(EntityCoverageSerdeError::InvalidLength { .. })
         ));
 
-        let mut invalid_string = bytes;
-        invalid_string[24] = 0xff;
+        let mut invalid_string = bytes.clone();
+        invalid_string[25] = 0xff;
         assert!(matches!(
             entity_coverage_from_bytes(&invalid_string),
             Err(EntityCoverageSerdeError::InvalidString { .. })
+        ));
+
+        let mut unknown_type = bytes;
+        unknown_type[16] = u8::MAX;
+        assert!(matches!(
+            entity_coverage_from_bytes(&unknown_type),
+            Err(EntityCoverageSerdeError::UnknownValueType { tag: u8::MAX })
         ));
     }
 
@@ -655,7 +726,7 @@ mod tests {
         let bytes = entity_coverage_to_bytes(&coverage).unwrap();
 
         let mut malformed_nested = bytes.clone();
-        malformed_nested[25..33].copy_from_slice(&1u64.to_be_bytes());
+        malformed_nested[26..34].copy_from_slice(&1u64.to_be_bytes());
         assert!(matches!(
             entity_coverage_from_bytes(&malformed_nested),
             Err(EntityCoverageSerdeError::MalformedCoverage { .. })

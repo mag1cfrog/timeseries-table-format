@@ -13,7 +13,7 @@ use log::warn;
 
 use crate::{
     coverage::{
-        Coverage, EntityCoverage, EntityIdentity,
+        Coverage, EntityCoverage, EntityIdentity, EntityValue,
         io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
     transaction_log::table_state::TableCoveragePointer,
@@ -76,7 +76,7 @@ impl TimeSeriesTable {
             .map(|column| {
                 provided
                     .get(column.as_str())
-                    .map(|value| (*value).to_string())
+                    .map(|value| EntityValue::from(*value))
                     .ok_or_else(|| TableError::MissingEntityIdentityColumn {
                         column: column.clone(),
                     })
@@ -547,7 +547,7 @@ mod tests {
     use super::*;
     use crate::{
         coverage::{
-            Coverage, EntityCoverage, EntityIdentity,
+            Coverage, EntityCoverage, EntityIdentity, EntityValue,
             bucket::{BucketError, bucket_id},
             io::{write_coverage_sidecar_atomic, write_coverage_sidecar_new_bytes},
             serde::entity_coverage_to_bytes,
@@ -628,7 +628,7 @@ mod tests {
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
         let mut wrong_arity = EntityCoverage::empty();
         wrong_arity.union_coverage(
-            EntityIdentity::try_new(vec!["A".to_string(), "X".to_string()])?,
+            EntityIdentity::try_new(vec!["A".into(), "X".into()])?,
             Coverage::from_iter([0]),
         );
         let wrong_arity_bytes = entity_coverage_to_bytes(&wrong_arity)?;
@@ -917,7 +917,10 @@ mod tests {
         let table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
 
         let identity = table.resolve_entity_identity(&[("venue", "X"), ("symbol", "A")])?;
-        assert_eq!(identity.components(), ["A", "X"]);
+        assert_eq!(
+            identity.components(),
+            [EntityValue::from("A"), EntityValue::from("X")]
+        );
         let start = ts_from_secs(0);
         let end = ts_from_secs(60);
         assert!(matches!(

@@ -21,7 +21,7 @@ use snafu::Backtrace;
 use tokio::task::JoinSet;
 
 use crate::{
-    coverage::{Coverage, EntityCoverage, EntityIdentity},
+    coverage::{Coverage, EntityCoverage, EntityIdentity, EntityValue},
     metadata::table_metadata::{IndexKind, IndexSpec, IndexValue},
     storage::{TableLocation, open_parquet_reader},
 };
@@ -143,7 +143,7 @@ pub(super) fn entity_identity_at(
     EntityIdentity::try_new(
         arrays
             .iter()
-            .map(|array| array.value(row).to_string())
+            .map(|array| EntityValue::from(array.value(row)))
             .collect(),
     )
     .map_err(|source| SegmentCoverageError::EntityIdentity {
@@ -391,7 +391,7 @@ mod tests {
     }
 
     fn identity(value: &str) -> EntityIdentity {
-        EntityIdentity::try_new(vec![value.to_string()]).expect("test identity")
+        EntityIdentity::try_new(vec![value.into()]).expect("test identity")
     }
 
     fn write_batch(
@@ -573,8 +573,8 @@ mod tests {
             compute_segment_entity_coverage(&TableLocation::local(temp.path()), rel_path, &index)
                 .await?;
 
-        let us_a = EntityIdentity::try_new(vec!["us".to_string(), "A".to_string()])?;
-        let eu_a = EntityIdentity::try_new(vec!["eu".to_string(), "A".to_string()])?;
+        let us_a = EntityIdentity::try_new(vec!["us".into(), "A".into()])?;
+        let eu_a = EntityIdentity::try_new(vec!["eu".into(), "A".into()])?;
         assert_eq!(
             coverage
                 .get(&us_a)

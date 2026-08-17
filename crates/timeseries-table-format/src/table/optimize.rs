@@ -436,7 +436,7 @@ mod tests {
 
     fn single_identity() -> SegmentEntityLayout {
         SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["A".to_string()]).expect("valid identity"),
+            EntityIdentity::try_new(vec!["A".into()]).expect("valid identity"),
         )
     }
 

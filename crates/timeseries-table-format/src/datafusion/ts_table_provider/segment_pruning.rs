@@ -10,6 +10,7 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 
+use crate::coverage::EntityValue;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::transaction_log::{SegmentEntityLayout, SegmentMeta};
 
@@ -92,17 +93,22 @@ pub(super) fn segment_pruning_statistics(
 }
 
 fn entity_scalar(
-    component: &str,
+    component: &EntityValue,
     data_type: &DataType,
     segment: &SegmentMeta,
     column: &str,
 ) -> DFResult<ScalarValue> {
-    match data_type {
-        DataType::Utf8 => Ok(ScalarValue::Utf8(Some(component.to_string()))),
-        DataType::LargeUtf8 => Ok(ScalarValue::LargeUtf8(Some(component.to_string()))),
+    match (component, data_type) {
+        (EntityValue::Utf8(value), DataType::Utf8) => Ok(ScalarValue::Utf8(Some(value.clone()))),
+        (EntityValue::Utf8(value), DataType::LargeUtf8) => {
+            Ok(ScalarValue::LargeUtf8(Some(value.clone())))
+        }
+        (EntityValue::Int32(value), DataType::Int32) => Ok(ScalarValue::Int32(Some(*value))),
+        (EntityValue::Int64(value), DataType::Int64) => Ok(ScalarValue::Int64(Some(*value))),
+        (EntityValue::UInt64(value), DataType::UInt64) => Ok(ScalarValue::UInt64(Some(*value))),
         _ => Err(DataFusionError::Execution(format!(
-            "cannot build entity pruning statistics for column {column} in segment {}: Arrow type {data_type} is unsupported",
-            segment.path
+            "cannot build entity pruning statistics for column {column} in segment {}: identity value {component:?} does not match Arrow type {data_type}",
+            segment.path,
         ))),
     }
 }
@@ -260,7 +266,7 @@ mod tests {
             EntityIdentity::try_new(
                 components
                     .iter()
-                    .map(|value| (*value).to_string())
+                    .map(|value| EntityValue::from(*value))
                     .collect(),
             )
             .unwrap(),
@@ -331,7 +337,7 @@ mod tests {
             IndexValue::Int64(1),
         );
         single.entity_layout = SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["west".to_string(), "sensor-a".to_string()]).unwrap(),
+            EntityIdentity::try_new(vec!["west".into(), "sensor-a".into()]).unwrap(),
         );
         let mut mixed = segment(
             "data/mixed.parquet",
@@ -398,9 +404,8 @@ mod tests {
             IndexValue::Int64(0),
             IndexValue::Int64(1),
         );
-        segment.entity_layout = SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["sensor-a".to_string()]).unwrap(),
-        );
+        segment.entity_layout =
+            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["sensor-a".into()]).unwrap());
 
         let error = segment_pruning_statistics(&schema, &index, &[&segment])
             .err()

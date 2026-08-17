@@ -316,7 +316,7 @@ mod tests {
         let rel = Path::new("_coverage/table/entity.roar");
         let mut coverage = EntityCoverage::empty();
         coverage.union_coverage(
-            EntityIdentity::try_new(vec!["A".to_string()]).unwrap(),
+            EntityIdentity::try_new(vec!["A".into()]).unwrap(),
             Coverage::from_iter([1, 2]),
         );
         let bytes = entity_coverage_to_bytes(&coverage).unwrap();

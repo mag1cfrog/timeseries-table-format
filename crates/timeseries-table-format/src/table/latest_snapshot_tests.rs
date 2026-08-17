@@ -41,7 +41,7 @@ async fn load_latest_state_sees_new_commits() -> TestResult {
     let seg = SegmentMeta {
         path: "data/seg_0001.parquet".to_string(),
         format: FileFormat::Parquet,
-        entity_layout: SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?),
+        entity_layout: SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".into()])?),
         index_min: (Utc.timestamp_opt(10, 0).single().unwrap()).into(),
         index_max: (Utc.timestamp_opt(20, 0).single().unwrap()).into(),
         row_count: 1,

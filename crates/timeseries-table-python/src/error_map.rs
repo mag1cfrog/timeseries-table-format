@@ -8,7 +8,8 @@ use crate::exceptions::{
     TimeseriesTableError,
 };
 use timeseries_table_format::{
-    storage::StorageError as CoreStorageError, table::TableError, transaction_log::CommitError,
+    coverage::EntityValue, storage::StorageError as CoreStorageError, table::TableError,
+    transaction_log::CommitError,
 };
 
 #[allow(dead_code)]
@@ -77,7 +78,7 @@ fn coverage_overlap_error_to_py(
     segment_path: String,
     overlap_count: u128,
     example_bucket: Option<u64>,
-    example_entity_identity: Option<(&[String], &[String])>,
+    example_entity_identity: Option<(&[String], &[EntityValue])>,
 ) -> PyErr {
     let py_err = CoverageOverlapError::new_err(msg);
     let exc = py_err.value(py);
@@ -100,7 +101,13 @@ fn coverage_overlap_error_to_py(
             }
             let identity = PyDict::new(py);
             for (column, component) in columns.iter().zip(components) {
-                if let Err(error) = identity.set_item(column, component) {
+                let result = match component {
+                    EntityValue::Utf8(value) => identity.set_item(column, value),
+                    EntityValue::Int32(value) => identity.set_item(column, value),
+                    EntityValue::Int64(value) => identity.set_item(column, value),
+                    EntityValue::UInt64(value) => identity.set_item(column, value),
+                };
+                if let Err(error) = result {
                     return error;
                 }
             }

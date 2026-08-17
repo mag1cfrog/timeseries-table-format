@@ -314,7 +314,7 @@ mod tests {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             entity_layout: SegmentEntityLayout::Single(
-                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+                EntityIdentity::try_new(vec!["A".into()]).expect("valid sample identity"),
             ),
             index_min: IndexValue::Timestamp(
                 chrono::Utc
@@ -339,7 +339,7 @@ mod tests {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             entity_layout: SegmentEntityLayout::Single(
-                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+                EntityIdentity::try_new(vec!["A".into()]).expect("valid sample identity"),
             ),
             index_min: (chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap()).into(),
             index_max: (chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap()).into(),
@@ -519,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_table_state_rejects_inapplicable_entity_layouts() -> TestResult {
-        let single = SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?);
+        let single = SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".into()])?);
         let cases = [
             (
                 vec!["symbol".to_string()],
