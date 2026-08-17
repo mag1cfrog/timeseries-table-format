@@ -11,7 +11,7 @@ use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
-use crate::transaction_log::SegmentMeta;
+use crate::transaction_log::{SegmentEntityLayout, SegmentMeta};
 
 pub(super) fn segment_pruning_statistics(
     schema: &SchemaRef,
@@ -26,6 +26,17 @@ pub(super) fn segment_pruning_statistics(
     })?;
     let index_type = schema.field(index_position).data_type();
     validate_index_type(index, index_type)?;
+    let entity_positions = index
+        .entity_columns
+        .iter()
+        .map(|column| {
+            schema.index_of(column).map_err(|source| {
+                DataFusionError::Plan(format!(
+                    "entity column {column} is missing from the Arrow schema: {source}"
+                ))
+            })
+        })
+        .collect::<DFResult<Vec<_>>>()?;
 
     let statistics = segments
         .iter()
@@ -42,11 +53,58 @@ pub(super) fn segment_pruning_statistics(
             statistics.column_statistics[index_position] = ColumnStatistics::new_unknown()
                 .with_min_value(Precision::Exact(min))
                 .with_max_value(Precision::Exact(max));
+            if let SegmentEntityLayout::Single(identity) = &segment.entity_layout {
+                if identity.components().len() != entity_positions.len() {
+                    return Err(DataFusionError::Execution(format!(
+                        "cannot build entity pruning statistics for segment {}: expected {} identity components, found {}",
+                        segment.path,
+                        entity_positions.len(),
+                        identity.components().len()
+                    )));
+                }
+                for (position, component) in entity_positions.iter().zip(identity.components()) {
+                    let value = entity_scalar(
+                        component,
+                        schema.field(*position).data_type(),
+                        segment,
+                        schema.field(*position).name(),
+                    )?;
+                    statistics.column_statistics[*position] = ColumnStatistics::new_unknown()
+                        .with_null_count(Precision::Exact(0))
+                        .with_min_value(Precision::Exact(value.clone()))
+                        .with_max_value(Precision::Exact(value));
+                }
+            } else if matches!(segment.entity_layout, SegmentEntityLayout::Mixed) {
+                for position in &entity_positions {
+                    // PrunableStatistics needs a typed null to combine unknown and exact
+                    // per-segment values in one Arrow array.
+                    let value = ScalarValue::try_from(schema.field(*position).data_type())?;
+                    statistics.column_statistics[*position] = ColumnStatistics::new_unknown()
+                        .with_min_value(Precision::Exact(value.clone()))
+                        .with_max_value(Precision::Exact(value));
+                }
+            }
             Ok(Arc::new(statistics))
         })
         .collect::<DFResult<Vec<_>>>()?;
 
     Ok(PrunableStatistics::new(statistics, Arc::clone(schema)))
+}
+
+fn entity_scalar(
+    component: &str,
+    data_type: &DataType,
+    segment: &SegmentMeta,
+    column: &str,
+) -> DFResult<ScalarValue> {
+    match data_type {
+        DataType::Utf8 => Ok(ScalarValue::Utf8(Some(component.to_string()))),
+        DataType::LargeUtf8 => Ok(ScalarValue::LargeUtf8(Some(component.to_string()))),
+        _ => Err(DataFusionError::Execution(format!(
+            "cannot build entity pruning statistics for column {column} in segment {}: Arrow type {data_type} is unsupported",
+            segment.path
+        ))),
+    }
 }
 
 pub(super) fn prune_segments<'a>(
@@ -164,6 +222,7 @@ mod tests {
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as PhysicalColumn, Literal};
 
+    use crate::coverage::EntityIdentity;
     use crate::metadata::table_metadata::TimeBucket;
     use crate::transaction_log::{FileFormat, SegmentEntityLayout};
 
@@ -211,6 +270,117 @@ mod tests {
         }
         .expect("known statistics");
         ScalarValue::try_from_array(values.as_ref(), position).expect("scalar value")
+    }
+
+    fn null_count_at(
+        statistics: &PrunableStatistics,
+        column: &str,
+        position: usize,
+    ) -> ScalarValue {
+        let values = statistics
+            .null_counts(&Column::from_name(column))
+            .expect("known null count");
+        ScalarValue::try_from_array(values.as_ref(), position).expect("scalar value")
+    }
+
+    #[test]
+    fn exposes_exact_entity_statistics_only_for_single_entity_segments() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Int64, false),
+            Field::new("device", DataType::Utf8, false),
+            Field::new("region", DataType::LargeUtf8, false),
+        ]));
+        let index = IndexSpec {
+            column: "idx".to_string(),
+            entity_columns: vec!["region".to_string(), "device".to_string()],
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let mut single = segment(
+            "data/single.parquet",
+            IndexValue::Int64(0),
+            IndexValue::Int64(1),
+        );
+        single.entity_layout = SegmentEntityLayout::Single(
+            EntityIdentity::try_new(vec!["west".to_string(), "sensor-a".to_string()]).unwrap(),
+        );
+        let mut mixed = segment(
+            "data/mixed.parquet",
+            IndexValue::Int64(2),
+            IndexValue::Int64(3),
+        );
+        mixed.entity_layout = SegmentEntityLayout::Mixed;
+
+        let statistics = segment_pruning_statistics(&schema, &index, &[&single, &mixed]).unwrap();
+
+        assert_eq!(
+            scalar_at(&statistics, "device", 0, true),
+            ScalarValue::Utf8(Some("sensor-a".to_string()))
+        );
+        assert_eq!(
+            scalar_at(&statistics, "device", 0, false),
+            ScalarValue::Utf8(Some("sensor-a".to_string()))
+        );
+        assert_eq!(
+            scalar_at(&statistics, "region", 0, true),
+            ScalarValue::LargeUtf8(Some("west".to_string()))
+        );
+        assert_eq!(
+            scalar_at(&statistics, "region", 0, false),
+            ScalarValue::LargeUtf8(Some("west".to_string()))
+        );
+        assert_eq!(
+            null_count_at(&statistics, "device", 0),
+            ScalarValue::UInt64(Some(0))
+        );
+        assert_eq!(
+            scalar_at(&statistics, "device", 1, true),
+            ScalarValue::Utf8(None)
+        );
+        assert_eq!(
+            scalar_at(&statistics, "device", 1, false),
+            ScalarValue::Utf8(None)
+        );
+        assert_eq!(
+            null_count_at(&statistics, "device", 1),
+            ScalarValue::UInt64(None)
+        );
+        assert_eq!(
+            scalar_at(&statistics, "region", 1, true),
+            ScalarValue::LargeUtf8(None)
+        );
+    }
+
+    #[test]
+    fn rejects_single_entity_statistics_for_unsupported_arrow_types() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Int64, false),
+            Field::new("device", DataType::Int64, false),
+        ]));
+        let index = IndexSpec {
+            column: "idx".to_string(),
+            entity_columns: vec!["device".to_string()],
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let mut segment = segment(
+            "data/unsupported.parquet",
+            IndexValue::Int64(0),
+            IndexValue::Int64(1),
+        );
+        segment.entity_layout = SegmentEntityLayout::Single(
+            EntityIdentity::try_new(vec!["sensor-a".to_string()]).unwrap(),
+        );
+
+        let error = segment_pruning_statistics(&schema, &index, &[&segment])
+            .err()
+            .expect("unsupported entity type must fail");
+
+        assert!(error.to_string().contains("data/unsupported.parquet"));
+        assert!(error.to_string().contains("device"));
+        assert!(error.to_string().contains("Int64"));
     }
 
     #[test]
