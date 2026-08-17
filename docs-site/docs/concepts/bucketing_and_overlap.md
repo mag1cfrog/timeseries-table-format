@@ -25,17 +25,32 @@ Buckets drive coverage and overlap checks; they do not resample data.
 Bucket boundaries and core range operations are half-open: the start is included and the end is
 excluded, written `[start, end)`.
 
+## Entity identities
+
+`entity_columns` is an ordered list of columns that identifies independent time series inside one
+logical table. For `entity_columns=["exchange", "symbol"]`, the identity `("NASDAQ", "NVDA")`
+is distinct from `("NYSE", "NVDA")`. The configured column order defines the composite identity.
+
+One Parquet segment may contain rows for several identities. The table remains one
+`TimeSeriesTable`, and a registered DataFusion provider exposes every row. Entity columns remain
+normal SQL columns, so use `WHERE` to select an identity and `GROUP BY` to aggregate identities
+independently.
+
 ## Coverage and overlap
 
 Coverage is bucket-level evidence. A covered bucket contains at least one value, but coverage does
 not prove that every possible value inside the bucket exists.
 
 When a segment is appended, the table computes its covered buckets for each entity. The append is
-rejected with `CoverageOverlapError` if a bucket is already covered for the same entity.
+rejected with `CoverageOverlapError` only if a bucket is already covered for the same complete
+identity. Different identities may reuse the same ordered-index value or bucket.
 
 For example, Timestamp values `10:05` and `10:55` share the `10:00` to `11:00` bucket when
 `bucket="1h"`. If an existing segment covers that bucket for `NVDA`, a later segment covering it
 for `NVDA` is rejected. Coverage for another entity remains independent.
+
+The table does not physically repartition a mixed-entity Parquet file. Compaction, repartitioning,
+and an `optimize` command are outside the current feature.
 
 ## Choosing a bucket
 

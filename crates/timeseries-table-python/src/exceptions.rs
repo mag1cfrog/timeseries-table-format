@@ -27,7 +27,7 @@ create_exception!(
     _native,
     CoverageOverlapError,
     TimeseriesTableError,
-    "Raised when appending a segment would overlap existing coverage."
+    "Raised when an appended segment reuses a covered bucket for the same identity."
 );
 
 create_exception!(

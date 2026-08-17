@@ -1493,7 +1493,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// Raises
         /// ------
         /// CoverageOverlapError:
-        ///     If the segment overlaps existing coverage.
+        ///     If the same complete entity identity already covers an incoming bucket. Different
+        ///     identities may reuse the same bucket.
         /// SchemaMismatchError:
         ///     If the segment schema does not match the table schema.
         /// TimeseriesTableError:
