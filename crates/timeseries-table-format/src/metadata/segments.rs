@@ -297,10 +297,9 @@ mod tests {
             (SegmentEntityLayout::NotApplicable, "\"NotApplicable\""),
             (
                 SegmentEntityLayout::Single(
-                    EntityIdentity::try_new(vec!["us".to_string(), "device-1".to_string()])
-                        .unwrap(),
+                    EntityIdentity::try_new(vec!["us".into(), "device-1".into()]).unwrap(),
                 ),
-                r#"{"Single":["us","device-1"]}"#,
+                r#"{"Single":[{"type":"utf8","value":"us"},{"type":"utf8","value":"device-1"}]}"#,
             ),
             (SegmentEntityLayout::Mixed, "\"Mixed\""),
         ];

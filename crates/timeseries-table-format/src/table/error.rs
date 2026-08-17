@@ -172,6 +172,16 @@ pub enum TableError {
         source: SchemaCompatibilityError,
     },
 
+    /// A segment's schema is incompatible with the table or index specification.
+    #[snafu(display("Schema compatibility error for segment {path}: {source}"))]
+    SegmentSchemaCompatibility {
+        /// Table-relative segment path.
+        path: String,
+        /// Underlying schema compatibility error.
+        #[snafu(source)]
+        source: SchemaCompatibilityError,
+    },
+
     /// Table has progressed past the initial metadata commit but still lacks
     /// a canonical logical schema (invariant violation for v0.1).
     #[snafu(display("Table has no logical_schema at version {version}; cannot append in v0.1"))]

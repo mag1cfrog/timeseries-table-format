@@ -89,14 +89,20 @@ Below is a detailed reference of which SQL predicates enable segment pruning.
 
 ### Entity equality pruning
 
-For tables with configured entity columns, direct string equality predicates
-can prune segments from transaction-log metadata alone. No Parquet file,
-footer, or coverage sidecar is opened to make this decision.
+For tables with configured entity columns, direct equality predicates with an
+exact string, Int32, Int64, or UInt64 literal can prune segments from
+transaction-log metadata alone. No Parquet file, footer, or coverage sidecar
+is opened to make this decision.
 
-For example, with `symbol` configured as an entity column:
+For example, with string `symbol` or Int32 `device_id` configured as an entity
+column:
 
 ```sql
 WHERE symbol = 'A'
+```
+
+```sql
+WHERE device_id = -1
 ```
 
 - A `Single(identity)` segment is retained when its `symbol` component is `A`.
@@ -114,8 +120,10 @@ Entity equality pruning composes with ordered-index pruning. For example,
 because its identity conflicts, its ordered-index range cannot match, or both.
 
 Reversed equality operands and qualified column references are supported, such
-as `WHERE 'A' = prices.symbol`. Range, inequality, function, and other
-unsupported entity expressions do not enable entity-level segment pruning.
+as `WHERE 'A' = prices.symbol` or `WHERE -1 = readings.device_id`. The literal
+must have the exact entity-column type. Mismatched or unsupported literals,
+range predicates, inequalities, functions, and other expressions do not enable
+entity-level segment pruning.
 
 Segment pruning is only an internal optimization. Filter pushdown remains
 inexact, and DataFusion still evaluates the original predicate against the

@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Float64Builder, Int64Array, StringArray, StringBuilder,
-    TimestampMillisecondArray, TimestampMillisecondBuilder, UInt64Array,
+    Array, ArrayRef, Float64Array, Float64Builder, Int32Array, Int64Array, StringArray,
+    StringBuilder, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -535,6 +535,102 @@ async fn create_entity_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTabl
         table.append_parquet_segment(path).await?;
     }
 
+    Ok(table)
+}
+
+fn int32_entity_table_meta() -> TestResult<TableMeta> {
+    Ok(TableMeta::new_time_series_with_schema(
+        IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["device_id".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        },
+        LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "device_id".to_string(),
+                data_type: LogicalDataType::Int32,
+                nullable: false,
+            },
+            LogicalField {
+                name: "price".to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: false,
+            },
+        ])?,
+    ))
+}
+
+fn write_int32_entity_segment(
+    root: &Path,
+    path: &str,
+    timestamps: &[i64],
+    device_ids: &[i32],
+    prices: &[f64],
+) -> TestResult {
+    let absolute = root.join(path);
+    std::fs::create_dir_all(absolute.parent().ok_or("segment parent")?)?;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("device_id", DataType::Int32, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())),
+            Arc::new(Int32Array::from(device_ids.to_vec())),
+            Arc::new(Float64Array::from(prices.to_vec())),
+        ],
+    )?;
+    let mut writer = ArrowWriter::try_new(std::fs::File::create(absolute)?, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+async fn create_int32_entity_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
+    let mut table =
+        TimeSeriesTable::create(TableLocation::local(tmp.path()), int32_entity_table_meta()?)
+            .await?;
+    let segments = [
+        (
+            "data/device-negative.parquet",
+            vec![0],
+            vec![-1],
+            vec![10.0],
+        ),
+        (
+            "data/device-maximum.parquet",
+            vec![60_000],
+            vec![i32::MAX],
+            vec![20.0],
+        ),
+        (
+            "data/device-mixed.parquet",
+            vec![120_000, 180_000],
+            vec![-1, i32::MAX],
+            vec![30.0, 40.0],
+        ),
+    ];
+    for (path, timestamps, device_ids, prices) in segments {
+        write_int32_entity_segment(tmp.path(), path, &timestamps, &device_ids, &prices)?;
+        table.append_parquet_segment(path).await?;
+    }
     Ok(table)
 }
 
@@ -1338,6 +1434,27 @@ async fn entity_equality_prunes_conflicting_single_entity_segments() -> TestResu
         ]
     );
     assert_eq!(collect_i64_values(&batches)?, [60_000, 180_000]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn numeric_entity_equality_prunes_conflicting_single_entity_segments() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_int32_entity_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+
+    let (files, batches) = run_timestamp_query(&ctx, "device_id = -1").await?;
+    assert_eq!(files, ["device-negative.parquet", "device-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [0, 120_000]);
+
+    let (files, batches) = run_timestamp_query(&ctx, "2147483647 = t.device_id").await?;
+    assert_eq!(files, ["device-maximum.parquet", "device-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [60_000, 180_000]);
+
+    let (files, batches) = run_timestamp_query(&ctx, "device_id = 42").await?;
+    assert_eq!(files, ["device-mixed.parquet"]);
+    assert!(batches.iter().all(|batch| batch.num_rows() == 0));
     Ok(())
 }
 

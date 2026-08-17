@@ -31,6 +31,11 @@ excluded, written `[start, end)`.
 logical table. For `entity_columns=["exchange", "symbol"]`, the identity `("NASDAQ", "NVDA")`
 is distinct from `("NYSE", "NVDA")`. The configured column order defines the composite identity.
 
+Entity columns support Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
+String and large-string values share one canonical string representation. Integer identities keep
+their exact scalar type and value, so signed and unsigned values are not compared through strings.
+Every observed entity value must be non-null. Other scalar domains and implicit casts are rejected.
+
 One Parquet segment may contain rows for several identities. The table remains one
 `TimeSeriesTable`, and a registered DataFusion provider exposes every row. Entity columns remain
 normal SQL columns, so use `WHERE` to select an identity and `GROUP BY` to aggregate identities
@@ -73,3 +78,6 @@ Use a finer bucket when independent segments may contain values in the same wide
 
 Indexes cannot currently use floats, decimals, strings, multiple columns, descending order, or
 implicit signedness conversion.
+
+Entity columns cannot currently use booleans, floats, decimals, timestamps, binary, dictionary,
+or nested values. Null entity values and implicit conversions are not supported.

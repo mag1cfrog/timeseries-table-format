@@ -18,13 +18,62 @@ pub use roaring::RoaringTreemap;
 /// Ordered 64-bit coverage bucket identity.
 pub type Bucket = u64;
 
+/// Exact scalar value in an entity identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "value",
+    rename_all = "lowercase",
+    deny_unknown_fields
+)]
+pub enum EntityValue {
+    /// UTF-8 text from an Arrow `Utf8` or `LargeUtf8` column.
+    Utf8(String),
+    /// Signed 32-bit integer.
+    Int32(i32),
+    /// Signed 64-bit integer.
+    Int64(i64),
+    /// Unsigned 64-bit integer.
+    UInt64(u64),
+}
+
+impl From<String> for EntityValue {
+    fn from(value: String) -> Self {
+        Self::Utf8(value)
+    }
+}
+
+impl From<&str> for EntityValue {
+    fn from(value: &str) -> Self {
+        Self::Utf8(value.to_string())
+    }
+}
+
+impl From<i32> for EntityValue {
+    fn from(value: i32) -> Self {
+        Self::Int32(value)
+    }
+}
+
+impl From<i64> for EntityValue {
+    fn from(value: i64) -> Self {
+        Self::Int64(value)
+    }
+}
+
+impl From<u64> for EntityValue {
+    fn from(value: u64) -> Self {
+        Self::UInt64(value)
+    }
+}
+
 /// Ordered composite entity identity.
 ///
 /// Component positions correspond to the table's configured entity-column
 /// order. Column names are deliberately not repeated in every identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityIdentity {
-    components: Vec<String>,
+    components: Vec<EntityValue>,
 }
 
 impl Serialize for EntityIdentity {
@@ -41,7 +90,7 @@ impl<'de> Deserialize<'de> for EntityIdentity {
     where
         D: Deserializer<'de>,
     {
-        let components = Vec::<String>::deserialize(deserializer)?;
+        let components = Vec::<EntityValue>::deserialize(deserializer)?;
         Self::try_new(components).map_err(D::Error::custom)
     }
 }
@@ -51,7 +100,7 @@ impl EntityIdentity {
     ///
     /// # Errors
     /// Returns [`EntityIdentityError::Empty`] when `components` is empty.
-    pub fn try_new(components: Vec<String>) -> Result<Self, EntityIdentityError> {
+    pub fn try_new(components: Vec<EntityValue>) -> Result<Self, EntityIdentityError> {
         if components.is_empty() {
             return Err(EntityIdentityError::Empty);
         }
@@ -59,7 +108,7 @@ impl EntityIdentity {
     }
 
     /// Borrow components in configured entity-column order.
-    pub fn components(&self) -> &[String] {
+    pub fn components(&self) -> &[EntityValue] {
         &self.components
     }
 }
@@ -492,7 +541,7 @@ mod tests {
         EntityIdentity::try_new(
             components
                 .iter()
-                .map(|component| (*component).to_string())
+                .map(|component| EntityValue::from(*component))
                 .collect(),
         )
         .unwrap()
@@ -502,7 +551,7 @@ mod tests {
     fn entity_identity_preserves_component_order() {
         assert_eq!(
             identity(&["venue", "symbol"]).components(),
-            &["venue".to_string(), "symbol".to_string()]
+            &[EntityValue::from("venue"), EntityValue::from("symbol")]
         );
         assert!(identity(&["A", "Z"]) < identity(&["B", "A"]));
         assert!(identity(&["A", "A"]) < identity(&["A", "Z"]));
@@ -511,6 +560,34 @@ mod tests {
             EntityIdentity::try_new(Vec::new()),
             Err(EntityIdentityError::Empty)
         );
+    }
+
+    #[test]
+    fn entity_identity_preserves_scalar_types_in_json() {
+        let identity = EntityIdentity::try_new(vec![
+            EntityValue::from("sensor"),
+            EntityValue::Int32(-1),
+            EntityValue::Int64(i64::MIN),
+            EntityValue::UInt64(u64::MAX),
+        ])
+        .unwrap();
+
+        let json = serde_json::to_value(&identity).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                { "type": "utf8", "value": "sensor" },
+                { "type": "int32", "value": -1 },
+                { "type": "int64", "value": i64::MIN },
+                { "type": "uint64", "value": u64::MAX },
+            ])
+        );
+        assert_eq!(
+            serde_json::from_value::<EntityIdentity>(json).unwrap(),
+            identity
+        );
+        assert_ne!(EntityValue::Int32(1), EntityValue::Int64(1));
+        assert_ne!(EntityValue::Int64(1), EntityValue::UInt64(1));
     }
 
     #[test]

@@ -11,8 +11,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit};
 use arrow_array::{
-    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
+    Array, Float64Array, Int32Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use futures::StreamExt;
@@ -74,6 +74,75 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
         format_version: TABLE_FORMAT_VERSION,
     }
+}
+
+pub(crate) fn make_int32_entity_table_meta() -> TableMeta {
+    TableMeta::new_time_series_with_schema(
+        IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["device_id".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        },
+        LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "device_id".to_string(),
+                data_type: LogicalDataType::Int32,
+                nullable: false,
+            },
+            LogicalField {
+                name: "price".to_string(),
+                data_type: LogicalDataType::Float64,
+                nullable: false,
+            },
+        ])
+        .expect("valid Int32 entity test schema"),
+    )
+}
+
+pub(crate) fn write_int32_entity_parquet(
+    path: &Path,
+    ts_millis: &[i64],
+    device_ids: &[i32],
+    prices: &[f64],
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(ts_millis.len(), device_ids.len());
+    assert_eq!(device_ids.len(), prices.len());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("device_id", DataType::Int32, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(TimestampMillisecondArray::from(ts_millis.to_vec())),
+            Arc::new(Int32Array::from(device_ids.to_vec())),
+            Arc::new(Float64Array::from(prices.to_vec())),
+        ],
+    )?;
+    let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
 }
 
 pub(crate) fn write_test_parquet(

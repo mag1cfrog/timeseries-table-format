@@ -13,26 +13,24 @@ use log::warn;
 
 use crate::{
     coverage::{
-        Coverage, EntityCoverage, EntityIdentity,
+        Coverage, EntityCoverage, EntityIdentity, EntityValue,
         io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
+    metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
     transaction_log::table_state::TableCoveragePointer,
 };
 
 use super::{TimeSeriesTable, error::TableError};
 
-fn ensure_entity_coverage_identity_arity(
+fn ensure_entity_coverage_identity_schema(
     coverage: &EntityCoverage,
-    expected: usize,
+    table: &TimeSeriesTable,
 ) -> Result<(), CoverageError> {
-    if let Some((identity, _)) = coverage
-        .iter()
-        .find(|(identity, _)| identity.components().len() != expected)
-    {
-        return Err(CoverageError::EntityIdentityArityMismatch {
-            expected,
-            actual: identity.components().len(),
-        });
+    let schema = require_table_schema(&table.state().table_meta)
+        .map_err(|source| CoverageError::EntityIdentitySchema { source })?;
+    for (identity, _) in coverage.iter() {
+        ensure_entity_identity_matches_schema(schema, table.index_spec(), identity)
+            .map_err(|source| CoverageError::EntityIdentitySchema { source })?;
     }
     Ok(())
 }
@@ -50,7 +48,7 @@ impl TimeSeriesTable {
 
     fn resolve_entity_identity(
         &self,
-        components: &[(&str, &str)],
+        components: &[(&str, EntityValue)],
     ) -> Result<EntityIdentity, TableError> {
         let entity_columns = &self.index_spec().entity_columns;
         if entity_columns.is_empty() {
@@ -58,15 +56,15 @@ impl TimeSeriesTable {
         }
 
         let mut provided = BTreeMap::new();
-        for &(column, value) in components {
-            if !entity_columns.iter().any(|expected| expected == column) {
+        for (column, value) in components {
+            if !entity_columns.iter().any(|expected| expected == *column) {
                 return Err(TableError::UnexpectedEntityIdentityColumn {
-                    column: column.to_string(),
+                    column: (*column).to_string(),
                 });
             }
-            if provided.insert(column, value).is_some() {
+            if provided.insert(*column, value).is_some() {
                 return Err(TableError::DuplicateEntityIdentityColumn {
-                    column: column.to_string(),
+                    column: (*column).to_string(),
                 });
             }
         }
@@ -76,14 +74,23 @@ impl TimeSeriesTable {
             .map(|column| {
                 provided
                     .get(column.as_str())
-                    .map(|value| (*value).to_string())
+                    .map(|value| (**value).clone())
                     .ok_or_else(|| TableError::MissingEntityIdentityColumn {
                         column: column.clone(),
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        EntityIdentity::try_new(ordered).map_err(|_| TableError::EntityIdentityNotConfigured)
+        let identity = EntityIdentity::try_new(ordered)
+            .map_err(|_| TableError::EntityIdentityNotConfigured)?;
+        let schema = self.state().table_meta.logical_schema.as_ref().ok_or(
+            TableError::MissingCanonicalSchema {
+                version: self.state().version,
+            },
+        )?;
+        ensure_entity_identity_matches_schema(schema, self.index_spec(), &identity)
+            .map_err(|source| TableError::SchemaCompatibility { source })?;
+        Ok(identity)
     }
 
     async fn read_validated_entity_coverage_sidecar(
@@ -91,7 +98,7 @@ impl TimeSeriesTable {
         path: &Path,
     ) -> Result<EntityCoverage, CoverageError> {
         let coverage = read_entity_coverage_sidecar(self.location(), path).await?;
-        ensure_entity_coverage_identity_arity(&coverage, self.index_spec().entity_columns.len())?;
+        ensure_entity_coverage_identity_schema(&coverage, self)?;
         Ok(coverage)
     }
 
@@ -357,15 +364,15 @@ impl TimeSeriesTable {
     /// is still queried independently:
     /// ```
     /// use chrono::{TimeZone, Utc};
-    /// # use timeseries_table_format::table::TimeSeriesTable;
+    /// # use timeseries_table_format::{coverage::EntityValue, table::TimeSeriesTable};
     /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_format::table::TableError> {
     /// let start = Utc.timestamp_opt(0, 0).single().unwrap();
     /// let end = Utc.timestamp_opt(120, 0).single().unwrap();
     /// let a = table
-    ///     .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+    ///     .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
     ///     .await?;
     /// let b = table
-    ///     .coverage_ratio_for_entity_range(&[("symbol", "B")], start, end)
+    ///     .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("B"))], start, end)
     ///     .await?;
     /// # let _ = (a, b);
     /// # Ok(())
@@ -373,7 +380,7 @@ impl TimeSeriesTable {
     /// ```
     pub async fn coverage_ratio_for_entity_range<S, E>(
         &self,
-        entity: &[(&str, &str)],
+        entity: &[(&str, EntityValue)],
         start: S,
         end: E,
     ) -> Result<f64, TableError>
@@ -437,7 +444,7 @@ impl TimeSeriesTable {
     /// the snapshot cannot be loaded or the range cannot be bucketed.
     pub async fn max_gap_len_for_entity_range<S, E>(
         &self,
-        entity: &[(&str, &str)],
+        entity: &[(&str, EntityValue)],
         start: S,
         end: E,
     ) -> Result<u128, TableError>
@@ -516,7 +523,7 @@ impl TimeSeriesTable {
     /// when the endpoint cannot be bucketed or the snapshot cannot be loaded.
     pub async fn last_fully_covered_window_for_entity<E>(
         &self,
-        entity: &[(&str, &str)],
+        entity: &[(&str, EntityValue)],
         end: E,
         window_len_buckets: u64,
     ) -> Result<Option<RangeInclusive<Bucket>>, TableError>
@@ -547,17 +554,20 @@ mod tests {
     use super::*;
     use crate::{
         coverage::{
-            Coverage, EntityCoverage, EntityIdentity,
+            Coverage, EntityCoverage, EntityIdentity, EntityValue,
             bucket::{BucketError, bucket_id},
             io::{write_coverage_sidecar_atomic, write_coverage_sidecar_new_bytes},
             serde::entity_coverage_to_bytes,
         },
+        metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
+        metadata::schema_compat::SchemaCompatibilityError,
         metadata::table_metadata::{
             IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeBucket,
         },
         storage::TableLocation,
         table::test_util::{
-            TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
+            TestResult, TestRow, make_basic_table_meta, make_int32_entity_table_meta, utc_datetime,
+            write_int32_entity_parquet, write_test_parquet,
         },
     };
     use chrono::{DateTime, TimeZone, Utc};
@@ -622,13 +632,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entity_sidecar_identity_arity_is_validated_for_snapshots_and_recovery() -> TestResult {
+    async fn entity_sidecar_identity_schema_is_validated_for_snapshots_and_recovery() -> TestResult
+    {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
         let mut wrong_arity = EntityCoverage::empty();
         wrong_arity.union_coverage(
-            EntityIdentity::try_new(vec!["A".to_string(), "X".to_string()])?,
+            EntityIdentity::try_new(vec!["A".into(), "X".into()])?,
             Coverage::from_iter([0]),
         );
         let wrong_arity_bytes = entity_coverage_to_bytes(&wrong_arity)?;
@@ -650,13 +661,21 @@ mod tests {
         assert!(matches!(
             snapshot_error,
             TableError::CoverageSidecar {
-                source: CoverageError::EntityIdentityArityMismatch {
-                    expected: 1,
-                    actual: 2,
+                source: CoverageError::EntityIdentitySchema {
+                    source: SchemaCompatibilityError::EntityIdentityArityMismatch {
+                        expected: 1,
+                        actual: 2,
+                    },
                 },
             }
         ));
 
+        let mut wrong_type = EntityCoverage::empty();
+        wrong_type.union_coverage(
+            EntityIdentity::try_new(vec![EntityValue::Int32(1)])?,
+            Coverage::from_iter([0]),
+        );
+        let wrong_type_bytes = entity_coverage_to_bytes(&wrong_type)?;
         table.state_mut().table_coverage = None;
         let segment_path = "data/entity-arity.parquet";
         append_segment(
@@ -676,12 +695,12 @@ mod tests {
             .get(segment_path)
             .and_then(|segment| segment.coverage_path.clone())
             .expect("segment coverage path");
-        tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_arity_bytes).await?;
+        tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_type_bytes).await?;
 
         let recovery_error = table
             .recover_table_entity_coverage_from_segments()
             .await
-            .expect_err("segment identity arity must match the table");
+            .expect_err("segment identity type must match the table schema");
         assert!(matches!(
             recovery_error,
             TableError::SegmentCoverageSidecarRead {
@@ -691,11 +710,15 @@ mod tests {
             } if path == segment_path
                 && coverage_path == segment_coverage_path
                 && matches!(
-                    *source,
-                    CoverageError::EntityIdentityArityMismatch {
-                        expected: 1,
-                        actual: 2,
+                    &*source,
+                    CoverageError::EntityIdentitySchema {
+                        source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                            column,
+                            expected: crate::metadata::logical_schema::LogicalDataType::Utf8,
+                            actual: "int32",
+                        },
                     }
+                    if column == "symbol"
                 )
         ));
         Ok(())
@@ -730,19 +753,23 @@ mod tests {
 
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await?,
             0.5
         );
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "B")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("B"))], start, end)
                 .await?,
             0.5
         );
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "unseen")], start, end)
+                .coverage_ratio_for_entity_range(
+                    &[("symbol", EntityValue::from("unseen"))],
+                    start,
+                    end,
+                )
                 .await?,
             0.0
         );
@@ -752,6 +779,80 @@ mod tests {
                 if entity_columns == ["symbol"]
         ));
         assert_eq!(table.state(), &state_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn numeric_entity_queries_require_the_exact_scalar_type() -> TestResult {
+        let tmp = TempDir::new()?;
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(tmp.path()),
+            make_int32_entity_table_meta(),
+        )
+        .await?;
+        let path = "data/numeric-coverage.parquet";
+        write_int32_entity_parquet(
+            &tmp.path().join(path),
+            &[1_000, 61_000],
+            &[-1, i32::MAX],
+            &[10.0, 20.0],
+        )?;
+        table.append_parquet_segment(path).await?;
+        let start = ts_from_secs(0);
+        let end = ts_from_secs(120);
+
+        assert_eq!(
+            table
+                .coverage_ratio_for_entity_range(
+                    &[("device_id", EntityValue::Int32(-1))],
+                    start,
+                    end,
+                )
+                .await?,
+            0.5
+        );
+        assert_eq!(
+            table
+                .coverage_ratio_for_entity_range(
+                    &[("device_id", EntityValue::Int32(42))],
+                    start,
+                    end,
+                )
+                .await?,
+            0.0
+        );
+        assert!(matches!(
+            table
+                .coverage_ratio_for_entity_range(
+                    &[("device_id", EntityValue::Int64(-1))],
+                    start,
+                    end,
+                )
+                .await,
+            Err(TableError::SchemaCompatibility {
+                source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                    column,
+                    expected: LogicalDataType::Int32,
+                    actual: "int64",
+                },
+            }) if column == "device_id"
+        ));
+        assert!(matches!(
+            table
+                .coverage_ratio_for_entity_range(
+                    &[("device_id", EntityValue::from("-1"))],
+                    start,
+                    end,
+                )
+                .await,
+            Err(TableError::SchemaCompatibility {
+                source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                    column,
+                    expected: LogicalDataType::Int32,
+                    actual: "utf8",
+                },
+            }) if column == "device_id"
+        ));
         Ok(())
     }
 
@@ -799,37 +900,45 @@ mod tests {
 
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await?,
             0.5
         );
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "B")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("B"))], start, end)
                 .await?,
             0.75
         );
         assert_eq!(
             table
-                .max_gap_len_for_entity_range(&[("symbol", "A")], start, end)
+                .max_gap_len_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await?,
             2
         );
         assert_eq!(
             table
-                .max_gap_len_for_entity_range(&[("symbol", "B")], start, end)
+                .max_gap_len_for_entity_range(&[("symbol", EntityValue::from("B"))], start, end)
                 .await?,
             1
         );
         assert_eq!(
             table
-                .last_fully_covered_window_for_entity(&[("symbol", "A")], end, 2)
+                .last_fully_covered_window_for_entity(
+                    &[("symbol", EntityValue::from("A"))],
+                    end,
+                    2,
+                )
                 .await?,
             None
         );
         assert_eq!(
             table
-                .last_fully_covered_window_for_entity(&[("symbol", "B")], end, 2)
+                .last_fully_covered_window_for_entity(
+                    &[("symbol", EntityValue::from("B"))],
+                    end,
+                    2,
+                )
                 .await?,
             Some(0x8000_0000_0000_0001..=0x8000_0000_0000_0002)
         );
@@ -846,43 +955,59 @@ mod tests {
 
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await?,
             0.5
         );
         assert_eq!(
             table
-                .coverage_ratio_for_entity_range(&[("symbol", "B")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("B"))], start, end)
                 .await?,
             0.75
         );
         assert_eq!(
             table
-                .max_gap_len_for_entity_range(&[("symbol", "A")], start, end)
+                .max_gap_len_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await?,
             2
         );
         assert_eq!(
             table
-                .last_fully_covered_window_for_entity(&[("symbol", "B")], end, 2)
+                .last_fully_covered_window_for_entity(
+                    &[("symbol", EntityValue::from("B"))],
+                    end,
+                    2,
+                )
                 .await?,
             Some(0x8000_0000_0000_0001..=0x8000_0000_0000_0002)
         );
         assert_eq!(
             table
-                .max_gap_len_for_entity_range(&[("symbol", "unseen")], start, end)
+                .max_gap_len_for_entity_range(
+                    &[("symbol", EntityValue::from("unseen"))],
+                    start,
+                    end,
+                )
                 .await?,
             4
         );
         assert_eq!(
             table
-                .last_fully_covered_window_for_entity(&[("symbol", "unseen")], end, 1)
+                .last_fully_covered_window_for_entity(
+                    &[("symbol", EntityValue::from("unseen"))],
+                    end,
+                    1,
+                )
                 .await?,
             None
         );
         assert_eq!(
             table
-                .last_fully_covered_window_for_entity(&[("symbol", "unseen")], end, 0)
+                .last_fully_covered_window_for_entity(
+                    &[("symbol", EntityValue::from("unseen"))],
+                    end,
+                    0,
+                )
                 .await?,
             None
         );
@@ -914,22 +1039,43 @@ mod tests {
             unreachable!("test metadata is time series")
         };
         index.entity_columns = vec!["symbol".to_string(), "venue".to_string()];
+        let mut fields = meta
+            .logical_schema
+            .as_ref()
+            .expect("test schema")
+            .columns()
+            .to_vec();
+        fields.push(LogicalField {
+            name: "venue".to_string(),
+            data_type: LogicalDataType::Utf8,
+            nullable: false,
+        });
+        meta.logical_schema = Some(LogicalSchema::new(fields)?);
         let table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
 
-        let identity = table.resolve_entity_identity(&[("venue", "X"), ("symbol", "A")])?;
-        assert_eq!(identity.components(), ["A", "X"]);
+        let identity = table.resolve_entity_identity(&[
+            ("venue", EntityValue::from("X")),
+            ("symbol", EntityValue::from("A")),
+        ])?;
+        assert_eq!(
+            identity.components(),
+            [EntityValue::from("A"), EntityValue::from("X")]
+        );
         let start = ts_from_secs(0);
         let end = ts_from_secs(60);
         assert!(matches!(
             table
-                .coverage_ratio_for_entity_range(&[("venue", "X")], start, end)
+                .coverage_ratio_for_entity_range(&[("venue", EntityValue::from("X"))], start, end)
                 .await,
             Err(TableError::MissingEntityIdentityColumn { column }) if column == "symbol"
         ));
         assert!(matches!(
             table
                 .coverage_ratio_for_entity_range(
-                    &[("device", "A"), ("venue", "X")],
+                    &[
+                        ("device", EntityValue::from("A")),
+                        ("venue", EntityValue::from("X")),
+                    ],
                     start,
                     end,
                 )
@@ -940,9 +1086,9 @@ mod tests {
             table
                 .coverage_ratio_for_entity_range(
                     &[
-                        ("symbol", "A"),
-                        ("symbol", "B"),
-                        ("venue", "X"),
+                        ("symbol", EntityValue::from("A")),
+                        ("symbol", EntityValue::from("B")),
+                        ("venue", EntityValue::from("X")),
                     ],
                     start,
                     end,
@@ -954,7 +1100,7 @@ mod tests {
         let (_tmp, global_table) = make_table().await?;
         assert!(matches!(
             global_table
-                .coverage_ratio_for_entity_range(&[("symbol", "A")], start, end)
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await,
             Err(TableError::EntityIdentityNotConfigured)
         ));

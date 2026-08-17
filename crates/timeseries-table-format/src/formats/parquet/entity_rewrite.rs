@@ -33,7 +33,7 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::ensure_index_matches_schema,
+        schema_compat::ensure_index_spec_matches_schema,
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta},
         table_metadata::IndexSpec,
     },
@@ -322,7 +322,7 @@ async fn validate_source(
     index
         .validate()
         .map_err(|error| invalid_input(format!("invalid ordered index: {error}")))?;
-    ensure_index_matches_schema(table_schema, index)
+    ensure_index_spec_matches_schema(table_schema, index)
         .map_err(|error| invalid_input(format!("ordered index does not match schema: {error}")))?;
     if index.entity_columns.is_empty() {
         return Err(invalid_input("table has no entity columns"));
@@ -621,7 +621,9 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        coverage::{io::write_coverage_sidecar_new_bytes, serde::entity_coverage_to_bytes},
+        coverage::{
+            EntityValue, io::write_coverage_sidecar_new_bytes, serde::entity_coverage_to_bytes,
+        },
         metadata::table_metadata::{IndexKind, TimeBucket},
         table::test_util::{make_table_meta_with_unit, write_arrow_parquet_with_unit},
         transaction_log::TableKind,
@@ -897,21 +899,21 @@ mod tests {
         }
 
         assert_eq!(
-            actual["tenant-secret-a"],
+            actual[&EntityValue::from("tenant-secret-a")],
             vec![
                 (2_000, "tenant-secret-a".to_string(), 20.0),
                 (5_000, "tenant-secret-a".to_string(), 21.0),
             ]
         );
         assert_eq!(
-            actual["tenant-secret-b"],
+            actual[&EntityValue::from("tenant-secret-b")],
             vec![
                 (1_000, "tenant-secret-b".to_string(), 10.0),
                 (3_000, "tenant-secret-b".to_string(), 11.0),
             ]
         );
         assert_eq!(
-            actual["tenant-secret-c"],
+            actual[&EntityValue::from("tenant-secret-c")],
             vec![
                 (4_000, "tenant-secret-c".to_string(), 30.0),
                 (6_000, "tenant-secret-c".to_string(), 31.0),

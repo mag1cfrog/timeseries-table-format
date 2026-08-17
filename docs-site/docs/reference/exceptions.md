@@ -28,7 +28,8 @@ double-ingesting data. The exception carries:
 - `overlap_count` - how many entity/bucket pairs overlap on an entity-aware table, or how many
   buckets overlap on a table without entity columns
 - `example_entity_identity` - one overlapping identity as a dictionary in configured
-  entity-column order, or `None` for a table without entity columns
+  entity-column order, or `None` for a table without entity columns. String components are Python
+  `str` values and integer components are Python `int` values.
 - `example_bucket` - one overlapping bucket identifier, useful for debugging
 
 These attributes are stable diagnostics. Inspect them directly instead of parsing the exception

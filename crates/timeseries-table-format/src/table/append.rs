@@ -30,7 +30,7 @@ use crate::{
         logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::{
-        schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
+        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
         segments::SegmentEntityLayout,
     },
     storage,
@@ -43,8 +43,8 @@ use super::{
     error::{
         CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu,
         EntityCoverageOverlapSnafu, EntityWithoutIndexCoverageSnafu,
-        ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu,
-        SegmentCoverageSnafu, SegmentMetaSnafu, StorageSnafu, TableError,
+        ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SegmentCoverageSnafu,
+        SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
     },
 };
 
@@ -216,8 +216,11 @@ impl TimeSeriesTable {
         let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
             .context(SegmentMetaSnafu)?;
-        ensure_index_matches_schema(&segment_schema, &self.index)
-            .context(SchemaCompatibilitySnafu)?;
+        ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
+            SegmentSchemaCompatibilitySnafu {
+                path: relative_path.to_string(),
+            },
+        )?;
         if let Some(r) = report.as_mut() {
             r.push_step("logical_schema", step_start.elapsed(), Vec::new());
         }
@@ -245,8 +248,11 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)?;
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index).context(
+                    SegmentSchemaCompatibilitySnafu {
+                        path: relative_path.to_string(),
+                    },
+                )?;
                 None
             }
         };
@@ -528,7 +534,7 @@ mod tests {
     use super::*;
     use crate::coverage::io::{read_coverage_sidecar, read_entity_coverage_sidecar};
     use crate::coverage::serde::entity_coverage_from_bytes;
-    use crate::coverage::{EntityCoverage, EntityIdentity};
+    use crate::coverage::{EntityCoverage, EntityIdentity, EntityValue};
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
@@ -542,7 +548,8 @@ mod tests {
     };
     use arrow::{
         array::{
-            ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray, UInt64Array,
+            ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
+            TimestampMillisecondArray, UInt64Array,
         },
         datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
@@ -877,7 +884,7 @@ mod tests {
         assert_eq!(seg.row_count, 1);
         assert_eq!(
             seg.entity_layout,
-            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?)
+            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".into()])?)
         );
         assert!(matches!(
             &seg.index_min,
@@ -900,7 +907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_no_entity_int64_append_uses_global_coverage() -> TestResult {
+    async fn version_six_no_entity_int64_append_uses_global_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
@@ -976,7 +983,7 @@ mod tests {
                 .append_parquet_segment(mismatch_path)
                 .await
                 .expect_err("later schema mismatch must fail"),
-            TableError::SchemaCompatibility { .. }
+            TableError::SegmentSchemaCompatibility { .. }
         ));
         assert_eq!(table.state, state_before);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -1165,7 +1172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_records_single_layout_for_each_entity_segment() -> TestResult {
+    async fn version_six_records_single_layout_for_each_entity_segment() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1192,7 +1199,7 @@ mod tests {
                     .get(path)
                     .expect("segment present")
                     .entity_layout,
-                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.to_string()])?)
+                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.into()])?)
             );
         }
 
@@ -1210,7 +1217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_records_mixed_layout_for_multiple_identities() -> TestResult {
+    async fn version_six_records_mixed_layout_for_multiple_identities() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1248,7 +1255,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_five_preserves_composite_identity_order_in_layout() -> TestResult {
+    async fn numeric_entities_append_overlap_and_recover_with_exact_types() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table =
+            TimeSeriesTable::create(location.clone(), make_int32_entity_table_meta()).await?;
+
+        let negative_path = "data/negative-device.parquet";
+        write_int32_entity_parquet(
+            &tmp.path().join(negative_path),
+            &[1_000, 61_000],
+            &[-1, -1],
+            &[10.0, 11.0],
+        )?;
+        table.append_parquet_segment(negative_path).await?;
+        let negative_identity = EntityIdentity::try_new(vec![EntityValue::Int32(-1)])?;
+        assert_eq!(
+            table.state.segments[negative_path].entity_layout,
+            SegmentEntityLayout::Single(negative_identity.clone())
+        );
+
+        let maximum_path = "data/maximum-device.parquet";
+        write_int32_entity_parquet(
+            &tmp.path().join(maximum_path),
+            &[1_000],
+            &[i32::MAX],
+            &[20.0],
+        )?;
+        table.append_parquet_segment(maximum_path).await?;
+        assert_eq!(
+            table.state.segments[maximum_path].entity_layout,
+            SegmentEntityLayout::Single(EntityIdentity::try_new(vec![EntityValue::Int32(
+                i32::MAX,
+            )])?)
+        );
+
+        let overlap_path = "data/negative-overlap.parquet";
+        write_int32_entity_parquet(&tmp.path().join(overlap_path), &[1_500], &[-1], &[12.0])?;
+        let error = table
+            .append_parquet_segment(overlap_path)
+            .await
+            .expect_err("same typed identity and bucket must overlap");
+        assert!(matches!(
+            error,
+            TableError::EntityCoverageOverlap {
+                overlap_count: 1,
+                example_identity,
+                ..
+            } if example_identity == negative_identity
+        ));
+
+        let snapshot = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state(), table.state());
+        assert_eq!(
+            reopened
+                .recover_table_entity_coverage_from_segments()
+                .await?,
+            snapshot
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn version_six_preserves_composite_identity_order_in_layout() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = IndexSpec {
@@ -1304,8 +1374,8 @@ mod tests {
                     .expect("segment present")
                     .entity_layout,
                 SegmentEntityLayout::Single(EntityIdentity::try_new(vec![
-                    "A".to_string(),
-                    venue.to_string(),
+                    "A".into(),
+                    venue.into(),
                 ])?)
             );
         }
@@ -1322,7 +1392,8 @@ mod tests {
                 overlap_count: 1,
                 example_identity,
                 ..
-            } if example_identity.components() == ["A", "X"]
+            } if example_identity.components()
+                == [EntityValue::from("A"), EntityValue::from("X")]
         ));
         Ok(())
     }
@@ -1357,7 +1428,7 @@ mod tests {
                 identity,
             } => {
                 assert_eq!(segment_path, path);
-                assert_eq!(identity.components(), ["B"]);
+                assert_eq!(identity.components(), [EntityValue::from("B")]);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1449,14 +1520,75 @@ mod tests {
             .expect_err("expected schema mismatch");
 
         match err {
-            TableError::SchemaCompatibility { source } => {
+            TableError::SegmentSchemaCompatibility { path, source } => {
+                assert_eq!(path, rel_path);
                 assert!(matches!(
                     source,
-                    crate::metadata::schema_compat::SchemaCompatibilityError::MissingColumn { .. }
+                    crate::metadata::schema_compat::SchemaCompatibilityError::MissingEntityColumn { .. }
                 ));
             }
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn first_append_rejects_unsupported_entity_type_without_publication() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["device_id".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        };
+        let mut table =
+            TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
+        let rel_path = "data/unsupported-entity.parquet";
+        let abs_path = tmp.path().join(rel_path);
+        std::fs::create_dir_all(abs_path.parent().expect("data parent"))?;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("device_id", DataType::Boolean, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000])),
+                Arc::new(BooleanArray::from(vec![true])),
+            ],
+        )?;
+        let mut writer = ArrowWriter::try_new(File::create(abs_path)?, schema, None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        let state_before = table.state.clone();
+
+        let error = table
+            .append_parquet_segment(rel_path)
+            .await
+            .expect_err("Boolean entity columns must be rejected");
+
+        assert!(matches!(
+            error,
+            TableError::SegmentSchemaCompatibility { path, source }
+                if path == rel_path
+                    && matches!(
+                        &source,
+                        crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
+                            column,
+                            actual: LogicalDataType::Bool,
+                        } if column == "device_id"
+                    )
+        ));
+        assert_eq!(table.state, state_before);
+        assert!(coverage_files(tmp.path())?.is_empty());
+        assert_eq!(table.log.load_current_version().await?, 1);
         Ok(())
     }
 
@@ -1672,7 +1804,7 @@ mod tests {
                 example_identity,
                 example_bucket: 0x8000_0000_0000_0000,
             } if segment_path == rel2
-                && example_identity.components() == ["A"]
+                && example_identity.components() == [EntityValue::from("A")]
         ));
         Ok(())
     }
@@ -2179,7 +2311,7 @@ mod tests {
         let source = TableError::EntityCoverageOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
-            example_identity: EntityIdentity::try_new(vec!["A".to_string()])?,
+            example_identity: EntityIdentity::try_new(vec!["A".into()])?,
             example_bucket: 0,
         };
         let err = table.rollback_created_sidecars(&sidecars, source).await;

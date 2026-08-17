@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow_array::{
-    Array, Int64Array, LargeStringArray, StringArray, TimestampMicrosecondArray,
+    Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampMicrosecondArray,
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
 };
 use futures::{Stream, StreamExt};
@@ -21,7 +21,7 @@ use snafu::Backtrace;
 use tokio::task::JoinSet;
 
 use crate::{
-    coverage::{Coverage, EntityCoverage, EntityIdentity},
+    coverage::{Coverage, EntityCoverage, EntityIdentity, EntityValue},
     metadata::table_metadata::{IndexKind, IndexSpec, IndexValue},
     storage::{TableLocation, open_parquet_reader},
 };
@@ -35,13 +35,19 @@ use super::{
 pub(super) enum EntityArray<'a> {
     Utf8(&'a StringArray),
     LargeUtf8(&'a LargeStringArray),
+    Int32(&'a Int32Array),
+    Int64(&'a Int64Array),
+    UInt64(&'a UInt64Array),
 }
 
 impl EntityArray<'_> {
-    fn value(&self, row: usize) -> &str {
+    fn value(&self, row: usize) -> EntityValue {
         match self {
-            Self::Utf8(array) => array.value(row),
-            Self::LargeUtf8(array) => array.value(row),
+            Self::Utf8(array) => EntityValue::Utf8(array.value(row).to_string()),
+            Self::LargeUtf8(array) => EntityValue::Utf8(array.value(row).to_string()),
+            Self::Int32(array) => EntityValue::Int32(array.value(row)),
+            Self::Int64(array) => EntityValue::Int64(array.value(row)),
+            Self::UInt64(array) => EntityValue::UInt64(array.value(row)),
         }
     }
 }
@@ -124,6 +130,18 @@ pub(super) fn entity_arrays<'a>(
                     .as_any()
                     .downcast_ref::<LargeStringArray>()
                     .map(EntityArray::LargeUtf8),
+                DataType::Int32 => array
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .map(EntityArray::Int32),
+                DataType::Int64 => array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .map(EntityArray::Int64),
+                DataType::UInt64 => array
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .map(EntityArray::UInt64),
                 _ => None,
             }
             .ok_or_else(|| SegmentCoverageError::EntityColumnUnsupportedType {
@@ -140,16 +158,12 @@ pub(super) fn entity_identity_at(
     row: usize,
     path: &str,
 ) -> Result<EntityIdentity, SegmentCoverageError> {
-    EntityIdentity::try_new(
-        arrays
-            .iter()
-            .map(|array| array.value(row).to_string())
-            .collect(),
+    EntityIdentity::try_new(arrays.iter().map(|array| array.value(row)).collect()).map_err(
+        |source| SegmentCoverageError::EntityIdentity {
+            path: path.to_string(),
+            source,
+        },
     )
-    .map_err(|source| SegmentCoverageError::EntityIdentity {
-        path: path.to_string(),
-        source,
-    })
 }
 
 fn ordered_index_array<'a>(
@@ -287,7 +301,14 @@ pub async fn compute_segment_entity_coverage(
                 column: column.clone(),
             }
         })?;
-        if !matches!(field.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+        if !matches!(
+            field.data_type(),
+            DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt64
+        ) {
             return Err(SegmentCoverageError::EntityColumnUnsupportedType {
                 path,
                 column: column.clone(),
@@ -367,7 +388,7 @@ mod tests {
         record_batch::RecordBatch,
     };
     use arrow_array::{
-        Int32Array, Int64Array, LargeStringArray, TimestampMicrosecondArray,
+        BooleanArray, Int32Array, Int64Array, LargeStringArray, TimestampMicrosecondArray,
         TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array,
     };
     use parquet::arrow::ArrowWriter;
@@ -391,7 +412,7 @@ mod tests {
     }
 
     fn identity(value: &str) -> EntityIdentity {
-        EntityIdentity::try_new(vec![value.to_string()]).expect("test identity")
+        EntityIdentity::try_new(vec![value.into()]).expect("test identity")
     }
 
     fn write_batch(
@@ -573,8 +594,8 @@ mod tests {
             compute_segment_entity_coverage(&TableLocation::local(temp.path()), rel_path, &index)
                 .await?;
 
-        let us_a = EntityIdentity::try_new(vec!["us".to_string(), "A".to_string()])?;
-        let eu_a = EntityIdentity::try_new(vec!["eu".to_string(), "A".to_string()])?;
+        let us_a = EntityIdentity::try_new(vec!["us".into(), "A".into()])?;
+        let eu_a = EntityIdentity::try_new(vec!["eu".into(), "A".into()])?;
         assert_eq!(
             coverage
                 .get(&us_a)
@@ -716,6 +737,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_supported_entity_type_is_extracted_without_loss() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("typed-entities.parquet");
+        let above_i64_max = i64::MAX as u64 + 1;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("large_text", DataType::LargeUtf8, false),
+            Field::new("signed_32", DataType::Int32, false),
+            Field::new("signed_64", DataType::Int64, false),
+            Field::new("unsigned_64", DataType::UInt64, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["min", "zero", "max"])),
+                Arc::new(LargeStringArray::from(vec!["min", "zero", "max"])),
+                Arc::new(Int32Array::from(vec![i32::MIN, 0, i32::MAX])),
+                Arc::new(Int64Array::from(vec![i64::MIN, 0, i64::MAX])),
+                Arc::new(UInt64Array::from(vec![above_i64_max, 0, u64::MAX])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    0, 3_600_000, 7_200_000,
+                ])),
+            ],
+        )?;
+        write_batch(&temp.path().join(rel_path), &batch, None)?;
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec![
+                "text".to_string(),
+                "large_text".to_string(),
+                "signed_32".to_string(),
+                "signed_64".to_string(),
+                "unsigned_64".to_string(),
+            ],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Hours(1),
+                timezone: None,
+            },
+        };
+
+        let coverage =
+            compute_segment_entity_coverage(&TableLocation::local(temp.path()), rel_path, &index)
+                .await?;
+
+        let cases = [
+            (
+                EntityIdentity::try_new(vec![
+                    EntityValue::from("min"),
+                    EntityValue::from("min"),
+                    EntityValue::Int32(i32::MIN),
+                    EntityValue::Int64(i64::MIN),
+                    EntityValue::UInt64(above_i64_max),
+                ])?,
+                EPOCH_BUCKET,
+            ),
+            (
+                EntityIdentity::try_new(vec![
+                    EntityValue::from("zero"),
+                    EntityValue::from("zero"),
+                    EntityValue::Int32(0),
+                    EntityValue::Int64(0),
+                    EntityValue::UInt64(0),
+                ])?,
+                EPOCH_BUCKET + 1,
+            ),
+            (
+                EntityIdentity::try_new(vec![
+                    EntityValue::from("max"),
+                    EntityValue::from("max"),
+                    EntityValue::Int32(i32::MAX),
+                    EntityValue::Int64(i64::MAX),
+                    EntityValue::UInt64(u64::MAX),
+                ])?,
+                EPOCH_BUCKET + 2,
+            ),
+        ];
+        assert_eq!(coverage.identity_count(), cases.len());
+        for (identity, bucket) in cases {
+            assert_eq!(
+                coverage
+                    .get(&identity)
+                    .expect("typed entity coverage")
+                    .present()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec![bucket]
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn null_entity_returns_typed_error() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
@@ -796,7 +914,7 @@ mod tests {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
         let schema = Arc::new(Schema::new(vec![
-            Field::new("entity", DataType::Int32, false),
+            Field::new("entity", DataType::Boolean, false),
             Field::new(
                 "ts",
                 DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -806,7 +924,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(BooleanArray::from(vec![true])),
                 Arc::new(TimestampMillisecondArray::from(vec![0])),
             ],
         )?;
@@ -823,7 +941,7 @@ mod tests {
         assert!(matches!(
             error,
             SegmentCoverageError::EntityColumnUnsupportedType { path, column, datatype }
-                if path == "segment.parquet" && column == "entity" && datatype == "Int32"
+                if path == "segment.parquet" && column == "entity" && datatype == "Boolean"
         ));
         Ok(())
     }

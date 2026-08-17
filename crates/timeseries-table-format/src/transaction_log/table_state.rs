@@ -29,7 +29,10 @@ pub fn reset_rebuild_table_state_count() {
 }
 
 use crate::{
-    metadata::{schema_compat::ensure_index_matches_schema, segments::sort_segment_meta_by_index},
+    metadata::{
+        schema_compat::{ensure_entity_identity_matches_schema, ensure_index_spec_matches_schema},
+        segments::sort_segment_meta_by_index,
+    },
     storage::normalize_relative_storage_path,
     transaction_log::*,
 };
@@ -216,28 +219,40 @@ impl TransactionLogStore {
             }
             .fail();
         }
-        if let Some(schema) = &table_meta.logical_schema {
-            ensure_index_matches_schema(schema, index).map_err(|source| {
+        let schema = table_meta.logical_schema.as_ref();
+        if let Some(schema) = schema {
+            ensure_index_spec_matches_schema(schema, index).map_err(|source| {
                 CommitError::CorruptState {
-                    msg: format!("Ordered index does not match logical schema: {source}"),
+                    msg: format!("Index specification does not match logical schema: {source}"),
                     backtrace: snafu::Backtrace::capture(),
                 }
             })?;
+        }
+        if schema.is_none() && !persisted_segment_layouts.is_empty() {
+            return CorruptStateSnafu {
+                msg: "Persisted segments require a logical schema".to_string(),
+            }
+            .fail();
         }
         let entity_column_count = index.entity_columns.len();
         for (path, layout) in persisted_segment_layouts {
             match (&layout, entity_column_count) {
                 (SegmentEntityLayout::NotApplicable, 0) | (SegmentEntityLayout::Mixed, 1..) => {}
-                (SegmentEntityLayout::Single(identity), 1..)
-                    if identity.components().len() == entity_column_count => {}
                 (SegmentEntityLayout::Single(identity), 1..) => {
-                    return CorruptStateSnafu {
-                        msg: format!(
-                            "Invalid single-entity identity in segment at {path}: expected {entity_column_count} components, found {}",
-                            identity.components().len()
-                        ),
-                    }
-                    .fail();
+                    let Some(schema) = schema else {
+                        return CorruptStateSnafu {
+                            msg: "Persisted segments require a logical schema".to_string(),
+                        }
+                        .fail();
+                    };
+                    ensure_entity_identity_matches_schema(schema, index, identity).map_err(
+                        |source| CommitError::CorruptState {
+                            msg: format!(
+                                "Invalid single-entity identity in segment at {path}: {source}"
+                            ),
+                            backtrace: snafu::Backtrace::capture(),
+                        },
+                    )?;
                 }
                 _ => {
                     return CorruptStateSnafu {
@@ -271,7 +286,10 @@ impl TransactionLogStore {
 mod tests {
     use super::*;
     use crate::coverage::EntityIdentity;
-    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
+    use crate::metadata::{
+        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
+        table_metadata::TABLE_FORMAT_VERSION,
+    };
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
@@ -291,16 +309,17 @@ mod tests {
     }
 
     fn sample_table_meta() -> TableMeta {
+        let entity_columns = vec!["symbol".to_string()];
         TableMeta {
             kind: TableKind::TimeSeries(IndexSpec {
                 column: "ts".to_string(),
-                entity_columns: vec!["symbol".to_string()],
+                entity_columns: entity_columns.clone(),
                 kind: IndexKind::Timestamp {
                     bucket: TimeBucket::Minutes(1),
                     timezone: None,
                 },
             }),
-            logical_schema: None,
+            logical_schema: Some(schema_for_entities(&entity_columns)),
             created_at: chrono::Utc
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
@@ -309,12 +328,29 @@ mod tests {
         }
     }
 
+    fn schema_for_entities(entity_columns: &[String]) -> LogicalSchema {
+        let mut fields = vec![LogicalField {
+            name: "ts".to_string(),
+            data_type: LogicalDataType::Timestamp {
+                unit: LogicalTimestampUnit::Millis,
+                timezone: None,
+            },
+            nullable: false,
+        }];
+        fields.extend(entity_columns.iter().map(|column| LogicalField {
+            name: column.clone(),
+            data_type: LogicalDataType::Utf8,
+            nullable: false,
+        }));
+        LogicalSchema::new(fields).expect("valid test schema")
+    }
+
     fn sample_segment(id: &str) -> SegmentMeta {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             entity_layout: SegmentEntityLayout::Single(
-                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+                EntityIdentity::try_new(vec!["A".into()]).expect("valid sample identity"),
             ),
             index_min: IndexValue::Timestamp(
                 chrono::Utc
@@ -339,7 +375,7 @@ mod tests {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
             entity_layout: SegmentEntityLayout::Single(
-                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+                EntityIdentity::try_new(vec!["A".into()]).expect("valid sample identity"),
             ),
             index_min: (chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap()).into(),
             index_max: (chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap()).into(),
@@ -519,7 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_table_state_rejects_inapplicable_entity_layouts() -> TestResult {
-        let single = SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?);
+        let single = SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".into()])?);
         let cases = [
             (
                 vec!["symbol".to_string()],
@@ -535,7 +571,7 @@ mod tests {
             (
                 vec!["site".to_string(), "device".to_string()],
                 single,
-                "expected 2 components, found 1",
+                "has 1 components, but the table configures 2",
             ),
         ];
 
@@ -545,7 +581,8 @@ mod tests {
             let TableKind::TimeSeries(index) = &mut table_meta.kind else {
                 unreachable!("sample metadata is time-series");
             };
-            index.entity_columns = entity_columns;
+            index.entity_columns = entity_columns.clone();
+            table_meta.logical_schema = Some(schema_for_entities(&entity_columns));
 
             let mut segment = sample_segment("invalid-layout");
             segment.entity_layout = entity_layout;
@@ -567,6 +604,68 @@ mod tests {
             assert!(error.to_string().contains(expected_message), "{error}");
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_validates_persisted_entity_component_types() -> TestResult {
+        let typed_schema = LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "symbol".to_string(),
+                data_type: LogicalDataType::Int32,
+                nullable: false,
+            },
+        ])?;
+        let mut typed_meta = sample_table_meta();
+        typed_meta.logical_schema = Some(typed_schema);
+        let mut typed_segment = sample_segment("typed-layout");
+        typed_segment.entity_layout = SegmentEntityLayout::Single(EntityIdentity::try_new(vec![
+            crate::coverage::EntityValue::Int32(-1),
+        ])?);
+
+        let (_valid_tmp, valid_store) = create_test_log_store();
+        valid_store
+            .commit_with_expected_version(
+                0,
+                vec![
+                    LogAction::UpdateTableMeta(typed_meta.clone()),
+                    LogAction::AddSegment(typed_segment.clone()),
+                ],
+            )
+            .await?;
+        valid_store.rebuild_table_state().await?;
+
+        let (_invalid_tmp, invalid_store) = create_test_log_store();
+        let mut string_meta = typed_meta;
+        string_meta.logical_schema = Some(schema_for_entities(&["symbol".to_string()]));
+        invalid_store
+            .commit_with_expected_version(
+                0,
+                vec![
+                    LogAction::UpdateTableMeta(string_meta),
+                    LogAction::AddSegment(typed_segment),
+                ],
+            )
+            .await?;
+        let error = invalid_store
+            .rebuild_table_state()
+            .await
+            .expect_err("persisted component type must match the logical schema");
+        assert!(matches!(error, CommitError::CorruptState { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("column symbol has type int32; expected utf8"),
+            "{error}"
+        );
         Ok(())
     }
 

@@ -632,10 +632,8 @@ def main(argv: list[str]) -> int:
                 index_column="ts",
                 index_type="timestamp",
                 bucket="1h",
-                # v0 entity identity extraction currently only supports string entity columns and
-                # requires them to be constant within a segment. For this conversion benchmark we
-                # keep entity identity disabled (empty list) and treat `entity_id` as a normal
-                # column used only for query shape/bytes.
+                # This benchmark measures query conversion, not entity-aware coverage, so
+                # `entity_id` remains a normal query column.
                 entity_columns=[],
                 timezone=None,
             )

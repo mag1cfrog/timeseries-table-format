@@ -15,9 +15,9 @@ def test_docs_example_quickstart_runs(tmp_path):
     )
     out = mod["run"](table_root=tmp_path / "table")
     assert isinstance(out, pa.Table)
-    assert out.column_names == ["ts", "symbol", "close"]
+    assert out.column_names == ["ts", "exchange_id", "symbol", "close"]
     assert out.num_rows == 4
-    assert out["symbol"].to_pylist() == ["AAPL", "AAPL", "NVDA", "NVDA"]
+    assert out["symbol"].to_pylist() == ["NVDA", "NVDA", "AAPL", "AAPL"]
 
 
 def test_docs_example_join_runs(tmp_path):

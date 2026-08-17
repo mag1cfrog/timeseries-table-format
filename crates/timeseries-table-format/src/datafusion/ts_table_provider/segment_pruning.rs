@@ -10,6 +10,7 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 
+use crate::coverage::EntityValue;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::transaction_log::{SegmentEntityLayout, SegmentMeta};
 
@@ -92,17 +93,22 @@ pub(super) fn segment_pruning_statistics(
 }
 
 fn entity_scalar(
-    component: &str,
+    component: &EntityValue,
     data_type: &DataType,
     segment: &SegmentMeta,
     column: &str,
 ) -> DFResult<ScalarValue> {
-    match data_type {
-        DataType::Utf8 => Ok(ScalarValue::Utf8(Some(component.to_string()))),
-        DataType::LargeUtf8 => Ok(ScalarValue::LargeUtf8(Some(component.to_string()))),
+    match (component, data_type) {
+        (EntityValue::Utf8(value), DataType::Utf8) => Ok(ScalarValue::Utf8(Some(value.clone()))),
+        (EntityValue::Utf8(value), DataType::LargeUtf8) => {
+            Ok(ScalarValue::LargeUtf8(Some(value.clone())))
+        }
+        (EntityValue::Int32(value), DataType::Int32) => Ok(ScalarValue::Int32(Some(*value))),
+        (EntityValue::Int64(value), DataType::Int64) => Ok(ScalarValue::Int64(Some(*value))),
+        (EntityValue::UInt64(value), DataType::UInt64) => Ok(ScalarValue::UInt64(Some(*value))),
         _ => Err(DataFusionError::Execution(format!(
-            "cannot build entity pruning statistics for column {column} in segment {}: Arrow type {data_type} is unsupported",
-            segment.path
+            "cannot build entity pruning statistics for column {column} in segment {}: identity value {component:?} does not match Arrow type {data_type}",
+            segment.path,
         ))),
     }
 }
@@ -260,7 +266,7 @@ mod tests {
             EntityIdentity::try_new(
                 components
                     .iter()
-                    .map(|value| (*value).to_string())
+                    .map(|value| EntityValue::from(*value))
                     .collect(),
             )
             .unwrap(),
@@ -282,6 +288,21 @@ mod tests {
             Operator::Eq,
             Arc::new(Literal::new(ScalarValue::Utf8(Some(value.to_string())))),
         )
+    }
+
+    fn scalar_eq(
+        name: &str,
+        position: usize,
+        value: ScalarValue,
+        reversed: bool,
+    ) -> Arc<dyn PhysicalExpr> {
+        let column: Arc<dyn PhysicalExpr> = Arc::new(PhysicalColumn::new(name, position));
+        let literal: Arc<dyn PhysicalExpr> = Arc::new(Literal::new(value));
+        if reversed {
+            binary(literal, Operator::Eq, column)
+        } else {
+            binary(column, Operator::Eq, literal)
+        }
     }
 
     fn scalar_at(
@@ -331,7 +352,7 @@ mod tests {
             IndexValue::Int64(1),
         );
         single.entity_layout = SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["west".to_string(), "sensor-a".to_string()]).unwrap(),
+            EntityIdentity::try_new(vec!["west".into(), "sensor-a".into()]).unwrap(),
         );
         let mut mixed = segment(
             "data/mixed.parquet",
@@ -398,9 +419,8 @@ mod tests {
             IndexValue::Int64(0),
             IndexValue::Int64(1),
         );
-        segment.entity_layout = SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["sensor-a".to_string()]).unwrap(),
-        );
+        segment.entity_layout =
+            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["sensor-a".into()]).unwrap());
 
         let error = segment_pruning_statistics(&schema, &index, &[&segment])
             .err()
@@ -409,6 +429,90 @@ mod tests {
         assert!(error.to_string().contains("data/unsupported.parquet"));
         assert!(error.to_string().contains("device"));
         assert!(error.to_string().contains("Int64"));
+    }
+
+    #[test]
+    fn typed_entity_statistics_prune_every_supported_type_in_both_orders() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Int64, false),
+            Field::new("text", DataType::Utf8, false),
+            Field::new("large_text", DataType::LargeUtf8, false),
+            Field::new("signed_32", DataType::Int32, false),
+            Field::new("signed_64", DataType::Int64, false),
+            Field::new("unsigned_64", DataType::UInt64, false),
+        ]));
+        let index = IndexSpec {
+            column: "idx".to_string(),
+            entity_columns: vec![
+                "text".to_string(),
+                "large_text".to_string(),
+                "signed_32".to_string(),
+                "signed_64".to_string(),
+                "unsigned_64".to_string(),
+            ],
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::MIN,
+            },
+        };
+        let mut matching = segment(
+            "matching.parquet",
+            IndexValue::Int64(0),
+            IndexValue::Int64(0),
+        );
+        matching.entity_layout = SegmentEntityLayout::Single(
+            EntityIdentity::try_new(vec![
+                EntityValue::from("device"),
+                EntityValue::from("region"),
+                EntityValue::Int32(-1),
+                EntityValue::Int64(i64::MIN),
+                EntityValue::UInt64(u64::MAX),
+            ])
+            .unwrap(),
+        );
+        let mut conflicting = segment(
+            "conflicting.parquet",
+            IndexValue::Int64(1),
+            IndexValue::Int64(1),
+        );
+        conflicting.entity_layout = SegmentEntityLayout::Single(
+            EntityIdentity::try_new(vec![
+                EntityValue::from("other"),
+                EntityValue::from("other"),
+                EntityValue::Int32(1),
+                EntityValue::Int64(i64::MAX),
+                EntityValue::UInt64(0),
+            ])
+            .unwrap(),
+        );
+        let mut mixed = segment("mixed.parquet", IndexValue::Int64(2), IndexValue::Int64(2));
+        mixed.entity_layout = SegmentEntityLayout::Mixed;
+        let segments = vec![&matching, &conflicting, &mixed];
+        let cases = [
+            ("text", 1, ScalarValue::Utf8(Some("device".to_string()))),
+            (
+                "large_text",
+                2,
+                ScalarValue::LargeUtf8(Some("region".to_string())),
+            ),
+            ("signed_32", 3, ScalarValue::Int32(Some(-1))),
+            ("signed_64", 4, ScalarValue::Int64(Some(i64::MIN))),
+            ("unsigned_64", 5, ScalarValue::UInt64(Some(u64::MAX))),
+        ];
+
+        for (column, position, value) in cases {
+            for reversed in [false, true] {
+                let predicate = scalar_eq(column, position, value.clone(), reversed);
+                let selected = prune_segments(&schema, &index, segments.clone(), &predicate)
+                    .expect("typed pruning");
+                assert_eq!(
+                    selected
+                        .into_iter()
+                        .map(|segment| segment.path.as_str())
+                        .collect::<Vec<_>>(),
+                    ["matching.parquet", "mixed.parquet"]
+                );
+            }
+        }
     }
 
     #[test]

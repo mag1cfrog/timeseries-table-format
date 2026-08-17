@@ -146,7 +146,7 @@ mod tests {
             .remove("entity_layout");
 
         let error = serde_json::from_value::<SegmentMeta>(value)
-            .expect_err("version 5 segment metadata must include entity_layout");
+            .expect_err("version 6 segment metadata must include entity_layout");
         assert!(error.to_string().contains("entity_layout"));
     }
 }

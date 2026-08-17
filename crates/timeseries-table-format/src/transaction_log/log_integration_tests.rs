@@ -74,7 +74,7 @@ fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
         path: format!("data/{id}.parquet"),
         format: FileFormat::Parquet,
         entity_layout: SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+            EntityIdentity::try_new(vec!["A".into()]).expect("valid sample identity"),
         ),
         index_min: (utc_datetime(2025, 1, 1, ts_hour, 0, 0)).into(),
         index_max: (utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0)).into(),

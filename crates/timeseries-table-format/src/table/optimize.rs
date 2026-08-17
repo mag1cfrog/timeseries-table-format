@@ -396,7 +396,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        coverage::EntityIdentity,
+        coverage::{EntityIdentity, EntityValue},
         metadata::{
             logical_schema::LogicalTimestampUnit,
             segments::{FileFormat, SegmentEntityLayout},
@@ -404,7 +404,8 @@ mod tests {
         },
         storage::{TableLocation, layout},
         table::test_util::{
-            make_table_meta_with_unit, utc_datetime, write_arrow_parquet_with_unit,
+            make_int32_entity_table_meta, make_table_meta_with_unit, utc_datetime,
+            write_arrow_parquet_with_unit, write_int32_entity_parquet,
         },
         transaction_log::TableKind,
     };
@@ -436,7 +437,7 @@ mod tests {
 
     fn single_identity() -> SegmentEntityLayout {
         SegmentEntityLayout::Single(
-            EntityIdentity::try_new(vec!["A".to_string()]).expect("valid identity"),
+            EntityIdentity::try_new(vec!["A".into()]).expect("valid identity"),
         )
     }
 
@@ -647,6 +648,56 @@ mod tests {
             std::fs::read(temp.path().join(source_coverage_path)).expect("source coverage remains"),
             source_coverage_bytes
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optimize_rewrites_numeric_entities_with_typed_single_layouts() -> Result<(), TableError>
+    {
+        let temp = TempDir::new().expect("temp directory");
+        let location = TableLocation::local(temp.path());
+        let mut table =
+            TimeSeriesTable::create(location.clone(), make_int32_entity_table_meta()).await?;
+        let source_path = "data/numeric-mixed.parquet";
+        write_int32_entity_parquet(
+            &temp.path().join(source_path),
+            &[1_000, 2_000, 3_000, 4_000],
+            &[-1, i32::MAX, -1, i32::MAX],
+            &[10.0, 20.0, 11.0, 21.0],
+        )
+        .expect("write numeric mixed source");
+        table.append_parquet_segment(source_path).await?;
+        assert_eq!(
+            table.state().segments[source_path].entity_layout,
+            SegmentEntityLayout::Mixed
+        );
+        let table_meta = table.state().table_meta.clone();
+
+        let report = table.optimize().await?;
+
+        assert_eq!(report.replacement_segments_written, 2);
+        assert_eq!(report.rows_written, 4);
+        assert_eq!(table.state().table_meta, table_meta);
+        let identities = table
+            .state()
+            .segments
+            .values()
+            .map(|segment| match &segment.entity_layout {
+                SegmentEntityLayout::Single(identity) => identity.clone(),
+                layout => panic!("expected typed single-entity layout, found {layout:?}"),
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            identities,
+            BTreeSet::from([
+                EntityIdentity::try_new(vec![EntityValue::Int32(-1)]).expect("negative identity"),
+                EntityIdentity::try_new(vec![EntityValue::Int32(i32::MAX)])
+                    .expect("maximum identity"),
+            ])
+        );
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state(), table.state());
         Ok(())
     }
 

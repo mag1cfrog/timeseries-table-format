@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory() as d:
         index_column="ts",
         index_type="timestamp",
         bucket="1h",
-        entity_columns=["symbol"],
+        entity_columns=["exchange_id", "symbol"],
         timezone=None,
     )
 
@@ -110,6 +110,7 @@ with tempfile.TemporaryDirectory() as d:
         pa.table(
             {
                 "ts": pa.array([0, 3_600 * 1_000_000, 7_200 * 1_000_000], type=pa.timestamp("us")),
+                "exchange_id": pa.array([1, 1, 1], type=pa.int32()),
                 "symbol": pa.array(["NVDA", "NVDA", "NVDA"], type=pa.string()),
                 "close": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
             }
@@ -122,14 +123,22 @@ with tempfile.TemporaryDirectory() as d:
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))
 
-    out = sess.sql("select ts, symbol, close from prices order by symbol, ts")
+    out = sess.sql(
+        "select ts, exchange_id, symbol, close "
+        "from prices order by exchange_id, symbol, ts"
+    )
     print(out)  # pyarrow.Table
 ```
 
-`entity_columns` defines independent identities within one logical table. Different symbols may
-reuse the same timestamp bucket, and one Parquet file may contain multiple symbols. An append is
-rejected only when the same complete identity already covers a bucket. In SQL, entity columns are
-ordinary columns that can be filtered or grouped.
+`entity_columns` defines independent identities within one logical table. Different identities may
+reuse the same timestamp bucket, and one Parquet file may contain multiple identities. An append
+is rejected only when the same complete identity already covers a bucket. In SQL, entity columns
+are ordinary columns that can be filtered or grouped.
+
+Entity columns support Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`. Actual
+entity values must be non-null. Composite identity components follow the configured
+`entity_columns` order. Signed and unsigned integers keep their exact types and are not compared
+as strings. Unsupported domains and mismatched types are rejected rather than cast.
 
 ## Optimize mixed-entity segments
 
