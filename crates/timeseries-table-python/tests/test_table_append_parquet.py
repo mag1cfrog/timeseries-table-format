@@ -337,6 +337,7 @@ def test_numeric_entity_overlap_preserves_python_integer_types_and_order(tmp_pat
         tbl.append_parquet("data/second.parquet", copy_if_outside=False)
 
     identity = excinfo.value.example_entity_identity
+    assert identity is not None
     assert identity == {"device_id": -1, "account_id": maximum}
     assert list(identity) == ["device_id", "account_id"]
     assert all(isinstance(value, int) for value in identity.values())

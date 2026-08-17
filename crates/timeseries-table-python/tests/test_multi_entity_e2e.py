@@ -5,12 +5,13 @@ import pytest
 import timeseries_table_format as ttf
 
 
-def _write_segment(path, rows: list[tuple[int, str, int]]) -> None:
-    ticks, devices, readings = zip(*rows, strict=True)
+def _write_segment(path, rows: list[tuple[int, int, str, int]]) -> None:
+    ticks, fleet_ids, devices, readings = zip(*rows, strict=True)
     pq.write_table(
         pa.table(
             {
                 "tick": pa.array(ticks, type=pa.uint64()),
+                "fleet_id": pa.array(fleet_ids, type=pa.int32()),
                 "device_id": pa.array(devices, type=pa.string()),
                 "reading": pa.array(readings, type=pa.int64()),
             }
@@ -23,15 +24,16 @@ def _query_results(root) -> tuple[dict, dict, dict]:
     session = ttf.Session()
     session.register_tstable("frames", str(root))
     all_rows = session.sql(
-        "select device_id, tick, reading from frames order by device_id, tick"
+        "select fleet_id, device_id, tick, reading from frames "
+        "order by fleet_id, device_id, tick"
     )
     device_a_rows = session.sql(
         "select tick, reading from frames "
-        "where device_id = 'A' and tick >= 20 order by tick"
+        "where fleet_id = -1 and device_id = 'A' and tick >= 20 order by tick"
     )
     grouped = session.sql(
-        "select device_id, count(*) as n, sum(reading) as total "
-        "from frames group by device_id order by device_id"
+        "select fleet_id, device_id, count(*) as n, sum(reading) as total "
+        "from frames group by fleet_id, device_id order by fleet_id, device_id"
     )
     return all_rows.to_pydict(), device_a_rows.to_pydict(), grouped.to_pydict()
 
@@ -43,22 +45,28 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
         index_column="tick",
         index_type="uint64",
         bucket_width=10,
-        entity_columns=["device_id"],
+        entity_columns=["fleet_id", "device_id"],
     )
     device_a = tmp_path / "device-a.parquet"
     device_b = tmp_path / "device-b.parquet"
     mixed = tmp_path / "mixed.parquet"
     duplicate = tmp_path / "duplicate.parquet"
-    _write_segment(device_a, [(0, "A", 1), (10, "A", 2)])
-    _write_segment(device_b, [(0, "B", 3), (10, "B", 4)])
-    _write_segment(mixed, [(20, "A", 5), (20, "B", 6), (30, "A", 7), (30, "B", 8)])
-    _write_segment(duplicate, [(5, "A", 9), (15, "B", 10), (0, "C", 11)])
+    _write_segment(device_a, [(0, -1, "A", 1), (10, -1, "A", 2)])
+    _write_segment(device_b, [(0, 7, "B", 3), (10, 7, "B", 4)])
+    _write_segment(
+        mixed,
+        [(20, -1, "A", 5), (20, 7, "B", 6), (30, -1, "A", 7), (30, 7, "B", 8)],
+    )
+    _write_segment(
+        duplicate,
+        [(5, -1, "A", 9), (15, 7, "B", 10), (0, 99, "C", 11)],
+    )
 
     table.append_parquet(str(device_a))
     table.append_parquet(str(device_b))
     table.append_parquet(str(mixed))
     version = table.version()
-    assert table.index_spec()["entity_columns"] == ["device_id"]
+    assert table.index_spec()["entity_columns"] == ["fleet_id", "device_id"]
 
     with pytest.raises(ttf.CoverageOverlapError) as excinfo:
         table.append_parquet(str(duplicate))
@@ -66,18 +74,24 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
     error = excinfo.value
     assert error.segment_path == "data/duplicate.parquet"
     assert error.overlap_count == 2
-    assert error.example_entity_identity == {"device_id": "A"}
+    assert error.example_entity_identity == {"fleet_id": -1, "device_id": "A"}
     assert error.example_bucket == 0
     assert table.version() == version
 
     expected = (
         {
+            "fleet_id": [-1, -1, -1, -1, 7, 7, 7, 7],
             "device_id": ["A", "A", "A", "A", "B", "B", "B", "B"],
             "tick": [0, 10, 20, 30, 0, 10, 20, 30],
             "reading": [1, 2, 5, 7, 3, 4, 6, 8],
         },
         {"tick": [20, 30], "reading": [5, 7]},
-        {"device_id": ["A", "B"], "n": [4, 4], "total": [15, 21]},
+        {
+            "fleet_id": [-1, 7],
+            "device_id": ["A", "B"],
+            "n": [4, 4],
+            "total": [15, 21],
+        },
     )
     before = _query_results(root)
     assert before == expected
@@ -96,7 +110,7 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
     del table
     reopened = ttf.TimeSeriesTable.open(str(root))
     assert reopened.version() == 5
-    assert reopened.index_spec()["entity_columns"] == ["device_id"]
+    assert reopened.index_spec()["entity_columns"] == ["fleet_id", "device_id"]
     assert _query_results(root) == before
 
     no_op = reopened.optimize()

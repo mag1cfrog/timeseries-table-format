@@ -15,6 +15,7 @@ def _write_tiny_prices_parquet(path: Path) -> None:
                 [0, 0, 3_600 * 1_000_000, 3_600 * 1_000_000],
                 type=pa.timestamp("us"),
             ),
+            "exchange_id": pa.array([1, 2, 1, 2], type=pa.int32()),
             "symbol": pa.array(["NVDA", "AAPL", "NVDA", "AAPL"], type=pa.string()),
             "close": pa.array([10.0, 20.0, 11.0, 21.0], type=pa.float64()),
         }
@@ -30,7 +31,7 @@ def run(*, table_root: Path) -> pa.Table:
         index_column="ts",
         index_type="timestamp",
         bucket="1h",
-        entity_columns=["symbol"],
+        entity_columns=["exchange_id", "symbol"],
         timezone=None,
     )
 
@@ -44,9 +45,9 @@ def run(*, table_root: Path) -> pa.Table:
     sess.register_tstable("prices", str(table_root))
     before = sess.sql(
         """
-        select ts, symbol, close
+        select ts, exchange_id, symbol, close
         from prices
-        order by symbol, ts
+        order by exchange_id, symbol, ts
         """
     )
 
@@ -66,9 +67,9 @@ def run(*, table_root: Path) -> pa.Table:
     sess.register_tstable("prices", str(table_root))
     after = sess.sql(
         """
-        select ts, symbol, close
+        select ts, exchange_id, symbol, close
         from prices
-        order by symbol, ts
+        order by exchange_id, symbol, ts
         """
     )
     assert after.equals(before)

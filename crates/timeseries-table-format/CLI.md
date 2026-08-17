@@ -101,7 +101,11 @@ tstable create --table ./unsigned_counters --index-column counter --index-type u
 ```
 
 **What are entity columns?**  
-Use repeatable `--entity` flags for identifiers such as stock symbols or sensor IDs. Coverage and overlap are tracked separately for each entity.
+Use repeatable `--entity` flags for identifiers such as stock symbols or numeric sensor IDs.
+Coverage and overlap are tracked separately for each complete identity, in flag order. Supported
+Arrow types are Utf8, LargeUtf8, Int32, Int64, and UInt64. Actual values must be non-null. Signed
+and unsigned integers retain their exact types; unsupported domains and type mismatches are
+rejected rather than cast.
 
 ---
 

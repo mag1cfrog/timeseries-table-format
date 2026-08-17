@@ -20,11 +20,13 @@ Run this example from an empty working directory. It creates a table at
 
 - `index_column="ts"` selects the ascending timestamp column.
 - `bucket="1h"` tracks coverage in one-hour windows. It does not resample data.
-- `entity_columns=["symbol"]` tracks coverage independently for each symbol.
+- `entity_columns=["exchange_id", "symbol"]` tracks coverage independently for each
+  composite identity.
 
 This means NVDA and AAPL can cover the same hour without conflicting. The
 entity columns are an ordered identity definition, not instructions to create
-one table per entity.
+one table per entity. `exchange_id` is an Arrow Int32 column, so the example
+also shows a numeric identity component.
 
 ## 2. Append a Parquet segment
 
@@ -66,8 +68,9 @@ accept a target file size.
 as `prices` before and after optimization. It verifies that both queries return
 the same rows, then returns the optimized result as a `pyarrow.Table`.
 
-`symbol` remains a normal SQL column. You can use `WHERE symbol = 'NVDA'` to
-select one identity or `GROUP BY symbol` to calculate independent aggregates.
+Both entity columns remain normal SQL columns. You can use
+`WHERE exchange_id = 1 AND symbol = 'NVDA'` to select one identity or group by
+both columns to calculate independent aggregates.
 
 You now have a self-contained table root that can accept more non-overlapping
 Parquet segments.

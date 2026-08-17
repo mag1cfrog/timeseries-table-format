@@ -14,8 +14,8 @@ class CoverageOverlapError(TimeseriesTableError):
     """Path to the Parquet segment that triggered the overlap."""
     overlap_count: int
     """Number of overlapping buckets, or entity/bucket pairs for an entity-aware table."""
-    example_entity_identity: dict[str, str] | None
-    """One overlapping identity in configured column order, or `None` for global coverage."""
+    example_entity_identity: dict[str, str | int] | None
+    """One typed identity in configured column order, or `None` for global coverage."""
     example_bucket: int | None
     """One overlapping bucket identifier, for debugging."""
 
