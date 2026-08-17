@@ -836,6 +836,8 @@ mod tests {
             segment_meta_from_parquet(&location, Path::new(source_path), index).await?;
         source.entity_layout = SegmentEntityLayout::Mixed;
         source.coverage_path = Some(source_coverage_path.to_string());
+        let source_bytes = std::fs::read(temp.path().join(source_path))?;
+        let source_coverage_bytes = std::fs::read(temp.path().join(source_coverage_path))?;
 
         let rewrite =
             rewrite_mixed_parquet_segment(&location, table_schema, index, &source).await?;
@@ -845,8 +847,26 @@ mod tests {
         assert_eq!(rewrite.rows_read, source.row_count * 3);
         assert_eq!(rewrite.rows_written, source.row_count);
         assert_eq!(rewrite.staged_object_paths.len(), 6);
-        assert!(temp.path().join(source_path).exists());
-        assert!(temp.path().join(source_coverage_path).exists());
+        assert_eq!(std::fs::read(temp.path().join(source_path))?, source_bytes);
+        assert_eq!(
+            std::fs::read(temp.path().join(source_coverage_path))?,
+            source_coverage_bytes
+        );
+        assert_eq!(
+            rewrite
+                .staged_object_paths
+                .iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            rewrite.staged_object_paths.len()
+        );
+        for path in &rewrite.staged_object_paths {
+            let (canonical, _) = normalize_relative_storage_path(Path::new(path))?;
+            assert_eq!(&canonical, path);
+            for secret in ["tenant-secret-a", "tenant-secret-b", "tenant-secret-c"] {
+                assert!(!path.contains(secret));
+            }
+        }
 
         let mut actual = BTreeMap::new();
         for replacement in &rewrite.replacements {
@@ -870,9 +890,6 @@ mod tests {
                 replacement.coverage
             );
             assert!(rewrite.staged_object_paths.contains(&replacement.meta.path));
-            for secret in ["tenant-secret-a", "tenant-secret-b", "tenant-secret-c"] {
-                assert!(!replacement.meta.path.contains(secret));
-            }
             actual.insert(
                 replacement.identity.components()[0].clone(),
                 read_rows(&temp.path().join(&replacement.meta.path))?,
