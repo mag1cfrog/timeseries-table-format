@@ -256,7 +256,49 @@ def test_append_parquet_overlap_raises_coverage_overlap(tmp_path):
     assert isinstance(e.segment_path, str)
     assert isinstance(e.overlap_count, int)
     assert e.overlap_count > 0
+    assert e.example_bucket_range == "[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)"
+    assert e.example_bucket_range in str(e)
     assert getattr(e, "table_root", None) == str(root)
+
+
+@pytest.mark.parametrize(
+    ("index_type", "arrow_type", "bucket_width", "value", "expected_range"),
+    [
+        ("int64", pa.int64(), 1, 50_464, "[50464, 50465)"),
+        ("int64", pa.int64(), 10, -11, "[-20, -10)"),
+        ("uint64", pa.uint64(), 10, 50_464, "[50460, 50470)"),
+    ],
+)
+def test_integer_overlap_exposes_logical_bucket_range(
+    tmp_path, index_type, arrow_type, bucket_width, value, expected_range
+):
+    root = tmp_path / "table"
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="tick",
+        index_type=index_type,
+        bucket_width=bucket_width,
+        entity_columns=[],
+    )
+    first = tmp_path / "first.parquet"
+    duplicate = tmp_path / "duplicate.parquet"
+    row = pa.table(
+        {
+            "tick": pa.array([value], type=arrow_type),
+            "reading": pa.array([1], type=pa.int64()),
+        }
+    )
+    pq.write_table(row, first)
+    pq.write_table(row, duplicate)
+
+    table.append_parquet(str(first))
+    with pytest.raises(ttf.CoverageOverlapError) as excinfo:
+        table.append_parquet(str(duplicate))
+
+    error = excinfo.value
+    assert isinstance(error.example_bucket, int)
+    assert error.example_bucket_range == expected_range
+    assert expected_range in str(error)
 
 
 def test_entity_overlap_exposes_ordered_identity_and_pair_count(tmp_path):

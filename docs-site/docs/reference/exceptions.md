@@ -30,7 +30,10 @@ double-ingesting data. The exception carries:
 - `example_entity_identity` - one overlapping identity as a dictionary in configured
   entity-column order, or `None` for a table without entity columns. String components are Python
   `str` values and integer components are Python `int` values.
-- `example_bucket` - one overlapping bucket identifier, useful for debugging
+- `example_bucket` - the internal overlapping bucket identifier, retained for compatibility
+- `example_bucket_range` - the same bucket in logical ordered-index units, such as
+  `[-20, -10)`, `[50460, 50470)`, or
+  `[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)`
 
 These attributes are stable diagnostics. Inspect them directly instead of parsing the exception
 message.
