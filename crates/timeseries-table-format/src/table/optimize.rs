@@ -403,6 +403,7 @@ mod tests {
     };
 
     use arrow::datatypes::TimeUnit;
+    use futures::StreamExt;
     use tempfile::TempDir;
 
     use crate::{
@@ -816,6 +817,181 @@ mod tests {
         ));
         assert!(message.contains("primary failure"));
         assert!(paths.iter().all(|path| temp.path().join(path).exists()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multiple_sources_reopen_recover_and_repeat_as_a_no_op() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(
+            location.clone(),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        let source_paths = ["data/first.parquet", "data/second.parquet"];
+        append_mixed_source(&mut table, temp.path(), source_paths[0], 0).await?;
+        append_mixed_source(&mut table, temp.path(), source_paths[1], 60_000).await?;
+        let sources = source_paths.map(|path| table.state().segments[path].clone());
+        let expected_coverage = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let coverage_pointer = table
+            .state()
+            .table_coverage
+            .clone()
+            .expect("table coverage pointer");
+        let coverage_bytes = std::fs::read(temp.path().join(&coverage_pointer.coverage_path))
+            .expect("table coverage bytes");
+        let snapshot_files =
+            files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files");
+        let starting_version = table.state().version;
+
+        let report = table.optimize().await?;
+
+        assert_eq!(
+            report,
+            OptimizeReport {
+                starting_version,
+                committed_version: starting_version + 1,
+                candidate_source_segments: 2,
+                source_segments_replaced: 2,
+                replacement_segments_written: 4,
+                distinct_identities_materialized: 2,
+                rows_read: 8,
+                rows_written: 8,
+                no_op: false,
+            }
+        );
+        assert_eq!(table.state().segments.len(), 4);
+        assert!(
+            table
+                .state()
+                .segments
+                .values()
+                .all(|segment| matches!(segment.entity_layout, SegmentEntityLayout::Single(_)))
+        );
+        assert_eq!(table.state().table_coverage, Some(coverage_pointer.clone()));
+        assert_eq!(
+            std::fs::read(temp.path().join(&coverage_pointer.coverage_path))
+                .expect("table coverage bytes"),
+            coverage_bytes
+        );
+        assert_eq!(
+            files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files"),
+            snapshot_files
+        );
+        for source in &sources {
+            assert!(temp.path().join(&source.path).exists());
+            assert!(
+                temp.path()
+                    .join(source.coverage_path.as_deref().expect("source coverage"))
+                    .exists()
+            );
+        }
+
+        let commit = table
+            .log
+            .load_commit(report.committed_version)
+            .await
+            .expect("optimization commit");
+        assert_eq!(commit.base_version, starting_version);
+        assert_eq!(commit.actions.len(), 6);
+        assert!(
+            commit.actions[..2]
+                .iter()
+                .all(|action| matches!(action, LogAction::RemoveSegment { .. }))
+        );
+        assert!(
+            commit.actions[2..]
+                .iter()
+                .all(|action| matches!(action, LogAction::AddSegment(_)))
+        );
+
+        let state_after_first = table.state().clone();
+        let objects_after_first = optimization_objects(temp.path()).expect("optimization objects");
+        let second_report = table.optimize().await?;
+        assert_eq!(
+            second_report,
+            OptimizeReport::no_op(report.committed_version)
+        );
+        assert_eq!(table.state(), &state_after_first);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_after_first
+        );
+        assert_eq!(
+            table
+                .log
+                .load_current_version()
+                .await
+                .expect("current version"),
+            report.committed_version
+        );
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state(), table.state());
+        assert_eq!(
+            reopened
+                .recover_table_entity_coverage_from_segments()
+                .await?,
+            expected_coverage
+        );
+        let mut scan = reopened
+            .scan_range(
+                chrono::DateTime::from_timestamp_millis(0).expect("range start"),
+                chrono::DateTime::from_timestamp_millis(120_000).expect("range end"),
+            )
+            .await?;
+        let mut rows = 0;
+        while let Some(batch) = scan.next().await {
+            rows += batch?.num_rows();
+        }
+        assert_eq!(rows, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn accumulated_report_counts_do_not_wrap() {
+        let mut total = u64::MAX;
+
+        let error = add("rows_written", &mut total, 1).expect_err("count overflow must fail");
+
+        assert!(matches!(
+            error,
+            TableError::OptimizeCountOverflow {
+                field: "rows_written"
+            }
+        ));
+        assert_eq!(total, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn version_overflow_fails_before_staging() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        append_mixed_source(&mut table, temp.path(), "data/candidate.parquet", 0).await?;
+        table.state.version = u64::MAX;
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+
+        let error = table
+            .optimize()
+            .await
+            .expect_err("version overflow must fail");
+
+        assert!(matches!(
+            error,
+            TableError::OptimizeCountOverflow {
+                field: "committed_version"
+            }
+        ));
+        assert_eq!(table.state().version, u64::MAX);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
         Ok(())
     }
 }
