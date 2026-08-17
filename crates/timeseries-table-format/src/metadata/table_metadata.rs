@@ -325,7 +325,8 @@ impl IndexSpec {
     ///
     /// # Errors
     /// Returns [`IndexSpecError`] for an empty index column, an empty entity
-    /// column, or a duplicate entity column.
+    /// column, a duplicate entity column, or an entity column that is also the
+    /// ordered index.
     pub fn validate(&self) -> Result<(), IndexSpecError> {
         if self.column.is_empty() {
             return Err(IndexSpecError::EmptyColumn);
@@ -335,6 +336,11 @@ impl IndexSpec {
         for (position, column) in self.entity_columns.iter().enumerate() {
             if column.is_empty() {
                 return Err(IndexSpecError::EmptyEntityColumn { position });
+            }
+            if column == &self.column {
+                return Err(IndexSpecError::EntityColumnMatchesIndex {
+                    column: column.clone(),
+                });
             }
             if !seen.insert(column) {
                 return Err(IndexSpecError::DuplicateEntityColumn {
@@ -524,6 +530,12 @@ pub enum IndexSpecError {
         /// Repeated entity column name.
         column: String,
     },
+    /// An entity column is also the ordered index column.
+    #[snafu(display("entity column cannot also be the ordered index column: {column}"))]
+    EntityColumnMatchesIndex {
+        /// Conflicting column name.
+        column: String,
+    },
     /// A timestamp bucket was constructed directly with a zero width.
     #[snafu(display("timestamp bucket width must be nonzero"))]
     ZeroTimeBucket,
@@ -642,6 +654,15 @@ mod tests {
             spec.validate(),
             Err(IndexSpecError::DuplicateEntityColumn { .. })
         ));
+
+        let mut spec = sample_time_index_spec();
+        spec.entity_columns = vec![spec.column.clone()];
+        assert_eq!(
+            spec.validate(),
+            Err(IndexSpecError::EntityColumnMatchesIndex {
+                column: "ts".to_string(),
+            })
+        );
 
         let mut spec = sample_time_index_spec();
         spec.kind = IndexKind::Timestamp {

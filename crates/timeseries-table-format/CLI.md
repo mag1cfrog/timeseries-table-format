@@ -128,7 +128,8 @@ tstable append \
 **Notes:**
 - An external Parquet file is copied into the table's `data/` directory
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
-- Overlapping index buckets with existing segments will cause an error
+- Overlapping index buckets cause an error only for the same complete entity identity; tables
+  without entity columns use global bucket overlap
 - Schema must be compatible with existing data (if any)
 
 ---
