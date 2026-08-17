@@ -476,6 +476,50 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     Ok(table)
 }
 
+async fn create_entity_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
+    let mut table = create_table(tmp, false).await?;
+    let segments = [
+        (
+            "data/entity-a.parquet",
+            vec![TestRow {
+                ts_millis: 0,
+                symbol: "A",
+                price: Some(10.0),
+            }],
+        ),
+        (
+            "data/entity-b.parquet",
+            vec![TestRow {
+                ts_millis: 60_000,
+                symbol: "B",
+                price: Some(20.0),
+            }],
+        ),
+        (
+            "data/entity-mixed.parquet",
+            vec![
+                TestRow {
+                    ts_millis: 120_000,
+                    symbol: "A",
+                    price: Some(30.0),
+                },
+                TestRow {
+                    ts_millis: 180_000,
+                    symbol: "B",
+                    price: Some(40.0),
+                },
+            ],
+        ),
+    ];
+
+    for (path, rows) in segments {
+        write_segment(tmp.path(), path, &rows, false)?;
+        table.append_parquet_segment(path).await?;
+    }
+
+    Ok(table)
+}
+
 async fn create_utc_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
     let mut table = create_table(tmp, false).await?;
     let segments = [
@@ -1257,6 +1301,23 @@ async fn explain_does_not_prune_on_unrecognized_predicate() -> TestResult {
         plan.contains(seg_b),
         "expected plan to include {seg_b}; plan:\n{plan}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn entity_equality_prunes_conflicting_single_entity_segments() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_entity_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+
+    let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A'").await?;
+    assert_eq!(files, ["entity-a.parquet", "entity-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [0, 120_000]);
+
+    let (files, batches) = run_timestamp_query(&ctx, "symbol = 'missing'").await?;
+    assert_eq!(files, ["entity-mixed.parquet"]);
+    assert!(batches.iter().all(|batch| batch.num_rows() == 0));
     Ok(())
 }
 

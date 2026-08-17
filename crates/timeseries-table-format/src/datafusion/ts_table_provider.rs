@@ -132,7 +132,7 @@ impl TsTableProvider {
         self.table.index_spec().column.as_str()
     }
 
-    fn prune_segments_by_index<'a>(
+    fn prune_segments_by_metadata<'a>(
         &self,
         segments: Vec<&'a SegmentMeta>,
         filters: &[Expr],
@@ -142,19 +142,14 @@ impl TsTableProvider {
         for filter in filters {
             expr_to_columns(filter, &mut columns)?;
         }
-        if !columns
-            .iter()
-            .any(|column| column.name == self.index_column_name())
-        {
+        let index = self.table.index_spec();
+        if !columns.iter().any(|column| {
+            column.name == index.column || index.entity_columns.contains(&column.name)
+        }) {
             return Ok(segments);
         }
 
-        segment_pruning::prune_segments(
-            &self.schema,
-            self.table.index_spec(),
-            segments,
-            pruning_predicate,
-        )
+        segment_pruning::prune_segments(&self.schema, index, segments, pruning_predicate)
     }
 }
 
@@ -245,7 +240,7 @@ impl TableProvider for TsTableProvider {
         .with_projection_indices(projection.cloned())
         .with_limit(limit);
 
-        let selected = self.prune_segments_by_index(segments, filters, &pruning_predicate)?;
+        let selected = self.prune_segments_by_metadata(segments, filters, &pruning_predicate)?;
         for seg in selected {
             let file_size = self.segment_file_size(seg).await?;
             let location = self
