@@ -8,7 +8,9 @@ use crate::exceptions::{
     TimeseriesTableError,
 };
 use timeseries_table_format::{
-    coverage::EntityValue, storage::StorageError as CoreStorageError, table::TableError,
+    coverage::{EntityValue, bucket::LogicalBucketRange},
+    storage::StorageError as CoreStorageError,
+    table::TableError,
     transaction_log::CommitError,
 };
 
@@ -78,6 +80,7 @@ fn coverage_overlap_error_to_py(
     segment_path: String,
     overlap_count: u128,
     example_bucket: Option<u64>,
+    example_bucket_range: LogicalBucketRange,
     example_entity_identity: Option<(&[String], &[EntityValue])>,
 ) -> PyErr {
     let py_err = CoverageOverlapError::new_err(msg);
@@ -90,6 +93,9 @@ fn coverage_overlap_error_to_py(
         return error;
     }
     if let Err(error) = exc.setattr("example_bucket", example_bucket) {
+        return error;
+    }
+    if let Err(error) = exc.setattr("example_bucket_range", example_bucket_range.to_string()) {
         return error;
     }
     match example_entity_identity {
@@ -142,13 +148,14 @@ pub(crate) fn table_error_to_py(
             segment_path,
             overlap_count,
             example_bucket,
-            ..
+            example_bucket_range,
         } => coverage_overlap_error_to_py(
             py,
             msg,
             segment_path,
             u128::from(overlap_count),
             example_bucket,
+            example_bucket_range,
             None,
         ),
 
@@ -157,13 +164,14 @@ pub(crate) fn table_error_to_py(
             overlap_count,
             example_identity,
             example_bucket,
-            ..
+            example_bucket_range,
         } => coverage_overlap_error_to_py(
             py,
             msg,
             segment_path,
             overlap_count,
             Some(example_bucket),
+            example_bucket_range,
             Some((entity_columns, example_identity.components())),
         ),
 

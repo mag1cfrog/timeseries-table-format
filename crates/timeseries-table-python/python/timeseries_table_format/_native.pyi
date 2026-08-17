@@ -17,7 +17,9 @@ class CoverageOverlapError(TimeseriesTableError):
     example_entity_identity: dict[str, str | int] | None
     """One typed identity in configured column order, or `None` for global coverage."""
     example_bucket: int | None
-    """One overlapping bucket identifier, for debugging."""
+    """Internal overlapping bucket identifier, retained for compatibility."""
+    example_bucket_range: str
+    """Logical ordered-index interval covered by `example_bucket`."""
 
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
