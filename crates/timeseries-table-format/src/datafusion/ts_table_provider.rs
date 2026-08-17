@@ -23,11 +23,11 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::object_store::ObjectStoreUrl;
 
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, Operator};
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
-use crate::metadata::table_metadata::IndexKind;
+use crate::metadata::table_metadata::{IndexKind, IndexSpec};
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -35,6 +35,7 @@ use datafusion::logical_expr::utils::{conjunction, expr_to_columns};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
+use datafusion::scalar::ScalarValue;
 use tokio::sync::RwLock;
 
 /// DataFusion table provider for a timeseries table schema.
@@ -62,6 +63,53 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     DataFusionError::External(Box::new(e))
+}
+
+fn metadata_pruning_expr(expr: &Expr, index: &IndexSpec) -> DFResult<Option<Expr>> {
+    let exact_entity_equality = matches!(expr, Expr::BinaryExpr(binary)
+        if binary.op == Operator::Eq
+            && ((is_entity_column(&binary.left, index) && is_string_literal(&binary.right))
+                || (is_string_literal(&binary.left) && is_entity_column(&binary.right, index))));
+    if exact_entity_equality {
+        return Ok(Some(expr.clone()));
+    }
+
+    if let Expr::BinaryExpr(binary) = expr
+        && matches!(binary.op, Operator::And | Operator::Or)
+    {
+        let left = metadata_pruning_expr(&binary.left, index)?;
+        let right = metadata_pruning_expr(&binary.right, index)?;
+        return Ok(if binary.op == Operator::And {
+            match (left, right) {
+                (Some(left), Some(right)) => Some(left.and(right)),
+                (left @ Some(_), None) | (None, left @ Some(_)) => left,
+                (None, None) => None,
+            }
+        } else {
+            left.zip(right).map(|(left, right)| left.or(right))
+        });
+    }
+
+    let mut columns = HashSet::new();
+    expr_to_columns(expr, &mut columns)?;
+    Ok(
+        (!columns.is_empty() && columns.iter().all(|column| column.name == index.column))
+            .then(|| expr.clone()),
+    )
+}
+
+fn is_entity_column(expr: &Expr, index: &IndexSpec) -> bool {
+    matches!(expr, Expr::Column(column) if index.entity_columns.contains(&column.name))
+}
+
+fn is_string_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Literal(
+            ScalarValue::Utf8(Some(_)) | ScalarValue::LargeUtf8(Some(_)),
+            _
+        )
+    )
 }
 
 impl TsTableProvider {
@@ -132,20 +180,13 @@ impl TsTableProvider {
         self.table.index_spec().column.as_str()
     }
 
-    fn prune_segments_by_index<'a>(
+    fn prune_segments_by_metadata<'a>(
         &self,
         segments: Vec<&'a SegmentMeta>,
-        filters: &[Expr],
+        metadata_filters: &[Expr],
         pruning_predicate: &Arc<dyn PhysicalExpr>,
     ) -> DFResult<Vec<&'a SegmentMeta>> {
-        let mut columns = HashSet::new();
-        for filter in filters {
-            expr_to_columns(filter, &mut columns)?;
-        }
-        if !columns
-            .iter()
-            .any(|column| column.name == self.index_column_name())
-        {
+        if metadata_filters.is_empty() {
             return Ok(segments);
         }
 
@@ -205,33 +246,40 @@ impl TableProvider for TsTableProvider {
             .transpose()?
             .unwrap_or_else(|| lit(true));
 
-        let pruning_predicate =
-            if matches!(self.table.index_spec().kind, IndexKind::Timestamp { .. }) {
-                let index_column = self.index_column_name();
-                let index_type = self.schema.field_with_name(index_column)?.data_type();
-                let normalized_filters = filters
-                    .iter()
-                    .cloned()
-                    .map(|filter| {
-                        timestamp_pruning::normalize_timestamp_predicate(
-                            filter,
-                            index_column,
-                            index_type,
-                        )
-                    })
-                    .collect::<DFResult<Vec<_>>>()?;
+        let metadata_filters = filters
+            .iter()
+            .map(|filter| metadata_pruning_expr(filter, self.table.index_spec()))
+            .collect::<DFResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
 
-                if normalized_filters.as_slice() == filters {
-                    Arc::clone(&exact_predicate)
-                } else {
-                    conjunction(normalized_filters)
-                        .map(|p| state.create_physical_expr(p, &df_schema))
-                        .transpose()?
-                        .unwrap_or_else(|| lit(true))
-                }
-            } else {
-                Arc::clone(&exact_predicate)
-            };
+        let pruning_filters = if matches!(self.table.index_spec().kind, IndexKind::Timestamp { .. })
+        {
+            let index_column = self.index_column_name();
+            let index_type = self.schema.field_with_name(index_column)?.data_type();
+            metadata_filters
+                .iter()
+                .cloned()
+                .map(|filter| {
+                    timestamp_pruning::normalize_timestamp_predicate(
+                        filter,
+                        index_column,
+                        index_type,
+                    )
+                })
+                .collect::<DFResult<Vec<_>>>()?
+        } else {
+            metadata_filters.clone()
+        };
+        let pruning_predicate = if pruning_filters.as_slice() == filters {
+            Arc::clone(&exact_predicate)
+        } else {
+            conjunction(pruning_filters)
+                .map(|p| state.create_physical_expr(p, &df_schema))
+                .transpose()?
+                .unwrap_or_else(|| lit(true))
+        };
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
         let parquet_source =
@@ -245,7 +293,8 @@ impl TableProvider for TsTableProvider {
         .with_projection_indices(projection.cloned())
         .with_limit(limit);
 
-        let selected = self.prune_segments_by_index(segments, filters, &pruning_predicate)?;
+        let selected =
+            self.prune_segments_by_metadata(segments, &metadata_filters, &pruning_predicate)?;
         for seg in selected {
             let file_size = self.segment_file_size(seg).await?;
             let location = self
