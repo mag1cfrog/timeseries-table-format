@@ -1,3 +1,8 @@
+#[cfg(test)]
+use std::{
+    collections::HashSet,
+    sync::{LazyLock, Mutex},
+};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -10,6 +15,26 @@ use crate::storage::{
     BackendError, OtherIoSnafu, StorageLocation, StorageResult, TempFileGuard, create_new_file,
     create_parent_dir, join_local,
 };
+
+#[cfg(test)]
+static FINISH_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_output_finish_failure(path: PathBuf) {
+    FINISH_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
+fn take_output_finish_failure(path: &Path) -> bool {
+    FINISH_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+}
 
 enum LocalFinish {
     Rename(PathBuf),
@@ -81,6 +106,16 @@ impl LocalSink {
             .context(OtherIoSnafu {
                 path: self.path.display().to_string(),
             })?;
+
+        #[cfg(test)]
+        if take_output_finish_failure(&self.path) {
+            return Err(OtherIoSnafu {
+                path: self.path.display().to_string(),
+            }
+            .into_error(BackendError::Local(io::Error::other(
+                "injected output finish failure",
+            ))));
+        }
 
         if let LocalFinish::Rename(final_path) = &self.finish {
             fs::rename(&self.path, final_path)

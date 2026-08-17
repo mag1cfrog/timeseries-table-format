@@ -754,6 +754,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_rewrite_stages_exactly_two_verified_outputs() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+
+        let rewrite = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await?;
+
+        assert_eq!(rewrite.replacements.len(), 2);
+        assert_eq!(rewrite.rows_read, fixture.source.row_count * 2);
+        assert_eq!(rewrite.rows_written, fixture.source.row_count);
+        assert_eq!(rewrite.staged_object_paths.len(), 4);
+        let mut output_coverage = EntityCoverage::empty();
+        for replacement in &rewrite.replacements {
+            assert_eq!(
+                replacement.meta.entity_layout,
+                SegmentEntityLayout::Single(replacement.identity.clone())
+            );
+            output_coverage.union_inplace(&replacement.coverage);
+        }
+        assert_eq!(output_coverage, fixture.source_coverage);
+        assert_eq!(
+            rewrite.materialized_identities,
+            fixture
+                .source_coverage
+                .iter()
+                .map(|(identity, _)| identity.clone())
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn mixed_rewrite_stages_one_bounded_output_per_identity() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
@@ -1143,6 +1179,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rewrite_cleans_completed_outputs_when_a_later_finish_fails() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let attempt_id = Uuid::from_u128(5);
+        let owned_paths = [
+            staged_data_path(attempt_id, 0),
+            staged_coverage_path(&fixture, attempt_id, 0)?,
+            staged_data_path(attempt_id, 1),
+        ];
+        crate::storage::inject_output_finish_failure(fixture.temp.path().join(&owned_paths[2]));
+
+        let error = rewrite_with_attempt_id(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+            attempt_id,
+        )
+        .await
+        .expect_err("second output finish must fail");
+
+        assert!(matches!(
+            error,
+            EntityRewriteError::Storage {
+                source: StorageError::OtherIo { .. }
+            }
+        ));
+        for path in &owned_paths {
+            assert!(!fixture.temp.path().join(path).exists(), "{path} leaked");
+        }
+        assert!(fixture.temp.path().join(&fixture.source.path).exists());
+        assert!(
+            fixture
+                .temp
+                .path()
+                .join(
+                    fixture
+                        .source
+                        .coverage_path
+                        .as_deref()
+                        .expect("source sidecar")
+                )
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_read_failure_never_creates_staged_objects() -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        std::fs::remove_file(fixture.temp.path().join(&fixture.source.path))?;
+
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("missing source must fail");
+
+        assert!(matches!(
+            error,
+            EntityRewriteError::SegmentInspection { .. }
+        ));
+        assert_nothing_staged(&fixture);
+        assert!(
+            fixture
+                .temp
+                .path()
+                .join(
+                    fixture
+                        .source
+                        .coverage_path
+                        .as_deref()
+                        .expect("source sidecar")
+                )
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn rewrite_rejects_wrong_layout_and_missing_pointer_before_staging() -> TestResult {
         let mut fixture = rewrite_fixture().await?;
         let identity = fixture
@@ -1271,6 +1389,31 @@ mod tests {
         )
         .await
         .expect_err("stale coverage object must fail");
+        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+
+        let mut empty_identity_coverage = EntityCoverage::empty();
+        for (ordinal, (identity, coverage)) in fixture.source_coverage.iter().enumerate() {
+            empty_identity_coverage.union_coverage(
+                identity.clone(),
+                if ordinal == 0 {
+                    crate::coverage::Coverage::empty()
+                } else {
+                    coverage.clone()
+                },
+            );
+        }
+        std::fs::write(
+            &absolute_coverage_path,
+            entity_coverage_to_bytes(&empty_identity_coverage)?,
+        )?;
+        let error = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &fixture.table_schema,
+            &fixture.index,
+            &fixture.source,
+        )
+        .await
+        .expect_err("identity without a covered bucket must fail");
         assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
         assert_nothing_staged(&fixture);
         Ok(())
