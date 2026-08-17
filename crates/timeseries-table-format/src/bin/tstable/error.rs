@@ -62,6 +62,13 @@ pub enum CliError {
         source: Box<TableError>,
     },
 
+    #[snafu(display("Entity-layout optimization failed for table {table}: {source}"))]
+    OptimizeTable {
+        table: String,
+        #[snafu(source(from(TableError, Box::new)))]
+        source: Box<TableError>,
+    },
+
     #[snafu(display("Internal path error: {message}"))]
     PathInvariantNoSource {
         message: String,
