@@ -136,7 +136,7 @@ impl OutputSink {
 ///
 /// Returns [`crate::storage::StorageError::AlreadyExists`] when `rel_path`
 /// already exists, or another storage error when creation fails.
-pub async fn open_new_output_sink(
+pub(crate) async fn open_new_output_sink(
     location: &StorageLocation,
     rel_path: &Path,
 ) -> StorageResult<OutputSink> {
