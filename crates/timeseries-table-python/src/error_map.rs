@@ -142,6 +142,7 @@ pub(crate) fn table_error_to_py(
             segment_path,
             overlap_count,
             example_bucket,
+            ..
         } => coverage_overlap_error_to_py(
             py,
             msg,
@@ -156,6 +157,7 @@ pub(crate) fn table_error_to_py(
             overlap_count,
             example_identity,
             example_bucket,
+            ..
         } => coverage_overlap_error_to_py(
             py,
             msg,

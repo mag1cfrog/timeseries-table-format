@@ -18,6 +18,7 @@ use crate::{
     coverage::serde::{coverage_to_bytes, entity_coverage_to_bytes},
     coverage::{
         EntityCoverage,
+        bucket::logical_bucket_range,
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
@@ -41,10 +42,11 @@ use super::{
     TimeSeriesTable,
     append_report::{AppendReport, AppendReportBuilder},
     error::{
-        CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu,
-        EntityCoverageOverlapSnafu, EntityWithoutIndexCoverageSnafu,
-        ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SegmentCoverageSnafu,
-        SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
+        CoverageBucketSnafu, CoverageOverlapSnafu, DuplicateSegmentPathSnafu,
+        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
+        EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
+        MissingCanonicalSchemaSnafu, SegmentCoverageSnafu, SegmentMetaSnafu,
+        SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
     },
 };
 
@@ -279,11 +281,14 @@ impl TimeSeriesTable {
 
             let step_start = Instant::now();
             if let Some((identity, bucket)) = segment_cov.overlap_example(&table_cov) {
+                let example_bucket_range =
+                    logical_bucket_range(&self.index.kind, bucket).context(CoverageBucketSnafu)?;
                 return EntityCoverageOverlapSnafu {
                     segment_path: relative_path.to_string(),
                     overlap_count: segment_cov.intersection_cardinality(&table_cov),
                     example_identity: identity.clone(),
                     example_bucket: bucket,
+                    example_bucket_range,
                 }
                 .fail();
             }
@@ -321,12 +326,14 @@ impl TimeSeriesTable {
             let step_start = Instant::now();
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
-            if overlap_count > 0 {
-                let example_bucket = overlap.present().iter().next();
+            if let Some(example_bucket) = overlap.present().iter().next() {
+                let example_bucket_range = logical_bucket_range(&self.index.kind, example_bucket)
+                    .context(CoverageBucketSnafu)?;
                 return CoverageOverlapSnafu {
                     segment_path: relative_path.to_string(),
                     overlap_count,
-                    example_bucket,
+                    example_bucket: Some(example_bucket),
+                    example_bucket_range,
                 }
                 .fail();
             }
@@ -968,13 +975,22 @@ mod tests {
         let coverage_before = coverage_files(tmp.path())?;
         let overlap_path = "data/negative-overlap.parquet";
         write_arrow_parquet_int_time(&tmp.path().join(overlap_path), &[-19], &["A"], &[3.0])?;
+        let overlap_error = table
+            .append_parquet_segment(overlap_path)
+            .await
+            .expect_err("negative bucket overlap must fail");
         assert!(matches!(
-            table
-                .append_parquet_segment(overlap_path)
-                .await
-                .expect_err("negative bucket overlap must fail"),
-            TableError::CoverageOverlap { .. }
+            &overlap_error,
+            TableError::CoverageOverlap {
+                example_bucket_range,
+                ..
+            } if example_bucket_range.to_string() == "[-20, -10)"
         ));
+        assert!(
+            overlap_error
+                .to_string()
+                .contains("example_bucket_range=[-20, -10)")
+        );
 
         let mismatch_path = "data/schema-mismatch.parquet";
         write_single_index_parquet(
@@ -1053,12 +1069,17 @@ mod tests {
             DataType::UInt64,
             Arc::new(UInt64Array::from(vec![u64::MAX - 1])),
         )?;
+        let overlap_error = table
+            .append_parquet_segment(overlap_path)
+            .await
+            .expect_err("large uint64 bucket overlap must fail");
         assert!(matches!(
-            table
-                .append_parquet_segment(overlap_path)
-                .await
-                .expect_err("large uint64 bucket overlap must fail"),
-            TableError::CoverageOverlap { .. }
+            overlap_error,
+            TableError::CoverageOverlap {
+                example_bucket_range,
+                ..
+            } if example_bucket_range.to_string()
+                == "[18446744073709551610, 18446744073709551615]"
         ));
         assert_eq!(table.state, state_before);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -1807,8 +1828,11 @@ mod tests {
                 overlap_count: 3,
                 example_identity,
                 example_bucket: 0x8000_0000_0000_0000,
+                example_bucket_range,
             } if segment_path == rel2
                 && example_identity.components() == [EntityValue::from("A")]
+                && example_bucket_range.to_string()
+                    == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
         ));
         Ok(())
     }
@@ -2312,11 +2336,16 @@ mod tests {
         for sidecar in &sidecars {
             tokio::fs::create_dir_all(tmp.path().join(sidecar)).await?;
         }
+        let example_bucket = crate::coverage::bucket::bucket_id(
+            &table.index.kind,
+            &IndexValue::Timestamp(utc_datetime(1970, 1, 1, 0, 0, 0)),
+        )?;
         let source = TableError::EntityCoverageOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
             example_identity: EntityIdentity::try_new(vec!["A".into()])?,
-            example_bucket: 0,
+            example_bucket,
+            example_bucket_range: logical_bucket_range(&table.index.kind, example_bucket)?,
         };
         let err = table.rollback_created_sidecars(&sidecars, source).await;
         let message = err.to_string();

@@ -12,7 +12,11 @@ use parquet::errors::ParquetError;
 use snafu::prelude::*;
 
 use crate::{
-    coverage::{EntityIdentity, bucket::BucketError, io::CoverageError},
+    coverage::{
+        EntityIdentity,
+        bucket::{BucketError, LogicalBucketRange},
+        io::CoverageError,
+    },
     formats::parquet::{EntityRewriteError, SegmentCoverageError},
     metadata::{
         schema_compat::SchemaCompatibilityError,
@@ -326,20 +330,22 @@ pub enum TableError {
 
     /// Appending would overlap existing table coverage.
     #[snafu(display(
-        "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example={example_bucket:?})"
+        "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example_bucket_range={example_bucket_range})"
     ))]
     CoverageOverlap {
         /// Relative path of the segment being appended.
         segment_path: String,
         /// Number of overlapping buckets detected.
         overlap_count: u64,
-        /// Example overlapping bucket (if available) to aid debugging.
+        /// Internal example bucket retained for programmatic compatibility.
         example_bucket: Option<u64>,
+        /// Logical ordered-index range covered by the example bucket.
+        example_bucket_range: LogicalBucketRange,
     },
 
     /// Appending would overlap entity-scoped table coverage.
     #[snafu(display(
-        "Entity coverage overlap while appending {segment_path}: {overlap_count} overlapping identity/bucket pairs (example_identity={example_identity:?}, example_bucket={example_bucket})"
+        "Entity coverage overlap while appending {segment_path}: {overlap_count} overlapping identity/bucket pairs (example_identity={example_identity:?}, example_bucket_range={example_bucket_range})"
     ))]
     EntityCoverageOverlap {
         /// Relative path of the segment being appended.
@@ -350,6 +356,8 @@ pub enum TableError {
         example_identity: EntityIdentity,
         /// Smallest overlapping bucket for `example_identity`.
         example_bucket: u64,
+        /// Logical ordered-index range covered by the example bucket.
+        example_bucket_range: LogicalBucketRange,
     },
 
     /// Entity-aware append produced no entity coverage.
