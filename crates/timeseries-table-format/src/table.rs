@@ -48,6 +48,8 @@ pub use error::TableError;
 pub use optimize::OptimizeReport;
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
+///
+/// Batch and row order is unspecified.
 pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;
 
 /// High-level time-series table handle.

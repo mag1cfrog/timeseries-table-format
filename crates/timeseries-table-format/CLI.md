@@ -105,7 +105,8 @@ Use repeatable `--entity` flags for identifiers such as stock symbols or numeric
 Coverage and overlap are tracked separately for each complete identity, in flag order. Supported
 Arrow types are Utf8, LargeUtf8, Int32, Int64, and UInt64. Actual values must be non-null. Signed
 and unsigned integers retain their exact types; unsupported domains and type mismatches are
-rejected rather than cast.
+rejected rather than cast. Entity column names must be unique and cannot also name the ordered
+index column.
 
 ---
 
@@ -128,6 +129,7 @@ tstable append \
 **Notes:**
 - An external Parquet file is copied into the table's `data/` directory
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
+- Parquet rows need not be sorted by the index column
 - Overlapping index buckets cause an error only for the same complete entity identity; tables
   without entity columns use global bucket overlap
 - Schema must be compatible with existing data (if any)
@@ -169,11 +171,14 @@ Optimization preserves logical rows, schema, and per-entity coverage. It does no
 files or accept a target file size. Replaced source files may remain on disk until a future vacuum
 operation removes unreferenced files.
 
+Optimization may change physical row order.
+
 ---
 
 ### `query` — Run SQL queries
 
 Execute SQL queries against your table using DataFusion.
+Results are unordered unless the SQL query uses `ORDER BY`.
 
 ```bash
 tstable query \

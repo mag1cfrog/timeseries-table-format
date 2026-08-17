@@ -72,8 +72,9 @@ Log actions:
 
 ## Coverage and gaps
 - **Bucket IDs**: timestamps are mapped to discrete bucket IDs using `TimeBucket`.
-- **Overlap checks**: a new segment is rejected if any bucket ID already exists.
-- **Snapshots**: table coverage snapshots are the union of all segment coverages.
+- **Overlap checks**: tables with entity columns reject an existing complete identity/bucket pair;
+  tables without entity columns reject an existing bucket ID.
+- **Snapshots**: table coverage snapshots union segment coverage while preserving entity identity.
 - **Recovery**: if the snapshot sidecar is missing/corrupt, it is rebuilt from
   segment coverage sidecars when possible.
 - **Read-side metrics**: coverage ratio, missing runs, max gap length, and
@@ -88,7 +89,8 @@ Log actions:
 ## Range scans
 1. Select segments whose `[ts_min, ts_max]` intersect `[ts_start, ts_end)`.
 2. Read each segment, build a Parquet `RecordBatch` reader, and filter by time.
-3. Stream filtered batches in chronological order as `TimeSeriesScan`.
+3. Stream filtered batches as `TimeSeriesScan`. Input rows need not be chronological, and returned
+   batches and rows have no ordering guarantee. Callers must sort when they require ordered results.
 
 ## Schema rules (v0.1)
 - No schema evolution: all segments must match the canonical schema exactly.

@@ -480,12 +480,16 @@ impl TimeSeriesTable {
     }
 
     /// Append a Parquet segment using its canonical relative path as identity.
+    ///
+    /// Rows need not be ordered by the table's ordered index.
     pub async fn append_parquet_segment(&mut self, relative_path: &str) -> Result<u64, TableError> {
         let relative_path = self.normalize_new_segment_path(relative_path).await?;
         self.append_parquet_segment_file(&relative_path, None).await
     }
 
     /// Copy an external Parquet file into the table when needed and append it.
+    ///
+    /// Rows need not be ordered by the table's ordered index.
     ///
     /// A copy created by this operation is removed when append fails before
     /// publication. Files already under the table root and copies involved in

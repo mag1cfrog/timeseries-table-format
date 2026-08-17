@@ -1529,7 +1529,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// Append a Parquet segment to the table.
         ///
         /// The persisted ordered-index specification determines the required column and exact
-        /// Arrow type; append accepts no index override.
+        /// Arrow type; append accepts no index override. Rows need not be ordered by that index.
         ///
         /// Parameters
         /// ----------
@@ -1595,6 +1595,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
 
         /// Rewrite every mixed-entity segment into single-entity segments.
+        ///
+        /// Preserves logical rows, schema, and per-entity coverage, but may change physical row
+        /// order. Query results are unordered unless the SQL query uses ORDER BY.
         ///
         /// Returns
         /// -------
