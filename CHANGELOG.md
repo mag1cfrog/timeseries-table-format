@@ -4,6 +4,87 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.4.0
+
+
+### Bug Fixes
+
+- Upgrade PyO3 to 0.29 ([#301](https://github.com/mag1cfrog/timeseries-table-format/pull/301)) ([888fd9a](https://github.com/mag1cfrog/timeseries-table-format/commit/888fd9a1ee7d881a892f75b6ea36b52b203bc772))
+
+- Prevent failed concurrent appends from leaking or deleting table artifacts ([#291](https://github.com/mag1cfrog/timeseries-table-format/pull/291)) ([e36915e](https://github.com/mag1cfrog/timeseries-table-format/commit/e36915ec0e85f1a0c9dcaafe26e977ae9e23e7b2))
+
+- Remove orphaned Parquet copies after failed appends ([#293](https://github.com/mag1cfrog/timeseries-table-format/pull/293)) ([fdd6d73](https://github.com/mag1cfrog/timeseries-table-format/commit/fdd6d731e9304db32edc2629e8b91ef28ba05b37))
+
+- Upgrade CLI dependencies ([#304](https://github.com/mag1cfrog/timeseries-table-format/pull/304)) ([740dca6](https://github.com/mag1cfrog/timeseries-table-format/commit/740dca6e31c5caad274afd440a458e5904b7b2ab))
+
+- Upgrade SNAFU to 0.9 ([#305](https://github.com/mag1cfrog/timeseries-table-format/pull/305)) ([d5f129d](https://github.com/mag1cfrog/timeseries-table-format/commit/d5f129d1249e30afa2e61c4b26b7087d9a1a5fe3))
+
+- Prevent ordered index columns from being configured as entity identities ([6a0ef72](https://github.com/mag1cfrog/timeseries-table-format/commit/6a0ef722baaf90aa648bdf0d42bf38175d5649dd))
+
+- Render logical overlap bucket ranges ([#342](https://github.com/mag1cfrog/timeseries-table-format/pull/342)) ([0ad9e58](https://github.com/mag1cfrog/timeseries-table-format/commit/0ad9e58ffb05d7a2359adc9c5a729bb3280859e4))
+
+
+### Code Refactoring
+
+- Remove the obsolete timestamp pruning engine after the DataFusion migration ([#308](https://github.com/mag1cfrog/timeseries-table-format/pull/308)) ([aacea8e](https://github.com/mag1cfrog/timeseries-table-format/commit/aacea8eb6581afa597e8fb89a0ae06c60e13975e))
+
+
+### Documentation
+
+- Overhaul project documentation ([#317](https://github.com/mag1cfrog/timeseries-table-format/pull/317)) ([bd971a4](https://github.com/mag1cfrog/timeseries-table-format/commit/bd971a4b4149a68d9ad88b8683ce4433ab2c1f7c))
+
+- Clarify unordered row behavior and entity-aware coverage ([4eb3dac](https://github.com/mag1cfrog/timeseries-table-format/commit/4eb3dac815958897aa7e72bc8ac41c1d939b931e))
+
+
+### Features
+
+- Expose multi-entity tables and structured overlap diagnostics in Python ([902507c](https://github.com/mag1cfrog/timeseries-table-format/commit/902507cd9fdc85fb1cad7b0fee8cc1916e9f5beb))
+
+- Inspect Parquet files without full payload buffering ([#282](https://github.com/mag1cfrog/timeseries-table-format/pull/282)) ([7056997](https://github.com/mag1cfrog/timeseries-table-format/commit/7056997f00d6d81b8b2e13bc12263a6396a7a58a))
+
+- Finalize bounded Parquet append profiling and RSS proof ([#284](https://github.com/mag1cfrog/timeseries-table-format/pull/284)) ([823edc3](https://github.com/mag1cfrog/timeseries-table-format/commit/823edc3efefbaf24ee0f5325795335f79cd3e36b))
+
+- Stream time-series range scans incrementally with bounded memory ([#290](https://github.com/mag1cfrog/timeseries-table-format/pull/290)) ([df76bbb](https://github.com/mag1cfrog/timeseries-table-format/commit/df76bbbf9ce15bd07b8c45090c42c67d854d2c73))
+
+- Introduce ordered-index metadata and 64-bit coverage ([#295](https://github.com/mag1cfrog/timeseries-table-format/pull/295)) ([1d9bb52](https://github.com/mag1cfrog/timeseries-table-format/commit/1d9bb52f8873d4c58b64b1d2e1d456ca1674ae4a))
+
+- Support signed and unsigned integer indexes for Parquet appends ([#296](https://github.com/mag1cfrog/timeseries-table-format/pull/296)) ([8002ec0](https://github.com/mag1cfrog/timeseries-table-format/commit/8002ec0e0023eebd8389d4a435e25f6df00f8065))
+
+- Support signed and unsigned integer range scans and coverage queries ([#297](https://github.com/mag1cfrog/timeseries-table-format/pull/297)) ([467b2ed](https://github.com/mag1cfrog/timeseries-table-format/commit/467b2ede1ea56ddcba37421da7ed4df1111ec569))
+
+- Speed up signed and unsigned integer index queries by skipping irrelevant segment files ([5eecce1](https://github.com/mag1cfrog/timeseries-table-format/commit/5eecce1a51a0bf21880e8c15cb5fe513d40aa8ca))
+
+- Improve timestamp query pruning with shared metadata predicates ([#307](https://github.com/mag1cfrog/timeseries-table-format/pull/307)) ([4cbffec](https://github.com/mag1cfrog/timeseries-table-format/commit/4cbffec82e45c8e2bd1c7fa5b791e27c48aa1878))
+
+- Create and query Timestamp, Int64, and UInt64 ordered-index tables from CLI and Python ([57a6f20](https://github.com/mag1cfrog/timeseries-table-format/commit/57a6f2050989e28d58fc374a926e5c105a44b28d))
+
+- Add per-entity coverage model with deterministic sidecar encoding ([8d17c54](https://github.com/mag1cfrog/timeseries-table-format/commit/8d17c54521813e29635f3f5506dcd52c621537ea))
+
+- Compute exact entity-scoped coverage for multi-entity Parquet segments ([#320](https://github.com/mag1cfrog/timeseries-table-format/pull/320)) ([e4a1e8a](https://github.com/mag1cfrog/timeseries-table-format/commit/e4a1e8ae670c299dfedbf3d30fe22f38ffde3081))
+
+- Support entity-scoped append, overlap detection, and recovery ([3ee339c](https://github.com/mag1cfrog/timeseries-table-format/commit/3ee339c08d1a47929c1b261deaafd399a543f1f7))
+
+- Query coverage and gaps safely for individual entities ([4227763](https://github.com/mag1cfrog/timeseries-table-format/commit/4227763922e7d4a08136674269eff0e0b8e006d9))
+
+- Persist exact segment entity layouts for reliable optimization planning ([d6625c5](https://github.com/mag1cfrog/timeseries-table-format/commit/d6625c5327e5701ae378f8f098795d749a772b6c))
+
+- Prune conflicting single-entity segments from DataFusion scans using log metadata ([da04bb9](https://github.com/mag1cfrog/timeseries-table-format/commit/da04bb9cc6260a13fdd303a94ecf46803690f5b1))
+
+- Add explicit entity layout optimization to the CLI and Python API ([5a12258](https://github.com/mag1cfrog/timeseries-table-format/commit/5a122581bd1809b56c62ff49a47bc638770b4f0b))
+
+- Support string and integer entity columns across the full table lifecycle ([6ff0e80](https://github.com/mag1cfrog/timeseries-table-format/commit/6ff0e809e1c7b12477953202db981bbb3047d140))
+
+
+### Testing
+
+- Characterize timestamp segment pruning across SQL transforms and DST ([#306](https://github.com/mag1cfrog/timeseries-table-format/pull/306)) ([cc8e9aa](https://github.com/mag1cfrog/timeseries-table-format/commit/cc8e9aa6cf1c9c8f3cdd29a6dd701973fd0150f9))
+
+
+### Perf
+
+- Add bounded-memory and first-batch regression coverage for range scans ([#292](https://github.com/mag1cfrog/timeseries-table-format/pull/292)) ([63e7676](https://github.com/mag1cfrog/timeseries-table-format/commit/63e76764629f1af956a638e0b432e375967872b7))
+
+
 ## Legacy package history
 
 Before 0.3.0, the repository released several packages independently. Their

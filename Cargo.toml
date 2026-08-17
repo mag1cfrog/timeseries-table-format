@@ -3,7 +3,7 @@ members = ["crates/timeseries-table-format", "crates/timeseries-table-python"]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/mag1cfrog/timeseries-table-format"
@@ -18,7 +18,7 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
-timeseries-table-format = { path = "crates/timeseries-table-format", version = "0.3.0", default-features = false }
+timeseries-table-format = { path = "crates/timeseries-table-format", version = "0.4.0", default-features = false }
 
 arrow = "57.1.0"
 arrow-array = "57.1.0"
