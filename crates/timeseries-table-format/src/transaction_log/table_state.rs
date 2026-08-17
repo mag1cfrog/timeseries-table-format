@@ -242,12 +242,13 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coverage::EntityIdentity;
     use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
-        FileFormat, IndexKind, IndexSpec, LogAction, SegmentMeta, TableKind, TableMeta, TimeBucket,
-        TransactionLogStore,
+        FileFormat, IndexKind, IndexSpec, LogAction, SegmentEntityLayout, SegmentMeta, TableKind,
+        TableMeta, TimeBucket, TransactionLogStore,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
@@ -284,6 +285,9 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::Single(
+                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+            ),
             index_min: IndexValue::Timestamp(
                 chrono::Utc
                     .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
@@ -306,6 +310,9 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::Single(
+                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+            ),
             index_min: (chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap()).into(),
             index_max: (chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap()).into(),
             row_count: 1,

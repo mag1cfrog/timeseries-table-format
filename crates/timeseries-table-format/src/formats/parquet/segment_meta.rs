@@ -22,7 +22,7 @@ use crate::metadata::segments::ParquetIndexColumnError;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::storage::{TableLocation, file_size, open_parquet_reader};
 use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
-use crate::transaction_log::{FileFormat, SegmentMeta};
+use crate::transaction_log::{FileFormat, SegmentEntityLayout, SegmentMeta};
 
 use super::schema::{ParquetIndexKind, ParquetTimestampUnit, validate_parquet_index};
 
@@ -490,6 +490,8 @@ pub(crate) async fn segment_meta_from_parquet(
     let meta_out = SegmentMeta {
         path: path_str,
         format: FileFormat::Parquet,
+        // Entity-aware append replaces this after deriving exact coverage.
+        entity_layout: SegmentEntityLayout::NotApplicable,
         index_min: bounds.min,
         index_max: bounds.max,
         row_count,

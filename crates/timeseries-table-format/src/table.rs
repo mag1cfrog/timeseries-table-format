@@ -1,8 +1,7 @@
 //! High-level time-series table abstraction.
 //!
 //! This module is the canonical home for the user-facing [`TimeSeriesTable`]
-//! API. The `time_series_table` module exists as a thin compatibility facade
-//! and re-exports this API.
+//! API.
 //!
 //! In v0.1 this is intentionally read-heavy and write-light:
 //! - `open` reconstructs state from the transaction log,
@@ -265,7 +264,11 @@ mod tests {
 
         // State should be at version 1 with no segments.
         assert_eq!(table.state().version, 1);
-        assert_eq!(table.state().table_meta.format_version(), 4);
+        assert_eq!(TABLE_FORMAT_VERSION, 5);
+        assert_eq!(
+            table.state().table_meta.format_version(),
+            TABLE_FORMAT_VERSION
+        );
         assert!(table.state().segments.is_empty());
 
         // Verify that the log layout exists on disk.

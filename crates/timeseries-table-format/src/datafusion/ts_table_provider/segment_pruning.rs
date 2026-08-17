@@ -165,7 +165,7 @@ mod tests {
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as PhysicalColumn, Literal};
 
     use crate::metadata::table_metadata::TimeBucket;
-    use crate::transaction_log::FileFormat;
+    use crate::transaction_log::{FileFormat, SegmentEntityLayout};
 
     use super::*;
 
@@ -188,6 +188,7 @@ mod tests {
         SegmentMeta {
             path: path.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: min,
             index_max: max,
             row_count: 10,

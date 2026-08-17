@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::{
     coverage::serde::{coverage_to_bytes, entity_coverage_to_bytes},
     coverage::{
+        EntityCoverage,
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
@@ -28,7 +29,10 @@ use crate::{
         compute_segment_entity_coverage, coverage::compute_segment_coverage,
         logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
     },
-    metadata::schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
+    metadata::{
+        schema_compat::{ensure_index_matches_schema, ensure_schema_exact_match},
+        segments::SegmentEntityLayout,
+    },
     storage,
     transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
 };
@@ -37,11 +41,39 @@ use super::{
     TimeSeriesTable,
     append_report::{AppendReport, AppendReportBuilder},
     error::{
-        CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EntityCoverageOverlapSnafu,
+        CoverageOverlapSnafu, DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu,
+        EntityCoverageOverlapSnafu, EntityWithoutIndexCoverageSnafu,
         ExistingSegmentMissingCoverageSnafu, MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu,
         SegmentCoverageSnafu, SegmentMetaSnafu, StorageSnafu, TableError,
     },
 };
+
+fn classify_entity_layout(
+    segment_path: &str,
+    coverage: &EntityCoverage,
+) -> Result<SegmentEntityLayout, TableError> {
+    let first_identity = coverage
+        .iter()
+        .next()
+        .map(|(identity, _)| identity)
+        .context(EmptySegmentEntityCoverageSnafu {
+            segment_path: segment_path.to_string(),
+        })?;
+
+    if let Some((identity, _)) = coverage.iter().find(|(_, coverage)| coverage.is_empty()) {
+        return EntityWithoutIndexCoverageSnafu {
+            segment_path: segment_path.to_string(),
+            identity: identity.clone(),
+        }
+        .fail();
+    }
+
+    Ok(if coverage.identity_count() == 1 {
+        SegmentEntityLayout::Single(first_identity.clone())
+    } else {
+        SegmentEntityLayout::Mixed
+    })
+}
 
 fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), TableError> {
     for seg in state.segments.values() {
@@ -222,7 +254,7 @@ impl TimeSeriesTable {
         let has_entity_columns = !self.index.entity_columns.is_empty();
 
         // 3-5) Load, compute, and compare coverage using the entity-column mode.
-        let (seg_cov_bytes, new_snap_cov_bytes) = if has_entity_columns {
+        let (seg_cov_bytes, new_snap_cov_bytes, entity_layout) = if has_entity_columns {
             let step_start = Instant::now();
             let table_cov = self.load_table_entity_snapshot_coverage_readonly().await?;
             if let Some(r) = report.as_mut() {
@@ -234,6 +266,7 @@ impl TimeSeriesTable {
                 compute_segment_entity_coverage(self.location(), rel_path, &self.index)
                     .await
                     .context(SegmentCoverageSnafu)?;
+            let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
             if let Some(r) = report.as_mut() {
                 r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
             }
@@ -263,7 +296,7 @@ impl TimeSeriesTable {
                         source: CoverageError::EntitySerde { source },
                     }
                 })?;
-            (seg_bytes, snapshot_bytes)
+            (seg_bytes, snapshot_bytes, entity_layout)
         } else {
             let step_start = Instant::now();
             let table_cov = self.load_table_snapshot_coverage_readonly().await?;
@@ -305,7 +338,11 @@ impl TimeSeriesTable {
                         source: CoverageError::Serde { source },
                     }
                 })?;
-            (seg_bytes, snapshot_bytes)
+            (
+                seg_bytes,
+                snapshot_bytes,
+                SegmentEntityLayout::NotApplicable,
+            )
         };
 
         // 6) Give this append private sidecar paths, then write them before commit.
@@ -366,6 +403,7 @@ impl TimeSeriesTable {
 
         // 7) Build actions and atomically publish the commit.
         segment_meta.coverage_path = Some(seg_cov_path);
+        segment_meta.entity_layout = entity_layout;
 
         let mut actions = Vec::new();
         if let Some(updated_meta) = maybe_updated_meta.clone() {
@@ -494,7 +532,7 @@ mod tests {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
-    use crate::metadata::segments::ParquetIndexColumnError;
+    use crate::metadata::segments::{ParquetIndexColumnError, SegmentEntityLayout};
     use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
@@ -506,7 +544,7 @@ mod tests {
         array::{
             ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray, UInt64Array,
         },
-        datatypes::{DataType, Field, Schema},
+        datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
     };
     use parquet::arrow::ArrowWriter;
@@ -600,6 +638,15 @@ mod tests {
             }
         }
         Ok(files)
+    }
+
+    #[test]
+    fn entity_layout_classification_rejects_empty_coverage() {
+        assert!(matches!(
+            classify_entity_layout("data/empty.parquet", &EntityCoverage::empty()),
+            Err(TableError::EmptySegmentEntityCoverage { segment_path })
+                if segment_path == "data/empty.parquet"
+        ));
     }
 
     #[tokio::test]
@@ -828,6 +875,10 @@ mod tests {
         let seg = table.state.segments.get(rel_path).expect("segment present");
         assert_eq!(seg.path, rel_path);
         assert_eq!(seg.row_count, 1);
+        assert_eq!(
+            seg.entity_layout,
+            SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?)
+        );
         assert!(matches!(
             &seg.index_min,
             IndexValue::Timestamp(value) if value.timestamp_millis() == 1_000
@@ -844,12 +895,12 @@ mod tests {
         assert_eq!(current.trim(), "2");
 
         let reopened = TimeSeriesTable::open(location).await?;
-        assert!(reopened.state.segments.contains_key(rel_path));
+        assert_eq!(reopened.state.segments.get(rel_path), Some(seg));
         Ok(())
     }
 
     #[tokio::test]
-    async fn version_four_no_entity_int64_append_uses_global_coverage() -> TestResult {
+    async fn version_five_no_entity_int64_append_uses_global_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
@@ -869,6 +920,7 @@ mod tests {
         assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
 
         let segment = table.state.segments.get(rel_path).expect("segment present");
+        assert_eq!(segment.entity_layout, SegmentEntityLayout::NotApplicable);
         assert_eq!(segment.index_min, IndexValue::Int64(i64::MIN));
         assert_eq!(segment.index_max, IndexValue::Int64(i64::MAX));
         let pointer = table.state.table_coverage.as_ref().expect("table coverage");
@@ -1113,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_four_allows_different_identities_in_the_same_bucket() -> TestResult {
+    async fn version_five_records_single_layout_for_each_entity_segment() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1133,6 +1185,15 @@ mod tests {
                 }],
             )?;
             table.append_parquet_segment(path).await?;
+            assert_eq!(
+                table
+                    .state
+                    .segments
+                    .get(path)
+                    .expect("segment present")
+                    .entity_layout,
+                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.to_string()])?)
+            );
         }
 
         assert_eq!(table.state.version, 3);
@@ -1149,7 +1210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_four_accepts_one_segment_with_multiple_identities() -> TestResult {
+    async fn version_five_records_mixed_layout_for_multiple_identities() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1175,6 +1236,7 @@ mod tests {
         table.append_parquet_segment(path).await?;
 
         let segment = table.state.segments.get(path).expect("segment present");
+        assert_eq!(segment.entity_layout, SegmentEntityLayout::Mixed);
         let coverage = read_entity_coverage_sidecar(
             &location,
             Path::new(segment.coverage_path.as_ref().expect("coverage path")),
@@ -1186,7 +1248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_four_composite_identities_isolate_coverage() -> TestResult {
+    async fn version_five_preserves_composite_identity_order_in_layout() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = IndexSpec {
@@ -1234,6 +1296,18 @@ mod tests {
         ] {
             write_composite_entity_parquet(&tmp.path().join(path), &[(1_000, "A", venue, 10.0)])?;
             table.append_parquet_segment(path).await?;
+            assert_eq!(
+                table
+                    .state
+                    .segments
+                    .get(path)
+                    .expect("segment present")
+                    .entity_layout,
+                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![
+                    "A".to_string(),
+                    venue.to_string(),
+                ])?)
+            );
         }
 
         let overlap_path = "data/composite-x-overlap.parquet";
@@ -1250,6 +1324,45 @@ mod tests {
                 ..
             } if example_identity.components() == ["A", "X"]
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn entity_with_only_null_index_values_is_rejected() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(
+            location,
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        let state_before = table.state.clone();
+        let path = "data/entity-without-index-coverage.parquet";
+        write_arrow_parquet_with_unit(
+            &tmp.path().join(path),
+            ArrowTimeUnit::Millisecond,
+            &[Some(1_000), None],
+            &["A", "B"],
+            &[10.0, 20.0],
+        )?;
+
+        let error = table
+            .append_parquet_segment(path)
+            .await
+            .expect_err("identity without index coverage must be rejected");
+
+        match error {
+            TableError::EntityWithoutIndexCoverage {
+                segment_path,
+                identity,
+            } => {
+                assert_eq!(segment_path, path);
+                assert_eq!(identity.components(), ["B"]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(table.state, state_before);
+        assert!(coverage_files(tmp.path())?.is_empty());
         Ok(())
     }
 

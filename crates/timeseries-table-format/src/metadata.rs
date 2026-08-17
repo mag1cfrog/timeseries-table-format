@@ -4,7 +4,7 @@
 //!
 //! It must not depend on storage backends or perform IO. IO-heavy modules (log
 //! replay, storage access, Parquet scanning, etc.) should live in higher layers
-//! such as `transaction_log`, `storage`, and `time_series_table`.
+//! such as `transaction_log`, `storage`, and `table`.
 
 pub mod logical_schema;
 pub mod schema_compat;

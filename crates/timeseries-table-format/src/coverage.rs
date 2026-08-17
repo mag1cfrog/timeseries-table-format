@@ -10,6 +10,7 @@ use std::{
     ops::RangeInclusive,
 };
 
+use ::serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use snafu::Snafu;
 
 pub use roaring::RoaringTreemap;
@@ -24,6 +25,25 @@ pub type Bucket = u64;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityIdentity {
     components: Vec<String>,
+}
+
+impl Serialize for EntityIdentity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.components.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let components = Vec::<String>::deserialize(deserializer)?;
+        Self::try_new(components).map_err(D::Error::custom)
+    }
 }
 
 impl EntityIdentity {
