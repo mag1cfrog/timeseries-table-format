@@ -13,7 +13,7 @@ use snafu::prelude::*;
 
 use crate::{
     coverage::{EntityIdentity, bucket::BucketError, io::CoverageError},
-    formats::parquet::SegmentCoverageError,
+    formats::parquet::{EntityRewriteError, SegmentCoverageError},
     metadata::{
         schema_compat::SchemaCompatibilityError,
         table_metadata::{IndexKind, IndexSpecError, IndexValueError},
@@ -37,6 +37,49 @@ pub enum TableError {
         /// Underlying transaction log / commit error.
         #[snafu(source, backtrace)]
         source: CommitError,
+    },
+
+    /// Entity-layout optimization does not apply to a table without entities.
+    #[snafu(display(
+        "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
+    ))]
+    OptimizeNotApplicable {
+        /// User-facing table root.
+        table_root: String,
+    },
+
+    /// Rewriting one mixed source into staged replacements failed.
+    #[snafu(display("Entity-layout optimization rewrite failed: {source}"))]
+    OptimizeRewrite {
+        /// Storage-level mixed segment rewrite failure.
+        #[snafu(source)]
+        source: EntityRewriteError,
+    },
+
+    /// A staged optimization plan violated an atomic publication invariant.
+    #[snafu(display("Invalid entity-layout optimization plan: {reason}"))]
+    OptimizeInvariant {
+        /// Failed plan invariant.
+        reason: String,
+    },
+
+    /// An optimization count could not be represented without wrapping.
+    #[snafu(display("Entity-layout optimization count overflow: {field}"))]
+    OptimizeCountOverflow {
+        /// Report or version field that overflowed.
+        field: &'static str,
+    },
+
+    /// Optimization failed and one or more owned staged objects could not be removed.
+    #[snafu(display(
+        "Entity-layout optimization failed: {source}; staged-object cleanup also failed: {cleanup_errors:?}"
+    ))]
+    OptimizeRollback {
+        /// Original optimization failure.
+        #[snafu(source)]
+        source: Box<TableError>,
+        /// Every private path whose cleanup failed.
+        cleanup_errors: Vec<String>,
     },
 
     /// Append failed and one or more owned coverage sidecars could not be removed.

@@ -14,6 +14,7 @@ pub mod append;
 pub mod append_report;
 pub mod coverage;
 pub mod error;
+mod optimize;
 pub mod scan;
 
 #[cfg(test)]
@@ -42,6 +43,7 @@ use crate::{
 };
 
 pub use error::TableError;
+pub use optimize::OptimizeReport;
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
 pub type TimeSeriesScan = Pin<Box<dyn Stream<Item = Result<RecordBatch, TableError>> + Send>>;

@@ -42,7 +42,7 @@ pub use metadata::table_metadata::{
     TableMeta, TimeBucket, validate_index_range,
 };
 pub use storage::TableLocation;
-pub use table::{TableError, TimeSeriesTable};
+pub use table::{OptimizeReport, TableError, TimeSeriesTable};
 
 /// DataFusion table provider (enabled by default).
 #[cfg(feature = "datafusion")]
