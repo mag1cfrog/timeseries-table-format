@@ -47,10 +47,11 @@
 //!     {
 //!       "AddSegment": {
 //!         "path": "data/nvda_1h_0001.parquet",
+//!         "format": "parquet",
+//!         "entity_layout": {"Single": ["NVDA"]},
 //!         "index_min": {"type": "timestamp", "value": "2020-01-01T00:00:00Z"},
 //!         "index_max": {"type": "timestamp", "value": "2020-01-02T00:00:00Z"},
-//!         "row_count": 1024,
-//!         "format": "parquet"
+//!         "row_count": 1024
 //!       }
 //!     }
 //!   ]
@@ -74,7 +75,7 @@ pub use crate::metadata::table_metadata::{
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
-pub use segments::{FileFormat, SegmentMeta};
+pub use segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
 pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};
@@ -142,6 +143,7 @@ pub enum CommitError {
 
 #[cfg(test)]
 mod tests {
+    use crate::coverage::EntityIdentity;
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
     };
@@ -207,6 +209,9 @@ mod tests {
         let seg_meta = SegmentMeta {
             path: "data/nvda_1h_0001.parquet".to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::Single(
+                EntityIdentity::try_new(vec!["NVDA".to_string()]).expect("valid identity"),
+            ),
             index_min: (ts0).into(),
             index_max: (ts1).into(),
             row_count: 1024,

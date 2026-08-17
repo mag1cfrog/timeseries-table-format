@@ -124,6 +124,7 @@ impl TransactionLogStore {
 
         let mut table_meta: Option<TableMeta> = None;
         let mut segments: HashMap<String, SegmentMeta> = HashMap::new();
+        let mut persisted_segment_layouts = Vec::new();
 
         let mut table_coverage: Option<TableCoveragePointer> = None;
 
@@ -158,6 +159,8 @@ impl TransactionLogStore {
                             }
                             .fail();
                         }
+                        persisted_segment_layouts
+                            .push((meta.path.clone(), meta.entity_layout.clone()));
                         segments.insert(meta.path.clone(), meta);
                     }
                     LogAction::RemoveSegment { path } => {
@@ -221,6 +224,31 @@ impl TransactionLogStore {
                 }
             })?;
         }
+        let entity_column_count = index.entity_columns.len();
+        for (path, layout) in persisted_segment_layouts {
+            match (&layout, entity_column_count) {
+                (SegmentEntityLayout::NotApplicable, 0) | (SegmentEntityLayout::Mixed, 1..) => {}
+                (SegmentEntityLayout::Single(identity), 1..)
+                    if identity.components().len() == entity_column_count => {}
+                (SegmentEntityLayout::Single(identity), 1..) => {
+                    return CorruptStateSnafu {
+                        msg: format!(
+                            "Invalid single-entity identity in segment at {path}: expected {entity_column_count} components, found {}",
+                            identity.components().len()
+                        ),
+                    }
+                    .fail();
+                }
+                _ => {
+                    return CorruptStateSnafu {
+                        msg: format!(
+                            "Invalid entity layout in segment at {path}: table has {entity_column_count} entity columns, layout is {layout:?}"
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        }
         for segment in segments.values() {
             segment
                 .validate_bounds(&index.kind)
@@ -242,12 +270,13 @@ impl TransactionLogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coverage::EntityIdentity;
     use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
-        FileFormat, IndexKind, IndexSpec, LogAction, SegmentMeta, TableKind, TableMeta, TimeBucket,
-        TransactionLogStore,
+        FileFormat, IndexKind, IndexSpec, LogAction, SegmentEntityLayout, SegmentMeta, TableKind,
+        TableMeta, TimeBucket, TransactionLogStore,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
@@ -284,6 +313,9 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::Single(
+                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+            ),
             index_min: IndexValue::Timestamp(
                 chrono::Utc
                     .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
@@ -306,6 +338,9 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::Single(
+                EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+            ),
             index_min: (chrono::Utc.timestamp_opt(ts_min, 0).single().unwrap()).into(),
             index_max: (chrono::Utc.timestamp_opt(ts_max, 0).single().unwrap()).into(),
             row_count: 1,
@@ -479,6 +514,133 @@ mod tests {
         let error = store.rebuild_table_state().await.unwrap_err();
         assert!(matches!(error, CommitError::CorruptState { .. }));
         assert!(error.to_string().contains("Invalid ordered-index bounds"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_inapplicable_entity_layouts() -> TestResult {
+        let single = SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".to_string()])?);
+        let cases = [
+            (
+                vec!["symbol".to_string()],
+                SegmentEntityLayout::NotApplicable,
+                "Invalid entity layout",
+            ),
+            (
+                Vec::new(),
+                SegmentEntityLayout::Mixed,
+                "Invalid entity layout",
+            ),
+            (Vec::new(), single.clone(), "Invalid entity layout"),
+            (
+                vec!["site".to_string(), "device".to_string()],
+                single,
+                "expected 2 components, found 1",
+            ),
+        ];
+
+        for (entity_columns, entity_layout, expected_message) in cases {
+            let (_tmp, store) = create_test_log_store();
+            let mut table_meta = sample_table_meta();
+            let TableKind::TimeSeries(index) = &mut table_meta.kind else {
+                unreachable!("sample metadata is time-series");
+            };
+            index.entity_columns = entity_columns;
+
+            let mut segment = sample_segment("invalid-layout");
+            segment.entity_layout = entity_layout;
+            store
+                .commit_with_expected_version(
+                    0,
+                    vec![
+                        LogAction::UpdateTableMeta(table_meta),
+                        LogAction::AddSegment(segment),
+                    ],
+                )
+                .await?;
+
+            let error = store
+                .rebuild_table_state()
+                .await
+                .expect_err("inapplicable entity layout should be rejected");
+            assert!(matches!(error, CommitError::CorruptState { .. }));
+            assert!(error.to_string().contains(expected_message), "{error}");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_validates_removed_segment_layouts() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut segment = sample_segment("removed-invalid-layout");
+        segment.entity_layout = SegmentEntityLayout::NotApplicable;
+        let path = segment.path.clone();
+
+        store
+            .commit_with_expected_version(
+                0,
+                vec![
+                    LogAction::UpdateTableMeta(sample_table_meta()),
+                    LogAction::AddSegment(segment),
+                    LogAction::RemoveSegment { path },
+                ],
+            )
+            .await?;
+
+        let error = store
+            .rebuild_table_state()
+            .await
+            .expect_err("removed segment metadata should still be validated");
+        assert!(matches!(error, CommitError::CorruptState { .. }));
+        assert!(error.to_string().contains("Invalid entity layout"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_requires_valid_entity_layout_json() -> TestResult {
+        for (replacement, expected_message) in [
+            (None, "entity_layout"),
+            (
+                Some(serde_json::json!({"Single": []})),
+                "at least one component",
+            ),
+        ] {
+            let (tmp, store) = create_test_log_store();
+            store
+                .commit_with_expected_version(
+                    0,
+                    vec![
+                        LogAction::UpdateTableMeta(sample_table_meta()),
+                        LogAction::AddSegment(sample_segment("invalid-json")),
+                    ],
+                )
+                .await?;
+
+            let commit_path = tmp.path().join(layout::commit_rel_path(1));
+            let mut commit: serde_json::Value =
+                serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+            let segment = commit["actions"][1]["AddSegment"]
+                .as_object_mut()
+                .expect("valid committed AddSegment action");
+            match replacement {
+                Some(layout) => {
+                    segment.insert("entity_layout".to_string(), layout);
+                }
+                None => {
+                    segment.remove("entity_layout");
+                }
+            }
+            tokio::fs::write(&commit_path, serde_json::to_vec(&commit)?).await?;
+
+            let error = store
+                .rebuild_table_state()
+                .await
+                .expect_err("missing or malformed entity layout should be rejected");
+            assert!(matches!(error, CommitError::CorruptState { .. }));
+            assert!(error.to_string().contains(expected_message), "{error}");
+        }
+
         Ok(())
     }
 

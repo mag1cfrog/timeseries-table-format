@@ -299,6 +299,24 @@ pub enum TableError {
         example_bucket: u64,
     },
 
+    /// Entity-aware append produced no entity coverage.
+    #[snafu(display("No entity coverage derived while appending segment {segment_path}"))]
+    EmptySegmentEntityCoverage {
+        /// Relative path of the segment being appended.
+        segment_path: String,
+    },
+
+    /// One entity has rows but no usable ordered-index coverage.
+    #[snafu(display(
+        "Entity {identity:?} in segment {segment_path} has no non-null ordered-index values"
+    ))]
+    EntityWithoutIndexCoverage {
+        /// Relative path of the segment being appended.
+        segment_path: String,
+        /// Complete identity whose rows all have null ordered-index values.
+        identity: EntityIdentity,
+    },
+
     /// A live segment already uses the normalized path supplied for append.
     #[snafu(display("Segment path is already live: {path}"))]
     DuplicateSegmentPath {

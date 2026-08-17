@@ -6,10 +6,11 @@
 //! - Robust handling of missing/malformed metadata.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use crate::coverage::EntityIdentity;
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use crate::metadata::segments::{FileFormat, SegmentMeta};
+use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
 use crate::metadata::table_metadata::{
     IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket,
 };
@@ -72,6 +73,9 @@ fn sample_segment(id: &str, ts_hour: u32) -> SegmentMeta {
     SegmentMeta {
         path: format!("data/{id}.parquet"),
         format: FileFormat::Parquet,
+        entity_layout: SegmentEntityLayout::Single(
+            EntityIdentity::try_new(vec!["A".to_string()]).expect("valid sample identity"),
+        ),
         index_min: (utc_datetime(2025, 1, 1, ts_hour, 0, 0)).into(),
         index_max: (utc_datetime(2025, 1, 1, ts_hour + 1, 0, 0)).into(),
         row_count: 1000,

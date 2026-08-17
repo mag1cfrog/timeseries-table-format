@@ -9,9 +9,12 @@ use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
-use crate::metadata::{
-    logical_schema::LogicalSchemaError,
-    table_metadata::{IndexKind, IndexValue, IndexValueError},
+use crate::{
+    coverage::EntityIdentity,
+    metadata::{
+        logical_schema::LogicalSchemaError,
+        table_metadata::{IndexKind, IndexValue, IndexValueError},
+    },
 };
 
 /// Supported on-disk file formats for segments.
@@ -32,6 +35,17 @@ pub enum FileFormat {
     // Csv,
 }
 
+/// Entity distribution within one physical segment.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SegmentEntityLayout {
+    /// The table has no configured entity columns.
+    NotApplicable,
+    /// Every row belongs to one complete entity identity.
+    Single(EntityIdentity),
+    /// Rows belong to more than one complete entity identity.
+    Mixed,
+}
+
 /// Metadata about a single physical segment.
 ///
 /// In v0.1, a "segment" corresponds to one stored data object.
@@ -42,6 +56,9 @@ pub struct SegmentMeta {
 
     /// File format for this segment.
     pub format: FileFormat,
+
+    /// Exact entity distribution derived before the segment is committed.
+    pub entity_layout: SegmentEntityLayout,
 
     /// Minimum observed ordered-index value in this segment (inclusive).
     pub index_min: IndexValue,
@@ -265,12 +282,44 @@ mod tests {
         SegmentMeta {
             path: format!("data/{id}.parquet"),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: IndexValue::Timestamp(Utc.timestamp_opt(ts_min, 0).single().unwrap()),
             index_max: IndexValue::Timestamp(Utc.timestamp_opt(ts_max, 0).single().unwrap()),
             row_count: 1,
             file_size: None,
             coverage_path: None,
         }
+    }
+
+    #[test]
+    fn entity_layout_json_roundtrips_are_stable() {
+        let cases = [
+            (SegmentEntityLayout::NotApplicable, "\"NotApplicable\""),
+            (
+                SegmentEntityLayout::Single(
+                    EntityIdentity::try_new(vec!["us".to_string(), "device-1".to_string()])
+                        .unwrap(),
+                ),
+                r#"{"Single":["us","device-1"]}"#,
+            ),
+            (SegmentEntityLayout::Mixed, "\"Mixed\""),
+        ];
+
+        for (layout, expected_json) in cases {
+            let json = serde_json::to_string(&layout).unwrap();
+            assert_eq!(json, expected_json);
+            assert_eq!(
+                serde_json::from_str::<SegmentEntityLayout>(&json).unwrap(),
+                layout
+            );
+        }
+    }
+
+    #[test]
+    fn single_layout_rejects_an_empty_identity() {
+        let error = serde_json::from_str::<SegmentEntityLayout>(r#"{"Single":[]}"#)
+            .expect_err("empty identity must be rejected");
+        assert!(error.to_string().contains("at least one component"));
     }
 
     #[test]
@@ -344,6 +393,7 @@ mod tests {
         let valid = SegmentMeta {
             path: "data/valid.parquet".to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: IndexValue::Int64(i64::MIN),
             index_max: IndexValue::Int64(i64::MAX),
             row_count: 1,
@@ -385,6 +435,7 @@ mod tests {
             SegmentMeta {
                 path: "data/z.parquet".to_string(),
                 format: FileFormat::Parquet,
+                entity_layout: SegmentEntityLayout::NotApplicable,
                 index_min: IndexValue::UInt64(u64::MAX),
                 index_max: IndexValue::UInt64(u64::MAX),
                 row_count: 1,
@@ -394,6 +445,7 @@ mod tests {
             SegmentMeta {
                 path: "data/b.parquet".to_string(),
                 format: FileFormat::Parquet,
+                entity_layout: SegmentEntityLayout::NotApplicable,
                 index_min: IndexValue::UInt64(0),
                 index_max: IndexValue::UInt64(7),
                 row_count: 1,
@@ -403,6 +455,7 @@ mod tests {
             SegmentMeta {
                 path: "data/a.parquet".to_string(),
                 format: FileFormat::Parquet,
+                entity_layout: SegmentEntityLayout::NotApplicable,
                 index_min: IndexValue::UInt64(0),
                 index_max: IndexValue::UInt64(7),
                 row_count: 1,
@@ -427,6 +480,7 @@ mod tests {
             SegmentMeta {
                 path: "data/integer.parquet".to_string(),
                 format: FileFormat::Parquet,
+                entity_layout: SegmentEntityLayout::NotApplicable,
                 index_min: IndexValue::Int64(0),
                 index_max: IndexValue::Int64(1),
                 row_count: 1,
@@ -450,6 +504,7 @@ mod tests {
             let segment = SegmentMeta {
                 path: "data/extremes.parquet".to_string(),
                 format: FileFormat::Parquet,
+                entity_layout: SegmentEntityLayout::NotApplicable,
                 index_min: minimum,
                 index_max: maximum,
                 row_count: 2,

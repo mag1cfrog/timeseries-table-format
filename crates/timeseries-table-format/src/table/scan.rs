@@ -371,7 +371,7 @@ mod tests {
     use crate::table::test_util::*;
 
     use crate::metadata::logical_schema::LogicalTimestampUnit;
-    use crate::metadata::segments::FileFormat;
+    use crate::metadata::segments::{FileFormat, SegmentEntityLayout};
     use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta};
 
     use arrow::array::ArrayRef;
@@ -497,6 +497,7 @@ mod tests {
         SegmentMeta {
             path: path.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: min,
             index_max: max,
             row_count: 1,
@@ -1150,6 +1151,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             row_count: 1,
@@ -1183,6 +1185,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 0, 2)).into(),
             row_count: ts_vals.len() as u64,
@@ -1215,6 +1218,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             row_count: 0,
@@ -1382,6 +1386,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (Utc.timestamp_opt(1, 0).single().unwrap()).into(),
             index_max: (Utc.timestamp_opt(3, 0).single().unwrap()).into(),
             row_count: 3,
@@ -1527,6 +1532,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             row_count: 0,
@@ -1564,6 +1570,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
             row_count: 2,
@@ -1595,6 +1602,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 1, 0)).into(),
             row_count: 1,
@@ -1606,6 +1614,7 @@ mod tests {
         let unopened = SegmentMeta {
             path: "data/should-not-open.parquet".to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 1, 30)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 1, 31)).into(),
             row_count: 1,
@@ -1639,6 +1648,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
             index_max: (utc_datetime(2024, 1, 1, 0, 0, 1)).into(),
             row_count: 1,
@@ -1766,6 +1776,7 @@ mod tests {
         let segment = SegmentMeta {
             path: rel.to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (Utc.timestamp_millis_opt(1_000).single().unwrap()).into(),
             index_max: (Utc.timestamp_millis_opt(2_000).single().unwrap()).into(),
             row_count: 1,

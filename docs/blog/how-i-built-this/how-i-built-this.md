@@ -110,6 +110,7 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
   "AddSegment": {
     "path": "data/nvda_1h.parquet",
     "format": "parquet",
+    "entity_layout": {"Single": ["NVDA"]},
     "index_min": {"type": "timestamp", "value": "2024-06-01T00:00:00Z"},
     "index_max": {"type": "timestamp", "value": "2024-06-10T23:00:00Z"},
     "row_count": 240,
@@ -118,7 +119,7 @@ An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseri
   }
 }
 ```
-The canonical table-relative `path` is the segment identity. Notice the `coverage_path` -- we'll come back to that.
+The canonical table-relative `path` identifies the segment. Its `entity_layout` records that every row belongs to NVDA, while `coverage_path` points to the exact entity-aware index coverage sidecar.
 
 If you squint, you can already see the reader-side wins:
 - `index_min` and `index_max` enable coarse pruning (skip files that can't match a filter on the chronological index).

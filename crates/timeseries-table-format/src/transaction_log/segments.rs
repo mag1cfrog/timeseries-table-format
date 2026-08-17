@@ -11,7 +11,9 @@ use snafu::{Backtrace, prelude::*};
 use crate::storage::StorageError;
 
 // Expose the pure segment types alongside their IO-layer errors.
-pub use crate::metadata::segments::{FileFormat, SegmentMeta, SegmentMetaError};
+pub use crate::metadata::segments::{
+    FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError,
+};
 
 /// IO-layer errors when constructing/validating segments.
 #[derive(Debug, Snafu)]
@@ -105,6 +107,7 @@ mod tests {
         SegmentMeta {
             path: "data/seg-001.parquet".to_string(),
             format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
             index_min: (utc_datetime(2025, 1, 1, 0, 0, 0)).into(),
             index_max: (utc_datetime(2025, 1, 1, 1, 0, 0)).into(),
             row_count: 123,
@@ -132,5 +135,18 @@ mod tests {
             Some("_coverage/segments/a.roar")
         );
         assert_eq!(back2.file_size, Some(42));
+    }
+
+    #[test]
+    fn segment_meta_json_requires_entity_layout() {
+        let mut value = serde_json::to_value(sample_segment_meta()).unwrap();
+        value
+            .as_object_mut()
+            .expect("segment metadata is an object")
+            .remove("entity_layout");
+
+        let error = serde_json::from_value::<SegmentMeta>(value)
+            .expect_err("version 5 segment metadata must include entity_layout");
+        assert!(error.to_string().contains("entity_layout"));
     }
 }
