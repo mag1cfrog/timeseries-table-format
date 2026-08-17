@@ -36,7 +36,9 @@ mod _native {
         types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
     };
 
-    use timeseries_table_format::datafusion::TsTableProvider;
+    use timeseries_table_format::{
+        datafusion::TsTableProvider, table::OptimizeReport as CoreOptimizeReport,
+    };
 
     use crate::error_map::datafusion_error_to_py;
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;
@@ -1182,6 +1184,56 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
+    /// Result of one entity-layout optimization operation.
+    #[pyclass(frozen, get_all)]
+    struct OptimizeReport {
+        /// Table version used to select optimization candidates.
+        starting_version: u64,
+        /// Committed replacement version, or `starting_version` for a no-op.
+        committed_version: u64,
+        /// Mixed source segments selected from the starting snapshot.
+        candidate_source_segments: u64,
+        /// Selected source segments removed by the committed rewrite.
+        source_segments_replaced: u64,
+        /// Verified single-entity replacement segments written.
+        replacement_segments_written: u64,
+        /// Unique complete identities represented by the replacements.
+        distinct_identities_materialized: u64,
+        /// Logical rows read from selected source segments.
+        rows_read: u64,
+        /// Logical rows written to committed replacement segments.
+        rows_written: u64,
+        /// Whether no mixed live segments required rewriting.
+        no_op: bool,
+    }
+
+    impl From<CoreOptimizeReport> for OptimizeReport {
+        fn from(report: CoreOptimizeReport) -> Self {
+            let CoreOptimizeReport {
+                starting_version,
+                committed_version,
+                candidate_source_segments,
+                source_segments_replaced,
+                replacement_segments_written,
+                distinct_identities_materialized,
+                rows_read,
+                rows_written,
+                no_op,
+            } = report;
+            Self {
+                starting_version,
+                committed_version,
+                candidate_source_segments,
+                source_segments_replaced,
+                replacement_segments_written,
+                distinct_identities_materialized,
+                rows_read,
+                rows_written,
+                no_op,
+            }
+        }
+    }
+
     /// Local filesystem time-series table rooted at `table_root`.
     ///
     /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Parquet). For SQL
@@ -1538,6 +1590,41 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                     )
                 },
             )
+        }
+
+        /// Rewrite every mixed-entity segment into single-entity segments.
+        ///
+        /// Returns
+        /// -------
+        /// OptimizeReport
+        ///     Complete counts and versions for the operation. A successful no-op returns a
+        ///     report with `no_op=True` and equal starting and committed versions.
+        ///
+        /// Raises
+        /// ------
+        /// TimeseriesTableError
+        ///     If optimization is not applicable or rewriting, validation, commit, or cleanup
+        ///     fails. The exception includes a `table_root` attribute.
+        fn optimize(&mut self, py: Python<'_>) -> PyResult<OptimizeReport> {
+            let rt = tokio_runner::global_runtime()?;
+            let table_root_for_err = self.table_root.clone();
+            let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
+            let table = &mut self.inner;
+
+            let report = tokio_runner::run_blocking_map_err(
+                py,
+                rt.as_ref(),
+                table.optimize(),
+                move |py, err| {
+                    table_error_to_py_with_root(
+                        py,
+                        &table_root_for_err,
+                        &entity_columns_for_err,
+                        err,
+                    )
+                },
+            )?;
+            Ok(report.into())
         }
     }
 
@@ -2095,6 +2182,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
         // Export classes
         m.add_class::<Session>()?;
+        m.add_class::<OptimizeReport>()?;
         m.add_class::<TimeSeriesTable>()?;
 
         // Export exception types
