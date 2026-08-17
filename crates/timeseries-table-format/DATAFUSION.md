@@ -87,6 +87,39 @@ This happens automatically; you don't need to do anything special.
 
 Below is a detailed reference of which SQL predicates enable segment pruning.
 
+### Entity equality pruning
+
+For tables with configured entity columns, direct string equality predicates
+can prune segments from transaction-log metadata alone. No Parquet file,
+footer, or coverage sidecar is opened to make this decision.
+
+For example, with `symbol` configured as an entity column:
+
+```sql
+WHERE symbol = 'A'
+```
+
+- A `Single(identity)` segment is retained when its `symbol` component is `A`.
+- A `Single(identity)` segment is skipped when its `symbol` component conflicts.
+- A `Mixed` segment is always retained as a candidate because it may contain `A`.
+
+Composite entities follow the configured entity-column order. A predicate may
+specify every component or only some components. Any specified conflict can
+exclude a `Single(identity)` segment; unspecified components do not prevent a
+compatible segment from remaining a candidate.
+
+Entity equality pruning composes with ordered-index pruning. For example,
+`WHERE symbol = 'A' AND ts >= '2024-01-01T00:00:00Z'` can exclude a segment
+because its identity conflicts, its ordered-index range cannot match, or both.
+
+Reversed equality operands and qualified column references are supported, such
+as `WHERE 'A' = prices.symbol`. Range, inequality, function, and other
+unsupported entity expressions do not enable entity-level segment pruning.
+
+Segment pruning is only an internal optimization. Filter pushdown remains
+inexact, and DataFusion still evaluates the original predicate against the
+rows from every retained segment.
+
 ### What works well today
 
 ### Basic time comparisons
