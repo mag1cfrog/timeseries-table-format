@@ -7,14 +7,19 @@ use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
 use crate::storage::{
-    BackendError, OtherIoSnafu, StorageLocation, StorageResult, TempFileGuard, create_parent_dir,
-    join_local,
+    BackendError, OtherIoSnafu, StorageLocation, StorageResult, TempFileGuard, create_new_file,
+    create_parent_dir, join_local,
 };
 
-/// Local filesystem sink that writes to a temp file and renames on finish.
+enum LocalFinish {
+    Rename(PathBuf),
+    Keep,
+}
+
+/// Local filesystem sink that either renames or keeps its path on finish.
 struct LocalSink {
-    tmp_path: PathBuf,
-    final_path: PathBuf,
+    path: PathBuf,
+    finish: LocalFinish,
     writer: io::BufWriter<std::fs::File>,
     guard: TempFileGuard,
 }
@@ -37,8 +42,21 @@ impl LocalSink {
         let guard = TempFileGuard::new(tmp_path.clone());
 
         Ok(Self {
-            tmp_path,
-            final_path,
+            path: tmp_path,
+            finish: LocalFinish::Rename(final_path),
+            writer,
+            guard,
+        })
+    }
+
+    async fn open_new(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
+        let path = join_local(location, rel_path)?;
+        let file = create_new_file(&path).await?.into_std().await;
+        let writer = io::BufWriter::new(file);
+        let guard = TempFileGuard::new(path.clone());
+        Ok(Self {
+            path,
+            finish: LocalFinish::Keep,
             writer,
             guard,
         })
@@ -53,7 +71,7 @@ impl LocalSink {
             .flush()
             .map_err(BackendError::Local)
             .context(OtherIoSnafu {
-                path: self.tmp_path.display().to_string(),
+                path: self.path.display().to_string(),
             })?;
 
         self.writer
@@ -61,15 +79,17 @@ impl LocalSink {
             .sync_all()
             .map_err(BackendError::Local)
             .context(OtherIoSnafu {
-                path: self.tmp_path.display().to_string(),
+                path: self.path.display().to_string(),
             })?;
 
-        fs::rename(&self.tmp_path, &self.final_path)
-            .await
-            .map_err(BackendError::Local)
-            .context(OtherIoSnafu {
-                path: self.final_path.display().to_string(),
-            })?;
+        if let LocalFinish::Rename(final_path) = &self.finish {
+            fs::rename(&self.path, final_path)
+                .await
+                .map_err(BackendError::Local)
+                .context(OtherIoSnafu {
+                    path: final_path.display().to_string(),
+                })?;
+        }
 
         self.guard.disarm();
         Ok(())
@@ -104,6 +124,26 @@ impl OutputSink {
         match self.inner {
             OutputSinkInner::Local(mut s) => s.finish().await,
         }
+    }
+}
+
+/// Open a streaming output sink with exclusive creation.
+///
+/// The final path is created immediately and removed if the sink is dropped
+/// before [`OutputSink::finish`] succeeds.
+///
+/// # Errors
+///
+/// Returns [`crate::storage::StorageError::AlreadyExists`] when `rel_path`
+/// already exists, or another storage error when creation fails.
+pub async fn open_new_output_sink(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<OutputSink> {
+    match location {
+        StorageLocation::Local(_) => Ok(OutputSink {
+            inner: OutputSinkInner::Local(LocalSink::open_new(location, rel_path).await?),
+        }),
     }
 }
 
@@ -176,5 +216,56 @@ impl OutputLocation {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StorageError;
+    use tempfile::TempDir;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[tokio::test]
+    async fn new_output_sink_creates_exclusively_and_finishes() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        let path = Path::new("staged/output.parquet");
+        let mut sink = open_new_output_sink(&location, path).await?;
+        sink.writer().write_all(b"parquet")?;
+        sink.finish().await?;
+
+        assert_eq!(tokio::fs::read(temp.path().join(path)).await?, b"parquet");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn new_output_sink_preserves_an_existing_object() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        let path = Path::new("staged/existing.parquet");
+        crate::storage::write_new(&location, path, b"existing").await?;
+
+        let error = match open_new_output_sink(&location, path).await {
+            Ok(_) => panic!("existing output must not be replaced"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, StorageError::AlreadyExists { .. }));
+        assert_eq!(tokio::fs::read(temp.path().join(path)).await?, b"existing");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_unfinished_new_output_removes_it() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        let path = Path::new("staged/unfinished.parquet");
+        let mut sink = open_new_output_sink(&location, path).await?;
+        sink.writer().write_all(b"incomplete")?;
+        drop(sink);
+
+        assert!(!temp.path().join(path).exists());
+        Ok(())
     }
 }

@@ -176,7 +176,7 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
     }
 }
 
-async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
+pub(super) async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
     create_parent_dir(path).await?;
 
     match OpenOptions::new()
