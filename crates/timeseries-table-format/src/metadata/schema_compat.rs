@@ -8,9 +8,12 @@ use std::collections::HashMap;
 
 use snafu::prelude::*;
 
-use crate::metadata::{
-    logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
-    table_metadata::{IndexKind, IndexSpec, TableMeta},
+use crate::{
+    coverage::{EntityIdentity, EntityValue},
+    metadata::{
+        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
+        table_metadata::{IndexKind, IndexSpec, TableMeta},
+    },
 };
 
 /// Errors raised when a segment's schema is not compatible with the table.
@@ -36,6 +39,48 @@ pub enum SchemaCompatibilityError {
     MissingIndexColumn {
         /// Registered index column name.
         column: String,
+    },
+
+    /// The logical schema does not contain a configured entity column.
+    #[snafu(display("Schema is missing configured entity column {column}"))]
+    MissingEntityColumn {
+        /// Configured entity column name.
+        column: String,
+    },
+
+    /// A configured entity column has an unsupported logical type.
+    #[snafu(display(
+        "Entity column {column} has unsupported logical type {actual}; expected utf8, int32, int64, or uint64"
+    ))]
+    UnsupportedEntityColumnType {
+        /// Configured entity column name.
+        column: String,
+        /// Unsupported logical type.
+        actual: LogicalDataType,
+    },
+
+    /// A persisted single-entity identity has the wrong component count.
+    #[snafu(display(
+        "Entity identity has {actual} components, but the table configures {expected} entity columns"
+    ))]
+    EntityIdentityArityMismatch {
+        /// Configured entity column count.
+        expected: usize,
+        /// Persisted identity component count.
+        actual: usize,
+    },
+
+    /// A persisted entity component has the wrong scalar type.
+    #[snafu(display(
+        "Entity identity component for column {column} has type {actual}; expected {expected}"
+    ))]
+    EntityIdentityTypeMismatch {
+        /// Configured entity column name.
+        column: String,
+        /// Logical type required by the table schema.
+        expected: LogicalDataType,
+        /// Persisted scalar type.
+        actual: &'static str,
     },
 
     /// The segment has an extra column that does not exist in the table schema.
@@ -113,13 +158,17 @@ fn columns_by_name(schema: &LogicalSchema) -> HashMap<&str, &LogicalField> {
         .collect()
 }
 
-/// Validate the registered ordered index against a logical schema.
+/// Validate the registered ordered index and entity columns against a logical schema.
 ///
 /// # Errors
 /// Returns [`SchemaCompatibilityError::MissingIndexColumn`] when the column is
 /// absent and [`SchemaCompatibilityError::IndexKindMismatch`] when its logical
-/// type does not match the registered domain.
-pub fn ensure_index_matches_schema(schema: &LogicalSchema, index: &IndexSpec) -> SchemaResult<()> {
+/// type does not match the registered domain. Missing or unsupported entity
+/// columns return their corresponding typed errors.
+pub fn ensure_index_spec_matches_schema(
+    schema: &LogicalSchema,
+    index: &IndexSpec,
+) -> SchemaResult<()> {
     let field = schema
         .columns()
         .iter()
@@ -137,15 +186,87 @@ pub fn ensure_index_matches_schema(schema: &LogicalSchema, index: &IndexSpec) ->
             | (IndexKind::UInt64 { .. }, LogicalDataType::UInt64)
     );
 
-    if matches {
-        Ok(())
-    } else {
-        Err(SchemaCompatibilityError::IndexKindMismatch {
+    if !matches {
+        return Err(SchemaCompatibilityError::IndexKindMismatch {
             column: index.column.clone(),
             expected: index.kind.name(),
             actual: field.data_type.clone(),
-        })
+        });
     }
+
+    for column in &index.entity_columns {
+        let field = schema
+            .columns()
+            .iter()
+            .find(|field| field.name == *column)
+            .ok_or_else(|| SchemaCompatibilityError::MissingEntityColumn {
+                column: column.clone(),
+            })?;
+        if !matches!(
+            field.data_type,
+            LogicalDataType::Utf8
+                | LogicalDataType::Int32
+                | LogicalDataType::Int64
+                | LogicalDataType::UInt64
+        ) {
+            return Err(SchemaCompatibilityError::UnsupportedEntityColumnType {
+                column: column.clone(),
+                actual: field.data_type.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a persisted identity against configured entity-column types.
+///
+/// # Errors
+/// Returns an arity or component-type mismatch when the identity cannot belong
+/// to the supplied table schema and index specification.
+pub fn ensure_entity_identity_matches_schema(
+    schema: &LogicalSchema,
+    index: &IndexSpec,
+    identity: &EntityIdentity,
+) -> SchemaResult<()> {
+    if identity.components().len() != index.entity_columns.len() {
+        return Err(SchemaCompatibilityError::EntityIdentityArityMismatch {
+            expected: index.entity_columns.len(),
+            actual: identity.components().len(),
+        });
+    }
+
+    for (column, value) in index.entity_columns.iter().zip(identity.components()) {
+        let field = schema
+            .columns()
+            .iter()
+            .find(|field| field.name == *column)
+            .ok_or_else(|| SchemaCompatibilityError::MissingEntityColumn {
+                column: column.clone(),
+            })?;
+        let matches = matches!(
+            (&field.data_type, value),
+            (LogicalDataType::Utf8, EntityValue::Utf8(_))
+                | (LogicalDataType::Int32, EntityValue::Int32(_))
+                | (LogicalDataType::Int64, EntityValue::Int64(_))
+                | (LogicalDataType::UInt64, EntityValue::UInt64(_))
+        );
+        if !matches {
+            let actual = match value {
+                EntityValue::Utf8(_) => "utf8",
+                EntityValue::Int32(_) => "int32",
+                EntityValue::Int64(_) => "int64",
+                EntityValue::UInt64(_) => "uint64",
+            };
+            return Err(SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                column: column.clone(),
+                expected: field.data_type.clone(),
+                actual,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Enforce the v0.1 "no schema evolution" rule.
@@ -230,6 +351,37 @@ mod tests {
         }
     }
 
+    fn schema_with_entities(entity_types: Vec<LogicalDataType>) -> LogicalSchema {
+        let mut fields = vec![LogicalField {
+            name: "idx".to_string(),
+            data_type: LogicalDataType::Int64,
+            nullable: false,
+        }];
+        fields.extend(
+            entity_types
+                .into_iter()
+                .enumerate()
+                .map(|(position, data_type)| LogicalField {
+                    name: format!("entity_{position}"),
+                    data_type,
+                    nullable: false,
+                }),
+        );
+        LogicalSchema::new(fields).unwrap()
+    }
+
+    fn entity_index(count: usize) -> IndexSpec {
+        IndexSpec {
+            column: "idx".to_string(),
+            entity_columns: (0..count)
+                .map(|position| format!("entity_{position}"))
+                .collect(),
+            kind: IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(1).unwrap(),
+            },
+        }
+    }
+
     #[test]
     fn ordered_index_schema_validation_accepts_each_exact_domain() {
         let cases = [
@@ -258,7 +410,7 @@ mod tests {
         ];
 
         for (index, schema) in cases {
-            ensure_index_matches_schema(&schema, &index).unwrap();
+            ensure_index_spec_matches_schema(&schema, &index).unwrap();
         }
     }
 
@@ -275,15 +427,95 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            ensure_index_matches_schema(&missing, &unsigned),
+            ensure_index_spec_matches_schema(&missing, &unsigned),
             Err(SchemaCompatibilityError::MissingIndexColumn { .. })
         ));
         assert!(matches!(
-            ensure_index_matches_schema(&schema(LogicalDataType::Int64), &unsigned),
+            ensure_index_spec_matches_schema(&schema(LogicalDataType::Int64), &unsigned),
             Err(SchemaCompatibilityError::IndexKindMismatch {
                 expected: "uint64",
                 actual: LogicalDataType::Int64,
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn entity_schema_validation_accepts_only_supported_types() {
+        let supported = vec![
+            LogicalDataType::Utf8,
+            LogicalDataType::Int32,
+            LogicalDataType::Int64,
+            LogicalDataType::UInt64,
+        ];
+        ensure_index_spec_matches_schema(&schema_with_entities(supported), &entity_index(4))
+            .unwrap();
+
+        let missing = ensure_index_spec_matches_schema(
+            &schema_with_entities(vec![LogicalDataType::Utf8]),
+            &entity_index(2),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing,
+            SchemaCompatibilityError::MissingEntityColumn { column }
+                if column == "entity_1"
+        ));
+
+        let unsupported = ensure_index_spec_matches_schema(
+            &schema_with_entities(vec![LogicalDataType::Bool]),
+            &entity_index(1),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unsupported,
+            SchemaCompatibilityError::UnsupportedEntityColumnType {
+                column,
+                actual: LogicalDataType::Bool,
+            } if column == "entity_0"
+        ));
+    }
+
+    #[test]
+    fn persisted_entity_identity_must_match_schema_types_and_arity() {
+        let schema = schema_with_entities(vec![
+            LogicalDataType::Utf8,
+            LogicalDataType::Int32,
+            LogicalDataType::Int64,
+            LogicalDataType::UInt64,
+        ]);
+        let index = entity_index(4);
+        let identity = EntityIdentity::try_new(vec![
+            EntityValue::from("device"),
+            EntityValue::Int32(-1),
+            EntityValue::Int64(i64::MIN),
+            EntityValue::UInt64(u64::MAX),
+        ])
+        .unwrap();
+        ensure_entity_identity_matches_schema(&schema, &index, &identity).unwrap();
+
+        let wrong_type = EntityIdentity::try_new(vec![
+            EntityValue::from("device"),
+            EntityValue::UInt64(1),
+            EntityValue::Int64(2),
+            EntityValue::UInt64(3),
+        ])
+        .unwrap();
+        assert!(matches!(
+            ensure_entity_identity_matches_schema(&schema, &index, &wrong_type),
+            Err(SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                column,
+                expected: LogicalDataType::Int32,
+                actual: "uint64",
+            }) if column == "entity_1"
+        ));
+
+        let too_short = EntityIdentity::try_new(vec![EntityValue::from("device")]).unwrap();
+        assert!(matches!(
+            ensure_entity_identity_matches_schema(&schema, &index, &too_short),
+            Err(SchemaCompatibilityError::EntityIdentityArityMismatch {
+                expected: 4,
+                actual: 1,
             })
         ));
     }

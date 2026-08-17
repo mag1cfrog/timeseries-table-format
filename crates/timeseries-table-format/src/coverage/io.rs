@@ -33,6 +33,7 @@ use crate::{
             entity_coverage_from_bytes,
         },
     },
+    metadata::schema_compat::SchemaCompatibilityError,
     storage::{self, StorageError, TableLocation},
 };
 
@@ -64,13 +65,11 @@ pub enum CoverageError {
         source: EntityCoverageSerdeError,
     },
 
-    /// An entity identity does not match the table's configured component count.
-    #[snafu(display("Entity coverage identity has {actual} components, expected {expected}"))]
-    EntityIdentityArityMismatch {
-        /// Number of components required by the table's entity columns.
-        expected: usize,
-        /// Number of components found in the sidecar identity.
-        actual: usize,
+    /// An entity identity does not match the table's configured schema.
+    #[snafu(display("Entity coverage identity does not match the table schema: {source}"))]
+    EntityIdentitySchema {
+        /// Identity arity or scalar-type mismatch.
+        source: SchemaCompatibilityError,
     },
 
     /// Coverage sidecar file was not found at the expected path.

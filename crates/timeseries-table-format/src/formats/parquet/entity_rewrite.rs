@@ -33,7 +33,7 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::ensure_index_matches_schema,
+        schema_compat::ensure_index_spec_matches_schema,
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta},
         table_metadata::IndexSpec,
     },
@@ -322,7 +322,7 @@ async fn validate_source(
     index
         .validate()
         .map_err(|error| invalid_input(format!("invalid ordered index: {error}")))?;
-    ensure_index_matches_schema(table_schema, index)
+    ensure_index_spec_matches_schema(table_schema, index)
         .map_err(|error| invalid_input(format!("ordered index does not match schema: {error}")))?;
     if index.entity_columns.is_empty() {
         return Err(invalid_input("table has no entity columns"));

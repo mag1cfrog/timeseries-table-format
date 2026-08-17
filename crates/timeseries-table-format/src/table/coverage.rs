@@ -16,23 +16,21 @@ use crate::{
         Coverage, EntityCoverage, EntityIdentity, EntityValue,
         io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
+    metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
     transaction_log::table_state::TableCoveragePointer,
 };
 
 use super::{TimeSeriesTable, error::TableError};
 
-fn ensure_entity_coverage_identity_arity(
+fn ensure_entity_coverage_identity_schema(
     coverage: &EntityCoverage,
-    expected: usize,
+    table: &TimeSeriesTable,
 ) -> Result<(), CoverageError> {
-    if let Some((identity, _)) = coverage
-        .iter()
-        .find(|(identity, _)| identity.components().len() != expected)
-    {
-        return Err(CoverageError::EntityIdentityArityMismatch {
-            expected,
-            actual: identity.components().len(),
-        });
+    let schema = require_table_schema(&table.state().table_meta)
+        .map_err(|source| CoverageError::EntityIdentitySchema { source })?;
+    for (identity, _) in coverage.iter() {
+        ensure_entity_identity_matches_schema(schema, table.index_spec(), identity)
+            .map_err(|source| CoverageError::EntityIdentitySchema { source })?;
     }
     Ok(())
 }
@@ -91,7 +89,7 @@ impl TimeSeriesTable {
         path: &Path,
     ) -> Result<EntityCoverage, CoverageError> {
         let coverage = read_entity_coverage_sidecar(self.location(), path).await?;
-        ensure_entity_coverage_identity_arity(&coverage, self.index_spec().entity_columns.len())?;
+        ensure_entity_coverage_identity_schema(&coverage, self)?;
         Ok(coverage)
     }
 
@@ -552,6 +550,8 @@ mod tests {
             io::{write_coverage_sidecar_atomic, write_coverage_sidecar_new_bytes},
             serde::entity_coverage_to_bytes,
         },
+        metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
+        metadata::schema_compat::SchemaCompatibilityError,
         metadata::table_metadata::{
             IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeBucket,
         },
@@ -622,7 +622,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entity_sidecar_identity_arity_is_validated_for_snapshots_and_recovery() -> TestResult {
+    async fn entity_sidecar_identity_schema_is_validated_for_snapshots_and_recovery() -> TestResult
+    {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -650,13 +651,21 @@ mod tests {
         assert!(matches!(
             snapshot_error,
             TableError::CoverageSidecar {
-                source: CoverageError::EntityIdentityArityMismatch {
-                    expected: 1,
-                    actual: 2,
+                source: CoverageError::EntityIdentitySchema {
+                    source: SchemaCompatibilityError::EntityIdentityArityMismatch {
+                        expected: 1,
+                        actual: 2,
+                    },
                 },
             }
         ));
 
+        let mut wrong_type = EntityCoverage::empty();
+        wrong_type.union_coverage(
+            EntityIdentity::try_new(vec![EntityValue::Int32(1)])?,
+            Coverage::from_iter([0]),
+        );
+        let wrong_type_bytes = entity_coverage_to_bytes(&wrong_type)?;
         table.state_mut().table_coverage = None;
         let segment_path = "data/entity-arity.parquet";
         append_segment(
@@ -676,12 +685,12 @@ mod tests {
             .get(segment_path)
             .and_then(|segment| segment.coverage_path.clone())
             .expect("segment coverage path");
-        tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_arity_bytes).await?;
+        tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_type_bytes).await?;
 
         let recovery_error = table
             .recover_table_entity_coverage_from_segments()
             .await
-            .expect_err("segment identity arity must match the table");
+            .expect_err("segment identity type must match the table schema");
         assert!(matches!(
             recovery_error,
             TableError::SegmentCoverageSidecarRead {
@@ -691,11 +700,15 @@ mod tests {
             } if path == segment_path
                 && coverage_path == segment_coverage_path
                 && matches!(
-                    *source,
-                    CoverageError::EntityIdentityArityMismatch {
-                        expected: 1,
-                        actual: 2,
+                    &*source,
+                    CoverageError::EntityIdentitySchema {
+                        source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                            column,
+                            expected: crate::metadata::logical_schema::LogicalDataType::Utf8,
+                            actual: "int32",
+                        },
                     }
+                    if column == "symbol"
                 )
         ));
         Ok(())
@@ -914,6 +927,18 @@ mod tests {
             unreachable!("test metadata is time series")
         };
         index.entity_columns = vec!["symbol".to_string(), "venue".to_string()];
+        let mut fields = meta
+            .logical_schema
+            .as_ref()
+            .expect("test schema")
+            .columns()
+            .to_vec();
+        fields.push(LogicalField {
+            name: "venue".to_string(),
+            data_type: LogicalDataType::Utf8,
+            nullable: false,
+        });
+        meta.logical_schema = Some(LogicalSchema::new(fields)?);
         let table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
 
         let identity = table.resolve_entity_identity(&[("venue", "X"), ("symbol", "A")])?;

@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use crate::coverage::EntityIdentity;
+use crate::metadata::logical_schema::{
+    LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
+};
 use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket};
 use crate::storage::TableLocation;
@@ -22,7 +25,25 @@ fn make_basic_table_meta() -> TableMeta {
         },
     };
 
-    TableMeta::new_time_series(index)
+    TableMeta::new_time_series_with_schema(
+        index,
+        LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "symbol".to_string(),
+                data_type: LogicalDataType::Utf8,
+                nullable: false,
+            },
+        ])
+        .expect("valid latest-snapshot test schema"),
+    )
 }
 
 #[tokio::test]

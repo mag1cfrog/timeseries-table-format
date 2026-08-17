@@ -35,7 +35,9 @@ use crate::table::error::{
 };
 
 use crate::{
-    metadata::{schema_compat::ensure_index_matches_schema, table_metadata::TABLE_FORMAT_VERSION},
+    metadata::{
+        schema_compat::ensure_index_spec_matches_schema, table_metadata::TABLE_FORMAT_VERSION,
+    },
     storage::TableLocation,
     transaction_log::{
         IndexSpec, LogAction, TableKind, TableMeta, TableState, TransactionLogStore,
@@ -161,7 +163,7 @@ impl TimeSeriesTable {
         };
         index.validate().context(IndexSpecSnafu)?;
         if let Some(schema) = &table_meta.logical_schema {
-            ensure_index_matches_schema(schema, &index).context(SchemaCompatibilitySnafu)?;
+            ensure_index_spec_matches_schema(schema, &index).context(SchemaCompatibilitySnafu)?;
         }
 
         let log = TransactionLogStore::new(location.clone());

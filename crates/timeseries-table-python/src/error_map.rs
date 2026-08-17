@@ -165,7 +165,9 @@ pub(crate) fn table_error_to_py(
             Some((entity_columns, example_identity.components())),
         ),
 
-        TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),
+        TableError::SchemaCompatibility { .. } | TableError::SegmentSchemaCompatibility { .. } => {
+            SchemaMismatchError::new_err(err.to_string())
+        }
 
         _ => TimeseriesTableError::new_err(err.to_string()),
     }
