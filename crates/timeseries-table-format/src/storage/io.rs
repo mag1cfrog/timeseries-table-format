@@ -176,7 +176,7 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
     }
 }
 
-async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
+pub(super) async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
     create_parent_dir(path).await?;
 
     match OpenOptions::new()
@@ -414,13 +414,32 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
                     backtrace: Backtrace::capture(),
                 });
             }
-            fs::remove_file(&abs)
-                .await
-                .map_err(BackendError::Local)
-                .context(OtherIoSnafu {
+            match fs::remove_file(&abs).await {
+                Ok(()) => Ok(()),
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    Err(StorageError::NotFound {
+                        path: abs.display().to_string(),
+                        source: BackendError::Local(source),
+                        backtrace: Backtrace::capture(),
+                    })
+                }
+                Err(source) => Err(StorageError::OtherIo {
                     path: abs.display().to_string(),
-                })
+                    source: BackendError::Local(source),
+                    backtrace: Backtrace::capture(),
+                }),
+            }
         }
+    }
+}
+
+pub(crate) async fn remove_file_if_exists(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<()> {
+    match remove_file(location, rel_path).await {
+        Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

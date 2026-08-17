@@ -32,7 +32,7 @@ use super::{
     schema::validate_parquet_index,
 };
 
-enum EntityArray<'a> {
+pub(super) enum EntityArray<'a> {
     Utf8(&'a StringArray),
     LargeUtf8(&'a LargeStringArray),
 }
@@ -95,7 +95,7 @@ impl OrderedIndexArray<'_> {
     }
 }
 
-fn entity_arrays<'a>(
+pub(super) fn entity_arrays<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     path: &str,
     entity_columns: &[String],
@@ -133,6 +133,23 @@ fn entity_arrays<'a>(
             })
         })
         .collect()
+}
+
+pub(super) fn entity_identity_at(
+    arrays: &[EntityArray<'_>],
+    row: usize,
+    path: &str,
+) -> Result<EntityIdentity, SegmentCoverageError> {
+    EntityIdentity::try_new(
+        arrays
+            .iter()
+            .map(|array| array.value(row).to_string())
+            .collect(),
+    )
+    .map_err(|source| SegmentCoverageError::EntityIdentity {
+        path: path.to_string(),
+        source,
+    })
 }
 
 fn ordered_index_array<'a>(
@@ -194,16 +211,7 @@ async fn compute_from_stream(
         let ordered_index = ordered_index_array(&batch, path, index)?;
 
         for row in 0..batch.num_rows() {
-            let identity = EntityIdentity::try_new(
-                entities
-                    .iter()
-                    .map(|array| array.value(row).to_string())
-                    .collect(),
-            )
-            .map_err(|source| SegmentCoverageError::EntityIdentity {
-                path: path.to_string(),
-                source,
-            })?;
+            let identity = entity_identity_at(&entities, row, path)?;
             let bitmap = by_identity.entry(identity).or_default();
             if let Some(value) = ordered_index.value(row, path, index)? {
                 insert_bucket(bitmap, path, index, value)?;
