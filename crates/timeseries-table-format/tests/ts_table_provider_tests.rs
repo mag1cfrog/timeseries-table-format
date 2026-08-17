@@ -281,6 +281,24 @@ fn write_segment(
     write_parquet(&abs, rows, price_nullable)
 }
 
+async fn remove_committed_file_size(root: &Path, version: u64) -> TestResult {
+    let commit_path = root.join(layout::commit_rel_path(version));
+    let mut commit: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+    let segment = commit["actions"]
+        .as_array_mut()
+        .and_then(|actions| {
+            actions
+                .iter_mut()
+                .find_map(|action| action.get_mut("AddSegment"))
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("append commit contains no AddSegment action")?;
+    segment.remove("file_size");
+    tokio::fs::write(commit_path, serde_json::to_vec(&commit)?).await?;
+    Ok(())
+}
+
 fn write_numeric_segment(
     root: &Path,
     rel_path: &str,
@@ -1033,20 +1051,7 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     table.append_parquet_segment(rel_path).await?;
     drop(table);
 
-    let commit_path = tmp.path().join(layout::commit_rel_path(2));
-    let mut commit: serde_json::Value =
-        serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
-    let segment = commit["actions"]
-        .as_array_mut()
-        .and_then(|actions| {
-            actions
-                .iter_mut()
-                .find_map(|action| action.get_mut("AddSegment"))
-        })
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("append commit contains AddSegment");
-    segment.remove("file_size");
-    tokio::fs::write(&commit_path, serde_json::to_vec(&commit)?).await?;
+    remove_committed_file_size(tmp.path(), 2).await?;
 
     let table = Arc::new(TimeSeriesTable::open(location).await?);
     let ctx = SessionContext::new();
@@ -1362,6 +1367,56 @@ async fn entity_pruning_composes_safely_with_other_predicates() -> TestResult {
         run_timestamp_query(&ctx, "symbol = 'A' AND ts >= '1970-01-01T00:02:00Z'").await?;
     assert_eq!(files, ["entity-mixed.parquet"]);
     assert_eq!(collect_i64_values(&batches)?, [120_000]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn entity_pruning_precedes_missing_file_access() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = create_entity_pruning_table(&tmp).await?;
+    drop(table);
+
+    remove_committed_file_size(tmp.path(), 3).await?;
+    tokio::fs::remove_file(tmp.path().join("data/entity-b.parquet")).await?;
+
+    let table = Arc::new(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+    let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A'").await?;
+
+    assert_eq!(files, ["entity-a.parquet", "entity-mixed.parquet"]);
+    assert_eq!(collect_i64_values(&batches)?, [0, 120_000]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn entity_metadata_preserves_unfiltered_and_grouped_results() -> TestResult {
+    let tmp = TempDir::new()?;
+    let table = Arc::new(create_entity_pruning_table(&tmp).await?);
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, table)?;
+
+    let batches = collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts").await?;
+    assert_eq!(collect_i64_values(&batches)?, [0, 60_000, 120_000, 180_000]);
+
+    let batches = collect_batches(
+        &ctx,
+        "SELECT symbol, COUNT(*) FROM t GROUP BY symbol ORDER BY symbol",
+    )
+    .await?;
+    let batch = first_batch(&batches)?;
+    let symbols = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or("expected StringArray")?;
+    let counts = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or("expected Int64Array")?;
+    assert_eq!(symbols.iter().collect::<Vec<_>>(), [Some("A"), Some("B")]);
+    assert_eq!(counts.values(), &[2, 2]);
     Ok(())
 }
 
@@ -2138,20 +2193,7 @@ async fn numeric_pruning_precedes_missing_file_size_lookup() -> TestResult {
     let table = create_int64_table(&tmp).await?;
     drop(table);
 
-    let commit_path = tmp.path().join(layout::commit_rel_path(2));
-    let mut commit: serde_json::Value =
-        serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
-    let segment = commit["actions"]
-        .as_array_mut()
-        .and_then(|actions| {
-            actions
-                .iter_mut()
-                .find_map(|action| action.get_mut("AddSegment"))
-        })
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("append commit contains AddSegment");
-    segment.remove("file_size");
-    tokio::fs::write(&commit_path, serde_json::to_vec(&commit)?).await?;
+    remove_committed_file_size(tmp.path(), 2).await?;
     tokio::fs::remove_file(tmp.path().join("data/int-a.parquet")).await?;
 
     let table = Arc::new(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?);
