@@ -397,7 +397,10 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::{
+        collections::{BTreeSet, HashMap},
+        path::{Path, PathBuf},
+    };
 
     use arrow::datatypes::TimeUnit;
     use tempfile::TempDir;
@@ -409,7 +412,7 @@ mod tests {
             segments::{FileFormat, SegmentEntityLayout},
             table_metadata::IndexValue,
         },
-        storage::TableLocation,
+        storage::{TableLocation, layout},
         table::test_util::{
             make_table_meta_with_unit, utc_datetime, write_arrow_parquet_with_unit,
         },
@@ -445,6 +448,60 @@ mod tests {
         SegmentEntityLayout::Single(
             EntityIdentity::try_new(vec!["A".to_string()]).expect("valid identity"),
         )
+    }
+
+    fn files_below(root: &Path) -> std::io::Result<BTreeSet<PathBuf>> {
+        if !root.exists() {
+            return Ok(BTreeSet::new());
+        }
+        let mut files = BTreeSet::new();
+        let mut directories = vec![root.to_owned()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    directories.push(entry.path());
+                } else {
+                    files.insert(entry.path());
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    fn optimization_objects(root: &Path) -> std::io::Result<BTreeSet<PathBuf>> {
+        let mut files = BTreeSet::new();
+        for relative in ["data/_staged", layout::SEGMENT_COVERAGE_DIR] {
+            files.extend(files_below(&root.join(relative))?);
+        }
+        Ok(files)
+    }
+
+    async fn append_mixed_source(
+        table: &mut TimeSeriesTable,
+        root: &Path,
+        path: &str,
+        start_millis: i64,
+    ) -> Result<(), TableError> {
+        write_arrow_parquet_with_unit(
+            &root.join(path),
+            TimeUnit::Millisecond,
+            &[
+                Some(start_millis + 1_000),
+                Some(start_millis + 2_000),
+                Some(start_millis + 3_000),
+                Some(start_millis + 4_000),
+            ],
+            &["A", "B", "A", "B"],
+            &[10.0, 20.0, 11.0, 21.0],
+        )
+        .expect("write mixed source");
+        table.append_parquet_segment(path).await?;
+        assert_eq!(
+            table.state().segments[path].entity_layout,
+            SegmentEntityLayout::Mixed
+        );
+        Ok(())
     }
 
     #[test]
@@ -600,6 +657,165 @@ mod tests {
             std::fs::read(temp.path().join(source_coverage_path)).expect("source coverage remains"),
             source_coverage_bytes
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn later_staging_failure_cleans_every_earlier_rewrite() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        append_mixed_source(&mut table, temp.path(), "data/first.parquet", 0).await?;
+        append_mixed_source(&mut table, temp.path(), "data/broken.parquet", 60_000).await?;
+        let state_before = table.state().clone();
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+        std::fs::remove_file(temp.path().join("data/broken.parquet")).expect("remove later source");
+
+        let error = table.optimize().await.expect_err("later staging must fail");
+
+        assert!(matches!(error, TableError::OptimizeRewrite { .. }));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn occ_conflict_cleans_staged_objects_and_preserves_state() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(
+            location.clone(),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        append_mixed_source(&mut table, temp.path(), "data/candidate.parquet", 0).await?;
+        let state_before = table.state().clone();
+        let mut concurrent = TimeSeriesTable::open(location).await?;
+        append_mixed_source(
+            &mut concurrent,
+            temp.path(),
+            "data/concurrent.parquet",
+            60_000,
+        )
+        .await?;
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+
+        let error = table.optimize().await.expect_err("stale commit must fail");
+
+        assert!(matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::Conflict { .. }
+            }
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(
+            table
+                .log
+                .load_current_version()
+                .await
+                .expect("current version"),
+            state_before.version + 1
+        );
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambiguous_commit_retains_staged_objects_and_preserves_state() -> Result<(), TableError>
+    {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        append_mixed_source(&mut table, temp.path(), "data/candidate.parquet", 0).await?;
+        let state_before = table.state().clone();
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+        let commit_path = temp
+            .path()
+            .join(layout::commit_rel_path(state_before.version + 1));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
+
+        let error = table
+            .optimize()
+            .await
+            .expect_err("commit outcome must be ambiguous");
+
+        assert!(matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::AmbiguousOutcome { .. }
+            }
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(
+            table
+                .log
+                .load_current_version()
+                .await
+                .expect("current version"),
+            state_before.version
+        );
+        assert!(commit_path.exists());
+        let objects_after = optimization_objects(temp.path()).expect("optimization objects");
+        assert_eq!(objects_after.difference(&objects_before).count(), 4);
+        assert_eq!(
+            files_below(&temp.path().join("data/_staged"))
+                .expect("staged data")
+                .len(),
+            2
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rollback_reports_every_cleanup_failure_in_reverse_order() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        let paths = [
+            "data/_staged/entity-rewrite/first.parquet".to_string(),
+            format!("{}/second.roar", layout::SEGMENT_COVERAGE_DIR),
+        ];
+        for path in &paths {
+            let absolute = temp.path().join(path);
+            std::fs::create_dir_all(absolute.parent().expect("object parent"))
+                .expect("create object parent");
+            std::fs::write(&absolute, b"staged").expect("write staged object");
+            crate::storage::inject_cleanup_failure(absolute);
+        }
+
+        let error = table
+            .rollback_optimization(&paths, invalid_plan("primary failure"))
+            .await;
+        let message = error.to_string();
+
+        assert!(matches!(
+            error,
+            TableError::OptimizeRollback {
+                source,
+                cleanup_errors,
+            } if matches!(*source, TableError::OptimizeInvariant { .. })
+                && cleanup_errors.len() == 2
+                && cleanup_errors[0].contains("second.roar")
+                && cleanup_errors[1].contains("first.parquet")
+        ));
+        assert!(message.contains("primary failure"));
+        assert!(paths.iter().all(|path| temp.path().join(path).exists()));
         Ok(())
     }
 }
