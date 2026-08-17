@@ -42,14 +42,37 @@ def run(*, table_root: Path) -> pa.Table:
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))
-
-    return sess.sql(
+    before = sess.sql(
         """
         select ts, symbol, close
         from prices
         order by symbol, ts
         """
     )
+
+    report = tbl.optimize()
+    assert report.source_segments_replaced == 1
+    assert report.replacement_segments_written == 2
+    assert report.distinct_identities_materialized == 2
+    assert report.rows_read == report.rows_written == 4
+    assert not report.no_op
+
+    repeated = tbl.optimize()
+    assert repeated.no_op
+    assert repeated.starting_version == repeated.committed_version
+    assert repeated.committed_version == report.committed_version
+
+    sess = ttf.Session()
+    sess.register_tstable("prices", str(table_root))
+    after = sess.sql(
+        """
+        select ts, symbol, close
+        from prices
+        order by symbol, ts
+        """
+    )
+    assert after.equals(before)
+    return after
 
 
 def main() -> None:

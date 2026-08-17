@@ -41,10 +41,30 @@ same bucket remains independent.
     Running the example again fails because `./my_table` already contains a
     table. Delete that directory before repeating the tutorial.
 
-## 3. Query with SQL
+## 3. Optimize the entity layout
+
+`optimize()` explicitly rewrites each mixed source segment into one replacement
+segment per complete identity. In this example, the source segment becomes one
+NVDA segment and one AAPL segment inside the same logical table.
+
+Optimization is optional. It preserves the logical rows, schema, and per-entity
+coverage. The returned `OptimizeReport` records the versions, source and
+replacement segment counts, distinct identities, row counts, and whether the
+operation was a no-op.
+
+Calling `optimize()` again in the example returns a successful no-op. Its
+starting and committed versions are equal, so it does not create another table
+version. Replaced source files may remain on disk until a future vacuum
+operation removes unreferenced files.
+
+This operation is specific to entity layout. It does not combine small files or
+accept a target file size.
+
+## 4. Query with SQL
 
 `Session` provides the DataFusion SQL engine. The example registers the table
-as `prices`, runs a query, and returns the result as a `pyarrow.Table`.
+as `prices` before and after optimization. It verifies that both queries return
+the same rows, then returns the optimized result as a `pyarrow.Table`.
 
 `symbol` remains a normal SQL column. You can use `WHERE symbol = 'NVDA'` to
 select one identity or `GROUP BY symbol` to calculate independent aggregates.

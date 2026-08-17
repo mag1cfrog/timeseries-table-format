@@ -131,6 +131,23 @@ reuse the same timestamp bucket, and one Parquet file may contain multiple symbo
 rejected only when the same complete identity already covers a bucket. In SQL, entity columns are
 ordinary columns that can be filtered or grouped.
 
+## Optimize mixed-entity segments
+
+Mixed-entity segments are valid input. Entity-layout optimization is explicit and optional:
+
+```python
+report = tbl.optimize()
+print(report.source_segments_replaced, report.replacement_segments_written)
+```
+
+For each mixed source segment, optimization writes one replacement segment per complete entity
+identity. It preserves logical rows, schema, and per-entity coverage. If no mixed live segments
+need rewriting, `report.no_op` is `True`, `starting_version` equals `committed_version`, and no new
+table version is created.
+
+Optimization does not combine small files or accept a target file size. Replaced source files may
+remain on disk until a future vacuum operation removes unreferenced files.
+
 > **Bucket size (important):** `bucket=1h` does **not** resample your data. It defines the time grid used for overlap detection and coverage tracking.
 > Example: with `bucket=1h`, timestamps `10:05` and `10:55` fall into the same bucket (10:00–11:00).
 > See https://mag1cfrog.github.io/timeseries-table-format/concepts/bucketing_and_overlap/

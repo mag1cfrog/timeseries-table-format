@@ -22,6 +22,54 @@ class CoverageOverlapError(TimeseriesTableError):
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
 
+class OptimizeReport:
+    """Result of one entity-layout optimization operation."""
+
+    @property
+    def starting_version(self) -> int:
+        """Table version used to select optimization candidates."""
+        ...
+
+    @property
+    def committed_version(self) -> int:
+        """Committed replacement version, or `starting_version` for a no-op."""
+        ...
+
+    @property
+    def candidate_source_segments(self) -> int:
+        """Mixed source segments selected from the starting snapshot."""
+        ...
+
+    @property
+    def source_segments_replaced(self) -> int:
+        """Selected source segments removed by the committed rewrite."""
+        ...
+
+    @property
+    def replacement_segments_written(self) -> int:
+        """Verified single-entity replacement segments written."""
+        ...
+
+    @property
+    def distinct_identities_materialized(self) -> int:
+        """Unique complete identities represented by the replacements."""
+        ...
+
+    @property
+    def rows_read(self) -> int:
+        """Logical rows read from selected source segments."""
+        ...
+
+    @property
+    def rows_written(self) -> int:
+        """Logical rows written to committed replacement segments."""
+        ...
+
+    @property
+    def no_op(self) -> bool:
+        """Whether no mixed live segments required rewriting."""
+        ...
+
 class Session:
     def __init__(self) -> None:
         """Create a new DataFusion-backed SQL session.
@@ -194,6 +242,23 @@ class TimeSeriesTable:
         CoverageOverlapError:
             If the same complete entity identity already covers an incoming bucket. Different
             identities may reuse the same bucket.
+        """
+        ...
+
+    def optimize(self) -> OptimizeReport:
+        """Rewrite every mixed-entity segment into single-entity segments.
+
+        Returns
+        -------
+        OptimizeReport
+            Complete counts and versions for the operation. A successful no-op returns a
+            report with `no_op=True` and equal starting and committed versions.
+
+        Raises
+        ------
+        TimeseriesTableError
+            If optimization is not applicable or rewriting, validation, commit, or cleanup
+            fails. The exception includes a `table_root` attribute.
         """
         ...
 

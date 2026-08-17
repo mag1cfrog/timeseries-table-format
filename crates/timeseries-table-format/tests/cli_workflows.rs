@@ -15,7 +15,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, TimeBucket},
+    metadata::{
+        segments::SegmentEntityLayout,
+        table_metadata::{IndexKind, TimeBucket},
+    },
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -443,6 +446,133 @@ fn cli_create_help_uses_only_ordered_index_names() -> StdResult<(), Box<dyn std:
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--time-column"));
 
+    Ok(())
+}
+
+#[test]
+fn cli_optimize_help_exposes_only_the_table_argument() -> StdResult<(), Box<dyn std::error::Error>>
+{
+    let output = run_cli(&["optimize", "--help"])?;
+    assert_cli_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--table <TABLE>"));
+    assert!(!stdout.contains("--timing"));
+    assert!(!stdout.contains("--output"));
+    assert!(!stdout.contains("--strategy"));
+    Ok(())
+}
+
+#[test]
+fn cli_optimize_rewrites_mixed_segments_and_reports_repeated_no_op()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &["symbol"])?;
+
+    let source = tmp.path().join("mixed.parquet");
+    write_parquet_rows(&source, &[(0, "A", 1.0), (60_000, "B", 2.0)])?;
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+    assert_cli_success(&output);
+
+    let output = run_cli(&["optimize", "--table", table_root.to_string_lossy().as_ref()])?;
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "starting_version: 2\n\
+         committed_version: 3\n\
+         candidate_source_segments: 1\n\
+         source_segments_replaced: 1\n\
+         replacement_segments_written: 2\n\
+         distinct_identities_materialized: 2\n\
+         rows_read: 2\n\
+         rows_written: 2\n\
+         no_op: false\n"
+    );
+
+    let table = open_table_blocking(&table_root)?;
+    assert_eq!(table.state().version, 3);
+    assert_eq!(table.state().segments.len(), 2);
+    assert!(
+        table
+            .state()
+            .segments
+            .values()
+            .all(|segment| matches!(segment.entity_layout, SegmentEntityLayout::Single(_)))
+    );
+
+    let output = run_cli(&["optimize", "--table", table_root.to_string_lossy().as_ref()])?;
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "starting_version: 3\n\
+         committed_version: 3\n\
+         candidate_source_segments: 0\n\
+         source_segments_replaced: 0\n\
+         replacement_segments_written: 0\n\
+         distinct_identities_materialized: 0\n\
+         rows_read: 0\n\
+         rows_written: 0\n\
+         no_op: true\n"
+    );
+    assert_eq!(open_table_blocking(&table_root)?.state().version, 3);
+    Ok(())
+}
+
+#[test]
+fn cli_optimize_rejects_tables_without_entities_with_context()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+
+    let output = run_cli(&["optimize", "--table", table_root.to_string_lossy().as_ref()])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&table_root.display().to_string()));
+    assert!(stderr.contains("no entity columns are configured"));
+    Ok(())
+}
+
+#[test]
+fn cli_optimize_preserves_failed_source_path_context() -> StdResult<(), Box<dyn std::error::Error>>
+{
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &["symbol"])?;
+
+    let source = tmp.path().join("missing-source.parquet");
+    write_parquet_rows(&source, &[(0, "A", 1.0), (60_000, "B", 2.0)])?;
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+    assert_cli_success(&output);
+
+    let table = open_table_blocking(&table_root)?;
+    let segment_path = table
+        .state()
+        .segments
+        .values()
+        .next()
+        .ok_or_else(|| io::Error::other("segment missing"))?
+        .path
+        .clone();
+    std::fs::remove_file(table_root.join(&segment_path))?;
+
+    let output = run_cli(&["optimize", "--table", table_root.to_string_lossy().as_ref()])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&table_root.display().to_string()));
+    assert!(stderr.contains(&segment_path));
     Ok(())
 }
 

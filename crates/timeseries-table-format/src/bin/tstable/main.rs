@@ -14,13 +14,13 @@ use snafu::ResultExt;
 use timeseries_table_format::{
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
-    table::TimeSeriesTable,
+    table::{OptimizeReport, TimeSeriesTable},
 };
 
 use crate::{
     error::{
         AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
-        OpenTableSnafu, StorageSnafu,
+        OpenTableSnafu, OptimizeTableSnafu, StorageSnafu,
     },
     query::{
         QueryOpts, page_output, preview_message, print_query_result, render_preview,
@@ -132,6 +132,12 @@ enum Command {
         /// Print elapsed time for the append
         #[arg(long, default_value_t = false)]
         timing: bool,
+    },
+
+    /// Rewrite mixed-entity segments into single-entity segments
+    Optimize {
+        #[arg(long)]
+        table: PathBuf,
     },
 
     /// Execute a SQL query via DataFusion against the table
@@ -322,6 +328,40 @@ async fn cmd_append(table: &Path, parquet: &Path, timing: bool) -> CliResult<()>
     Ok(())
 }
 
+fn print_optimize_report(report: &OptimizeReport) {
+    println!("starting_version: {}", report.starting_version);
+    println!("committed_version: {}", report.committed_version);
+    println!(
+        "candidate_source_segments: {}",
+        report.candidate_source_segments
+    );
+    println!(
+        "source_segments_replaced: {}",
+        report.source_segments_replaced
+    );
+    println!(
+        "replacement_segments_written: {}",
+        report.replacement_segments_written
+    );
+    println!(
+        "distinct_identities_materialized: {}",
+        report.distinct_identities_materialized
+    );
+    println!("rows_read: {}", report.rows_read);
+    println!("rows_written: {}", report.rows_written);
+    println!("no_op: {}", report.no_op);
+}
+
+async fn cmd_optimize(table: &Path) -> CliResult<()> {
+    let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
+    let mut table_handle = open_table(location, table).await?;
+    let report = table_handle.optimize().await.context(OptimizeTableSnafu {
+        table: table.display().to_string(),
+    })?;
+    print_optimize_report(&report);
+    Ok(())
+}
+
 async fn cmd_query_with_engine(
     engine: &dyn engine::Engine<Error = CliError>,
     sql: String,
@@ -392,6 +432,8 @@ async fn run() -> CliResult<()> {
             parquet,
             timing,
         } => cmd_append(&table, &parquet, timing).await,
+
+        Command::Optimize { table } => cmd_optimize(&table).await,
 
         Command::Query {
             table,
