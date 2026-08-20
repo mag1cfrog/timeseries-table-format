@@ -76,7 +76,7 @@ This happens automatically; you don't need to do anything special.
 
 - **Read-only**: This integration is for querying only. Use `timeseries-table-format` or the CLI for writes.
 - **Best-effort filter extraction**: Complex predicates may not be fully recognized (see below). Unrecognized predicates fall back to scanning all segments—correctness is preserved.
-- **No custom execution plan**: We use DataFusion's default `ParquetExec` after pruning. Future versions may add custom operators.
+- **No custom execution plan**: After segment pruning, execution uses DataFusion's standard Parquet scan.
 
 ---
 

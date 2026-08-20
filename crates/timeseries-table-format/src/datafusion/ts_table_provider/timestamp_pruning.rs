@@ -802,7 +802,7 @@ fn local_truncation_bucket(
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let local = literal.with_timezone(&timezone);
     let floor_local = truncate_local(local.naive_local(), unit)?;
-    // Match DataFusion 51: an ambiguous floor keeps the input's UTC offset.
+    // An ambiguous floor keeps the input's UTC offset.
     // The second occurrence of that local boundary ends the first bucket.
     let (start, repeated_end) = match floor_local.and_local_timezone(timezone) {
         LocalResult::Single(start) => (start, None),
