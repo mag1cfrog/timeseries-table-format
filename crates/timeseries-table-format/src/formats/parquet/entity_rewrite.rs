@@ -984,7 +984,7 @@ mod tests {
             schema,
             Some(
                 WriterProperties::builder()
-                    .set_max_row_group_size(513)
+                    .set_max_row_group_row_count(Some(513))
                     .build(),
             ),
         )?;

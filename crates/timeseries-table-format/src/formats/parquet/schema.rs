@@ -112,44 +112,35 @@ pub(super) fn validate_parquet_index(
         (
             IndexKind::Timestamp { .. },
             PhysicalType::INT64,
-            Some(LogicalType::Timestamp {
-                unit: TimeUnit::MILLIS,
-                ..
-            }),
-        ) => ParquetIndexKind::Timestamp(ParquetTimestampUnit::Millis),
+            Some(LogicalType::Timestamp(timestamp)),
+        ) if timestamp.unit == TimeUnit::MILLIS => {
+            ParquetIndexKind::Timestamp(ParquetTimestampUnit::Millis)
+        }
         (
             IndexKind::Timestamp { .. },
             PhysicalType::INT64,
-            Some(LogicalType::Timestamp {
-                unit: TimeUnit::MICROS,
-                ..
-            }),
-        ) => ParquetIndexKind::Timestamp(ParquetTimestampUnit::Micros),
+            Some(LogicalType::Timestamp(timestamp)),
+        ) if timestamp.unit == TimeUnit::MICROS => {
+            ParquetIndexKind::Timestamp(ParquetTimestampUnit::Micros)
+        }
         (
             IndexKind::Timestamp { .. },
             PhysicalType::INT64,
-            Some(LogicalType::Timestamp {
-                unit: TimeUnit::NANOS,
-                ..
-            }),
-        ) => ParquetIndexKind::Timestamp(ParquetTimestampUnit::Nanos),
-        (IndexKind::Int64 { .. }, PhysicalType::INT64, None)
-        | (
-            IndexKind::Int64 { .. },
-            PhysicalType::INT64,
-            Some(LogicalType::Integer {
-                bit_width: 64,
-                is_signed: true,
-            }),
-        ) => ParquetIndexKind::Int64,
-        (
-            IndexKind::UInt64 { .. },
-            PhysicalType::INT64,
-            Some(LogicalType::Integer {
-                bit_width: 64,
-                is_signed: false,
-            }),
-        ) => ParquetIndexKind::UInt64,
+            Some(LogicalType::Timestamp(timestamp)),
+        ) if timestamp.unit == TimeUnit::NANOS => {
+            ParquetIndexKind::Timestamp(ParquetTimestampUnit::Nanos)
+        }
+        (IndexKind::Int64 { .. }, PhysicalType::INT64, None) => ParquetIndexKind::Int64,
+        (IndexKind::Int64 { .. }, PhysicalType::INT64, Some(LogicalType::Integer(integer)))
+            if integer.bit_width == 64 && integer.is_signed =>
+        {
+            ParquetIndexKind::Int64
+        }
+        (IndexKind::UInt64 { .. }, PhysicalType::INT64, Some(LogicalType::Integer(integer)))
+            if integer.bit_width == 64 && !integer.is_signed =>
+        {
+            ParquetIndexKind::UInt64
+        }
         _ => {
             return Err(invalid_index_column(
                 path,
@@ -171,11 +162,8 @@ fn map_parquet_col_to_logical_type(
     // First: look at logical annotation when present
     if let Some(logical) = logical {
         match logical {
-            LogicalType::Timestamp {
-                is_adjusted_to_u_t_c: _,
-                unit,
-            } => {
-                let unit = match unit {
+            LogicalType::Timestamp(timestamp) => {
+                let unit = match timestamp.unit {
                     TimeUnit::MILLIS => LogicalTimestampUnit::Millis,
                     TimeUnit::MICROS => LogicalTimestampUnit::Micros,
                     TimeUnit::NANOS => LogicalTimestampUnit::Nanos,
@@ -195,17 +183,16 @@ fn map_parquet_col_to_logical_type(
                 // For now, treat “complex” logical types as Other – v0.1 doesn’t need to fully support them.
                 return Ok(LogicalDataType::Other(format!("parquet::{logical:?}")));
             }
-            LogicalType::Decimal { scale, precision } => {
+            LogicalType::Decimal(decimal) => {
                 return Ok(LogicalDataType::Decimal {
-                    precision: *precision,
-                    scale: *scale,
+                    precision: decimal.precision,
+                    scale: decimal.scale,
                 });
             }
-            LogicalType::Integer {
-                bit_width: 64,
-                is_signed,
-            } if physical == PhysicalType::INT64 => {
-                return Ok(if *is_signed {
+            LogicalType::Integer(integer)
+                if integer.bit_width == 64 && physical == PhysicalType::INT64 =>
+            {
+                return Ok(if integer.is_signed {
                     LogicalDataType::Int64
                 } else {
                     LogicalDataType::UInt64
@@ -894,7 +881,7 @@ mod tests {
         let col = Arc::new(
             Type::primitive_type_builder(column_name, PhysicalType::INT64)
                 .with_repetition(Repetition::REQUIRED)
-                .with_logical_type(Some(LogicalType::Decimal { scale, precision }))
+                .with_logical_type(Some(LogicalType::decimal(scale, precision)))
                 .with_precision(precision)
                 .with_scale(scale)
                 .build()?,
@@ -992,10 +979,7 @@ mod tests {
         ];
 
         for (unit, expected_unit) in cases {
-            let logical = LogicalType::Timestamp {
-                is_adjusted_to_u_t_c: true,
-                unit,
-            };
+            let logical = LogicalType::timestamp(true, unit);
 
             let mapped =
                 map_parquet_col_to_logical_type("ts", PhysicalType::INT64, Some(&logical), None)
@@ -1016,10 +1000,7 @@ mod tests {
             (true, LogicalDataType::Int64),
             (false, LogicalDataType::UInt64),
         ] {
-            let logical = LogicalType::Integer {
-                bit_width: 64,
-                is_signed,
-            };
+            let logical = LogicalType::integer(64, is_signed);
 
             let mapped =
                 map_parquet_col_to_logical_type("index", PhysicalType::INT64, Some(&logical), None)
@@ -1043,24 +1024,15 @@ mod tests {
             .build()?;
         let narrow = Type::primitive_type_builder("index", PhysicalType::INT32)
             .with_repetition(Repetition::REQUIRED)
-            .with_logical_type(Some(LogicalType::Integer {
-                bit_width: 32,
-                is_signed: true,
-            }))
+            .with_logical_type(Some(LogicalType::integer(32, true)))
             .build()?;
         let timestamp = Type::primitive_type_builder("index", PhysicalType::INT64)
             .with_repetition(Repetition::REQUIRED)
-            .with_logical_type(Some(LogicalType::Timestamp {
-                is_adjusted_to_u_t_c: true,
-                unit: TimeUnit::MILLIS,
-            }))
+            .with_logical_type(Some(LogicalType::timestamp(true, TimeUnit::MILLIS)))
             .build()?;
         let decimal = Type::primitive_type_builder("index", PhysicalType::INT64)
             .with_repetition(Repetition::REQUIRED)
-            .with_logical_type(Some(LogicalType::Decimal {
-                scale: 0,
-                precision: 18,
-            }))
+            .with_logical_type(Some(LogicalType::decimal(0, 18)))
             .with_scale(0)
             .with_precision(18)
             .build()?;
@@ -1152,10 +1124,7 @@ mod tests {
 
     #[test]
     fn map_parquet_col_to_logical_type_maps_decimal() {
-        let decimal = LogicalType::Decimal {
-            scale: 2,
-            precision: 10,
-        };
+        let decimal = LogicalType::decimal(2, 10);
         let decimal_type =
             map_parquet_col_to_logical_type("dec", PhysicalType::INT64, Some(&decimal), None)
                 .unwrap();
@@ -1846,10 +1815,7 @@ mod tests {
             .build()?;
         let value = Type::primitive_type_builder("value", PhysicalType::INT64)
             .with_repetition(Repetition::OPTIONAL)
-            .with_logical_type(Some(LogicalType::Integer {
-                bit_width: 64,
-                is_signed: false,
-            }))
+            .with_logical_type(Some(LogicalType::integer(64, false)))
             .build()?;
         let key_value = Type::group_type_builder("key_value")
             .with_repetition(Repetition::REPEATED)
@@ -2451,10 +2417,7 @@ mod tests {
         let path = tmp.path().join("uint64.parquet");
         let field = Type::primitive_type_builder("index", PhysicalType::INT64)
             .with_repetition(Repetition::REQUIRED)
-            .with_logical_type(Some(LogicalType::Integer {
-                bit_width: 64,
-                is_signed: false,
-            }))
+            .with_logical_type(Some(LogicalType::integer(64, false)))
             .build()?;
         let parquet_schema = Arc::new(
             Type::group_type_builder("schema")

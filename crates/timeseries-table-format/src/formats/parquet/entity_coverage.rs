@@ -448,7 +448,7 @@ mod tests {
         )?;
         let properties = max_row_group_size.map(|size| {
             WriterProperties::builder()
-                .set_max_row_group_size(size)
+                .set_max_row_group_row_count(Some(size))
                 .build()
         });
         write_batch(path, &batch, properties)

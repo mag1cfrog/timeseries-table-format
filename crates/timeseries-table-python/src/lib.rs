@@ -649,6 +649,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
         /// Notes
         /// -----
         /// If `name` is already registered, it is replaced atomically (with rollback on failure).
+        /// Directories must contain at least one Parquet file so their schema can be inferred.
         ///
         /// Raises
         /// ------

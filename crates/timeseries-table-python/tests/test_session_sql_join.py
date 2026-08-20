@@ -1,5 +1,6 @@
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 import timeseries_table_format as ttf
 
@@ -195,9 +196,7 @@ def test_session_sql_join_duplicate_dim_keys_multiplies_rows(tmp_path):
     assert out["exchange"].to_pylist() == ["A", "B", "A", "B"]
 
 
-def test_session_sql_join_key_type_mismatch_is_visible_and_yields_no_matches(
-    tmp_path,
-):
+def test_session_sql_join_key_type_mismatch_is_visible_and_raises(tmp_path):
     table_root = tmp_path / "prices_tbl"
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
@@ -219,19 +218,17 @@ def test_session_sql_join_key_type_mismatch_is_visible_and_yields_no_matches(
     sess.register_tstable("prices", str(table_root))
     sess.register_parquet("symbols", str(symbols_path))
 
-    # Pain point: key type mismatches can produce "silent" empty joins.
-    # Make the mismatch visible via schema-only queries.
     prices_schema = sess.sql("select symbol from prices limit 0").schema
     symbols_schema = sess.sql("select symbol from symbols limit 0").schema
     assert prices_schema.field("symbol").type == pa.string()
     assert symbols_schema.field("symbol").type == pa.int64()
 
-    out = sess.sql(
-        """
-        select count(*) as n
-        from prices p
-        join symbols s
-        on p.symbol = s.symbol
-        """
-    )
-    assert out["n"].to_pylist() == [0]
+    with pytest.raises(ttf.DataFusionError, match="Cannot cast string"):
+        sess.sql(
+            """
+            select count(*) as n
+            from prices p
+            join symbols s
+            on p.symbol = s.symbol
+            """
+        )

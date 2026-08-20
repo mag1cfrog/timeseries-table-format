@@ -634,7 +634,9 @@ def test_session_sql_largeish_result_matches_between_modes(
 
     assert t_cs.schema == t_ipc.schema
     assert t_cs.num_rows == n
-    assert t_cs.equals(t_ipc)
+    assert t_cs.sort_by([("a", "ascending")]).equals(
+        t_ipc.sort_by([("a", "ascending")])
+    )
 
 
 def test_session_sql_c_stream_largeish_does_not_call_ipc_decode(

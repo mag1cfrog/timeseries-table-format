@@ -135,8 +135,8 @@ fn time_idx_and_unit(
     }
 
     match logical {
-        Some(LogicalType::Timestamp { unit, .. }) => {
-            let unit = match unit {
+        Some(LogicalType::Timestamp(timestamp)) => {
+            let unit = match timestamp.unit {
                 ParquetTimeUnit::MILLIS => TimeUnit::Millisecond,
                 ParquetTimeUnit::MICROS => TimeUnit::Microsecond,
                 ParquetTimeUnit::NANOS => TimeUnit::Nanosecond,

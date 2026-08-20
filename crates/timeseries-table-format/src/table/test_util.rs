@@ -159,10 +159,7 @@ pub(crate) fn write_test_parquet(
 
     let ts_field = Type::primitive_type_builder("ts", PhysicalType::INT64)
         .with_repetition(Repetition::REQUIRED)
-        .with_logical_type(Some(LogicalType::Timestamp {
-            is_adjusted_to_u_t_c: true,
-            unit: TimeUnit::MILLIS,
-        }))
+        .with_logical_type(Some(LogicalType::timestamp(true, TimeUnit::MILLIS)))
         .build()?;
     fields.push(Arc::new(ts_field));
 
