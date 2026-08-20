@@ -12,20 +12,17 @@ The goal is simple: keep SQL queries fast without changing your data.
 
 ### Installation
 
-```toml
-[dependencies]
-timeseries-table-format = { version = "0.1", features = ["datafusion"] }
-datafusion = "51"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+```bash
+cargo add timeseries-table-format --features datafusion
+cargo add tokio --features macros,rt-multi-thread
 ```
 
 ### Rust API Example
 
 ```rust
-use datafusion::prelude::*;
 use std::sync::Arc;
 use timeseries_table_format::{
-    datafusion::TsTableProvider,
+    datafusion::{engine::prelude::SessionContext, TsTableProvider},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
