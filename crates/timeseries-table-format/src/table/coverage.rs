@@ -600,7 +600,6 @@ mod tests {
     };
     use chrono::{DateTime, TimeZone, Utc};
     use tempfile::TempDir;
-    use tracing::instrument::WithSubscriber;
 
     type HelperResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1382,9 +1381,8 @@ mod tests {
         tokio::fs::remove_file(tmp.path().join(&pointer.coverage_path)).await?;
         let capture = TraceCapture::default();
 
-        let ratio = table
-            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
-            .with_subscriber(capture.dispatch())
+        let ratio = capture
+            .run(table.coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240)))
             .await?;
 
         assert!((ratio - 0.75).abs() < 1e-12);
@@ -1427,13 +1425,12 @@ mod tests {
         tokio::fs::remove_file(tmp.path().join(&pointer.coverage_path)).await?;
         let capture = TraceCapture::default();
 
-        let ratio = table
-            .coverage_ratio_for_entity_range(
+        let ratio = capture
+            .run(table.coverage_ratio_for_entity_range(
                 &[("symbol", EntityValue::from(SENSITIVE_ENTITY))],
                 ts_from_secs(0),
                 ts_from_secs(60),
-            )
-            .with_subscriber(capture.dispatch())
+            ))
             .await?;
 
         assert_eq!(ratio, 1.0);

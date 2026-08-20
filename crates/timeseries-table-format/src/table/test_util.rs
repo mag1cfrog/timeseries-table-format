@@ -26,12 +26,14 @@ use parquet::schema::types::Type;
 use std::{
     collections::BTreeMap,
     fs::File,
+    future::Future,
     path::Path,
     sync::{Arc, Mutex},
 };
 use tracing::{
     Event, Subscriber,
     field::{Field as TracingField, Visit},
+    instrument::WithSubscriber,
     span::{Attributes, Id, Record},
 };
 use tracing_subscriber::{
@@ -75,6 +77,15 @@ pub(crate) struct TraceCapture(Arc<Mutex<CapturedDiagnostics>>);
 impl TraceCapture {
     pub(crate) fn dispatch(&self) -> tracing::Dispatch {
         tracing::Dispatch::new(tracing_subscriber::registry().with(self.clone()))
+    }
+
+    pub(crate) async fn run<F: Future>(&self, future: F) -> F::Output {
+        // Two live dispatches keep process-wide callsite interest stable when
+        // unrelated tests first execute the same callsite on another thread.
+        let callsite_guard = self.dispatch();
+        let output = future.with_subscriber(self.dispatch()).await;
+        drop(callsite_guard);
+        output
     }
 
     pub(crate) fn events(&self) -> Vec<CapturedEvent> {
