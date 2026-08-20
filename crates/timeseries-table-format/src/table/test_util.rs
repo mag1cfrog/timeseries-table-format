@@ -23,9 +23,21 @@ use parquet::data_type::ByteArray;
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::types::Type;
-use std::fs::File;
-use std::path::Path;
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+use tracing::{
+    Event, Subscriber,
+    field::{Field as TracingField, Visit},
+    span::{Attributes, Id, Record},
+};
+use tracing_subscriber::{
+    Layer,
+    layer::{Context, SubscriberExt},
+};
 
 pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -34,6 +46,128 @@ pub(crate) struct TestRow {
     pub(crate) ts_millis: i64,
     pub(crate) symbol: &'static str,
     pub(crate) price: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CapturedEvent {
+    pub(crate) name: &'static str,
+    pub(crate) level: tracing::Level,
+    pub(crate) fields: BTreeMap<&'static str, String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CapturedSpan {
+    id: u64,
+    pub(crate) name: &'static str,
+    pub(crate) level: tracing::Level,
+    pub(crate) fields: BTreeMap<&'static str, String>,
+}
+
+#[derive(Default)]
+struct CapturedDiagnostics {
+    events: Vec<CapturedEvent>,
+    spans: Vec<CapturedSpan>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct TraceCapture(Arc<Mutex<CapturedDiagnostics>>);
+
+impl TraceCapture {
+    pub(crate) fn dispatch(&self) -> tracing::Dispatch {
+        tracing::Dispatch::new(tracing_subscriber::registry().with(self.clone()))
+    }
+
+    pub(crate) fn events(&self) -> Vec<CapturedEvent> {
+        self.0.lock().expect("capture lock").events.clone()
+    }
+
+    pub(crate) fn spans(&self) -> Vec<CapturedSpan> {
+        self.0.lock().expect("capture lock").spans.clone()
+    }
+}
+
+struct FieldCapture<'a>(&'a mut BTreeMap<&'static str, String>);
+
+impl Visit for FieldCapture<'_> {
+    fn record_debug(&mut self, field: &TracingField, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name(), format!("{value:?}"));
+    }
+
+    fn record_u64(&mut self, field: &TracingField, value: u64) {
+        self.0.insert(field.name(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &TracingField, value: &str) {
+        self.0.insert(field.name(), value.to_string());
+    }
+}
+
+impl<S: Subscriber> Layer<S> for TraceCapture {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+        let mut fields = BTreeMap::new();
+        attrs.record(&mut FieldCapture(&mut fields));
+        self.0
+            .lock()
+            .expect("capture lock")
+            .spans
+            .push(CapturedSpan {
+                id: id.into_u64(),
+                name: attrs.metadata().name(),
+                level: *attrs.metadata().level(),
+                fields,
+            });
+    }
+
+    fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+        let mut captured = self.0.lock().expect("capture lock");
+        // ponytail: captures are tiny; add an active-span index if tests create thousands of spans.
+        if let Some(span) = captured
+            .spans
+            .iter_mut()
+            .rev()
+            .find(|span| span.id == id.into_u64())
+        {
+            values.record(&mut FieldCapture(&mut span.fields));
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut fields = BTreeMap::new();
+        event.record(&mut FieldCapture(&mut fields));
+        self.0
+            .lock()
+            .expect("capture lock")
+            .events
+            .push(CapturedEvent {
+                name: event.metadata().name(),
+                level: *event.metadata().level(),
+                fields,
+            });
+    }
+}
+
+#[test]
+fn trace_capture_keeps_spans_distinct_and_records_updates() {
+    let capture = TraceCapture::default();
+    tracing::dispatcher::with_default(&capture.dispatch(), || {
+        {
+            let first =
+                tracing::info_span!("first", initial = 1u64, updated = tracing::field::Empty);
+            first.record("updated", 2u64);
+        }
+        let _second = tracing::debug_span!("second", value = "kept separate");
+    });
+
+    let spans = capture.spans();
+    assert_eq!(spans.len(), 2);
+    let first = spans
+        .iter()
+        .find(|span| span.name == "first")
+        .expect("first span");
+    assert_eq!(first.level, tracing::Level::INFO);
+    assert_eq!(first.fields.get("initial").map(String::as_str), Some("1"));
+    assert_eq!(first.fields.get("updated").map(String::as_str), Some("2"));
+    assert!(spans.iter().any(|span| span.name == "second"));
 }
 
 pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta {

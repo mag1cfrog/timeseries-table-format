@@ -42,3 +42,4 @@ async-trait = "0.1.89"
 
 snafu = { version = "0.9.2" }
 tabled = { version = "0.21.0", default-features = false, features = ["std"] }
+tracing = { version = "0.1.44", default-features = false, features = ["log", "std"] }

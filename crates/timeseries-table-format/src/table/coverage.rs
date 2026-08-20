@@ -9,8 +9,6 @@
 
 use std::{collections::BTreeMap, path::Path};
 
-use log::warn;
-
 use crate::{
     coverage::{
         Coverage, EntityCoverage, EntityIdentity, EntityValue,
@@ -239,12 +237,27 @@ impl TimeSeriesTable {
                 match read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path)).await {
                     Ok(cov) => Ok(cov),
                     Err(snapshot_err) => {
-                        warn!(
-                            "Failed to read table coverage snapshot at {} (version {}): {:?}. \
-                             Attempting recovery from segment sidecars (readonly).",
-                            ptr.coverage_path, ptr.version, snapshot_err
+                        tracing::warn!(
+                            name: "coverage.recover",
+                            coverage_mode = "global",
+                            snapshot_version = ptr.version,
+                            coverage_path = %ptr.coverage_path,
+                            error = %snapshot_err,
+                            recovery_source = "segment_sidecars",
+                            "Failed to read table coverage snapshot; attempting read-only recovery from segment sidecars"
                         );
-                        self.recover_table_coverage_from_segments().await
+                        let coverage = self.recover_table_coverage_from_segments().await?;
+                        tracing::debug!(
+                            name: "coverage.recover",
+                            coverage_mode = "global",
+                            snapshot_version = ptr.version,
+                            coverage_path = %ptr.coverage_path,
+                            recovery_source = "segment_sidecars",
+                            coverage_bucket_count = coverage.cardinality(),
+                            outcome = "succeeded",
+                            "Recovered table coverage from segment sidecars"
+                        );
+                        Ok(coverage)
                     }
                 }
             }
@@ -266,12 +279,27 @@ impl TimeSeriesTable {
                 match self.load_table_entity_coverage_snapshot_only().await {
                     Ok(coverage) => Ok(coverage),
                     Err(snapshot_err) => {
-                        warn!(
-                            "Failed to read entity coverage snapshot at {} (version {}): {:?}. \
-                             Attempting recovery from segment sidecars (readonly).",
-                            ptr.coverage_path, ptr.version, snapshot_err
+                        tracing::warn!(
+                            name: "coverage.recover",
+                            coverage_mode = "entity",
+                            snapshot_version = ptr.version,
+                            coverage_path = %ptr.coverage_path,
+                            error = %snapshot_err,
+                            recovery_source = "segment_sidecars",
+                            "Failed to read entity coverage snapshot; attempting read-only recovery from segment sidecars"
                         );
-                        self.recover_table_entity_coverage_from_segments().await
+                        let coverage = self.recover_table_entity_coverage_from_segments().await?;
+                        tracing::debug!(
+                            name: "coverage.recover",
+                            coverage_mode = "entity",
+                            snapshot_version = ptr.version,
+                            coverage_path = %ptr.coverage_path,
+                            recovery_source = "segment_sidecars",
+                            coverage_identity_count = coverage.identity_count(),
+                            outcome = "succeeded",
+                            "Recovered entity coverage from segment sidecars"
+                        );
+                        Ok(coverage)
                     }
                 }
             }
@@ -566,12 +594,13 @@ mod tests {
         },
         storage::TableLocation,
         table::test_util::{
-            TestResult, TestRow, make_basic_table_meta, make_int32_entity_table_meta, utc_datetime,
-            write_int32_entity_parquet, write_test_parquet,
+            TestResult, TestRow, TraceCapture, make_basic_table_meta, make_int32_entity_table_meta,
+            utc_datetime, write_int32_entity_parquet, write_test_parquet,
         },
     };
     use chrono::{DateTime, TimeZone, Utc};
     use tempfile::TempDir;
+    use tracing::instrument::WithSubscriber;
 
     type HelperResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1260,6 +1289,163 @@ mod tests {
 
         let ratio = table.coverage_ratio_for_range(start, end).await?;
         assert!((ratio - 0.75).abs() < 1e-12);
+        Ok(())
+    }
+
+    fn assert_recovery_events(
+        capture: &TraceCapture,
+        pointer: &TableCoveragePointer,
+        mode: &str,
+        count_field: &str,
+        count: &str,
+        forbidden_values: &[&str],
+    ) {
+        let recovery_events: Vec<_> = capture
+            .events()
+            .into_iter()
+            .filter(|event| event.name == "coverage.recover")
+            .collect();
+        assert_eq!(recovery_events.len(), 2);
+
+        let warning = recovery_events
+            .iter()
+            .find(|event| event.level == tracing::Level::WARN)
+            .expect("recovery warning");
+        assert_eq!(
+            warning.fields.get("coverage_mode").map(String::as_str),
+            Some(mode)
+        );
+        assert_eq!(
+            warning.fields.get("snapshot_version"),
+            Some(&pointer.version.to_string())
+        );
+        assert_eq!(
+            warning.fields.get("coverage_path"),
+            Some(&pointer.coverage_path)
+        );
+        assert_eq!(
+            warning.fields.get("recovery_source").map(String::as_str),
+            Some("segment_sidecars")
+        );
+        assert!(
+            warning
+                .fields
+                .get("message")
+                .is_some_and(|message| message.contains("attempting read-only recovery"))
+        );
+        assert!(
+            warning
+                .fields
+                .get("error")
+                .is_some_and(|error| error.contains(&pointer.coverage_path))
+        );
+
+        let completion = recovery_events
+            .iter()
+            .find(|event| event.level == tracing::Level::DEBUG)
+            .expect("recovery completion");
+        assert_eq!(
+            completion.fields.get("outcome").map(String::as_str),
+            Some("succeeded")
+        );
+        assert_eq!(
+            completion.fields.get(count_field).map(String::as_str),
+            Some(count)
+        );
+
+        for value in recovery_events
+            .iter()
+            .flat_map(|event| event.fields.values())
+        {
+            for forbidden in forbidden_values
+                .iter()
+                .copied()
+                .chain(["LogicalSchema", "RecordBatch"])
+            {
+                assert!(
+                    !value.contains(forbidden),
+                    "diagnostic value contains sensitive data '{forbidden}': {value}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn global_coverage_snapshot_recovery_emits_safe_structured_events() -> TestResult {
+        let (tmp, table) = table_with_sparse_coverage().await?;
+        let pointer = table
+            .state()
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer")
+            .clone();
+        tokio::fs::remove_file(tmp.path().join(&pointer.coverage_path)).await?;
+        let capture = TraceCapture::default();
+
+        let ratio = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
+            .with_subscriber(capture.dispatch())
+            .await?;
+
+        assert!((ratio - 0.75).abs() < 1e-12);
+        let table_root = tmp.path().display().to_string();
+        assert_recovery_events(
+            &capture,
+            &pointer,
+            "global",
+            "coverage_bucket_count",
+            "3",
+            &[&table_root],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn entity_coverage_snapshot_recovery_emits_safe_structured_events() -> TestResult {
+        const SENSITIVE_ENTITY: &str = "sensitive-entity-value";
+        let tmp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), make_basic_table_meta())
+                .await?;
+        append_segment(
+            &mut table,
+            &tmp,
+            "data/sensitive.parquet",
+            &[TestRow {
+                ts_millis: 1_000,
+                symbol: SENSITIVE_ENTITY,
+                price: 987_654.25,
+            }],
+        )
+        .await?;
+        let pointer = table
+            .state()
+            .table_coverage
+            .as_ref()
+            .expect("snapshot pointer")
+            .clone();
+        tokio::fs::remove_file(tmp.path().join(&pointer.coverage_path)).await?;
+        let capture = TraceCapture::default();
+
+        let ratio = table
+            .coverage_ratio_for_entity_range(
+                &[("symbol", EntityValue::from(SENSITIVE_ENTITY))],
+                ts_from_secs(0),
+                ts_from_secs(60),
+            )
+            .with_subscriber(capture.dispatch())
+            .await?;
+
+        assert_eq!(ratio, 1.0);
+        let table_root = tmp.path().display().to_string();
+        assert_recovery_events(
+            &capture,
+            &pointer,
+            "entity",
+            "coverage_identity_count",
+            "1",
+            &[&table_root, SENSITIVE_ENTITY, "987654.25"],
+        );
         Ok(())
     }
 

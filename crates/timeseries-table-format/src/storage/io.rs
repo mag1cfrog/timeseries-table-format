@@ -474,7 +474,7 @@ pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> Stor
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
-            let path_str = abs.display().to_string();
+            let path_str = rel_path.display().to_string();
 
             match fs::read(&abs).await {
                 Ok(bytes) => Ok(bytes),
