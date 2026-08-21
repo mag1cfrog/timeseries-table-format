@@ -69,6 +69,7 @@ nav:
       - Register and join tables: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md
       - Stream query results: guides/stream_query_results.md
+      - Configure native logging: guides/native_logging.md
       - Configure notebook display: guides/notebook_display.md
   - Advanced:
       - Integer ordered indexes: guides/integer_indexes.md
@@ -81,4 +82,5 @@ nav:
       - TimeSeriesTable: reference/timeseries_table.md
       - Notebook display: reference/notebook_display.md
       - Exceptions: reference/exceptions.md
+  - Contributing: contributing.md
   - Help and troubleshooting: troubleshooting.md

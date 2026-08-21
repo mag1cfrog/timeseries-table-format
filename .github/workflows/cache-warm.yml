@@ -159,7 +159,7 @@ jobs:
       actions: read
       contents: read
     with:
-      os-json: '["windows-latest"]'
+      os-json: '["windows-2022"]'
       max-parallel: 1
       run-pytest: false
       upload-artifacts: false
