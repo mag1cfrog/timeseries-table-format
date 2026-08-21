@@ -78,3 +78,50 @@ def test_native_operation_uses_python_logging_namespace():
         )
         """
     )
+
+
+def test_native_logging_follows_runtime_level_changes():
+    _run_isolated(
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.WARNING)
+        logger.addHandler(Capture())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ttf.TimeSeriesTable.create(
+                table_root=str(root / "quiet"),
+                index_column="ts",
+                index_type="timestamp",
+                bucket="1h",
+            )
+            assert records == []
+
+            logger.setLevel(logging.INFO)
+            ttf.TimeSeriesTable.create(
+                table_root=str(root / "visible"),
+                index_column="ts",
+                index_type="timestamp",
+                bucket="1h",
+            )
+
+        assert any(
+            record.levelno == logging.INFO
+            and "Created time-series table" in record.getMessage()
+            for record in records
+        )
+        """
+    )

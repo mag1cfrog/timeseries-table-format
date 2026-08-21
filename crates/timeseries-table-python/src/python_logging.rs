@@ -4,10 +4,10 @@ use std::{borrow::Cow, sync::OnceLock};
 
 use log::{LevelFilter, Log, Metadata, Record};
 use pyo3::{PyResult, Python, exceptions::PyRuntimeError};
-use pyo3_log::{Caching, Logger, ResetHandle};
+use pyo3_log::{Caching, Logger};
 
 const LOGGER_ROOT: &str = "timeseries_table_format";
-static RESET_HANDLE: OnceLock<ResetHandle> = OnceLock::new();
+static INSTALLED: OnceLock<()> = OnceLock::new();
 
 struct PythonLogger {
     inner: Logger,
@@ -58,24 +58,23 @@ fn namespaced_target(target: &str) -> Cow<'_, str> {
 }
 
 pub(crate) fn install(py: Python<'_>) -> PyResult<()> {
-    if RESET_HANDLE.get().is_some() {
+    if INSTALLED.get().is_some() {
         return Ok(());
     }
 
-    let logger = Logger::new(py, Caching::LoggersAndLevels)
+    let logger = Logger::new(py, Caching::Loggers)
         .map_err(|err| {
             PyRuntimeError::new_err(format!("failed to create native logging bridge: {err}"))
         })?
         .filter(LevelFilter::Debug);
-    let reset_handle = logger.reset_handle();
 
     log::set_boxed_logger(Box::new(PythonLogger { inner: logger })).map_err(|err| {
         PyRuntimeError::new_err(format!("failed to install native logging bridge: {err}"))
     })?;
     log::set_max_level(LevelFilter::Debug);
 
-    RESET_HANDLE.set(reset_handle).map_err(|_| {
-        PyRuntimeError::new_err("native logging bridge initialized without its reset handle")
+    INSTALLED.set(()).map_err(|_| {
+        PyRuntimeError::new_err("native logging bridge was initialized concurrently")
     })?;
 
     Ok(())
