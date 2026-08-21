@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
-    datatypes::{Schema, SchemaRef},
+    datatypes::{DataType, Schema, SchemaRef, TimeUnit},
     error::ArrowError,
 };
 use parquet::arrow::{ArrowSchemaConverter, ArrowWriter as ParquetArrowWriter};
@@ -174,7 +174,80 @@ impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     }
 }
 
+fn invalid_append_schema(path: &str, data_type: &DataType, reason: &str) -> TableError {
+    TableError::AppendSource {
+        source: ArrowError::SchemaError(format!(
+            "invalid append source schema at {path}: {reason} ({data_type:?})"
+        )),
+    }
+}
+
+fn validate_append_data_type(path: &str, data_type: &DataType) -> Result<(), TableError> {
+    match data_type {
+        DataType::Union(_, _) => Err(invalid_append_schema(
+            path,
+            data_type,
+            "Parquet does not support Arrow unions",
+        )),
+        DataType::Time32(unit) if !matches!(unit, TimeUnit::Second | TimeUnit::Millisecond) => {
+            Err(invalid_append_schema(
+                path,
+                data_type,
+                "Time32 supports only second or millisecond units",
+            ))
+        }
+        DataType::Time64(unit) if !matches!(unit, TimeUnit::Microsecond | TimeUnit::Nanosecond) => {
+            Err(invalid_append_schema(
+                path,
+                data_type,
+                "Time64 supports only microsecond or nanosecond units",
+            ))
+        }
+        DataType::Struct(fields) => {
+            for field in fields {
+                validate_append_data_type(&format!("{path}.{}", field.name()), field.data_type())?;
+            }
+            Ok(())
+        }
+        DataType::List(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::LargeList(field)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field) => {
+            validate_append_data_type(&format!("{path}.{}", field.name()), field.data_type())
+        }
+        DataType::Map(entries, _) => {
+            let DataType::Struct(fields) = entries.data_type() else {
+                return Ok(());
+            };
+            if fields.len() != 2 {
+                return Err(invalid_append_schema(
+                    path,
+                    data_type,
+                    "Arrow map entries must contain exactly key and value fields",
+                ));
+            }
+            for field in fields {
+                validate_append_data_type(&format!("{path}.{}", field.name()), field.data_type())?;
+            }
+            Ok(())
+        }
+        DataType::Dictionary(_, value) => validate_append_data_type(path, value),
+        DataType::RunEndEncoded(run_ends, values) => {
+            validate_append_data_type(
+                &format!("{path}.{}", run_ends.name()),
+                run_ends.data_type(),
+            )?;
+            validate_append_data_type(&format!("{path}.{}", values.name()), values.data_type())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn logical_schema_from_arrow(schema: &Schema) -> Result<LogicalSchema, TableError> {
+    for field in schema.fields() {
+        validate_append_data_type(field.name(), field.data_type())?;
+    }
     let parquet_schema = ArrowSchemaConverter::new()
         .convert(schema)
         .context(AppendParquetSnafu)?;

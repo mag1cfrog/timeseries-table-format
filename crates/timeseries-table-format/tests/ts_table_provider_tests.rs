@@ -10,7 +10,7 @@ use arrow::array::{
     Array, ArrayRef, Float64Array, Float64Builder, Int32Array, Int64Array, StringArray,
     StringBuilder, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt64Array,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit, UnionFields, UnionMode};
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use chrono::Utc;
@@ -1116,6 +1116,87 @@ async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
             (420_000, "B", 17.0),
         ])?
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult {
+    let union = DataType::Union(
+        UnionFields::try_new([0], [Field::new("member", DataType::Int64, true)])?,
+        UnionMode::Sparse,
+    );
+    let cases = [
+        ("union", union.clone(), "unions"),
+        (
+            "nested union",
+            DataType::List(Arc::new(Field::new("item", union, true))),
+            "unions",
+        ),
+        (
+            "invalid Time32",
+            DataType::Time32(TimeUnit::Microsecond),
+            "Time32",
+        ),
+        (
+            "invalid Time64",
+            DataType::Time64(TimeUnit::Millisecond),
+            "Time64",
+        ),
+        (
+            "malformed map",
+            DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::empty()),
+                    false,
+                )),
+                false,
+            ),
+            "exactly key and value",
+        ),
+    ];
+
+    for (case, hostile_type, expected_message) in cases {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+            Field::new("hostile", hostile_type, true),
+        ]));
+        let reader =
+            RecordBatchIterator::new(Vec::<Result<RecordBatch, ArrowError>>::new(), schema);
+
+        let error = table
+            .append(reader)
+            .await
+            .expect_err("hostile schema must be rejected");
+        let TableError::AppendSource {
+            source: ArrowError::SchemaError(message),
+        } = error
+        else {
+            panic!("unexpected {case} error: {error}");
+        };
+        assert!(message.contains("hostile"), "{case}: {message}");
+        assert!(message.contains(expected_message), "{case}: {message}");
+        assert_eq!(table.state().version, 1, "{case}");
+        assert!(table.state().segments.is_empty(), "{case}");
+        assert!(!tmp.path().join("data").exists(), "{case}");
+        assert!(
+            !tmp.path().join(layout::commit_rel_path(2)).exists(),
+            "{case}"
+        );
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1, "{case}");
+        assert!(reopened.state().segments.is_empty(), "{case}");
+    }
     Ok(())
 }
 
