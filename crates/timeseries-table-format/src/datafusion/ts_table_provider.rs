@@ -241,6 +241,20 @@ impl TableProvider for TsTableProvider {
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
+    #[tracing::instrument(
+        name = "table.scan.plan",
+        level = "debug",
+        skip_all,
+        fields(
+            snapshot_version = tracing::field::Empty,
+            total_candidate_segments = tracing::field::Empty,
+            selected_segments = tracing::field::Empty,
+            pruned_segments = tracing::field::Empty,
+            filter_count = filters.len(),
+            projection_column_count = tracing::field::Empty,
+            limit = tracing::field::Empty
+        )
+    )]
     async fn scan(
         &self,
         state: &dyn Session,
@@ -248,8 +262,17 @@ impl TableProvider for TsTableProvider {
         filters: &[Expr], // may include all WHERE predicates
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let span = tracing::Span::current();
+        if let Some(projection) = projection {
+            span.record("projection_column_count", projection.len());
+        }
+        if let Some(limit) = limit {
+            span.record("limit", limit);
+        }
+
         // 1) Get a snapshot (TableState) from core table
         let snapshot = self.latest_state().await?;
+        span.record("snapshot_version", snapshot.version);
 
         for segment in snapshot.segments.values() {
             segment
@@ -258,6 +281,8 @@ impl TableProvider for TsTableProvider {
         }
 
         let segments = snapshot.segments_sorted_by_index().map_err(df_external)?;
+        let total_candidate_segments = segments.len();
+        span.record("total_candidate_segments", total_candidate_segments);
 
         let df_schema = DFSchema::try_from(self.schema().as_ref().clone())?;
         let exact_predicate = conjunction(filters.to_vec())
@@ -312,6 +337,11 @@ impl TableProvider for TsTableProvider {
 
         let selected =
             self.prune_segments_by_metadata(segments, &metadata_filters, &pruning_predicate)?;
+        span.record("selected_segments", selected.len());
+        span.record(
+            "pruned_segments",
+            total_candidate_segments.saturating_sub(selected.len()),
+        );
         for seg in selected {
             let file_size = self.segment_file_size(seg).await?;
             let location = self

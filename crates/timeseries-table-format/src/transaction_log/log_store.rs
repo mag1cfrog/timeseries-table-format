@@ -16,7 +16,7 @@ use crate::storage::{self, StorageError, TableLocation};
 use crate::transaction_log::actions::{Commit, LogAction};
 use crate::transaction_log::*;
 use chrono::Utc;
-use snafu::{Backtrace, prelude::*};
+use snafu::Backtrace;
 use std::path::{Path, PathBuf};
 
 /// Helper for reading and writing the commit log under a table root.
@@ -176,14 +176,41 @@ impl TransactionLogStore {
     /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
     ///    "create only if not exists" semantics (atomic guard).
     /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
+    #[tracing::instrument(
+        name = "transaction.commit",
+        level = "debug",
+        skip_all,
+        fields(
+            expected_version = expected,
+            observed_version = tracing::field::Empty,
+            proposed_version = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            action_count = actions.len(),
+            failure_stage = tracing::field::Empty,
+            rollback_outcome = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
     pub(crate) async fn commit_with_expected_version(
         &self,
         expected: u64,
         actions: Vec<LogAction>,
     ) -> Result<u64, CommitError> {
+        let span = tracing::Span::current();
+
         // 1) Guard on CURRENT
-        let current = self.load_current_version().await?;
+        let current = match self.load_current_version().await {
+            Ok(current) => current,
+            Err(error) => {
+                span.record("failure_stage", "current_read");
+                span.record("outcome", "failed");
+                return Err(error);
+            }
+        };
+        span.record("observed_version", current);
         if current != expected {
+            span.record("failure_stage", "advisory_check");
+            span.record("outcome", "conflict");
             return ConflictSnafu {
                 expected,
                 found: current,
@@ -192,9 +219,18 @@ impl TransactionLogStore {
         }
 
         // 2) Compute next version with overflow guard
-        let version = expected.checked_add(1).context(CorruptStateSnafu {
-            msg: "version counter overflow".to_string(),
-        })?;
+        let version = match expected.checked_add(1) {
+            Some(version) => version,
+            None => {
+                span.record("failure_stage", "version_calculation");
+                span.record("outcome", "failed");
+                return CorruptStateSnafu {
+                    msg: "version counter overflow".to_string(),
+                }
+                .fail();
+            }
+        };
+        span.record("proposed_version", version);
 
         // 3) Build commit payload
         let commit = Commit {
@@ -204,10 +240,17 @@ impl TransactionLogStore {
             actions,
         };
 
-        let json = serde_json::to_vec(&commit).map_err(|e| CommitError::CorruptState {
-            msg: format!("failed to serialize commit {version}: {e}"),
-            backtrace: Backtrace::capture(),
-        })?;
+        let json = match serde_json::to_vec(&commit) {
+            Ok(json) => json,
+            Err(error) => {
+                span.record("failure_stage", "serialization");
+                span.record("outcome", "failed");
+                return Err(CommitError::CorruptState {
+                    msg: format!("failed to serialize commit {version}: {error}"),
+                    backtrace: Backtrace::capture(),
+                });
+            }
+        };
 
         // 4) Attempt to create the commit file *only if it does not already exist*.
         //    If the file already exists (AlreadyExists error), we propagate it as-is
@@ -222,6 +265,8 @@ impl TransactionLogStore {
                 cleanup_error,
                 ..
             }) => {
+                span.record("failure_stage", "atomic_create");
+                span.record("outcome", "ambiguous");
                 return Err(CommitError::AmbiguousOutcome {
                     commit_path: commit_rel.display().to_string(),
                     operation_error,
@@ -229,7 +274,16 @@ impl TransactionLogStore {
                     backtrace: Backtrace::capture(),
                 });
             }
-            Err(source) => return Err(CommitError::Storage { source }),
+            Err(source @ StorageError::AlreadyExists { .. }) => {
+                span.record("failure_stage", "atomic_create");
+                span.record("outcome", "conflict");
+                return Err(CommitError::Storage { source });
+            }
+            Err(source) => {
+                span.record("failure_stage", "atomic_create");
+                span.record("outcome", "failed");
+                return Err(CommitError::Storage { source });
+            }
         }
 
         // 5) Update CURRENT via atomic write (temp + rename).
@@ -242,11 +296,22 @@ impl TransactionLogStore {
         )
         .await
         {
-            return Err(self
+            let error = self
                 .rollback_unpublished_commit(&commit_rel, publish_error)
-                .await);
+                .await;
+            span.record("failure_stage", "current_publication");
+            if matches!(&error, CommitError::AmbiguousOutcome { .. }) {
+                span.record("rollback_outcome", "failed");
+                span.record("outcome", "ambiguous");
+            } else {
+                span.record("rollback_outcome", "succeeded");
+                span.record("outcome", "failed");
+            }
+            return Err(error);
         }
 
+        span.record("committed_version", version);
+        span.record("outcome", "succeeded");
         Ok(version)
     }
 }
@@ -255,6 +320,7 @@ impl TransactionLogStore {
 mod tests {
     use super::*;
     use crate::storage::layout;
+    use crate::table::test_util::TraceCapture;
     use serde_json;
     use tempfile::TempDir;
 
@@ -267,6 +333,30 @@ mod tests {
         let location = TableLocation::local(tmp.path());
         let store = TransactionLogStore::new(location);
         (tmp, store)
+    }
+
+    fn assert_commit_span(capture: &TraceCapture, expected_fields: &[(&str, Option<&str>)]) {
+        let spans: Vec<_> = capture
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == "transaction.commit")
+            .collect();
+        assert_eq!(spans.len(), 1, "expected one transaction.commit span");
+        assert_eq!(spans[0].level, tracing::Level::DEBUG);
+        for (field, expected) in expected_fields {
+            assert_eq!(
+                spans[0].fields.get(*field).map(String::as_str),
+                *expected,
+                "unexpected transaction.commit.{field}"
+            );
+        }
+        assert!(
+            !capture
+                .events()
+                .iter()
+                .any(|event| event.name == "transaction.commit"),
+            "transaction commits must not emit duplicate events"
+        );
     }
 
     #[tokio::test]
@@ -345,6 +435,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_current_read_failure_records_failure_stage() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let current_path = tmp.path().join(layout::current_rel_path());
+        tokio::fs::create_dir_all(current_path.parent().expect("CURRENT parent")).await?;
+        tokio::fs::write(current_path, "invalid").await?;
+        let capture = TraceCapture::default();
+
+        let err = capture
+            .run(store.commit_with_expected_version(0, vec![]))
+            .await
+            .expect_err("invalid CURRENT should fail");
+
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert_commit_span(
+            &capture,
+            &[
+                ("expected_version", Some("0")),
+                ("observed_version", None),
+                ("proposed_version", None),
+                ("committed_version", None),
+                ("action_count", Some("0")),
+                ("failure_stage", Some("current_read")),
+                ("rollback_outcome", None),
+                ("outcome", Some("failed")),
+            ],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_version_overflow_records_failure_stage() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let current_path = tmp.path().join(layout::current_rel_path());
+        tokio::fs::create_dir_all(current_path.parent().expect("CURRENT parent")).await?;
+        tokio::fs::write(current_path, format!("{}\n", u64::MAX)).await?;
+        let capture = TraceCapture::default();
+
+        let err = capture
+            .run(store.commit_with_expected_version(u64::MAX, vec![]))
+            .await
+            .expect_err("version overflow should fail");
+
+        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert_commit_span(
+            &capture,
+            &[
+                ("expected_version", Some("18446744073709551615")),
+                ("observed_version", Some("18446744073709551615")),
+                ("proposed_version", None),
+                ("committed_version", None),
+                ("action_count", Some("0")),
+                ("failure_stage", Some("version_calculation")),
+                ("rollback_outcome", None),
+                ("outcome", Some("failed")),
+            ],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn commit_first_version_succeeds() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
@@ -390,7 +540,10 @@ mod tests {
         store.commit_with_expected_version(0, vec![]).await?;
 
         // Try to commit with expected=0 again (stale).
-        let result = store.commit_with_expected_version(0, vec![]).await;
+        let capture = TraceCapture::default();
+        let result = capture
+            .run(store.commit_with_expected_version(0, vec![]))
+            .await;
 
         assert!(result.is_err());
         let err = result.expect_err("expected Conflict");
@@ -403,6 +556,19 @@ mod tests {
             }
             _ => panic!("expected Conflict error, got {err:?}"),
         }
+        assert_commit_span(
+            &capture,
+            &[
+                ("expected_version", Some("0")),
+                ("observed_version", Some("1")),
+                ("proposed_version", None),
+                ("committed_version", None),
+                ("action_count", Some("0")),
+                ("failure_stage", Some("advisory_check")),
+                ("rollback_outcome", None),
+                ("outcome", Some("conflict")),
+            ],
+        );
 
         Ok(())
     }
@@ -415,7 +581,32 @@ mod tests {
             path: "data/test-seg.parquet".to_string(),
         };
 
-        store.commit_with_expected_version(0, vec![action]).await?;
+        let capture = TraceCapture::default();
+        capture
+            .run(store.commit_with_expected_version(0, vec![action]))
+            .await?;
+
+        assert_commit_span(
+            &capture,
+            &[
+                ("expected_version", Some("0")),
+                ("observed_version", Some("0")),
+                ("proposed_version", Some("1")),
+                ("committed_version", Some("1")),
+                ("action_count", Some("1")),
+                ("failure_stage", None),
+                ("rollback_outcome", None),
+                ("outcome", Some("succeeded")),
+            ],
+        );
+        for value in capture
+            .spans()
+            .into_iter()
+            .flat_map(|span| span.fields.into_values())
+        {
+            assert!(!value.contains("data/test-seg.parquet"));
+            assert!(!value.contains(&tmp.path().display().to_string()));
+        }
 
         // Read and parse the commit file.
         let commit_path = tmp.path().join(layout::commit_rel_path(1));
@@ -461,7 +652,10 @@ mod tests {
         tokio::fs::write(&commit_file, b"{}").await?;
 
         // Now try to commit at version 1 - should fail with Storage(AlreadyExists)
-        let result = store.commit_with_expected_version(0, vec![]).await;
+        let capture = TraceCapture::default();
+        let result = capture
+            .run(store.commit_with_expected_version(0, vec![]))
+            .await;
 
         assert!(
             matches!(
@@ -472,7 +666,46 @@ mod tests {
             ),
             "expected Storage(AlreadyExists) error, got: {result:?}",
         );
+        assert_commit_span(
+            &capture,
+            &[
+                ("observed_version", Some("0")),
+                ("proposed_version", Some("1")),
+                ("committed_version", None),
+                ("failure_stage", Some("atomic_create")),
+                ("rollback_outcome", None),
+                ("outcome", Some("conflict")),
+            ],
+        );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_write_failure_records_atomic_create_failure() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
+        storage::inject_write_new_failure(commit_path.clone(), false);
+        let capture = TraceCapture::default();
+
+        let err = capture
+            .run(store.commit_with_expected_version(0, vec![]))
+            .await
+            .expect_err("commit write should fail");
+
+        assert!(matches!(err, CommitError::Storage { .. }));
+        assert!(!commit_path.exists());
+        assert_commit_span(
+            &capture,
+            &[
+                ("observed_version", Some("0")),
+                ("proposed_version", Some("1")),
+                ("committed_version", None),
+                ("failure_stage", Some("atomic_create")),
+                ("rollback_outcome", None),
+                ("outcome", Some("failed")),
+            ],
+        );
         Ok(())
     }
 
@@ -484,14 +717,60 @@ mod tests {
             .join(layout::current_rel_path().with_extension("tmp"));
         tokio::fs::create_dir_all(&current_tmp).await?;
 
-        let err = store
-            .commit_with_expected_version(0, vec![])
+        let capture = TraceCapture::default();
+        let err = capture
+            .run(store.commit_with_expected_version(0, vec![]))
             .await
             .expect_err("CURRENT update should fail");
 
         assert!(matches!(err, CommitError::Storage { .. }));
         assert!(!tmp.path().join(layout::commit_rel_path(1)).exists());
         assert_eq!(store.load_current_version().await?, 0);
+        assert_commit_span(
+            &capture,
+            &[
+                ("observed_version", Some("0")),
+                ("proposed_version", Some("1")),
+                ("committed_version", None),
+                ("failure_stage", Some("current_publication")),
+                ("rollback_outcome", Some("succeeded")),
+                ("outcome", Some("failed")),
+            ],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_update_cleanup_failure_records_ambiguous_outcome() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let current_tmp = tmp
+            .path()
+            .join(layout::current_rel_path().with_extension("tmp"));
+        tokio::fs::create_dir_all(&current_tmp).await?;
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
+        storage::inject_cleanup_failure(commit_path.clone());
+        let capture = TraceCapture::default();
+
+        let err = capture
+            .run(store.commit_with_expected_version(0, vec![]))
+            .await
+            .expect_err("CURRENT update and rollback should fail");
+
+        assert!(matches!(err, CommitError::AmbiguousOutcome { .. }));
+        assert!(commit_path.exists());
+        assert_eq!(store.load_current_version().await?, 0);
+        assert_commit_span(
+            &capture,
+            &[
+                ("observed_version", Some("0")),
+                ("proposed_version", Some("1")),
+                ("committed_version", None),
+                ("failure_stage", Some("current_publication")),
+                ("rollback_outcome", Some("failed")),
+                ("outcome", Some("ambiguous")),
+            ],
+        );
+        tokio::fs::remove_file(commit_path).await?;
         Ok(())
     }
 
@@ -523,14 +802,26 @@ mod tests {
         let commit_path = tmp.path().join(&commit_rel);
         storage::inject_write_new_failure(commit_path.clone(), true);
 
-        let err = store
-            .commit_with_expected_version(0, vec![])
+        let capture = TraceCapture::default();
+        let err = capture
+            .run(store.commit_with_expected_version(0, vec![]))
             .await
             .expect_err("commit write and cleanup should fail");
 
         assert!(matches!(err, CommitError::AmbiguousOutcome { .. }));
         assert!(commit_path.exists());
         assert_eq!(store.load_current_version().await?, 0);
+        assert_commit_span(
+            &capture,
+            &[
+                ("observed_version", Some("0")),
+                ("proposed_version", Some("1")),
+                ("committed_version", None),
+                ("failure_stage", Some("atomic_create")),
+                ("rollback_outcome", None),
+                ("outcome", Some("ambiguous")),
+            ],
+        );
         tokio::fs::remove_file(commit_path).await?;
         Ok(())
     }

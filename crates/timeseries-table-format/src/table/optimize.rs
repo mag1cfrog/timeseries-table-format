@@ -276,113 +276,195 @@ impl TimeSeriesTable {
     ///
     /// Returns [`TableError`] when optimization is not applicable, staging or
     /// validation fails, the commit cannot be confirmed, or rollback fails.
+    #[tracing::instrument(
+        name = "table.optimize",
+        level = "debug",
+        skip_all,
+        fields(
+            starting_version = self.state.version,
+            candidate_source_segments = tracing::field::Empty,
+            replacement_segments_written = tracing::field::Empty,
+            distinct_identities_materialized = tracing::field::Empty,
+            rows_read = tracing::field::Empty,
+            rows_written = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            no_op = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
     pub async fn optimize(&mut self) -> Result<OptimizeReport, TableError> {
-        if self.index.entity_columns.is_empty() {
-            let table_root = match self.location().as_ref() {
-                StorageLocation::Local(root) => root.display().to_string(),
+        let result: Result<OptimizeReport, TableError> = async {
+            if self.index.entity_columns.is_empty() {
+                let table_root = match self.location().as_ref() {
+                    StorageLocation::Local(root) => root.display().to_string(),
+                };
+                return Err(TableError::OptimizeNotApplicable { table_root });
+            }
+
+            let starting_version = self.state.version;
+            let candidates = mixed_segment_candidates(&self.state)
+                .map_err(|source| TableError::InvalidSegmentBounds { source })?;
+            tracing::Span::current().record("candidate_source_segments", candidates.len());
+            if candidates.is_empty() {
+                return Ok(OptimizeReport::no_op(starting_version));
+            }
+            let committed_version =
+                starting_version
+                    .checked_add(1)
+                    .ok_or(TableError::OptimizeCountOverflow {
+                        field: "committed_version",
+                    })?;
+            let table_schema = self.state.table_meta.logical_schema.clone().ok_or(
+                TableError::MissingCanonicalSchema {
+                    version: starting_version,
+                },
+            )?;
+
+            let mut staged = Vec::with_capacity(candidates.len());
+            let mut staged_paths = Vec::new();
+            for source in &candidates {
+                match rewrite_mixed_parquet_segment(
+                    self.location(),
+                    &table_schema,
+                    &self.index,
+                    source,
+                )
+                .await
+                {
+                    Ok(rewrite) => {
+                        staged_paths.extend(rewrite.staged_object_paths.iter().cloned());
+                        staged.push(rewrite);
+                    }
+                    Err(source) => {
+                        let error = TableError::OptimizeRewrite { source };
+                        return Err(self.rollback_optimization(&staged_paths, error).await);
+                    }
+                }
+            }
+
+            let counts = match validate_staged_plan(self, &candidates, &staged).await {
+                Ok(counts) => counts,
+                Err(source) => {
+                    return Err(self.rollback_optimization(&staged_paths, source).await);
+                }
             };
-            return Err(TableError::OptimizeNotApplicable { table_root });
-        }
+            let span = tracing::Span::current();
+            span.record("candidate_source_segments", counts.candidates);
+            span.record("replacement_segments_written", counts.replacements);
+            span.record("distinct_identities_materialized", counts.identities);
+            span.record("rows_read", counts.rows);
+            span.record("rows_written", counts.rows);
 
-        let starting_version = self.state.version;
-        let candidates = mixed_segment_candidates(&self.state)
-            .map_err(|source| TableError::InvalidSegmentBounds { source })?;
-        if candidates.is_empty() {
-            return Ok(OptimizeReport::no_op(starting_version));
-        }
-        let committed_version =
-            starting_version
-                .checked_add(1)
-                .ok_or(TableError::OptimizeCountOverflow {
-                    field: "committed_version",
-                })?;
-        let table_schema = self.state.table_meta.logical_schema.clone().ok_or(
-            TableError::MissingCanonicalSchema {
-                version: starting_version,
-            },
-        )?;
+            let mut actions = Vec::new();
+            for source in &candidates {
+                actions.push(LogAction::RemoveSegment {
+                    path: source.path.clone(),
+                });
+            }
+            for rewrite in &staged {
+                actions.extend(
+                    rewrite
+                        .replacements
+                        .iter()
+                        .map(|replacement| LogAction::AddSegment(replacement.meta.clone())),
+                );
+            }
 
-        let mut staged = Vec::with_capacity(candidates.len());
-        let mut staged_paths = Vec::new();
-        for source in &candidates {
-            match rewrite_mixed_parquet_segment(self.location(), &table_schema, &self.index, source)
+            let new_version = match self
+                .log
+                .commit_with_expected_version(starting_version, actions)
                 .await
             {
-                Ok(rewrite) => {
-                    staged_paths.extend(rewrite.staged_object_paths.iter().cloned());
-                    staged.push(rewrite);
+                Ok(version) => version,
+                Err(source @ CommitError::AmbiguousOutcome { .. }) => {
+                    return Err(TableError::TransactionLog { source });
                 }
                 Err(source) => {
-                    let error = TableError::OptimizeRewrite { source };
+                    let error = TableError::TransactionLog { source };
                     return Err(self.rollback_optimization(&staged_paths, error).await);
                 }
-            }
-        }
-
-        let counts = match validate_staged_plan(self, &candidates, &staged).await {
-            Ok(counts) => counts,
-            Err(source) => {
-                return Err(self.rollback_optimization(&staged_paths, source).await);
-            }
-        };
-
-        let mut actions = Vec::new();
-        for source in &candidates {
-            actions.push(LogAction::RemoveSegment {
-                path: source.path.clone(),
-            });
-        }
-        for rewrite in &staged {
-            actions.extend(
-                rewrite
-                    .replacements
-                    .iter()
-                    .map(|replacement| LogAction::AddSegment(replacement.meta.clone())),
+            };
+            assert_eq!(
+                new_version, committed_version,
+                "transaction log returned unexpected optimize version"
             );
-        }
 
-        let new_version = match self
-            .log
-            .commit_with_expected_version(starting_version, actions)
-            .await
-        {
-            Ok(version) => version,
-            Err(source @ CommitError::AmbiguousOutcome { .. }) => {
-                return Err(TableError::TransactionLog { source });
+            for source in &candidates {
+                self.state.segments.remove(&source.path);
             }
-            Err(source) => {
-                let error = TableError::TransactionLog { source };
-                return Err(self.rollback_optimization(&staged_paths, error).await);
+            for rewrite in staged {
+                for replacement in rewrite.replacements {
+                    self.state
+                        .segments
+                        .insert(replacement.meta.path.clone(), replacement.meta);
+                }
             }
-        };
-        assert_eq!(
-            new_version, committed_version,
-            "transaction log returned unexpected optimize version"
-        );
+            self.state.version = new_version;
 
-        for source in &candidates {
-            self.state.segments.remove(&source.path);
+            Ok(OptimizeReport {
+                starting_version,
+                committed_version: new_version,
+                candidate_source_segments: counts.candidates,
+                source_segments_replaced: counts.candidates,
+                replacement_segments_written: counts.replacements,
+                distinct_identities_materialized: counts.identities,
+                rows_read: counts.rows,
+                rows_written: counts.rows,
+                no_op: false,
+            })
         }
-        for rewrite in staged {
-            for replacement in rewrite.replacements {
-                self.state
-                    .segments
-                    .insert(replacement.meta.path.clone(), replacement.meta);
+        .await;
+
+        let span = tracing::Span::current();
+        match &result {
+            Ok(report) => {
+                span.record(
+                    "candidate_source_segments",
+                    report.candidate_source_segments,
+                );
+                span.record(
+                    "replacement_segments_written",
+                    report.replacement_segments_written,
+                );
+                span.record(
+                    "distinct_identities_materialized",
+                    report.distinct_identities_materialized,
+                );
+                span.record("rows_read", report.rows_read);
+                span.record("rows_written", report.rows_written);
+                span.record("committed_version", report.committed_version);
+                span.record("no_op", report.no_op);
+                if report.no_op {
+                    span.record("outcome", "no_op");
+                } else {
+                    span.record("outcome", "succeeded");
+                    tracing::info!(
+                        name: "table.optimize",
+                        starting_version = report.starting_version,
+                        committed_version = report.committed_version,
+                        candidate_source_segments = report.candidate_source_segments,
+                        replacement_segments_written = report.replacement_segments_written,
+                        distinct_identities_materialized = report.distinct_identities_materialized,
+                        rows_read = report.rows_read,
+                        rows_written = report.rows_written,
+                        outcome = "succeeded",
+                        "Optimized time-series table"
+                    );
+                }
+            }
+            Err(TableError::TransactionLog {
+                source: CommitError::AmbiguousOutcome { .. },
+            }) => {
+                span.record("outcome", "ambiguous");
+            }
+            Err(TableError::OptimizeRollback { .. }) => {
+                span.record("outcome", "cleanup_failed");
+            }
+            Err(_) => {
+                span.record("outcome", "failed");
             }
         }
-        self.state.version = new_version;
-
-        Ok(OptimizeReport {
-            starting_version,
-            committed_version: new_version,
-            candidate_source_segments: counts.candidates,
-            source_segments_replaced: counts.candidates,
-            replacement_segments_written: counts.replacements,
-            distinct_identities_materialized: counts.identities,
-            rows_read: counts.rows,
-            rows_written: counts.rows,
-            no_op: false,
-        })
+        result
     }
 }
 
@@ -407,8 +489,8 @@ mod tests {
         },
         storage::{TableLocation, layout},
         table::test_util::{
-            make_int32_entity_table_meta, make_table_meta_with_unit, utc_datetime,
-            write_arrow_parquet_with_unit, write_int32_entity_parquet,
+            CapturedSpan, TraceCapture, make_int32_entity_table_meta, make_table_meta_with_unit,
+            utc_datetime, write_arrow_parquet_with_unit, write_int32_entity_parquet,
         },
         transaction_log::TableKind,
     };
@@ -469,6 +551,25 @@ mod tests {
             files.extend(files_below(&root.join(relative))?);
         }
         Ok(files)
+    }
+
+    fn captured_optimize_span(capture: &TraceCapture) -> CapturedSpan {
+        let mut spans: Vec<_> = capture
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == "table.optimize")
+            .collect();
+        assert_eq!(spans.len(), 1, "expected one table.optimize span");
+        spans.pop().expect("captured optimize span")
+    }
+
+    fn assert_no_optimize_event(capture: &TraceCapture) {
+        assert!(
+            !capture
+                .events()
+                .iter()
+                .any(|event| event.name == "table.optimize")
+        );
     }
 
     async fn append_mixed_source(
@@ -555,9 +656,26 @@ mod tests {
         .await?;
         let starting_version = table.state().version;
 
-        let report = table.optimize().await?;
+        let capture = TraceCapture::default();
+        let report = capture.run(table.optimize()).await?;
 
         assert_eq!(report, OptimizeReport::no_op(starting_version));
+        let span = captured_optimize_span(&capture);
+        assert_eq!(span.level, tracing::Level::DEBUG);
+        for (field, expected) in [
+            ("starting_version", starting_version.to_string()),
+            ("candidate_source_segments", "0".to_string()),
+            ("replacement_segments_written", "0".to_string()),
+            ("distinct_identities_materialized", "0".to_string()),
+            ("rows_read", "0".to_string()),
+            ("rows_written", "0".to_string()),
+            ("committed_version", starting_version.to_string()),
+            ("no_op", "true".to_string()),
+            ("outcome", "no_op".to_string()),
+        ] {
+            assert_eq!(span.fields.get(field), Some(&expected));
+        }
+        assert_no_optimize_event(&capture);
         assert!(!temp.path().join("data/_staged").exists());
         let reopened = TimeSeriesTable::open(TableLocation::local(temp.path())).await?;
         assert_eq!(reopened.state().version, starting_version);
@@ -575,8 +693,9 @@ mod tests {
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), table_meta).await?;
 
-        let error = table
-            .optimize()
+        let capture = TraceCapture::default();
+        let error = capture
+            .run(table.optimize())
             .await
             .expect_err("entity-free table must be rejected");
 
@@ -585,6 +704,17 @@ mod tests {
             TableError::OptimizeNotApplicable { table_root }
                 if table_root == temp.path().display().to_string()
         ));
+        let span = captured_optimize_span(&capture);
+        assert_eq!(
+            span.fields.get("outcome").map(String::as_str),
+            Some("failed")
+        );
+        assert!(
+            span.fields
+                .values()
+                .all(|value| !value.contains(&temp.path().display().to_string()))
+        );
+        assert_no_optimize_event(&capture);
         assert!(!temp.path().join("data/_staged").exists());
         Ok(())
     }
@@ -622,7 +752,8 @@ mod tests {
         let table_coverage = table.state().table_coverage.clone();
         let starting_version = table.state().version;
 
-        let report = table.optimize().await?;
+        let capture = TraceCapture::default();
+        let report = capture.run(table.optimize()).await?;
 
         assert_eq!(report.starting_version, starting_version);
         assert_eq!(report.committed_version, starting_version + 1);
@@ -633,6 +764,75 @@ mod tests {
         assert_eq!(report.rows_read, 4);
         assert_eq!(report.rows_written, 4);
         assert!(!report.no_op);
+        let span = captured_optimize_span(&capture);
+        assert_eq!(span.level, tracing::Level::DEBUG);
+        for (field, expected) in [
+            ("starting_version", report.starting_version.to_string()),
+            (
+                "candidate_source_segments",
+                report.candidate_source_segments.to_string(),
+            ),
+            (
+                "replacement_segments_written",
+                report.replacement_segments_written.to_string(),
+            ),
+            (
+                "distinct_identities_materialized",
+                report.distinct_identities_materialized.to_string(),
+            ),
+            ("rows_read", report.rows_read.to_string()),
+            ("rows_written", report.rows_written.to_string()),
+            ("committed_version", report.committed_version.to_string()),
+            ("no_op", "false".to_string()),
+            ("outcome", "succeeded".to_string()),
+        ] {
+            assert_eq!(span.fields.get(field), Some(&expected));
+        }
+        let events: Vec<_> = capture
+            .events()
+            .into_iter()
+            .filter(|event| event.name == "table.optimize")
+            .collect();
+        assert_eq!(events.len(), 1, "expected one table.optimize event");
+        assert_eq!(events[0].level, tracing::Level::INFO);
+        for (field, expected) in [
+            ("starting_version", report.starting_version.to_string()),
+            ("committed_version", report.committed_version.to_string()),
+            (
+                "candidate_source_segments",
+                report.candidate_source_segments.to_string(),
+            ),
+            (
+                "replacement_segments_written",
+                report.replacement_segments_written.to_string(),
+            ),
+            (
+                "distinct_identities_materialized",
+                report.distinct_identities_materialized.to_string(),
+            ),
+            ("rows_read", report.rows_read.to_string()),
+            ("rows_written", report.rows_written.to_string()),
+            ("outcome", "succeeded".to_string()),
+        ] {
+            assert_eq!(events[0].fields.get(field), Some(&expected));
+        }
+        assert!(
+            events[0]
+                .fields
+                .get("message")
+                .is_some_and(|message| message.contains("Optimized time-series table"))
+        );
+        for value in span.fields.into_values().chain(
+            events
+                .into_iter()
+                .flat_map(|event| event.fields.into_values()),
+        ) {
+            assert!(!value.contains(&temp.path().display().to_string()));
+            assert!(!value.contains("EntityIdentity"));
+            assert!(!value.contains("LogicalSchema"));
+            assert_ne!(value, "A");
+            assert_ne!(value, "B");
+        }
         assert!(!table.state().segments.contains_key(source_path));
         assert_eq!(table.state().segments.len(), 2);
         assert!(
@@ -791,8 +991,9 @@ mod tests {
             .join(layout::commit_rel_path(state_before.version + 1));
         crate::storage::inject_write_new_failure(commit_path.clone(), true);
 
-        let error = table
-            .optimize()
+        let capture = TraceCapture::default();
+        let error = capture
+            .run(table.optimize())
             .await
             .expect_err("commit outcome must be ambiguous");
 
@@ -802,6 +1003,12 @@ mod tests {
                 source: CommitError::AmbiguousOutcome { .. }
             }
         ));
+        let span = captured_optimize_span(&capture);
+        assert_eq!(
+            span.fields.get("outcome").map(String::as_str),
+            Some("ambiguous")
+        );
+        assert_no_optimize_event(&capture);
         assert_eq!(table.state(), &state_before);
         assert_eq!(
             table
