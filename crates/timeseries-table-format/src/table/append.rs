@@ -90,6 +90,22 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Tabl
     Ok(())
 }
 
+fn record_append_failure<T>(result: &Result<T, TableError>) {
+    if let Err(error) = result {
+        let outcome = if matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::AmbiguousOutcome { .. },
+            }
+        ) {
+            "ambiguous"
+        } else {
+            "failed"
+        };
+        tracing::Span::current().record("outcome", outcome);
+    }
+}
+
 impl TimeSeriesTable {
     async fn rollback_created_sidecars(
         &self,
@@ -146,11 +162,12 @@ impl TimeSeriesTable {
 
         let append_result = async {
             let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
+            tracing::Span::current().record("segment_path", relative_path.as_str());
             if let Some(r) = report.as_mut() {
                 r.set_context("relative_path", &relative_path);
             }
             let version = self
-                .append_parquet_segment_file(&relative_path, report)
+                .append_parquet_segment_file(&relative_path, report, "external_path")
                 .await?;
             Ok((version, relative_path))
         }
@@ -182,6 +199,7 @@ impl TimeSeriesTable {
         &mut self,
         relative_path: &str,
         mut report: Option<&mut AppendReportBuilder>,
+        source_mode: &'static str,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -198,6 +216,12 @@ impl TimeSeriesTable {
             segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
                 .context(SegmentMetaSnafu)?;
+        let row_count = segment_meta.row_count;
+        let span = tracing::Span::current();
+        span.record("row_count", row_count);
+        if let Some(file_size) = segment_meta.file_size {
+            span.record("file_size_bytes", file_size);
+        }
         if let Some(r) = report.as_mut() {
             if let Some(file_size) = segment_meta.file_size {
                 r.set_context("file_size_bytes", file_size.to_string());
@@ -357,6 +381,12 @@ impl TimeSeriesTable {
                 SegmentEntityLayout::NotApplicable,
             )
         };
+        let entity_layout_name = match &entity_layout {
+            SegmentEntityLayout::NotApplicable => "not_applicable",
+            SegmentEntityLayout::Single(_) => "single",
+            SegmentEntityLayout::Mixed => "mixed",
+        };
+        span.record("entity_layout", entity_layout_name);
 
         // 6) Give this append private sidecar paths, then write them before commit.
         let attempt_id = Uuid::new_v4();
@@ -483,15 +513,49 @@ impl TimeSeriesTable {
             r.push_step("state_update", step_start.elapsed(), Vec::new());
         }
 
+        span.record("committed_version", new_version);
+        span.record("outcome", "succeeded");
+        tracing::info!(
+            name: "table.append",
+            source_mode,
+            expected_version,
+            committed_version = new_version,
+            row_count,
+            entity_layout = entity_layout_name,
+            outcome = "succeeded",
+            "Appended Parquet segment"
+        );
         Ok(new_version)
     }
 
     /// Append a Parquet segment using its canonical relative path as identity.
     ///
     /// Rows need not be ordered by the table's ordered index.
+    #[tracing::instrument(
+        name = "table.append",
+        level = "debug",
+        skip_all,
+        fields(
+            source_mode = "table_relative",
+            expected_version = self.state.version,
+            segment_path = tracing::field::Empty,
+            row_count = tracing::field::Empty,
+            file_size_bytes = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            entity_layout = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
     pub async fn append_parquet_segment(&mut self, relative_path: &str) -> Result<u64, TableError> {
-        let relative_path = self.normalize_new_segment_path(relative_path).await?;
-        self.append_parquet_segment_file(&relative_path, None).await
+        let result = async {
+            let relative_path = self.normalize_new_segment_path(relative_path).await?;
+            tracing::Span::current().record("segment_path", relative_path.as_str());
+            self.append_parquet_segment_file(&relative_path, None, "table_relative")
+                .await
+        }
+        .await;
+        record_append_failure(&result);
+        result
     }
 
     /// Copy an external Parquet file into the table when needed and append it.
@@ -502,40 +566,96 @@ impl TimeSeriesTable {
     /// publication. Files already under the table root and copies involved in
     /// an ambiguous commit outcome are preserved.
     /// Returns the committed version and normalized table-relative segment path.
+    #[tracing::instrument(
+        name = "table.append",
+        level = "debug",
+        skip_all,
+        fields(
+            source_mode = "external_path",
+            expected_version = self.state.version,
+            segment_path = tracing::field::Empty,
+            row_count = tracing::field::Empty,
+            file_size_bytes = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            entity_layout = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
     pub async fn append_parquet_from_path(
         &mut self,
         parquet_path: &Path,
     ) -> Result<(u64, String), TableError> {
-        self.append_parquet_path_file(parquet_path, None).await
+        let result = self.append_parquet_path_file(parquet_path, None).await;
+        record_append_failure(&result);
+        result
     }
 
     /// Copy and append a Parquet file while collecting a profiling report.
     /// Returns the committed version, normalized table-relative path, and report.
+    #[tracing::instrument(
+        name = "table.append",
+        level = "debug",
+        skip_all,
+        fields(
+            source_mode = "external_path",
+            expected_version = self.state.version,
+            segment_path = tracing::field::Empty,
+            row_count = tracing::field::Empty,
+            file_size_bytes = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            entity_layout = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
     pub async fn append_parquet_from_path_with_report(
         &mut self,
         parquet_path: &Path,
     ) -> Result<(u64, String, AppendReport), TableError> {
-        let mut report = AppendReportBuilder::new();
-        let (version, relative_path) = self
-            .append_parquet_path_file(parquet_path, Some(&mut report))
-            .await?;
-        Ok((version, relative_path, report.finish()))
+        let result = async {
+            let mut report = AppendReportBuilder::new();
+            let (version, relative_path) = self
+                .append_parquet_path_file(parquet_path, Some(&mut report))
+                .await?;
+            Ok((version, relative_path, report.finish()))
+        }
+        .await;
+        record_append_failure(&result);
+        result
     }
 
     /// Append a Parquet segment and return a profiling report.
+    #[tracing::instrument(
+        name = "table.append",
+        level = "debug",
+        skip_all,
+        fields(
+            source_mode = "table_relative",
+            expected_version = self.state.version,
+            segment_path = tracing::field::Empty,
+            row_count = tracing::field::Empty,
+            file_size_bytes = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            entity_layout = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
     pub async fn append_parquet_segment_with_report(
         &mut self,
         relative_path: &str,
     ) -> Result<(u64, AppendReport), TableError> {
-        let relative_path = self.normalize_new_segment_path(relative_path).await?;
-        let mut report = AppendReportBuilder::new();
-        report.set_context("relative_path", &relative_path);
-
-        let version = self
-            .append_parquet_segment_file(&relative_path, Some(&mut report))
-            .await?;
-
-        Ok((version, report.finish()))
+        let result = async {
+            let relative_path = self.normalize_new_segment_path(relative_path).await?;
+            tracing::Span::current().record("segment_path", relative_path.as_str());
+            let mut report = AppendReportBuilder::new();
+            report.set_context("relative_path", &relative_path);
+            let version = self
+                .append_parquet_segment_file(&relative_path, Some(&mut report), "table_relative")
+                .await?;
+            Ok((version, report.finish()))
+        }
+        .await;
+        record_append_failure(&result);
+        result
     }
 }
 
@@ -658,6 +778,87 @@ mod tests {
         Ok(files)
     }
 
+    fn assert_append_diagnostics(
+        capture: &TraceCapture,
+        source_mode: &str,
+        segment_path: &str,
+        file_size: u64,
+        absolute_root: &str,
+    ) {
+        let spans: Vec<_> = capture
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == "table.append")
+            .collect();
+        assert_eq!(spans.len(), 1, "expected one table.append span");
+        assert_eq!(spans[0].level, tracing::Level::DEBUG);
+        for (field, expected) in [
+            ("source_mode", source_mode.to_string()),
+            ("expected_version", "1".to_string()),
+            ("segment_path", segment_path.to_string()),
+            ("row_count", "1".to_string()),
+            ("file_size_bytes", file_size.to_string()),
+            ("committed_version", "2".to_string()),
+            ("entity_layout", "single".to_string()),
+            ("outcome", "succeeded".to_string()),
+        ] {
+            assert_eq!(
+                spans[0].fields.get(field),
+                Some(&expected),
+                "unexpected table.append.{field}"
+            );
+        }
+
+        let events: Vec<_> = capture
+            .events()
+            .into_iter()
+            .filter(|event| event.name == "table.append")
+            .collect();
+        assert_eq!(events.len(), 1, "expected one table.append event");
+        assert_eq!(events[0].level, tracing::Level::INFO);
+        for (field, expected) in [
+            ("source_mode", source_mode),
+            ("expected_version", "1"),
+            ("committed_version", "2"),
+            ("row_count", "1"),
+            ("entity_layout", "single"),
+            ("outcome", "succeeded"),
+        ] {
+            assert_eq!(
+                events[0].fields.get(field).map(String::as_str),
+                Some(expected),
+                "unexpected table.append event field {field}"
+            );
+        }
+        assert!(
+            events[0]
+                .fields
+                .get("message")
+                .is_some_and(|message| message.contains("Appended Parquet segment"))
+        );
+
+        for value in spans
+            .into_iter()
+            .flat_map(|span| span.fields.into_values())
+            .chain(
+                events
+                    .into_iter()
+                    .flat_map(|event| event.fields.into_values()),
+            )
+        {
+            assert!(
+                !value.contains(absolute_root),
+                "diagnostic value contains absolute table path: {value}"
+            );
+            for forbidden in ["SECRET_ENTITY", "LogicalSchema", "RecordBatch"] {
+                assert!(
+                    !value.contains(forbidden),
+                    "diagnostic value contains sensitive data '{forbidden}': {value}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn entity_layout_classification_rejects_empty_coverage() {
         assert!(matches!(
@@ -716,8 +917,9 @@ mod tests {
         write_parquet_without_time_column(&source, &["A"], &[1.0])?;
         let source_bytes = std::fs::read(&source)?;
 
-        let err = table
-            .append_parquet_from_path(&source)
+        let capture = TraceCapture::default();
+        let err = capture
+            .run(table.append_parquet_from_path(&source))
             .await
             .expect_err("missing time column should fail");
 
@@ -728,6 +930,119 @@ mod tests {
         assert_eq!(table.log.load_current_version().await?, 1);
         assert_eq!(coverage_files(&table_root)?, coverage_before);
         assert!(!table_root.join(layout::commit_rel_path(2)).exists());
+        let spans: Vec<_> = capture
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == "table.append")
+            .collect();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].fields.get("source_mode").map(String::as_str),
+            Some("external_path")
+        );
+        assert_eq!(
+            spans[0].fields.get("outcome").map(String::as_str),
+            Some("failed")
+        );
+        assert!(
+            !capture
+                .events()
+                .iter()
+                .any(|event| event.name == "table.append")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_public_append_variant_emits_one_logical_operation() -> TestResult {
+        let tmp = TempDir::new()?;
+
+        for (case, external, with_report) in [
+            ("segment", false, false),
+            ("external", true, false),
+            ("segment-report", false, true),
+            ("external-report", true, true),
+        ] {
+            let table_root = tmp.path().join(format!("table-{case}"));
+            let location = TableLocation::local(&table_root);
+            let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+            let filename = format!("{case}.parquet");
+            let segment_path = format!("data/{filename}");
+            let source = if external {
+                tmp.path().join(&filename)
+            } else {
+                table_root.join(&segment_path)
+            };
+            write_test_parquet(
+                &source,
+                true,
+                false,
+                &[TestRow {
+                    ts_millis: 1_000,
+                    symbol: "SECRET_ENTITY",
+                    price: 10.0,
+                }],
+            )?;
+            let file_size = source.metadata()?.len();
+            let capture = TraceCapture::default();
+
+            let report = match (external, with_report) {
+                (false, false) => {
+                    assert_eq!(
+                        capture
+                            .run(table.append_parquet_segment(&segment_path))
+                            .await?,
+                        2
+                    );
+                    None
+                }
+                (true, false) => {
+                    let (version, actual_path) =
+                        capture.run(table.append_parquet_from_path(&source)).await?;
+                    assert_eq!(version, 2);
+                    assert_eq!(actual_path, segment_path);
+                    None
+                }
+                (false, true) => {
+                    let (version, report) = capture
+                        .run(table.append_parquet_segment_with_report(&segment_path))
+                        .await?;
+                    assert_eq!(version, 2);
+                    Some(report)
+                }
+                (true, true) => {
+                    let (version, actual_path, report) = capture
+                        .run(table.append_parquet_from_path_with_report(&source))
+                        .await?;
+                    assert_eq!(version, 2);
+                    assert_eq!(actual_path, segment_path);
+                    Some(report)
+                }
+            };
+
+            if let Some(report) = report {
+                assert!(
+                    report
+                        .context
+                        .iter()
+                        .any(|(key, value)| { key == "relative_path" && value == &segment_path })
+                );
+                assert!(!report.steps.is_empty());
+            }
+            assert_eq!(table.state.version, 2);
+            assert_append_diagnostics(
+                &capture,
+                if external {
+                    "external_path"
+                } else {
+                    "table_relative"
+                },
+                &segment_path,
+                file_size,
+                &tmp.path().display().to_string(),
+            );
+        }
+
         Ok(())
     }
 
