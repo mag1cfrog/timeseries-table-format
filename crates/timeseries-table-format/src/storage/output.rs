@@ -12,7 +12,7 @@ use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
 use crate::storage::{
-    BackendError, OtherIoSnafu, StorageLocation, StorageResult, TempFileGuard, create_new_file,
+    BackendError, FileCleanupGuard, OtherIoSnafu, StorageLocation, StorageResult, create_new_file,
     create_parent_dir, join_local,
 };
 
@@ -86,7 +86,7 @@ struct LocalSink {
     path: PathBuf,
     finish: LocalFinish,
     writer: io::BufWriter<std::fs::File>,
-    guard: TempFileGuard,
+    guard: FileCleanupGuard,
 }
 
 impl LocalSink {
@@ -104,7 +104,7 @@ impl LocalSink {
             })?;
 
         let writer = io::BufWriter::new(file);
-        let guard = TempFileGuard::new(tmp_path.clone());
+        let guard = FileCleanupGuard::new(tmp_path.clone());
 
         Ok(Self {
             path: tmp_path,
@@ -118,7 +118,7 @@ impl LocalSink {
         let path = join_local(location, rel_path)?;
         let file = create_new_file(&path).await?.into_std().await;
         let writer = io::BufWriter::new(file);
-        let guard = TempFileGuard::new(path.clone());
+        let guard = FileCleanupGuard::new(path.clone());
         Ok(Self {
             path,
             finish: LocalFinish::Keep,

@@ -258,8 +258,11 @@ impl TransactionLogStore {
         //    implement automatic conflict resolution (e.g., retrying with rebased
         //    changes if the operations don't actually conflict, like Delta Lake).
         let commit_rel = Self::commit_rel_path(version);
+        let mut commit_guard =
+            storage::prepare_file_cleanup_guard(self.location.as_ref(), &commit_rel)
+                .map_err(|source| CommitError::Storage { source })?;
         match storage::write_new(self.location.as_ref(), &commit_rel, &json).await {
-            Ok(()) => {}
+            Ok(()) => commit_guard.arm(),
             Err(StorageError::CleanupFailed {
                 operation_error,
                 cleanup_error,
@@ -299,6 +302,7 @@ impl TransactionLogStore {
             let error = self
                 .rollback_unpublished_commit(&commit_rel, publish_error)
                 .await;
+            commit_guard.disarm();
             span.record("failure_stage", "current_publication");
             if matches!(&error, CommitError::AmbiguousOutcome { .. }) {
                 span.record("rollback_outcome", "failed");
@@ -309,6 +313,8 @@ impl TransactionLogStore {
             }
             return Err(error);
         }
+
+        commit_guard.disarm();
 
         span.record("committed_version", version);
         span.record("outcome", "succeeded");

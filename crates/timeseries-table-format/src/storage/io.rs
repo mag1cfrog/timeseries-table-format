@@ -1,8 +1,10 @@
+#[cfg(test)]
+use futures::channel::oneshot;
 use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
 #[cfg(test)]
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{LazyLock, Mutex},
 };
 use std::{
@@ -20,19 +22,27 @@ use crate::storage::{
 };
 
 /// Guard that removes a file on drop unless disarmed.
-pub(super) struct TempFileGuard {
+pub(crate) struct FileCleanupGuard {
     path: PathBuf,
     armed: bool,
 }
 
-impl TempFileGuard {
+impl FileCleanupGuard {
     pub(super) fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
 
+    fn prepared(path: PathBuf) -> Self {
+        Self { path, armed: false }
+    }
+
+    pub(crate) fn arm(&mut self) {
+        self.armed = true;
+    }
+
     /// Disarm the guard so the file is NOT removed on drop.
     /// Call this after a successful rename.
-    pub(super) fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 
@@ -49,7 +59,7 @@ impl TempFileGuard {
     }
 }
 
-impl Drop for TempFileGuard {
+impl Drop for FileCleanupGuard {
     fn drop(&mut self) {
         if self.armed {
             #[cfg(test)]
@@ -84,6 +94,72 @@ static WRITE_NEW_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
 #[cfg(test)]
 static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+struct AtomicWritePausePoint {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static ATOMIC_WRITE_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) struct AtomicWritePause {
+    entered: Option<oneshot::Receiver<()>>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl AtomicWritePause {
+    pub(crate) async fn wait_until_paused(&mut self) {
+        self.entered
+            .take()
+            .expect("pause wait called once")
+            .await
+            .expect("atomic write reached rename pause");
+    }
+
+    pub(crate) fn release(mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn pause_atomic_write_before_rename(path: PathBuf) -> AtomicWritePause {
+    let (entered_sender, entered_receiver) = oneshot::channel();
+    let (release_sender, release_receiver) = oneshot::channel();
+    let previous = ATOMIC_WRITE_PAUSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            path,
+            AtomicWritePausePoint {
+                entered: entered_sender,
+                release: release_receiver,
+            },
+        );
+    assert!(previous.is_none(), "atomic write pause already installed");
+    AtomicWritePause {
+        entered: Some(entered_receiver),
+        release: Some(release_sender),
+    }
+}
+
+#[cfg(test)]
+async fn wait_at_atomic_write_pause(path: &Path) {
+    let pause = ATOMIC_WRITE_PAUSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path);
+    if let Some(pause) = pause {
+        let _ = pause.entered.send(());
+        let _ = pause.release.await;
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
@@ -146,7 +222,7 @@ fn write_failure(path: &Path) -> StorageError {
 }
 
 async fn cleanup_created_file(
-    guard: &mut TempFileGuard,
+    guard: &mut FileCleanupGuard,
     path: &Path,
     operation: StorageError,
 ) -> StorageError {
@@ -157,7 +233,7 @@ async fn cleanup_created_file(
 }
 
 async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
-    let mut guard = TempFileGuard::new(path.to_owned());
+    let mut guard = FileCleanupGuard::new(path.to_owned());
     #[cfg(test)]
     let injected_write_failure = take_write_new_failure(path);
     let result = async {
@@ -245,7 +321,7 @@ pub(crate) async fn copy_new_from_local(
             })?;
             let destination = join_local(location, rel_path)?;
             let mut destination_file = create_new_file(&destination).await?;
-            let mut guard = TempFileGuard::new(destination.clone());
+            let mut guard = FileCleanupGuard::new(destination.clone());
             #[cfg(test)]
             let injected_copy_failure = take_write_new_failure(&destination);
 
@@ -295,6 +371,15 @@ pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> StorageResul
     match location {
         StorageLocation::Local(root) => Ok(root.join(native_path)),
     }
+}
+
+/// Prepare a disarmed cleanup guard for a path this operation will create.
+/// Arm it immediately after exclusive creation succeeds.
+pub(crate) fn prepare_file_cleanup_guard(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<FileCleanupGuard> {
+    Ok(FileCleanupGuard::prepared(join_local(location, rel_path)?))
 }
 
 /// Open a stored Parquet file for asynchronous range reads.
@@ -357,7 +442,7 @@ pub async fn write_atomic(
             create_parent_dir(&abs).await?;
 
             let tmp_path = abs.with_extension("tmp");
-            let mut guard = TempFileGuard::new(tmp_path.clone());
+            let mut guard = FileCleanupGuard::new(tmp_path.clone());
 
             {
                 let mut file = fs::File::create(&tmp_path)
@@ -382,8 +467,13 @@ pub async fn write_atomic(
                     })?;
             }
 
-            fs::rename(&tmp_path, &abs)
-                .await
+            #[cfg(test)]
+            wait_at_atomic_write_pause(&abs).await;
+
+            // Keep publication and guard disarming in one synchronous poll so
+            // dropping the future cannot publish CURRENT and then roll back
+            // the commit file before this function observes success.
+            std::fs::rename(&tmp_path, &abs)
                 .map_err(BackendError::Local)
                 .context(OtherIoSnafu {
                     path: abs.display().to_string(),

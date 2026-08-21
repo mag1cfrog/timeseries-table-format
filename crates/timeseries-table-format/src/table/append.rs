@@ -342,6 +342,17 @@ impl TimeSeriesTable {
             .await
             .context(StorageSnafu)?;
         let prepared_path = prepared.relative_path.to_string_lossy().into_owned();
+        let mut prepared_guard = if prepared.created {
+            let mut guard = storage::prepare_file_cleanup_guard(
+                self.location().as_ref(),
+                &prepared.relative_path,
+            )
+            .context(StorageSnafu)?;
+            guard.arm();
+            Some(guard)
+        } else {
+            None
+        };
 
         let append_result = async {
             let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
@@ -357,15 +368,29 @@ impl TimeSeriesTable {
         .await;
 
         match append_result {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                if let Some(guard) = prepared_guard.as_mut() {
+                    guard.disarm();
+                }
+                Ok(result)
+            }
             Err(
                 error @ TableError::TransactionLog {
                     source: CommitError::AmbiguousOutcome { .. },
                 },
-            ) => Err(error),
+            ) => {
+                if let Some(guard) = prepared_guard.as_mut() {
+                    guard.disarm();
+                }
+                Err(error)
+            }
             Err(source) if prepared.created => {
-                match storage::remove_file(self.location().as_ref(), &prepared.relative_path).await
-                {
+                let cleanup =
+                    storage::remove_file(self.location().as_ref(), &prepared.relative_path).await;
+                if let Some(guard) = prepared_guard.as_mut() {
+                    guard.disarm();
+                }
+                match cleanup {
                     Ok(()) => Err(source),
                     Err(cleanup_error) => Err(TableError::ExternalParquetRollback {
                         path: prepared.relative_path.display().to_string(),
@@ -601,15 +626,24 @@ impl TimeSeriesTable {
 
         let step_start = Instant::now();
         let mut created_sidecars = Vec::new();
+        let mut segment_sidecar_guard =
+            storage::prepare_file_cleanup_guard(self.location().as_ref(), Path::new(&seg_cov_path))
+                .context(StorageSnafu)?;
         write_coverage_sidecar_new_bytes(self.location(), Path::new(&seg_cov_path), &seg_cov_bytes)
             .await
             .map_err(|source| TableError::CoverageSidecar { source })?;
+        segment_sidecar_guard.arm();
         created_sidecars.push(seg_cov_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
         }
 
         let step_start = Instant::now();
+        let mut snapshot_sidecar_guard = storage::prepare_file_cleanup_guard(
+            self.location().as_ref(),
+            Path::new(&snapshot_path),
+        )
+        .context(StorageSnafu)?;
         if let Err(source) = write_coverage_sidecar_new_bytes(
             self.location(),
             Path::new(&snapshot_path),
@@ -618,10 +652,13 @@ impl TimeSeriesTable {
         .await
         {
             let error = TableError::CoverageSidecar { source };
-            return Err(self
+            let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
-                .await);
+                .await;
+            segment_sidecar_guard.disarm();
+            return Err(error);
         }
+        snapshot_sidecar_guard.arm();
         created_sidecars.push(snapshot_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_snapshot_sidecar", step_start.elapsed(), Vec::new());
@@ -648,15 +685,24 @@ impl TimeSeriesTable {
             .commit_with_expected_version(expected_version, actions)
             .await
         {
-            Ok(version) => version,
+            Ok(version) => {
+                segment_sidecar_guard.disarm();
+                snapshot_sidecar_guard.disarm();
+                version
+            }
             Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
+                segment_sidecar_guard.disarm();
+                snapshot_sidecar_guard.disarm();
                 return Err(TableError::TransactionLog { source });
             }
             Err(source) => {
                 let error = TableError::TransactionLog { source };
-                return Err(self
+                let error = self
                     .rollback_created_artifacts(&created_sidecars, error)
-                    .await);
+                    .await;
+                segment_sidecar_guard.disarm();
+                snapshot_sidecar_guard.disarm();
+                return Err(error);
             }
         };
         if let Some(r) = report.as_mut() {
@@ -751,6 +797,11 @@ impl TimeSeriesTable {
 
             let relative_path = format!("data/{}.parquet", Uuid::new_v4());
             tracing::Span::current().record("segment_path", relative_path.as_str());
+            let mut data_guard = storage::prepare_file_cleanup_guard(
+                self.location().as_ref(),
+                Path::new(&relative_path),
+            )
+            .context(StorageSnafu)?;
             let sink =
                 storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
                     .await
@@ -774,24 +825,37 @@ impl TimeSeriesTable {
             }
             .await;
             if let Err(source) = write_result {
-                return Err(self
+                let error = self
                     .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
-                    .await);
+                    .await;
+                data_guard.disarm();
+                return Err(error);
             }
+            data_guard.arm();
 
             match self
                 .append_parquet_segment_file(&relative_path, None, "arrow_stream")
                 .await
             {
-                Ok(version) => Ok(version),
+                Ok(version) => {
+                    data_guard.disarm();
+                    Ok(version)
+                }
                 Err(
                     error @ TableError::TransactionLog {
                         source: CommitError::AmbiguousOutcome { .. },
                     },
-                ) => Err(error),
-                Err(source) => Err(self
-                    .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
-                    .await),
+                ) => {
+                    data_guard.disarm();
+                    Err(error)
+                }
+                Err(source) => {
+                    let error = self
+                        .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
+                        .await;
+                    data_guard.disarm();
+                    Err(error)
+                }
             }
         }
         .await;
@@ -1326,6 +1390,46 @@ mod tests {
                 "{stage:?}"
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_streaming_append_before_publication_removes_owned_artifacts() -> TestResult
+    {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let commit_path = temp.path().join(layout::commit_rel_path(2));
+        let current_path = temp.path().join(layout::current_rel_path());
+        let current_temp_path = current_path.with_extension("tmp");
+        let mut pause = crate::storage::pause_atomic_write_before_rename(current_path);
+        let mut append = Box::pin(table.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?));
+
+        tokio::select! {
+            () = pause.wait_until_paused() => {}
+            result = &mut append => panic!("append completed before cancellation: {result:?}"),
+        }
+
+        assert!(commit_path.is_file());
+        assert!(current_temp_path.is_file());
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 1);
+        assert_eq!(coverage_files(temp.path())?.len(), 2);
+        let before_publication = TimeSeriesTable::open(location.clone()).await?;
+        assert_eq!(before_publication.state().version, 1);
+        assert!(before_publication.state().segments.is_empty());
+
+        drop(append);
+        pause.release();
+
+        assert!(!commit_path.exists());
+        assert!(!current_temp_path.exists());
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 0);
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1);
+        assert!(reopened.state().segments.is_empty());
         Ok(())
     }
 
