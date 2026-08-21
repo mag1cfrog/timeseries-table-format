@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, sync::OnceLock};
 
-use log::{LevelFilter, Log, Metadata, Record};
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use pyo3::{PyResult, Python, exceptions::PyRuntimeError};
 use pyo3_log::{Caching, Logger, ResetHandle};
 
@@ -15,6 +15,10 @@ struct PythonLogger {
 
 impl Log for PythonLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        if !level_enabled(metadata.target(), metadata.level()) {
+            return false;
+        }
+
         let target = namespaced_target(metadata.target());
         let metadata = Metadata::builder()
             .level(metadata.level())
@@ -24,6 +28,10 @@ impl Log for PythonLogger {
     }
 
     fn log(&self, record: &Record<'_>) {
+        if !level_enabled(record.target(), record.level()) {
+            return;
+        }
+
         let target = namespaced_target(record.target());
         let record = Record::builder()
             .args(*record.args())
@@ -44,11 +52,18 @@ impl Log for PythonLogger {
     }
 }
 
-fn namespaced_target(target: &str) -> Cow<'_, str> {
-    if target == LOGGER_ROOT
+fn is_project_target(target: &str) -> bool {
+    target == LOGGER_ROOT
         || target.starts_with("timeseries_table_format::")
         || target.starts_with("timeseries_table_format.")
-    {
+}
+
+fn level_enabled(target: &str, level: Level) -> bool {
+    is_project_target(target) || level <= Level::Info
+}
+
+fn namespaced_target(target: &str) -> Cow<'_, str> {
+    if is_project_target(target) {
         Cow::Borrowed(target)
     } else if target.is_empty() {
         Cow::Borrowed(LOGGER_ROOT)
@@ -89,7 +104,9 @@ pub(crate) fn refresh_cache() {
 
 #[cfg(test)]
 mod tests {
-    use super::namespaced_target;
+    use log::Level;
+
+    use super::{level_enabled, namespaced_target};
 
     #[test]
     fn native_targets_share_the_public_python_namespace() {
@@ -114,5 +131,15 @@ mod tests {
             "timeseries_table_format::timeseries_table_formatting"
         );
         assert_eq!(namespaced_target(""), "timeseries_table_format");
+    }
+
+    #[test]
+    fn dependency_debug_records_are_filtered_before_python() {
+        assert!(level_enabled(
+            "timeseries_table_format::table",
+            Level::Debug
+        ));
+        assert!(level_enabled("datafusion::execution", Level::Info));
+        assert!(!level_enabled("datafusion::execution", Level::Debug));
     }
 }

@@ -211,3 +211,68 @@ def test_operation_exception_is_not_duplicated_as_an_error_record():
         assert all(error_message not in record.getMessage() for record in records)
         """
     )
+
+
+def test_native_records_exclude_sensitive_operation_inputs():
+    _run_isolated(
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(Capture())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            table_root = root / "table"
+            segment = root / "segment.parquet"
+            table = ttf.TimeSeriesTable.create(
+                table_root=str(table_root),
+                index_column="ts",
+                index_type="int64",
+                bucket_width=10,
+                entity_columns=["private_entity_key_348"],
+            )
+            pq.write_table(
+                pa.table(
+                    {
+                        "ts": pa.array([1], type=pa.int64()),
+                        "private_entity_key_348": ["private_entity_value_348"],
+                        "private_schema_field_348": [17],
+                    }
+                ),
+                segment,
+            )
+            table.append_parquet(str(segment))
+
+            session = ttf.Session()
+            session.register_tstable("private_table_348", str(table_root))
+            result = session.sql(
+                "SELECT private_schema_field_348 AS sql_marker_348 "
+                "FROM private_table_348 "
+                "WHERE private_entity_key_348 != $bound",
+                params={"bound": "private_bound_value_348"},
+            )
+            assert result.num_rows == 1
+
+        messages = "\\n".join(record.getMessage() for record in records)
+        assert "sql_marker_348" not in messages
+        assert "private_bound_value_348" not in messages
+        assert "private_entity_value_348" not in messages
+        assert "private_schema_field_348" not in messages
+        """
+    )
