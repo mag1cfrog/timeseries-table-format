@@ -1,6 +1,7 @@
 //! Python bindings for timeseries-table-format (v0 skeleton).
 mod error_map;
 mod exceptions;
+mod python_logging;
 #[allow(dead_code)]
 mod sql_stream_reader;
 mod tokio_runner;
@@ -2184,6 +2185,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        crate::python_logging::install(m.py())?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
         // Export classes
