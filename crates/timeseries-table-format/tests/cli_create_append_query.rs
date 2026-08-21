@@ -9,7 +9,9 @@ mod common;
 use common::{table_root, write_parquet_rows};
 
 fn cli() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tstable"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tstable"));
+    command.env_remove("RUST_LOG");
+    command
 }
 
 #[test]

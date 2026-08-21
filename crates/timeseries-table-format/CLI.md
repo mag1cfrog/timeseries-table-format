@@ -338,6 +338,37 @@ AAPL,2024-01-03,186.00,187.10,185.50,186.80,48000000
 
 ---
 
+## Diagnostics and troubleshooting
+
+`tstable` writes project and dependency diagnostics to stderr. The default level is `warn`, so
+successful commands do not normally add diagnostic output.
+
+Set the standard `RUST_LOG` environment variable to inspect a command in more detail:
+
+```bash
+RUST_LOG=timeseries_table_format=debug tstable append \
+  --table ./data/my_table \
+  --parquet ./incoming/new_data.parquet
+
+RUST_LOG=timeseries_table_format=debug,datafusion=warn tstable query \
+  --table ./data/my_table \
+  --sql "SELECT COUNT(*) FROM my_table"
+```
+
+The Rust target uses the underscore form `timeseries_table_format`. DataFusion targets use the
+`datafusion` prefix. An invalid `RUST_LOG` filter produces one warning and continues with the
+warning-level default.
+
+Diagnostics never enter stdout, `--output` files, pager input, or shell history. Those channels
+remain reserved for command and query data. Captured or piped stderr contains no ANSI escape
+codes.
+
+The CLI does not provide file logging, JSON diagnostics, metrics export, or an OpenTelemetry
+exporter. Rust applications embedding the library configure their own tracing subscriber; the CLI
+initializer is not a library API.
+
+---
+
 ## Tips
 
 - **Row limit:** By default, only 10 rows are displayed. Use `--max-rows 0` to see everything, or `--output file.csv` to save full results.

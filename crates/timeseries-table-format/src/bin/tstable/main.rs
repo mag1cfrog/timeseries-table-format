@@ -2,6 +2,7 @@
 
 mod engine;
 mod error;
+mod observability;
 mod query;
 mod shell;
 
@@ -404,6 +405,7 @@ async fn cmd_query(args: QueryArgs) -> CliResult<()> {
 
 async fn run() -> CliResult<()> {
     let cli = Cli::parse();
+    observability::init().map_err(|reason| CliError::DiagnosticsInitialization { reason })?;
 
     match cli.cmd {
         Command::Create {

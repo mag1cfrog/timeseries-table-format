@@ -28,11 +28,33 @@ fn cli_bin() -> &'static str {
 }
 
 fn run_cli(args: &[&str]) -> io::Result<Output> {
-    Command::new(cli_bin()).args(args).output()
+    Command::new(cli_bin())
+        .env_remove("RUST_LOG")
+        .args(args)
+        .output()
 }
 
 fn run_cli_strings(args: &[String]) -> io::Result<Output> {
-    Command::new(cli_bin()).args(args).output()
+    Command::new(cli_bin())
+        .env_remove("RUST_LOG")
+        .args(args)
+        .output()
+}
+
+fn create_command(table_root: &Path) -> Command {
+    let mut command = Command::new(cli_bin());
+    command.args([
+        "create",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--index-column",
+        "ts",
+        "--index-type",
+        "timestamp",
+        "--bucket",
+        "1h",
+    ]);
+    command
 }
 
 fn assert_cli_success(output: &Output) {
@@ -44,6 +66,71 @@ fn assert_cli_success(output: &Output) {
     );
 }
 
+#[test]
+fn cli_diagnostics_default_to_warn_without_changing_stdout()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let output = create_command(&table_root)
+        .env_remove("RUST_LOG")
+        .output()?;
+
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Created table at {}\n", table_root.display())
+    );
+    assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cli_debug_diagnostics_are_structured_stderr_only() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let output = create_command(&table_root)
+        .env("RUST_LOG", "timeseries_table_format=debug")
+        .output()?;
+
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Created table at {}\n", table_root.display())
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("table.create"), "stderr:\n{stderr}");
+    assert!(stderr.contains("committed_version=1"), "stderr:\n{stderr}");
+    assert!(stderr.contains(" INFO "), "stderr:\n{stderr}");
+    assert_eq!(stderr.matches("Created time-series table").count(), 1);
+    assert!(!output.stderr.windows(2).any(|bytes| bytes == b"\x1b["));
+    Ok(())
+}
+
+#[test]
+fn cli_invalid_rust_log_warns_once_and_uses_default() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let invalid_filter = "timeseries_table_format=verbose";
+    let output = create_command(&table_root)
+        .env("RUST_LOG", invalid_filter)
+        .output()?;
+
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Created table at {}\n", table_root.display())
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("invalid RUST_LOG filter").count(), 1);
+    assert!(stderr.contains(invalid_filter), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("using warning-level default"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("table.create"), "stderr:\n{stderr}");
+    Ok(())
+}
+
 fn open_table_blocking(
     table_root: &Path,
 ) -> StdResult<TimeSeriesTable, Box<dyn std::error::Error>> {
@@ -51,6 +138,108 @@ fn open_table_blocking(
     let location = TableLocation::local(table_root);
     let table = rt.block_on(TimeSeriesTable::open(location))?;
     Ok(table)
+}
+
+fn create_table_with_segment(
+    tmp: &TempDir,
+    table_name: &str,
+) -> StdResult<PathBuf, Box<dyn std::error::Error>> {
+    let table_root = tmp.path().join(table_name);
+    create_table_via_cli(&table_root, "1m", &["symbol"])?;
+
+    let source = tmp.path().join(format!("{table_name}.parquet"));
+    write_parquet_rows(&source, &[(0, "A", 1.0), (60_000, "A", 2.0)])?;
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+    assert_cli_success(&output);
+    Ok(table_root)
+}
+
+#[test]
+fn cli_diagnostics_stay_out_of_query_data_and_dependency_logs_are_not_duplicated()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = create_table_with_segment(&tmp, "diagnostic_table")?;
+    let query_output = tmp.path().join("result.csv");
+
+    let output = Command::new(cli_bin())
+        .env(
+            "RUST_LOG",
+            "timeseries_table_format=debug,datafusion_optimizer=debug",
+        )
+        .args([
+            "query",
+            "--table",
+            table_root.to_string_lossy().as_ref(),
+            "--sql",
+            "SELECT ts, symbol, price FROM diagnostic_table ORDER BY ts",
+            "--output",
+            query_output.to_string_lossy().as_ref(),
+            "--format",
+            "csv",
+        ])
+        .output()?;
+
+    assert_cli_success(&output);
+    let data = std::fs::read_to_string(query_output)?;
+    assert!(data.starts_with("ts,symbol,price\n"), "data:\n{data}");
+    for diagnostic in [
+        "table.scan.plan",
+        "timeseries_table_format",
+        "datafusion_optimizer",
+        "Analyzer took",
+    ] {
+        assert!(
+            !data.contains(diagnostic),
+            "data contains {diagnostic}:\n{data}"
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("table.scan.plan"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("Analyzer took"), "stdout:\n{stdout}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Analyzer took").count(),
+        1,
+        "stderr:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_returned_error_is_printed_once_with_debug_enabled()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let missing_table = tmp.path().join("missing");
+    let missing_parquet = tmp.path().join("missing.parquet");
+    let output = Command::new(cli_bin())
+        .env("RUST_LOG", "timeseries_table_format=debug")
+        .args([
+            "append",
+            "--table",
+            missing_table.to_string_lossy().as_ref(),
+            "--parquet",
+            missing_parquet.to_string_lossy().as_ref(),
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Failed to open v0.1 table").count(),
+        1,
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains(" ERROR "), "stderr:\n{stderr}");
+    Ok(())
 }
 
 fn write_parquet_rows(
