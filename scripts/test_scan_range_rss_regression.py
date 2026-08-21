@@ -8,8 +8,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from append_rss_regression import GNU_TIME, REPO_ROOT
-from scan_range_rss_regression import MAX_BATCH_BYTES, SCAN_BATCH_SIZE
+from scan_range_rss_regression import (
+    GNU_TIME,
+    MIB,
+    REPO_ROOT,
+    MAX_BATCH_BYTES,
+    SCAN_BATCH_SIZE,
+    parse_max_rss_bytes,
+    require_bounded_rss,
+)
 
 
 RUNNER = REPO_ROOT / "scripts" / "scan_range_rss_regression.py"
@@ -41,6 +48,38 @@ def benchmark_binary() -> Path:
     return (
         Path(metadata["target_directory"]) / "debug" / "examples" / "scan_range_bench"
     )
+
+
+class RssHelperTests(unittest.TestCase):
+    def test_parses_gnu_time_peak_rss_as_bytes(self) -> None:
+        output = """\
+Command being timed: "benchmark"
+\tUser time (seconds): 1.23
+\tMaximum resident set size (kbytes): 131072
+\tExit status: 0
+"""
+        self.assertEqual(parse_max_rss_bytes(output), 128 * MIB)
+
+    def test_rejects_missing_or_invalid_peak_rss(self) -> None:
+        for output in (
+            "User time (seconds): 1.23",
+            "Maximum resident set size (kbytes): unknown",
+            "Maximum resident set size (kbytes): 0",
+            "Maximum resident set size (kbytes): -1",
+        ):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                parse_max_rss_bytes(output)
+
+    def test_rss_delta_allows_limit_and_rejects_one_byte_more(self) -> None:
+        small = 64 * MIB
+        limit = 128 * MIB
+
+        self.assertEqual(require_bounded_rss(small, small + limit, limit), limit)
+        with self.assertRaises(RuntimeError):
+            require_bounded_rss(small, small + limit + 1, limit)
+
+    def test_rss_delta_may_be_negative(self) -> None:
+        self.assertEqual(require_bounded_rss(128 * MIB, 64 * MIB, 128 * MIB), -64 * MIB)
 
 
 class ScanRangeRssRegressionTests(unittest.TestCase):

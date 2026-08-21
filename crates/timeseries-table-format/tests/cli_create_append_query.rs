@@ -48,7 +48,7 @@ fn cli_append_uses_registered_time_column() -> Result<(), Box<dyn std::error::Er
         ])
         .assert()
         .success()
-        .stdout(contains("Appended segment"));
+        .stdout(contains("Appended table version: 2"));
 
     Ok(())
 }
@@ -88,7 +88,7 @@ fn cli_create_append_query_with_max_rows_zero() -> Result<(), Box<dyn std::error
         ])
         .assert()
         .success()
-        .stdout(contains("Appended segment"));
+        .stdout(contains("Appended table version: 2"));
 
     cli()
         .args([

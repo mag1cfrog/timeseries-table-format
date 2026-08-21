@@ -45,8 +45,6 @@ jobs:
               - '.github/workflows/release-plz.yml'
               - 'scripts/check_release_version.py'
               - 'scripts/test_check_release_version.py'
-              - 'scripts/append_rss_regression.py'
-              - 'scripts/test_append_rss_regression.py'
               - 'scripts/scan_range_rss_regression.py'
               - 'scripts/test_scan_range_rss_regression.py'
       - name: Check for skip label
@@ -189,17 +187,14 @@ jobs:
         if: matrix.task == 'RSS regression checks'
         run: |
           uv sync --project crates/timeseries-table-python --locked --no-install-project
-          crates/timeseries-table-python/.venv/bin/ruff check scripts/append_rss_regression.py scripts/test_append_rss_regression.py scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
-          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/append_rss_regression.py scripts/test_append_rss_regression.py scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
           (
             cd crates/timeseries-table-python
             PYTHONPATH=../../scripts .venv/bin/ty check \
-              ../../scripts/append_rss_regression.py \
-              ../../scripts/test_append_rss_regression.py \
               ../../scripts/scan_range_rss_regression.py \
               ../../scripts/test_scan_range_rss_regression.py
           )
-          crates/timeseries-table-python/.venv/bin/python scripts/test_append_rss_regression.py
           crates/timeseries-table-python/.venv/bin/python scripts/test_scan_range_rss_regression.py
 
       - name: fmt
