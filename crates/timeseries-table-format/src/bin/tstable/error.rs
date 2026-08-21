@@ -1,4 +1,5 @@
 use arrow::error::ArrowError;
+use parquet::errors::ParquetError;
 use std::path::PathBuf;
 use timeseries_table_format::metadata::table_metadata::ParseTimeBucketError;
 use timeseries_table_format::table::TableError;
@@ -55,12 +56,16 @@ pub enum CliError {
         source: Box<TableError>,
     },
 
+    #[snafu(display("Failed to read Parquet source {path}: {source}"))]
+    ReadParquetSource { path: String, source: ParquetError },
+
     #[snafu(display(
-        "Append failed for table {table}. \
+        "Append failed for Parquet source {parquet} into table {table}. \
          Ensure schema matches the table and the parquet is valid: {source}"
     ))]
     AppendSegment {
         table: String,
+        parquet: String,
         #[snafu(source(from(TableError, Box::new)))]
         source: Box<TableError>,
     },

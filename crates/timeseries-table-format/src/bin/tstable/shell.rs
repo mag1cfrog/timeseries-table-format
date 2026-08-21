@@ -337,6 +337,7 @@ async fn append_first_segment(table_root: &Path, table: &mut TimeSeriesTable) ->
                     "{}",
                     CliError::AppendSegment {
                         table: table_root.display().to_string(),
+                        parquet: parquet_path.display().to_string(),
                         source: Box::new(e),
                     }
                 );
@@ -867,6 +868,7 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
                     "{}",
                     CliError::AppendSegment {
                         table: ctx.table_root.display().to_string(),
+                        parquet: parquet_path.display().to_string(),
                         source: Box::new(e),
                     }
                 );

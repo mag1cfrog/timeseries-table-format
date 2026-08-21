@@ -6,11 +6,16 @@ mod observability;
 mod query;
 mod shell;
 
+use std::fs::File;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use parquet::{
+    arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
+    errors::ParquetError,
+};
 use snafu::ResultExt;
 use timeseries_table_format::{
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
@@ -21,7 +26,7 @@ use timeseries_table_format::{
 use crate::{
     error::{
         AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
-        OpenTableSnafu, OptimizeTableSnafu, StorageSnafu,
+        OpenTableSnafu, OptimizeTableSnafu, ReadParquetSourceSnafu, StorageSnafu,
     },
     query::{
         QueryOpts, page_output, preview_message, print_query_result, render_preview,
@@ -122,7 +127,7 @@ enum Command {
         entity: Vec<String>,
     },
 
-    /// Append an existing Parquet file as a new segment
+    /// Stream a local Parquet file into a new table-managed segment
     Append {
         #[arg(long)]
         table: PathBuf,
@@ -306,25 +311,34 @@ async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<Tim
         })
 }
 
+fn open_parquet_batch_reader(parquet: &Path) -> CliResult<ParquetRecordBatchReader> {
+    let path = parquet.display().to_string();
+    let file = File::open(parquet)
+        .map_err(ParquetError::from)
+        .context(ReadParquetSourceSnafu { path: path.clone() })?;
+    ParquetRecordBatchReaderBuilder::try_new(file)
+        .and_then(|builder| builder.build())
+        .context(ReadParquetSourceSnafu { path })
+}
+
 async fn cmd_append(table: &Path, parquet: &Path, timing: bool) -> CliResult<()> {
     let start = Instant::now();
     let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
     let mut t = open_table(location, table).await?;
+    let reader = open_parquet_batch_reader(parquet)?;
 
-    let (_, rel_str) = t
-        .append_parquet_from_path(parquet)
-        .await
-        .context(AppendSegmentSnafu {
-            table: table.display().to_string(),
-        })?;
+    let version = t.append(reader).await.context(AppendSegmentSnafu {
+        table: table.display().to_string(),
+        parquet: parquet.display().to_string(),
+    })?;
 
     if timing {
         println!(
-            "Appended segment: {rel_str} (elapsed_ms: {})",
+            "Appended table version: {version} (elapsed_ms: {})",
             start.elapsed().as_millis()
         );
     } else {
-        println!("Appended segment: {rel_str}");
+        println!("Appended table version: {version}");
     }
     Ok(())
 }

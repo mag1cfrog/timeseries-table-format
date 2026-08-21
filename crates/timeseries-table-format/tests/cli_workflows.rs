@@ -774,6 +774,7 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
     let rel_path = PathBuf::from("data/seg-under-root.parquet");
     let parquet_path = table_root.join(&rel_path);
     write_parquet_rows(&parquet_path, &[(0, "A", 1.0)])?;
+    let source_before = std::fs::read(&parquet_path)?;
 
     let output = run_cli(&[
         "append",
@@ -783,6 +784,11 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
         parquet_path.to_string_lossy().as_ref(),
     ])?;
     assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "Appended table version: 2\n"
+    );
+    assert_eq!(std::fs::read(&parquet_path)?, source_before);
 
     let table = open_table_blocking(&table_root)?;
     assert_eq!(table.state().segments.len(), 1);
@@ -792,18 +798,20 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
         .values()
         .next()
         .ok_or_else(|| io::Error::other("segment missing"))?;
-    assert_eq!(segment.path, rel_path.to_string_lossy());
+    assert_ne!(segment.path, rel_path.to_string_lossy());
+    assert!(table_root.join(&segment.path).exists());
     Ok(())
 }
 
 #[test]
-fn cli_append_outside_root_copies_and_appends() -> StdResult<(), Box<dyn std::error::Error>> {
+fn cli_append_outside_root_streams_without_copying() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     create_table_via_cli(&table_root, "1m", &[])?;
 
     let source_path = tmp.path().join("outside.parquet");
     write_parquet_rows(&source_path, &[(0, "A", 1.0)])?;
+    let source_before = std::fs::read(&source_path)?;
 
     let output = run_cli(&[
         "append",
@@ -813,10 +821,15 @@ fn cli_append_outside_root_copies_and_appends() -> StdResult<(), Box<dyn std::er
         source_path.to_string_lossy().as_ref(),
     ])?;
     assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "Appended table version: 2\n"
+    );
+    assert_eq!(std::fs::read(&source_path)?, source_before);
 
     let expected_rel = PathBuf::from("data/outside.parquet");
     let expected_dst = table_root.join(&expected_rel);
-    assert!(expected_dst.exists(), "expected copied parquet");
+    assert!(!expected_dst.exists(), "source filename must not be copied");
 
     let table = open_table_blocking(&table_root)?;
     assert_eq!(table.state().segments.len(), 1);
@@ -826,12 +839,13 @@ fn cli_append_outside_root_copies_and_appends() -> StdResult<(), Box<dyn std::er
         .values()
         .next()
         .ok_or_else(|| io::Error::other("segment missing"))?;
-    assert_eq!(segment.path, expected_rel.to_string_lossy());
+    assert_ne!(segment.path, expected_rel.to_string_lossy());
+    assert!(table_root.join(&segment.path).exists());
     Ok(())
 }
 
 #[test]
-fn cli_failed_external_append_removes_its_copy() -> StdResult<(), Box<dyn std::error::Error>> {
+fn cli_failed_external_append_preserves_its_source() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     let output = run_cli(&[
@@ -869,7 +883,8 @@ fn cli_failed_external_append_removes_its_copy() -> StdResult<(), Box<dyn std::e
 }
 
 #[test]
-fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn std::error::Error>> {
+fn cli_append_generates_path_without_overwriting_existing_data_file()
+-> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     create_table_via_cli(&table_root, "1m", &[])?;
@@ -881,6 +896,7 @@ fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn st
     let source_path = tmp.path().join("seg.parquet");
     write_parquet_rows(&source_path, &[(1, "B", 2.0)])?;
 
+    let existing_before = std::fs::read(&existing_path)?;
     let output = run_cli(&[
         "append",
         "--table",
@@ -889,12 +905,17 @@ fn cli_append_refuses_overwrite_existing_data_file() -> StdResult<(), Box<dyn st
         source_path.to_string_lossy().as_ref(),
     ])?;
 
-    assert!(!output.status.success(), "append should fail");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Path already exists"),
-        "unexpected stderr: {stderr}"
-    );
+    assert_cli_success(&output);
+    assert_eq!(std::fs::read(&existing_path)?, existing_before);
+    let table = open_table_blocking(&table_root)?;
+    assert_eq!(table.state().segments.len(), 1);
+    let segment = table
+        .state()
+        .segments
+        .values()
+        .next()
+        .ok_or_else(|| io::Error::other("segment missing"))?;
+    assert_ne!(segment.path, existing_rel.to_string_lossy());
     Ok(())
 }
 
