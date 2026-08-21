@@ -46,3 +46,29 @@ for diagnosis and check filesystem permissions first.
 There is no repair tool in v0. If table metadata or managed data is missing,
 rebuild the table in a new directory from the original Parquet sources. See
 [Table root layout](concepts/table_root.md).
+
+## Native diagnostics do not appear
+
+Configure `logging.getLogger("timeseries_table_format")` before the first table
+operation and attach a handler to that logger or one of its ancestors. Check
+the logger level and normal Python propagation settings.
+
+If you changed a logger level after native records were already emitted, call:
+
+```python
+import timeseries_table_format as ttf
+
+ttf.refresh_logging_cache()
+```
+
+`RUST_LOG` does not control the Python extension. See
+[Configure native logging](guides/native_logging.md) for the complete setup and
+cache behavior.
+
+## Native diagnostics appear twice
+
+The package forwards each native record once and does not install a handler.
+Check whether both `timeseries_table_format` and an ancestor such as the root
+logger have handlers. Remove one handler or set
+`logging.getLogger("timeseries_table_format").propagate = False` if the record
+should not reach the ancestor.
