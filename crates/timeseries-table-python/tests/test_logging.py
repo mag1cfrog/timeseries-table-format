@@ -276,3 +276,70 @@ def test_native_records_exclude_sensitive_operation_inputs():
         assert "private_schema_field_348" not in messages
         """
     )
+
+
+def test_coverage_snapshot_recovery_emits_one_actionable_warning():
+    _run_isolated(
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(Capture())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            table_root = root / "table"
+            table = ttf.TimeSeriesTable.create(
+                table_root=str(table_root),
+                index_column="ts",
+                index_type="int64",
+                bucket_width=10,
+            )
+
+            first = root / "first.parquet"
+            pq.write_table(pa.table({"ts": pa.array([1], type=pa.int64())}), first)
+            assert table.append_parquet(str(first)) == 2
+
+            snapshots = list((table_root / "_coverage" / "table").glob("*.roar"))
+            assert len(snapshots) == 1
+            snapshot_path = snapshots[0]
+            managed_path = snapshot_path.relative_to(table_root).as_posix()
+            snapshot_path.unlink()
+            records.clear()
+
+            second = root / "second.parquet"
+            pq.write_table(pa.table({"ts": pa.array([11], type=pa.int64())}), second)
+            assert table.append_parquet(str(second)) == 3
+
+        warnings = [
+            record
+            for record in records
+            if record.levelno == logging.WARNING
+            and "attempting read-only recovery" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0]
+        message = warning.getMessage()
+        assert warning.name == "timeseries_table_format.table.coverage"
+        assert 'coverage_mode="global"' in message
+        assert "snapshot_version=2" in message
+        assert f"coverage_path={managed_path}" in message
+        assert 'recovery_source="segment_sidecars"' in message
+        assert str(table_root) not in message
+        """
+    )
