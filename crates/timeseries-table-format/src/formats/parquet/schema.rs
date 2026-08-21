@@ -517,10 +517,9 @@ fn parquet_type_to_logical_field(
     })
 }
 
-pub(crate) fn logical_schema_from_parquet_schema(
-    schema: &SchemaDescriptor,
-) -> Result<LogicalSchema, LogicalSchemaError> {
-    let fields = schema
+fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+    let fields = meta
+        .schema_descr()
         .root_schema()
         .get_fields()
         .iter()
@@ -528,10 +527,6 @@ pub(crate) fn logical_schema_from_parquet_schema(
         .collect::<Result<Vec<_>, _>>()?;
 
     LogicalSchema::new(fields)
-}
-
-fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
-    logical_schema_from_parquet_schema(meta.schema_descr())
 }
 
 /// Derive a logical schema from a stored Parquet segment footer.

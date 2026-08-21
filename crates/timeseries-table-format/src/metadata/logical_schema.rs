@@ -341,6 +341,18 @@ pub struct LogicalSchema {
 }
 
 impl LogicalSchema {
+    /// Convert an Arrow schema into this table's exact logical schema model.
+    pub(crate) fn try_from_arrow_schema(
+        schema: &Schema,
+    ) -> Result<Self, ArrowToLogicalSchemaError> {
+        let fields = schema
+            .fields()
+            .iter()
+            .map(|field| logical_field_from_arrow(field, field.name()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(fields).context(InvalidArrowLogicalSchemaSnafu)
+    }
+
     /// Convert this logical schema to an owned Arrow [`Schema`].
     ///
     /// Fails if any column uses a logical type that cannot be represented in
@@ -610,9 +622,137 @@ pub enum SchemaConvertError {
     },
 }
 
+/// Errors converting an Arrow schema into the table logical schema model.
+#[derive(Debug, Snafu)]
+pub(crate) enum ArrowToLogicalSchemaError {
+    /// An Arrow type cannot be represented exactly by the logical schema model.
+    #[snafu(display(
+        "Arrow type cannot be represented exactly in the table logical schema at '{column}': {data_type:?}"
+    ))]
+    Unsupported {
+        /// Dotted field path containing the unsupported type.
+        column: String,
+        /// Unsupported Arrow data type.
+        data_type: DataType,
+    },
+
+    /// The converted fields do not form a valid logical schema.
+    #[snafu(display("invalid logical schema derived from Arrow: {source}"))]
+    InvalidArrowLogicalSchema {
+        /// Logical schema validation failure.
+        source: LogicalSchemaError,
+    },
+}
+
+fn logical_field_from_arrow(
+    field: &Field,
+    path: &str,
+) -> Result<LogicalField, ArrowToLogicalSchemaError> {
+    Ok(LogicalField {
+        name: field.name().clone(),
+        data_type: logical_data_type_from_arrow(field.data_type(), path)?,
+        nullable: field.is_nullable(),
+    })
+}
+
+fn logical_data_type_from_arrow(
+    data_type: &DataType,
+    path: &str,
+) -> Result<LogicalDataType, ArrowToLogicalSchemaError> {
+    let unsupported = || ArrowToLogicalSchemaError::Unsupported {
+        column: path.to_string(),
+        data_type: data_type.clone(),
+    };
+
+    Ok(match data_type {
+        DataType::Boolean => LogicalDataType::Bool,
+        DataType::Int32 => LogicalDataType::Int32,
+        DataType::Int64 => LogicalDataType::Int64,
+        DataType::UInt64 => LogicalDataType::UInt64,
+        DataType::Float32 => LogicalDataType::Float32,
+        DataType::Float64 => LogicalDataType::Float64,
+        DataType::Binary => LogicalDataType::Binary,
+        DataType::FixedSizeBinary(byte_width) if *byte_width > 0 => LogicalDataType::FixedBinary {
+            byte_width: *byte_width,
+        },
+        DataType::Utf8 => LogicalDataType::Utf8,
+        DataType::Timestamp(unit, timezone) => LogicalDataType::Timestamp {
+            unit: match unit {
+                TimeUnit::Millisecond => LogicalTimestampUnit::Millis,
+                TimeUnit::Microsecond => LogicalTimestampUnit::Micros,
+                TimeUnit::Nanosecond => LogicalTimestampUnit::Nanos,
+                TimeUnit::Second => return Err(unsupported()),
+            },
+            timezone: timezone.as_ref().map(ToString::to_string),
+        },
+        DataType::Decimal128(precision, scale)
+            if *precision > 0 && *precision <= 38 && *scale >= 0 && *scale <= *precision as i8 =>
+        {
+            LogicalDataType::Decimal {
+                precision: i32::from(*precision),
+                scale: i32::from(*scale),
+            }
+        }
+        DataType::Decimal256(precision, scale)
+            if *precision > 38 && *precision <= 76 && *scale >= 0 && *scale <= *precision as i8 =>
+        {
+            LogicalDataType::Decimal {
+                precision: i32::from(*precision),
+                scale: i32::from(*scale),
+            }
+        }
+        DataType::Struct(fields) => LogicalDataType::Struct {
+            fields: fields
+                .iter()
+                .map(|field| logical_field_from_arrow(field, &join_path(path, field.name())))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        DataType::List(elements) => LogicalDataType::List {
+            elements: Box::new(logical_field_from_arrow(
+                elements,
+                &join_path(path, elements.name()),
+            )?),
+        },
+        DataType::Map(entries, keys_sorted) => {
+            let DataType::Struct(fields) = entries.data_type() else {
+                return Err(unsupported());
+            };
+            if entries.name() != "entries"
+                || entries.is_nullable()
+                || fields.len() != 2
+                || fields[0].name() != "key"
+                || fields[0].is_nullable()
+                || fields[1].name() != "value"
+            {
+                return Err(unsupported());
+            }
+
+            let key = logical_field_from_arrow(&fields[0], &join_path(path, "key"))?;
+            let value = if matches!(fields[1].data_type(), DataType::Null) {
+                if !fields[1].is_nullable() {
+                    return Err(unsupported());
+                }
+                None
+            } else {
+                Some(Box::new(logical_field_from_arrow(
+                    &fields[1],
+                    &join_path(path, "value"),
+                )?))
+            };
+            LogicalDataType::Map {
+                key: Box::new(key),
+                value,
+                keys_sorted: *keys_sorted,
+            }
+        }
+        _ => return Err(unsupported()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn sample_logical_schema_all_supported() -> LogicalSchema {
         LogicalSchema::new(vec![
@@ -666,6 +806,116 @@ mod tests {
             },
         ])
         .expect("valid logical schema")
+    }
+
+    #[test]
+    fn arrow_schema_conversion_preserves_supported_logical_types() {
+        let expected = LogicalSchema::new(vec![
+            LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Nanos,
+                    timezone: Some("America/Phoenix".to_string()),
+                },
+                nullable: false,
+            },
+            LogicalField {
+                name: "decimal".to_string(),
+                data_type: LogicalDataType::Decimal {
+                    precision: 40,
+                    scale: 2,
+                },
+                nullable: true,
+            },
+            LogicalField {
+                name: "items".to_string(),
+                data_type: LogicalDataType::List {
+                    elements: Box::new(LogicalField {
+                        name: "item".to_string(),
+                        data_type: LogicalDataType::Struct {
+                            fields: vec![LogicalField {
+                                name: "value".to_string(),
+                                data_type: LogicalDataType::UInt64,
+                                nullable: false,
+                            }],
+                        },
+                        nullable: true,
+                    }),
+                },
+                nullable: true,
+            },
+            LogicalField {
+                name: "attrs".to_string(),
+                data_type: LogicalDataType::Map {
+                    key: Box::new(LogicalField {
+                        name: "key".to_string(),
+                        data_type: LogicalDataType::Utf8,
+                        nullable: false,
+                    }),
+                    value: Some(Box::new(LogicalField {
+                        name: "value".to_string(),
+                        data_type: LogicalDataType::Binary,
+                        nullable: true,
+                    })),
+                    keys_sorted: true,
+                },
+                nullable: true,
+            },
+        ])
+        .expect("valid logical schema");
+        let arrow = expected.to_arrow_schema().expect("Arrow schema");
+        let fields = arrow
+            .fields()
+            .iter()
+            .map(|field| {
+                field
+                    .as_ref()
+                    .clone()
+                    .with_metadata(HashMap::from([("ignored".to_string(), "yes".to_string())]))
+            })
+            .collect::<Vec<_>>();
+        let arrow = Schema::new_with_metadata(
+            fields,
+            HashMap::from([("schema-metadata".to_string(), "ignored".to_string())]),
+        );
+
+        assert_eq!(
+            LogicalSchema::try_from_arrow_schema(&arrow).expect("logical schema"),
+            expected
+        );
+    }
+
+    #[test]
+    fn arrow_schema_conversion_rejects_lossy_types() {
+        let cases = [
+            DataType::Int8,
+            DataType::Int16,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::LargeUtf8,
+            DataType::Utf8View,
+            DataType::LargeBinary,
+            DataType::BinaryView,
+            DataType::Date32,
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Decimal128(39, 2),
+            DataType::Decimal256(10, 2),
+            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+            DataType::LargeList(Arc::new(Field::new("item", DataType::Int64, true))),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Int64, true)), 2),
+        ];
+
+        for data_type in cases {
+            let schema = Schema::new(vec![Field::new("value", data_type.clone(), true)]);
+            assert!(matches!(
+                LogicalSchema::try_from_arrow_schema(&schema),
+                Err(ArrowToLogicalSchemaError::Unsupported {
+                    column,
+                    data_type: actual,
+                }) if column == "value" && actual == data_type
+            ));
+        }
     }
 
     #[test]

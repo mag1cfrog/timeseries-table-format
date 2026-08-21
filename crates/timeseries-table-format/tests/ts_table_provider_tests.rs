@@ -1177,11 +1177,11 @@ async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> 
         UnionMode::Sparse,
     );
     let cases = [
-        ("union", union.clone(), "unions"),
+        ("union", union.clone(), "cannot be represented exactly"),
         (
             "nested union",
             DataType::List(Arc::new(Field::new("item", union, true))),
-            "unions",
+            "cannot be represented exactly",
         ),
         (
             "invalid Time32",
@@ -1203,7 +1203,7 @@ async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> 
                 )),
                 false,
             ),
-            "exactly key and value",
+            "cannot be represented exactly",
         ),
     ];
 
