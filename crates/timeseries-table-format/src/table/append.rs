@@ -13,8 +13,10 @@ use std::time::Instant;
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
+    datatypes::{Schema, SchemaRef},
     error::ArrowError,
 };
+use parquet::arrow::{ArrowSchemaConverter, ArrowWriter as ParquetArrowWriter};
 use snafu::prelude::*;
 use uuid::Uuid;
 
@@ -32,10 +34,14 @@ use crate::{
     },
     formats::parquet::{
         compute_segment_entity_coverage, coverage::compute_segment_coverage,
-        logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
+        logical_schema_from_parquet, schema::logical_schema_from_parquet_schema,
+        segment_meta::segment_meta_from_parquet,
     },
     metadata::{
-        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
+        logical_schema::LogicalSchema,
+        schema_compat::{
+            SchemaCompatibilityError, ensure_index_spec_matches_schema, ensure_schema_exact_match,
+        },
         segments::SegmentEntityLayout,
     },
     storage,
@@ -46,11 +52,11 @@ use super::{
     TimeSeriesTable,
     append_report::{AppendReport, AppendReportBuilder},
     error::{
-        CoverageBucketSnafu, CoverageOverlapSnafu, DuplicateSegmentPathSnafu,
-        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
+        AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
+        DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
         EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
-        MissingCanonicalSchemaSnafu, SegmentCoverageSnafu, SegmentMetaSnafu,
-        SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
+        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
+        SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
     },
 };
 
@@ -168,8 +174,31 @@ impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     }
 }
 
+fn logical_schema_from_arrow(schema: &Schema) -> Result<LogicalSchema, TableError> {
+    let parquet_schema = ArrowSchemaConverter::new()
+        .convert(schema)
+        .context(AppendParquetSnafu)?;
+    logical_schema_from_parquet_schema(&parquet_schema).map_err(|source| {
+        TableError::SchemaCompatibility {
+            source: SchemaCompatibilityError::LogicalSchema { source },
+        }
+    })
+}
+
+fn ensure_batch_schema(schema: &SchemaRef, batch: &ArrowRecordBatch) -> Result<(), TableError> {
+    if batch.schema() == *schema {
+        Ok(())
+    } else {
+        Err(TableError::AppendSource {
+            source: ArrowError::SchemaError(
+                "record batch schema does not match its reader schema".to_string(),
+            ),
+        })
+    }
+}
+
 impl TimeSeriesTable {
-    async fn rollback_created_sidecars(
+    async fn rollback_created_artifacts(
         &self,
         created_sidecars: &[String],
         source: TableError,
@@ -208,6 +237,25 @@ impl TimeSeriesTable {
             .context(StorageSnafu)?;
 
         Ok(normalized)
+    }
+
+    fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
+        ensure_existing_segments_have_coverage(&self.state)?;
+        let segment_schema = logical_schema_from_arrow(schema)?;
+        ensure_index_spec_matches_schema(&segment_schema, &self.index)
+            .context(SchemaCompatibilitySnafu)?;
+
+        match self.state.table_meta.logical_schema.as_ref() {
+            None if self.state.version == 1 => Ok(()),
+            None => MissingCanonicalSchemaSnafu {
+                version: self.state.version,
+            }
+            .fail(),
+            Some(table_schema) => {
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)
+            }
+        }
     }
 
     async fn append_parquet_path_file(
@@ -498,7 +546,7 @@ impl TimeSeriesTable {
         {
             let error = TableError::CoverageSidecar { source };
             return Err(self
-                .rollback_created_sidecars(&created_sidecars, error)
+                .rollback_created_artifacts(&created_sidecars, error)
                 .await);
         }
         created_sidecars.push(snapshot_path.clone());
@@ -534,7 +582,7 @@ impl TimeSeriesTable {
             Err(source) => {
                 let error = TableError::TransactionLog { source };
                 return Err(self
-                    .rollback_created_sidecars(&created_sidecars, error)
+                    .rollback_created_artifacts(&created_sidecars, error)
                     .await);
             }
         };
@@ -588,6 +636,85 @@ impl TimeSeriesTable {
             "Appended Parquet segment"
         );
         Ok(new_version)
+    }
+
+    /// Append Arrow record batches into one table-managed Parquet segment.
+    ///
+    /// Rows need not be ordered by the table's ordered index. The source is
+    /// consumed incrementally and is never collected by this method.
+    #[tracing::instrument(
+        name = "table.append",
+        level = "debug",
+        skip_all,
+        fields(
+            source_mode = "arrow_stream",
+            expected_version = self.state.version,
+            segment_path = tracing::field::Empty,
+            row_count = tracing::field::Empty,
+            file_size_bytes = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            entity_layout = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
+    pub async fn append<S, Source>(&mut self, source: S) -> Result<u64, TableError>
+    where
+        S: IntoBatchStream<Source>,
+    {
+        let result = async {
+            let mut reader = source.into_batch_stream()?;
+            let schema = reader.schema();
+            self.validate_stream_schema(schema.as_ref())?;
+
+            let first_batch = loop {
+                let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
+                    return Err(TableError::EmptyAppendSource);
+                };
+                ensure_batch_schema(&schema, &batch)?;
+                if batch.num_rows() != 0 {
+                    break batch;
+                }
+            };
+
+            let relative_path = format!("data/{}.parquet", Uuid::new_v4());
+            tracing::Span::current().record("segment_path", relative_path.as_str());
+            let sink =
+                storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
+                    .await
+                    .context(StorageSnafu)?;
+            let mut writer = ParquetArrowWriter::try_new(sink, schema.clone(), None)
+                .context(AppendParquetSnafu)?;
+            writer.write(&first_batch).context(AppendParquetSnafu)?;
+
+            for batch in reader {
+                let batch = batch.context(AppendSourceSnafu)?;
+                ensure_batch_schema(&schema, &batch)?;
+                if batch.num_rows() != 0 {
+                    writer.write(&batch).context(AppendParquetSnafu)?;
+                }
+            }
+
+            let sink = writer.into_inner().context(AppendParquetSnafu)?;
+            sink.finish().await.context(StorageSnafu)?;
+
+            match self
+                .append_parquet_segment_file(&relative_path, None, "arrow_stream")
+                .await
+            {
+                Ok(version) => Ok(version),
+                Err(
+                    error @ TableError::TransactionLog {
+                        source: CommitError::AmbiguousOutcome { .. },
+                    },
+                ) => Err(error),
+                Err(source) => Err(self
+                    .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
+                    .await),
+            }
+        }
+        .await;
+        record_append_failure(&result);
+        result
     }
 
     /// Append a Parquet segment using its canonical relative path as identity.
@@ -796,6 +923,30 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))])
     }
 
+    fn time_series_batch(
+        timestamps: Vec<i64>,
+        symbols: Vec<&str>,
+        prices: Vec<f64>,
+    ) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(timestamps)),
+                Arc::new(StringArray::from(symbols)),
+                Arc::new(Float64Array::from(prices)),
+            ],
+        )
+    }
+
     fn assert_batches<R>(reader: R, expected: &[RecordBatch]) -> TestResult
     where
         R: RecordBatchReader,
@@ -845,6 +996,116 @@ mod tests {
     fn into_batch_stream_rejects_schema_less_vec() {
         let result = Vec::<RecordBatch>::new().into_batch_stream();
         assert!(matches!(result, Err(TableError::EmptyAppendSource)));
+    }
+
+    #[tokio::test]
+    async fn append_stream_writes_one_segment_and_returns_versions() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        assert_eq!(table.append(vec![first, second]).await?, 2);
+        assert_eq!(table.state().segments.len(), 1);
+        let Some(segment) = table.state().segments.values().next() else {
+            return Err("missing streamed segment".into());
+        };
+        assert_eq!(segment.row_count, 2);
+        assert!(temp.path().join(&segment.path).is_file());
+
+        let third = time_series_batch(vec![120_000], vec!["A"], vec![3.0])?;
+        assert_eq!(table.append(third).await?, 3);
+        assert_eq!(table.state().segments.len(), 2);
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 3);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>(),
+            3
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_rejects_empty_sources_before_creating_data() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
+        let schema = zero.schema();
+
+        assert!(matches!(
+            table.append(vec![zero.clone(), zero]).await,
+            Err(TableError::EmptyAppendSource)
+        ));
+        let empty = RecordBatchIterator::new(Vec::<Result<RecordBatch, ArrowError>>::new(), schema);
+        assert!(matches!(
+            table.append(empty).await,
+            Err(TableError::EmptyAppendSource)
+        ));
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_validates_schema_before_creating_data() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+
+        assert!(matches!(
+            table.append(input_batch(vec![1])?).await,
+            Err(TableError::SchemaCompatibility { .. })
+        ));
+        assert_eq!(table.state().version, 1);
+        assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_removes_owned_data_after_overlap() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        assert_eq!(table.append(batch.clone()).await?, 2);
+
+        assert!(matches!(
+            table.append(batch).await,
+            Err(TableError::EntityCoverageOverlap { .. })
+        ));
+        assert_eq!(table.state().version, 2);
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("data"))?
+                .collect::<Result<Vec<_>, _>>()?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_adopts_schema_on_first_append() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut meta = make_basic_table_meta();
+        meta.logical_schema = None;
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        assert_eq!(table.append(batch).await?, 2);
+        assert!(table.state().table_meta.logical_schema.is_some());
+        Ok(())
     }
 
     fn registered_index(kind: IndexKind) -> IndexSpec {
@@ -2814,7 +3075,7 @@ mod tests {
             example_bucket,
             example_bucket_range: logical_bucket_range(&table.index.kind, example_bucket)?,
         };
-        let err = table.rollback_created_sidecars(&sidecars, source).await;
+        let err = table.rollback_created_artifacts(&sidecars, source).await;
         let message = err.to_string();
 
         assert!(matches!(

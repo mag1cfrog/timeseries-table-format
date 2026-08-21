@@ -517,15 +517,21 @@ fn parquet_type_to_logical_field(
     })
 }
 
-fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
-    let root = meta.schema_descr().root_schema_ptr(); // schema tree root (group)
-    let fields = root
+pub(crate) fn logical_schema_from_parquet_schema(
+    schema: &SchemaDescriptor,
+) -> Result<LogicalSchema, LogicalSchemaError> {
+    let fields = schema
+        .root_schema()
         .get_fields()
         .iter()
         .map(|t| parquet_type_to_logical_field(t, ""))
         .collect::<Result<Vec<_>, _>>()?;
 
     LogicalSchema::new(fields)
+}
+
+fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+    logical_schema_from_parquet_schema(meta.schema_descr())
 }
 
 /// Derive a logical schema from a stored Parquet segment footer.

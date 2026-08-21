@@ -86,16 +86,28 @@ pub enum TableError {
         cleanup_errors: Vec<String>,
     },
 
-    /// Append failed and one or more owned coverage sidecars could not be removed.
-    #[snafu(display(
-        "Append failed: {source}; coverage sidecar rollback also failed: {cleanup_errors:?}"
-    ))]
+    /// Append failed and one or more attempt-owned artifacts could not be removed.
+    #[snafu(display("Append failed: {source}; artifact rollback also failed: {cleanup_errors:?}"))]
     AppendRollback {
         /// Original append failure that triggered rollback.
         #[snafu(source)]
         source: Box<TableError>,
         /// Cleanup failures, including each affected sidecar path.
         cleanup_errors: Vec<String>,
+    },
+
+    /// A batch source failed while yielding rows for a streaming append.
+    #[snafu(display("Arrow batch source error while appending: {source}"))]
+    AppendSource {
+        /// Arrow error returned by the source reader.
+        source: ArrowError,
+    },
+
+    /// Parquet schema conversion or streaming output failed during append.
+    #[snafu(display("Parquet write error while appending: {source}"))]
+    AppendParquet {
+        /// Parquet writer error.
+        source: ParquetError,
     },
 
     /// Append failed and its provisional external Parquet copy could not be removed.

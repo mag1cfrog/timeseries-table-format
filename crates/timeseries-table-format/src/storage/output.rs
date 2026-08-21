@@ -162,6 +162,16 @@ impl OutputSink {
     }
 }
 
+impl Write for OutputSink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.writer().write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer().flush()
+    }
+}
+
 /// Open a streaming output sink with exclusive creation.
 ///
 /// The final path is created immediately and removed if the sink is dropped
