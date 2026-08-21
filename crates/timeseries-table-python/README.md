@@ -52,6 +52,50 @@ Use `Session.register_parquet(name, path)` to query a standalone Parquet file or
 Directories must contain at least one Parquet file so their schema can be inferred; registering an
 empty directory raises `DataFusionError`.
 
+## Native logging
+
+Native table diagnostics use Python's standard `logging` hierarchy. Configure the
+`timeseries_table_format` logger before the first table operation to receive records from all
+project modules:
+
+```python
+import logging
+
+logger = logging.getLogger("timeseries_table_format")
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+logger.addHandler(handler)
+
+import timeseries_table_format as ttf
+
+# Native table operations now emit through this logger hierarchy.
+```
+
+The package does not call `logging.basicConfig()`, add a handler, change the root logger, disable
+propagation, or choose an output destination. Logger propagation and formatting follow ordinary
+Python logging behavior and remain under application control.
+
+Project records use `DEBUG`, `INFO`, `WARNING`, and `ERROR` under child loggers such as
+`timeseries_table_format.table`. Third-party dependency records are placed under the same root,
+but dependency `DEBUG` records are filtered because they may contain SQL text or query plans.
+
+Native logger names and effective levels are cached after first use so disabled records do not
+repeatedly acquire the GIL. Configuration completed before the first table operation is honored.
+After changing logger levels at runtime, clear the native level cache:
+
+```python
+logger.setLevel(logging.INFO)
+ttf.refresh_logging_cache()
+```
+
+Operation exceptions remain the authoritative failure channel and are not generically duplicated
+as error records. Native diagnostics do not include SQL text, bound parameter values, entity
+values, record contents, complete schemas, credentials, or environment variables. Recovery
+warnings may include table-relative managed paths.
+
+OpenTelemetry, metrics export, collectors, and telemetry backends are not built in. Applications
+that need them can connect Python logging to their chosen integration.
+
 ## Notebook display (Jupyter/IPython)
 
 In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results will display as a bounded HTML preview by default (the return type is still a real `pyarrow.Table`).
@@ -416,3 +460,4 @@ directory and cleans it up on exit).
 - Append fails with an ordered-index error: the column must exactly match the configured Arrow `timestamp(...)`, `int64`, or `uint64` type; Timestamp units must also remain consistent across segments.
 - `SchemaMismatchError` on append: the new Parquet segment schema must match the table's adopted schema (column names and types).
 - SQL errors / parameter placeholders: try an explicit `CAST(...)` for placeholders used in `SELECT` projections.
+- Native log level changes are not taking effect: call `ttf.refresh_logging_cache()` after changing Python logger levels. Configure handlers and propagation with Python `logging`; `RUST_LOG` does not control the extension.
