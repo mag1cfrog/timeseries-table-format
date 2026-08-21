@@ -685,6 +685,7 @@ impl TimeSeriesTable {
             let mut writer = ParquetArrowWriter::try_new(sink, schema.clone(), None)
                 .context(AppendParquetSnafu)?;
             writer.write(&first_batch).context(AppendParquetSnafu)?;
+            drop(first_batch);
 
             for batch in reader {
                 let batch = batch.context(AppendSourceSnafu)?;
@@ -876,41 +877,86 @@ mod tests {
     };
     use parquet::arrow::ArrowWriter;
     use parquet::file::reader::{FileReader, SerializedFileReader};
+    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
     use std::num::NonZeroU64;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::sync::Arc;
+    use std::sync::{Arc, Weak};
     use tempfile::TempDir;
 
-    struct NonSendReader {
-        inner: RecordBatchIterator<Vec<Result<RecordBatch, ArrowError>>>,
-        _not_send: Rc<()>,
+    #[derive(Default)]
+    struct ReaderObservations {
+        schema_calls: Cell<usize>,
+        next_calls: Cell<usize>,
+        next_before_schema: Cell<bool>,
+        previous_batch_alive: Cell<bool>,
     }
 
-    impl NonSendReader {
-        fn new(batch: RecordBatch) -> Self {
-            let schema = batch.schema();
-            Self {
-                inner: RecordBatchIterator::new(vec![Ok(batch)], schema),
-                _not_send: Rc::new(()),
-            }
+    struct InstrumentedReader {
+        schema: SchemaRef,
+        batches: std::vec::IntoIter<Result<RecordBatch, ArrowError>>,
+        observations: Rc<ReaderObservations>,
+        previous_array: Option<Weak<dyn arrow::array::Array>>,
+    }
+
+    impl InstrumentedReader {
+        fn new(
+            schema: SchemaRef,
+            batches: Vec<Result<RecordBatch, ArrowError>>,
+        ) -> (Self, Rc<ReaderObservations>) {
+            let observations = Rc::new(ReaderObservations::default());
+            (
+                Self {
+                    schema,
+                    batches: batches.into_iter(),
+                    observations: Rc::clone(&observations),
+                    previous_array: None,
+                },
+                observations,
+            )
+        }
+
+        fn one(batch: RecordBatch) -> Self {
+            let (reader, _) = Self::new(batch.schema(), vec![Ok(batch)]);
+            reader
         }
     }
 
-    impl Iterator for NonSendReader {
+    impl Iterator for InstrumentedReader {
         type Item = Result<RecordBatch, ArrowError>;
 
         fn next(&mut self) -> Option<Self::Item> {
-            self.inner.next()
+            self.observations
+                .next_calls
+                .set(self.observations.next_calls.get() + 1);
+            if self.observations.schema_calls.get() == 0 {
+                self.observations.next_before_schema.set(true);
+            }
+            if self
+                .previous_array
+                .as_ref()
+                .is_some_and(|array| array.strong_count() != 0)
+            {
+                self.observations.previous_batch_alive.set(true);
+            }
+
+            let next = self.batches.next();
+            if let Some(Ok(batch)) = &next {
+                self.previous_array = Some(Arc::downgrade(batch.column(0)));
+            }
+            next
         }
     }
 
-    impl RecordBatchReader for NonSendReader {
+    impl RecordBatchReader for InstrumentedReader {
         fn schema(&self) -> arrow::datatypes::SchemaRef {
-            self.inner.schema()
+            self.observations
+                .schema_calls
+                .set(self.observations.schema_calls.get() + 1);
+            Arc::clone(&self.schema)
         }
     }
 
@@ -974,7 +1020,7 @@ mod tests {
         let iterator = RecordBatchIterator::new(vec![Ok(first.clone())], first.schema());
         assert_batches(iterator.into_batch_stream()?, std::slice::from_ref(&first))?;
         assert_batches(
-            NonSendReader::new(first.clone()).into_batch_stream()?,
+            InstrumentedReader::one(first.clone()).into_batch_stream()?,
             std::slice::from_ref(&first),
         )?;
 
@@ -1033,6 +1079,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_stream_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        let (reader, observations) =
+            InstrumentedReader::new(first.schema(), vec![Ok(first), Ok(second)]);
+
+        assert_eq!(table.append(reader).await?, 2);
+        assert!(observations.schema_calls.get() > 0);
+        assert!(!observations.next_before_schema.get());
+        assert!(!observations.previous_batch_alive.get());
+        assert_eq!(observations.next_calls.get(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_stream_rejects_empty_sources_before_creating_data() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
@@ -1053,6 +1118,47 @@ mod tests {
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
         assert!(!temp.path().join("data").exists());
+
+        let data = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let leading_zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
+        assert_eq!(table.append(vec![leading_zero, data]).await?, 2);
+        assert_eq!(table.state().version, 2);
+        assert_eq!(table.state().segments.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_cleans_up_after_later_schema_or_source_error() -> TestResult {
+        for source_error in [false, true] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                    .await?;
+            let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+            let later = if source_error {
+                Err(ArrowError::ComputeError(
+                    "injected batch source failure".to_string(),
+                ))
+            } else {
+                Ok(input_batch(vec![1])?)
+            };
+            let (reader, _) = InstrumentedReader::new(first.schema(), vec![Ok(first), later]);
+
+            let error = table
+                .append(reader)
+                .await
+                .expect_err("later batch must fail the append");
+            assert!(matches!(error, TableError::AppendSource { .. }));
+            assert_eq!(table.state().version, 1);
+            assert!(table.state().segments.is_empty());
+            assert!(
+                std::fs::read_dir(temp.path().join("data"))?
+                    .next()
+                    .is_none()
+            );
+            assert!(coverage_files(temp.path())?.is_empty());
+            assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        }
         Ok(())
     }
 
