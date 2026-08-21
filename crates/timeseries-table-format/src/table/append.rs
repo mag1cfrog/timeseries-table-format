@@ -206,7 +206,7 @@ impl TimeSeriesTable {
         let mut cleanup_errors = Vec::new();
         for path in created_sidecars.iter().rev() {
             if let Err(error) =
-                storage::remove_file(self.location().as_ref(), Path::new(path)).await
+                storage::remove_file_if_exists(self.location().as_ref(), Path::new(path)).await
             {
                 cleanup_errors.push(format!("{path}: {error}"));
             }
@@ -682,21 +682,29 @@ impl TimeSeriesTable {
                 storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
                     .await
                     .context(StorageSnafu)?;
-            let mut writer = ParquetArrowWriter::try_new(sink, schema.clone(), None)
-                .context(AppendParquetSnafu)?;
-            writer.write(&first_batch).context(AppendParquetSnafu)?;
-            drop(first_batch);
+            let write_result = async {
+                let mut writer = ParquetArrowWriter::try_new(sink, schema.clone(), None)
+                    .context(AppendParquetSnafu)?;
+                writer.write(&first_batch).context(AppendParquetSnafu)?;
+                drop(first_batch);
 
-            for batch in reader {
-                let batch = batch.context(AppendSourceSnafu)?;
-                ensure_batch_schema(&schema, &batch)?;
-                if batch.num_rows() != 0 {
-                    writer.write(&batch).context(AppendParquetSnafu)?;
+                for batch in reader {
+                    let batch = batch.context(AppendSourceSnafu)?;
+                    ensure_batch_schema(&schema, &batch)?;
+                    if batch.num_rows() != 0 {
+                        writer.write(&batch).context(AppendParquetSnafu)?;
+                    }
                 }
-            }
 
-            let sink = writer.into_inner().context(AppendParquetSnafu)?;
-            sink.finish().await.context(StorageSnafu)?;
+                let sink = writer.into_inner().context(AppendParquetSnafu)?;
+                sink.finish().await.context(StorageSnafu)
+            }
+            .await;
+            if let Err(source) = write_result {
+                return Err(self
+                    .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
+                    .await);
+            }
 
             match self
                 .append_parquet_segment_file(&relative_path, None, "arrow_stream")
@@ -993,6 +1001,42 @@ mod tests {
         )
     }
 
+    fn timestamp_only_meta() -> TableMeta {
+        TableMeta::new_time_series_with_schema(
+            IndexSpec {
+                column: "ts".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::Timestamp {
+                    bucket: TimeBucket::Minutes(1),
+                    timezone: None,
+                },
+            },
+            LogicalSchema::new(vec![LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            }])
+            .expect("valid timestamp-only schema"),
+        )
+    }
+
+    fn timestamp_only_batch(row_count: usize) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from_iter_values(
+                (0..row_count).map(|value| value as i64),
+            ))],
+        )
+    }
+
     fn assert_batches<R>(reader: R, expected: &[RecordBatch]) -> TestResult
     where
         R: RecordBatchReader,
@@ -1159,6 +1203,115 @@ mod tests {
             assert!(coverage_files(temp.path())?.is_empty());
             assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_cleans_up_writer_lifecycle_failures() -> TestResult {
+        #[derive(Clone, Copy, Debug)]
+        enum Stage {
+            Write,
+            Close,
+            Finish,
+        }
+
+        for stage in [Stage::Write, Stage::Close, Stage::Finish] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                    .await?;
+            let data_dir = temp.path().join("data");
+            match stage {
+                Stage::Write => crate::storage::inject_output_write_failure(data_dir.clone(), 2),
+                Stage::Close => crate::storage::inject_output_write_failure(data_dir.clone(), 1),
+                Stage::Finish => crate::storage::inject_output_finish_failure(data_dir.clone()),
+            }
+            let row_count = if matches!(stage, Stage::Write) {
+                parquet::file::properties::DEFAULT_MAX_ROW_GROUP_ROW_COUNT
+            } else {
+                1
+            };
+
+            let result = table.append(timestamp_only_batch(row_count)?).await;
+            let Err(error) = result else {
+                panic!("{stage:?} writer failure was not injected");
+            };
+            if matches!(stage, Stage::Finish) {
+                assert!(matches!(error, TableError::Storage { .. }), "{stage:?}");
+            } else {
+                assert!(
+                    matches!(error, TableError::AppendParquet { .. }),
+                    "{stage:?}: {error}"
+                );
+            }
+            assert_eq!(table.state().version, 1, "{stage:?}");
+            assert!(table.state().segments.is_empty(), "{stage:?}");
+            assert!(std::fs::read_dir(&data_dir)?.next().is_none(), "{stage:?}");
+            assert!(coverage_files(temp.path())?.is_empty(), "{stage:?}");
+            assert!(
+                !temp.path().join(layout::commit_rel_path(2)).exists(),
+                "{stage:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn guarded_output_cleans_up_parquet_writer_creation_failure() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        let path = Path::new("data/create-failure.parquet");
+        let sink = storage::open_new_output_sink(&location, path).await?;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "unsupported",
+            DataType::Struct(arrow::datatypes::Fields::empty()),
+            true,
+        )]));
+
+        assert!(ParquetArrowWriter::try_new(sink, schema, None).is_err());
+        assert!(!temp.path().join(path).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_preserves_writer_error_and_failed_cleanup_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                .await?;
+        let data_dir = temp.path().join("data");
+        crate::storage::inject_output_write_failure(data_dir.clone(), 1);
+        crate::storage::inject_cleanup_failure(data_dir.clone());
+
+        let error = table
+            .append(timestamp_only_batch(1)?)
+            .await
+            .expect_err("writer and cleanup failures must fail append");
+        let TableError::AppendRollback {
+            source,
+            cleanup_errors,
+        } = error
+        else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(matches!(*source, TableError::AppendParquet { .. }));
+        assert_eq!(cleanup_errors.len(), 1);
+        let remaining = std::fs::read_dir(&data_dir)?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(remaining.len(), 1);
+        let remaining_path = remaining[0].path();
+        assert!(
+            cleanup_errors[0].contains(
+                remaining_path
+                    .file_name()
+                    .expect("remaining data filename")
+                    .to_str()
+                    .expect("UTF-8 data filename")
+            )
+        );
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 

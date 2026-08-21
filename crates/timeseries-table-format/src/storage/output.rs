@@ -21,6 +21,10 @@ static FINISH_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
+static WRITE_FAILURES: LazyLock<Mutex<Vec<(PathBuf, usize)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+#[cfg(test)]
 pub(crate) fn inject_output_finish_failure(path: PathBuf) {
     FINISH_FAILURES
         .lock()
@@ -29,11 +33,47 @@ pub(crate) fn inject_output_finish_failure(path: PathBuf) {
 }
 
 #[cfg(test)]
-fn take_output_finish_failure(path: &Path) -> bool {
-    FINISH_FAILURES
+pub(crate) fn inject_output_write_failure(path_prefix: PathBuf, write_number: usize) {
+    assert!(write_number > 0);
+    WRITE_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(path)
+        .push((path_prefix, write_number));
+}
+
+#[cfg(test)]
+fn take_output_finish_failure(path: &Path) -> bool {
+    let mut failures = FINISH_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(target) = failures
+        .iter()
+        .find(|target| path.starts_with(target))
+        .cloned()
+    else {
+        return false;
+    };
+    failures.remove(&target)
+}
+
+#[cfg(test)]
+fn take_output_write_failure(path: &Path) -> bool {
+    let mut failures = WRITE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(index) = failures
+        .iter()
+        .position(|(prefix, _)| path.starts_with(prefix))
+    else {
+        return false;
+    };
+    if failures[index].1 == 1 {
+        failures.remove(index);
+        true
+    } else {
+        failures[index].1 -= 1;
+        false
+    }
 }
 
 enum LocalFinish {
@@ -89,6 +129,14 @@ impl LocalSink {
 
     fn writer(&mut self) -> &mut dyn Write {
         &mut self.writer
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if take_output_write_failure(&self.path) {
+            return Err(io::Error::other("injected output write failure"));
+        }
+        self.writer.write(bytes)
     }
 
     async fn finish(&mut self) -> StorageResult<()> {
@@ -164,7 +212,9 @@ impl OutputSink {
 
 impl Write for OutputSink {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.writer().write(bytes)
+        match &mut self.inner {
+            OutputSinkInner::Local(s) => s.write(bytes),
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {

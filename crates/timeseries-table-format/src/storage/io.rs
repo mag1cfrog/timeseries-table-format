@@ -52,6 +52,10 @@ impl TempFileGuard {
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if self.armed {
+            #[cfg(test)]
+            if has_cleanup_failure(&self.path) {
+                return;
+            }
             // Best-effort cleanup; ignore errors since we're likely already handling another error.
             let _ = std::fs::remove_file(&self.path);
         }
@@ -110,10 +114,26 @@ fn take_write_new_failure(path: &Path) -> bool {
 
 #[cfg(test)]
 fn take_cleanup_failure(path: &Path) -> bool {
+    let mut failures = CLEANUP_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(target) = failures
+        .iter()
+        .find(|target| path.starts_with(target))
+        .cloned()
+    else {
+        return false;
+    };
+    failures.remove(&target)
+}
+
+#[cfg(test)]
+fn has_cleanup_failure(path: &Path) -> bool {
     CLEANUP_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(path)
+        .iter()
+        .any(|target| path.starts_with(target))
 }
 
 #[cfg(test)]
