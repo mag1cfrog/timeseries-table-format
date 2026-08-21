@@ -23,12 +23,24 @@ mod test_common {
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 async fn run_shell_with_input(args: &[&str], input: &str) -> TestResult<std::process::Output> {
+    run_shell_with_input_and_filter(args, input, None).await
+}
+
+async fn run_shell_with_input_and_filter(
+    args: &[&str],
+    input: &str,
+    rust_log: Option<&str>,
+) -> TestResult<std::process::Output> {
     let bin = assert_cmd::cargo::cargo_bin!("tstable");
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
+        .env_remove("RUST_LOG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(filter) = rust_log {
+        cmd.env("RUST_LOG", filter);
+    }
 
     let mut child = cmd.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -271,6 +283,41 @@ async fn shell_with_table_prompts_for_first_segment() -> TestResult<()> {
     let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
     assert!(table.state().table_meta.logical_schema().is_some());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_uses_one_subscriber_for_diagnostic_operations() -> TestResult<()> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_empty_table(&table_root).await?;
+    let seg_path = table_root.join("data/seg.parquet");
+    write_segment(&seg_path)?;
+
+    let input = format!("{}\nexit\n", seg_path.display());
+    let table_root_str = table_root.to_string_lossy();
+    let output = run_shell_with_input_and_filter(
+        &["shell", "--table", table_root_str.as_ref()],
+        &input,
+        Some("timeseries_table_format=debug"),
+    )
+    .await?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Appended Parquet segment").count(),
+        1,
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Failed to initialize CLI diagnostics"),
+        "stderr:\n{stderr}"
+    );
     Ok(())
 }
 
