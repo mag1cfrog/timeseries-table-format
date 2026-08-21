@@ -29,10 +29,12 @@ use datafusion::scalar::ScalarValue;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
+use timeseries_table_format::coverage::EntityValue;
 use timeseries_table_format::datafusion::TsTableProvider;
 use timeseries_table_format::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
+use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::{TableError, TimeSeriesTable};
 use timeseries_table_format::transaction_log::{
@@ -173,6 +175,17 @@ fn make_nested_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
     ))
 }
 
+fn make_composite_table_meta() -> TableMeta {
+    TableMeta::new_time_series(IndexSpec {
+        column: "ts".to_string(),
+        entity_columns: vec!["symbol".to_string(), "venue".to_string()],
+        kind: IndexKind::Timestamp {
+            bucket: TimeBucket::Minutes(1),
+            timezone: None,
+        },
+    })
+}
+
 fn make_rows(start: i64, count: usize, symbol: &'static str, price_base: f64) -> Vec<TestRow> {
     (0..count)
         .map(|idx| TestRow {
@@ -204,6 +217,36 @@ fn make_append_batch(rows: &[(i64, &str, f64)]) -> TestResult<RecordBatch> {
             )),
             Arc::new(Float64Array::from(
                 rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+            )),
+        ],
+    )?)
+}
+
+fn make_composite_batch(rows: &[(i64, &str, &str, f64)]) -> TestResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("venue", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMillisecondArray::from(
+                rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|row| row.3).collect::<Vec<_>>(),
             )),
         ],
     )?)
@@ -338,19 +381,27 @@ fn write_numeric_segment(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let batch = make_numeric_batch(index_type, index_values, tags)?;
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn make_numeric_batch(
+    index_type: DataType,
+    index_values: ArrayRef,
+    tags: &[&str],
+) -> TestResult<RecordBatch> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("idx", index_type, false),
         Field::new("tag", DataType::Utf8, false),
     ]));
-    let batch = RecordBatch::try_new(
+    Ok(RecordBatch::try_new(
         Arc::clone(&schema),
         vec![index_values, Arc::new(StringArray::from(tags.to_vec()))],
-    )?;
-    let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema, None)?;
-    writer.write(&batch)?;
-    writer.close()?;
-    Ok(())
+    )?)
 }
 
 fn make_numeric_table_meta(kind: IndexKind, data_type: LogicalDataType) -> TestResult<TableMeta> {
@@ -1197,6 +1248,169 @@ async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> 
         assert_eq!(reopened.state().version, 1, "{case}");
         assert!(reopened.state().segments.is_empty(), "{case}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_append_rejects_adversarial_source_boundaries_without_artifacts() -> TestResult {
+    let schema = make_append_batch(&[])?.schema();
+    let wrong_zero = RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
+        "wrong",
+        DataType::Int64,
+        false,
+    )])));
+    let cases = vec![
+        (
+            "error before first batch",
+            vec![Err(ArrowError::ComputeError("first failure".to_string()))],
+        ),
+        (
+            "error after zero-row batch",
+            vec![
+                Ok(RecordBatch::new_empty(Arc::clone(&schema))),
+                Err(ArrowError::ComputeError("failure after zero".to_string())),
+            ],
+        ),
+        ("mismatched zero-row batch", vec![Ok(wrong_zero)]),
+    ];
+
+    for (case, batches) in cases {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
+        let reader = RecordBatchIterator::new(batches, Arc::clone(&schema));
+
+        assert!(
+            matches!(
+                table.append(reader).await,
+                Err(TableError::AppendSource { .. })
+            ),
+            "{case}"
+        );
+        assert_eq!(table.state().version, 1, "{case}");
+        assert!(table.state().segments.is_empty(), "{case}");
+        assert!(!tmp.path().join("data").exists(), "{case}");
+        assert!(
+            !tmp.path().join(layout::commit_rel_path(2)).exists(),
+            "{case}"
+        );
+        for directory in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+            assert!(!tmp.path().join(directory).exists(), "{case}: {directory}");
+        }
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1, "{case}");
+        assert!(reopened.state().segments.is_empty(), "{case}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_append_round_trips_signed_and_unsigned_indexes() -> TestResult {
+    let signed_tmp = TempDir::new()?;
+    let signed_location = TableLocation::local(signed_tmp.path());
+    let mut signed = TimeSeriesTable::create(
+        signed_location.clone(),
+        make_numeric_table_meta(
+            IndexKind::Int64 {
+                bucket_width: NonZeroU64::new(1).expect("nonzero bucket"),
+            },
+            LogicalDataType::Int64,
+        )?,
+    )
+    .await?;
+    signed
+        .append(make_numeric_batch(
+            DataType::Int64,
+            Arc::new(Int64Array::from(vec![4, -3, 0])),
+            &["positive", "negative", "zero"],
+        )?)
+        .await?;
+    let signed = Arc::new(TimeSeriesTable::open(signed_location).await?);
+    assert!(matches!(
+        signed
+            .state()
+            .segments
+            .values()
+            .next()
+            .map(|segment| &segment.entity_layout),
+        Some(SegmentEntityLayout::NotApplicable)
+    ));
+    let signed_ctx = SessionContext::new();
+    let _provider = register_provider(&signed_ctx, signed)?;
+    let (_, signed_batches) = run_numeric_query(&signed_ctx, None).await?;
+    assert_eq!(collect_i64_values(&signed_batches)?, vec![-3, 0, 4]);
+
+    let unsigned_tmp = TempDir::new()?;
+    let unsigned_location = TableLocation::local(unsigned_tmp.path());
+    let mut unsigned = TimeSeriesTable::create(
+        unsigned_location.clone(),
+        make_numeric_table_meta(
+            IndexKind::UInt64 {
+                bucket_width: NonZeroU64::new(1).expect("nonzero bucket"),
+            },
+            LogicalDataType::UInt64,
+        )?,
+    )
+    .await?;
+    let above_signed_max = i64::MAX as u64 + 1;
+    unsigned
+        .append(make_numeric_batch(
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![
+                above_signed_max + 1,
+                above_signed_max,
+            ])),
+            &["higher", "high"],
+        )?)
+        .await?;
+    let unsigned = Arc::new(TimeSeriesTable::open(unsigned_location).await?);
+    let unsigned_ctx = SessionContext::new();
+    let _provider = register_provider(&unsigned_ctx, unsigned)?;
+    let (_, unsigned_batches) = run_numeric_query(&unsigned_ctx, None).await?;
+    assert_eq!(
+        collect_u64_values(&unsigned_batches)?,
+        vec![above_signed_max, above_signed_max + 1]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_append_round_trips_composite_entity_identity_order() -> TestResult {
+    let tmp = TempDir::new()?;
+    let location = TableLocation::local(tmp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), make_composite_table_meta()).await?;
+    table
+        .append(make_composite_batch(&[
+            (60_000, "A", "X", 11.0),
+            (0, "A", "X", 10.0),
+        ])?)
+        .await?;
+
+    let reopened = Arc::new(TimeSeriesTable::open(location).await?);
+    let segment = reopened
+        .state()
+        .segments
+        .values()
+        .next()
+        .ok_or("missing streamed segment")?;
+    let SegmentEntityLayout::Single(identity) = &segment.entity_layout else {
+        return Err("expected single composite entity layout".into());
+    };
+    assert_eq!(
+        identity.components(),
+        [EntityValue::from("A"), EntityValue::from("X")]
+    );
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, reopened)?;
+    let batches =
+        collect_batches(&ctx, "SELECT ts, symbol, venue, price FROM t ORDER BY ts").await?;
+    let actual = arrow_select::concat::concat_batches(&first_batch(&batches)?.schema(), &batches)?;
+    assert_eq!(
+        actual,
+        make_composite_batch(&[(0, "A", "X", 10.0), (60_000, "A", "X", 11.0),])?
+    );
     Ok(())
 }
 
