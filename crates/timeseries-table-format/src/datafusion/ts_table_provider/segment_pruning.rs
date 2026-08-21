@@ -7,7 +7,7 @@ use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::scalar::ScalarValue;
 
 use crate::coverage::EntityValue;
@@ -120,7 +120,9 @@ pub(super) fn prune_segments<'a>(
     predicate: &Arc<dyn PhysicalExpr>,
 ) -> DFResult<Vec<&'a SegmentMeta>> {
     let statistics = segment_pruning_statistics(schema, index, &segments)?;
-    let pruning_predicate = PruningPredicate::try_new(Arc::clone(predicate), Arc::clone(schema))
+    let pruning_predicate = PruningPredicateBuilder::new()
+        .with_file_schema(Arc::clone(schema))
+        .try_build(Arc::clone(predicate))
         .map_err(|source| {
             DataFusionError::Execution(format!(
                 "cannot create segment metadata pruning predicate: {source}"
@@ -643,7 +645,7 @@ mod tests {
                 .is_none()
         );
         assert!(statistics.null_counts(&Column::from_name("idx")).is_none());
-        assert!(statistics.row_counts(&Column::from_name("idx")).is_none());
+        assert!(statistics.row_counts().is_none());
     }
 
     #[test]

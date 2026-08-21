@@ -12,20 +12,17 @@ The goal is simple: keep SQL queries fast without changing your data.
 
 ### Installation
 
-```toml
-[dependencies]
-timeseries-table-format = { version = "0.1", features = ["datafusion"] }
-datafusion = "51"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+```bash
+cargo add timeseries-table-format --features datafusion
+cargo add tokio --features macros,rt-multi-thread
 ```
 
 ### Rust API Example
 
 ```rust
-use datafusion::prelude::*;
 use std::sync::Arc;
 use timeseries_table_format::{
-    datafusion::TsTableProvider,
+    datafusion::{engine::prelude::SessionContext, TsTableProvider},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -79,7 +76,7 @@ This happens automatically; you don't need to do anything special.
 
 - **Read-only**: This integration is for querying only. Use `timeseries-table-format` or the CLI for writes.
 - **Best-effort filter extraction**: Complex predicates may not be fully recognized (see below). Unrecognized predicates fall back to scanning all segments—correctness is preserved.
-- **No custom execution plan**: We use DataFusion's default `ParquetExec` after pruning. Future versions may add custom operators.
+- **No custom execution plan**: After segment pruning, execution uses DataFusion's standard Parquet scan.
 
 ---
 

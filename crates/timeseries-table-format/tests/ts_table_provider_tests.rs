@@ -836,7 +836,6 @@ fn planned_file_names(plan: &dyn ExecutionPlan) -> TestResult<Vec<String>> {
     let exec = find_data_source_exec(plan).ok_or("expected DataSourceExec in physical plan")?;
     let scan = exec
         .data_source()
-        .as_any()
         .downcast_ref::<FileScanConfig>()
         .ok_or("expected FileScanConfig in DataSourceExec")?;
 
@@ -866,7 +865,7 @@ async fn run_timestamp_query(
 }
 
 fn find_data_source_exec(plan: &dyn ExecutionPlan) -> Option<&DataSourceExec> {
-    if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
+    if let Some(exec) = plan.downcast_ref::<DataSourceExec>() {
         return Some(exec);
     }
     for child in plan.children() {
@@ -1318,7 +1317,7 @@ async fn parquet_prunes_row_groups_for_non_time_predicate() -> TestResult {
     }
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(5)
+        .set_max_row_group_row_count(Some(5))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
     let table =
@@ -1812,8 +1811,8 @@ async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_row
         ),
         (
             "to_unixtime(ts) < '60'",
-            UTC_PRUNING_FILES.to_vec(),
-            vec![0, 59_999, 119_999, 120_000, 179_999],
+            vec!["time-before.parquet"],
+            vec![0, 59_999],
         ),
         (
             "date_trunc('minute', ts) = '1970-01-01T00:01:00Z'",

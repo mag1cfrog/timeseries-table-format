@@ -83,7 +83,7 @@ fn write_segment(
         .set_compression(Compression::UNCOMPRESSED)
         .set_dictionary_enabled(false)
         .set_statistics_enabled(EnabledStatistics::None)
-        .set_max_row_group_size(rows_per_group)
+        .set_max_row_group_row_count(Some(rows_per_group))
         .build();
     let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), Some(properties))?;
     let payload = vec![0xA5; payload_bytes];

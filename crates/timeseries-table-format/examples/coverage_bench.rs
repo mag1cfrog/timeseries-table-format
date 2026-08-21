@@ -590,7 +590,7 @@ fn compute_parquet_direct_coverage_with_batch(
     }
 
     let unit = match col_descr.logical_type_ref() {
-        Some(LogicalType::Timestamp { unit, .. }) => *unit,
+        Some(LogicalType::Timestamp(timestamp)) => timestamp.unit,
         other => {
             return Err(
                 format!("unsupported parquet logical type for {time_column}: {other:?}").into(),

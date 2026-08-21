@@ -626,26 +626,11 @@ mod tests {
 
         if let Some(l) = logical {
             let lt = match l {
-                "TIMESTAMP_MILLIS" => LogicalType::Timestamp {
-                    is_adjusted_to_u_t_c: true,
-                    unit: TimeUnit::MILLIS,
-                },
-                "TIMESTAMP_MICROS" => LogicalType::Timestamp {
-                    is_adjusted_to_u_t_c: true,
-                    unit: TimeUnit::MICROS,
-                },
-                "TIMESTAMP_NANOS" => LogicalType::Timestamp {
-                    is_adjusted_to_u_t_c: true,
-                    unit: TimeUnit::NANOS,
-                },
-                "INT_64" => LogicalType::Integer {
-                    bit_width: 64,
-                    is_signed: true,
-                },
-                "UINT_64" => LogicalType::Integer {
-                    bit_width: 64,
-                    is_signed: false,
-                },
+                "TIMESTAMP_MILLIS" => LogicalType::timestamp(true, TimeUnit::MILLIS),
+                "TIMESTAMP_MICROS" => LogicalType::timestamp(true, TimeUnit::MICROS),
+                "TIMESTAMP_NANOS" => LogicalType::timestamp(true, TimeUnit::NANOS),
+                "INT_64" => LogicalType::integer(64, true),
+                "UINT_64" => LogicalType::integer(64, false),
                 other => return Err(format!("unsupported logical for test: {other}").into()),
             };
             builder = builder.with_logical_type(Some(lt));
@@ -827,10 +812,7 @@ mod tests {
         let column = Arc::new(
             Type::primitive_type_builder("ts", PhysicalType::INT64)
                 .with_repetition(Repetition::REQUIRED)
-                .with_logical_type(Some(LogicalType::Timestamp {
-                    is_adjusted_to_u_t_c: true,
-                    unit: TimeUnit::MILLIS,
-                }))
+                .with_logical_type(Some(LogicalType::timestamp(true, TimeUnit::MILLIS)))
                 .build()?,
         );
         let schema = Arc::new(

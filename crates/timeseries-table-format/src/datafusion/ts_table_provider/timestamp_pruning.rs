@@ -15,7 +15,7 @@ use datafusion::functions::datetime::{
     to_timestamp::ToTimestampFunc, to_unixtime::ToUnixtimeFunc,
 };
 use datafusion::logical_expr::expr::ScalarFunction;
-use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+use datafusion::logical_expr::{BinaryExpr, Expr, Operator, ScalarUDFImpl};
 use datafusion::scalar::ScalarValue;
 
 use super::segment_pruning::timestamp_scalar;
@@ -537,7 +537,7 @@ fn to_date_index(expr: &Expr, index_column: &str) -> Option<Expr> {
         return None;
     };
     if !matches!(
-        cast.data_type,
+        cast.field.data_type(),
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
     ) {
         return None;
@@ -716,7 +716,7 @@ fn timestamp_index_column(expr: &Expr, index_column: &str, index_type: &DataType
     let DataType::Timestamp(index_unit, index_timezone) = index_type else {
         return None;
     };
-    let DataType::Timestamp(cast_unit, cast_timezone) = &cast.data_type else {
+    let DataType::Timestamp(cast_unit, cast_timezone) = cast.field.data_type() else {
         return None;
     };
     (column.name == index_column
@@ -802,7 +802,7 @@ fn local_truncation_bucket(
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let local = literal.with_timezone(&timezone);
     let floor_local = truncate_local(local.naive_local(), unit)?;
-    // Match DataFusion 51: an ambiguous floor keeps the input's UTC offset.
+    // An ambiguous floor keeps the input's UTC offset.
     // The second occurrence of that local boundary ends the first bucket.
     let (start, repeated_end) = match floor_local.and_local_timezone(timezone) {
         LocalResult::Single(start) => (start, None),
@@ -1058,8 +1058,8 @@ fn binary(left: Expr, operator: Operator, right: Expr) -> Expr {
     Expr::BinaryExpr(BinaryExpr::new(Box::new(left), operator, Box::new(right)))
 }
 
-fn is_builtin_function<T: 'static>(function: &ScalarFunction) -> bool {
-    function.func.inner().as_any().is::<T>()
+fn is_builtin_function<T: ScalarUDFImpl>(function: &ScalarFunction) -> bool {
+    function.func.inner().is::<T>()
 }
 
 #[cfg(test)]
@@ -1124,14 +1124,14 @@ mod tests {
     }
 
     fn to_timestamp(value: Expr) -> Expr {
-        scalar_function(datafusion::functions::datetime::to_timestamp(), vec![value])
+        scalar_function(
+            datafusion::functions::datetime::to_timestamp(&Default::default()),
+            vec![value],
+        )
     }
 
     fn string_cast(expr: Expr) -> Expr {
-        Expr::Cast(Cast {
-            expr: Box::new(expr),
-            data_type: DataType::Utf8View,
-        })
+        Expr::Cast(Cast::new(Box::new(expr), DataType::Utf8View))
     }
 
     fn string_literal(value: &str) -> Expr {

@@ -539,7 +539,7 @@ mod tests {
         )]));
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values])?;
         let properties = WriterProperties::builder()
-            .set_max_row_group_size(1)
+            .set_max_row_group_row_count(Some(1))
             .build();
         let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(properties))?;
         writer.write(&batch)?;

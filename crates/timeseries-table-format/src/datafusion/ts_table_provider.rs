@@ -224,10 +224,6 @@ impl TsTableProvider {
 
 #[async_trait]
 impl TableProvider for TsTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> arrow::datatypes::SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -305,16 +301,14 @@ impl TableProvider for TsTableProvider {
         };
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
-        let parquet_source =
-            Arc::new(ParquetSource::default().with_predicate(Arc::clone(&exact_predicate)));
+        let parquet_source = Arc::new(
+            ParquetSource::new(Arc::clone(&self.schema))
+                .with_predicate(Arc::clone(&exact_predicate)),
+        );
 
-        let mut builder = FileScanConfigBuilder::new(
-            self.object_store_url.clone(),
-            self.schema.clone(),
-            parquet_source,
-        )
-        .with_projection_indices(projection.cloned())
-        .with_limit(limit);
+        let mut builder = FileScanConfigBuilder::new(self.object_store_url.clone(), parquet_source)
+            .with_projection_indices(projection.cloned())?
+            .with_limit(limit);
 
         let selected =
             self.prune_segments_by_metadata(segments, &metadata_filters, &pruning_predicate)?;

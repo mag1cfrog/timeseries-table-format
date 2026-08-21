@@ -9,7 +9,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
 {% for commit in commits %}
-- {{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/mag1cfrog/timeseries-table-format/commit/{{ commit.id }}))
+- {{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/mag1cfrog/timeseries-table-format/commit/{{ commit.id }})){% if commit.breaking %} - **Breaking:** {{ commit.breaking_description }}{% endif %}
 {% endfor %}
 {% endfor %}
 """

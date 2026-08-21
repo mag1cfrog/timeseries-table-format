@@ -48,6 +48,10 @@ uv run pytest -q
 
 - Polars: `pip install polars`, then `polars.from_arrow(out)`
 
+Use `Session.register_parquet(name, path)` to query a standalone Parquet file or directory.
+Directories must contain at least one Parquet file so their schema can be inferred; registering an
+empty directory raises `DataFusionError`.
+
 ## Notebook display (Jupyter/IPython)
 
 In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results will display as a bounded HTML preview by default (the return type is still a real `pyarrow.Table`).
