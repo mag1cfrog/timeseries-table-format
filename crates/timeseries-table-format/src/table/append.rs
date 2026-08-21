@@ -11,6 +11,10 @@
 use std::path::Path;
 use std::time::Instant;
 
+use arrow::{
+    array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
+    error::ArrowError,
+};
 use snafu::prelude::*;
 use uuid::Uuid;
 
@@ -103,6 +107,64 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
             "failed"
         };
         tracing::Span::current().record("outcome", outcome);
+    }
+}
+
+/// Marker used to distinguish reader inputs from materialized batch inputs.
+///
+/// This type exists only to keep the blanket [`RecordBatchReader`]
+/// implementation disjoint from the direct batch implementations.
+#[doc(hidden)]
+pub struct RecordBatchReaderSource;
+
+/// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
+///
+/// Implementations preserve non-`Send` readers. The `Source` parameter is an
+/// inference-only coherence marker and should not normally be specified by
+/// callers.
+pub trait IntoBatchStream<Source = RecordBatchReaderSource> {
+    /// Reader produced from this source.
+    type Reader: RecordBatchReader;
+
+    /// Convert this source without collecting its batches.
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError>;
+}
+
+impl<R> IntoBatchStream<RecordBatchReaderSource> for R
+where
+    R: RecordBatchReader,
+{
+    type Reader = R;
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        Ok(self)
+    }
+}
+
+impl IntoBatchStream<ArrowRecordBatch> for ArrowRecordBatch {
+    type Reader = Box<dyn RecordBatchReader + Send>;
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        let schema = self.schema();
+        Ok(Box::new(RecordBatchIterator::new(
+            std::iter::once(Ok(self)),
+            schema,
+        )))
+    }
+}
+
+impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
+    type Reader = Box<dyn RecordBatchReader + Send>;
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        let schema = self
+            .first()
+            .map(ArrowRecordBatch::schema)
+            .ok_or(TableError::EmptyAppendSource)?;
+        Ok(Box::new(RecordBatchIterator::new(
+            self.into_iter().map(Ok::<_, ArrowError>),
+            schema,
+        )))
     }
 }
 
@@ -692,8 +754,98 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
     use std::num::NonZeroU64;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    struct NonSendReader {
+        inner: RecordBatchIterator<Vec<Result<RecordBatch, ArrowError>>>,
+        _not_send: Rc<()>,
+    }
+
+    impl NonSendReader {
+        fn new(batch: RecordBatch) -> Self {
+            let schema = batch.schema();
+            Self {
+                inner: RecordBatchIterator::new(vec![Ok(batch)], schema),
+                _not_send: Rc::new(()),
+            }
+        }
+    }
+
+    impl Iterator for NonSendReader {
+        type Item = Result<RecordBatch, ArrowError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+    }
+
+    impl RecordBatchReader for NonSendReader {
+        fn schema(&self) -> arrow::datatypes::SchemaRef {
+            self.inner.schema()
+        }
+    }
+
+    fn input_batch(values: Vec<i64>) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))])
+    }
+
+    fn assert_batches<R>(reader: R, expected: &[RecordBatch]) -> TestResult
+    where
+        R: RecordBatchReader,
+    {
+        assert_eq!(reader.schema(), expected[0].schema());
+        let actual = reader.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn into_batch_stream_accepts_all_required_input_forms() -> TestResult {
+        let first = input_batch(vec![1, 2])?;
+        let second = input_batch(vec![3])?;
+
+        assert_batches(
+            first.clone().into_batch_stream()?,
+            std::slice::from_ref(&first),
+        )?;
+        assert_batches(
+            vec![first.clone(), second.clone()].into_batch_stream()?,
+            &[first.clone(), second.clone()],
+        )?;
+
+        let iterator = RecordBatchIterator::new(vec![Ok(first.clone())], first.schema());
+        assert_batches(iterator.into_batch_stream()?, std::slice::from_ref(&first))?;
+        assert_batches(
+            NonSendReader::new(first.clone()).into_batch_stream()?,
+            std::slice::from_ref(&first),
+        )?;
+
+        let boxed: Box<dyn RecordBatchReader> = Box::new(RecordBatchIterator::new(
+            vec![Ok(first.clone())],
+            first.schema(),
+        ));
+        assert_batches(boxed.into_batch_stream()?, std::slice::from_ref(&first))?;
+
+        let sendable: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+            vec![Ok(second.clone())],
+            second.schema(),
+        ));
+        assert_batches(sendable.into_batch_stream()?, std::slice::from_ref(&second))?;
+        Ok(())
+    }
+
+    #[test]
+    fn into_batch_stream_rejects_schema_less_vec() {
+        let result = Vec::<RecordBatch>::new().into_batch_stream();
+        assert!(matches!(result, Err(TableError::EmptyAppendSource)));
+    }
 
     fn registered_index(kind: IndexKind) -> IndexSpec {
         IndexSpec {

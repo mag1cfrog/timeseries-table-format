@@ -112,6 +112,10 @@ pub enum TableError {
         cleanup_error: StorageError,
     },
 
+    /// An append source contained no rows.
+    #[snafu(display("Cannot append an empty Arrow batch source"))]
+    EmptyAppendSource,
+
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
     EmptyTable,

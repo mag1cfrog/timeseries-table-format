@@ -57,7 +57,7 @@ pub use metadata::table_metadata::{
     TableMeta, TimeBucket, validate_index_range,
 };
 pub use storage::TableLocation;
-pub use table::{OptimizeReport, TableError, TimeSeriesTable};
+pub use table::{OptimizeReport, TableError, TimeSeriesTable, append::IntoBatchStream};
 
 /// DataFusion table provider (enabled by default).
 #[cfg(feature = "datafusion")]
