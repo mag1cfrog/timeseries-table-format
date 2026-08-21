@@ -35,6 +35,22 @@ fn run_cli_strings(args: &[String]) -> io::Result<Output> {
     Command::new(cli_bin()).args(args).output()
 }
 
+fn create_command(table_root: &Path) -> Command {
+    let mut command = Command::new(cli_bin());
+    command.args([
+        "create",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--index-column",
+        "ts",
+        "--index-type",
+        "timestamp",
+        "--bucket",
+        "1h",
+    ]);
+    command
+}
+
 fn assert_cli_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -42,6 +58,70 @@ fn assert_cli_success(output: &Output) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn cli_diagnostics_default_to_warn_without_changing_stdout()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let output = create_command(&table_root)
+        .env_remove("RUST_LOG")
+        .output()?;
+
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Created table at {}\n", table_root.display())
+    );
+    assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cli_debug_diagnostics_are_structured_stderr_only() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let output = create_command(&table_root)
+        .env("RUST_LOG", "timeseries_table_format=debug")
+        .output()?;
+
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Created table at {}\n", table_root.display())
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("table.create"), "stderr:\n{stderr}");
+    assert!(stderr.contains("committed_version=1"), "stderr:\n{stderr}");
+    assert!(stderr.contains(" INFO "), "stderr:\n{stderr}");
+    assert!(!output.stderr.windows(2).any(|bytes| bytes == b"\x1b["));
+    Ok(())
+}
+
+#[test]
+fn cli_invalid_rust_log_warns_once_and_uses_default() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    let invalid_filter = "timeseries_table_format=verbose";
+    let output = create_command(&table_root)
+        .env("RUST_LOG", invalid_filter)
+        .output()?;
+
+    assert_cli_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Created table at {}\n", table_root.display())
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("invalid RUST_LOG filter").count(), 1);
+    assert!(stderr.contains(invalid_filter), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("using warning-level default"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("table.create"), "stderr:\n{stderr}");
+    Ok(())
 }
 
 fn open_table_blocking(

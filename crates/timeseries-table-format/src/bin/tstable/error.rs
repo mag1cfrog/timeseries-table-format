@@ -10,6 +10,9 @@ pub type CliResult<T> = std::result::Result<T, CliError>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum CliError {
+    #[snafu(display("Failed to initialize CLI diagnostics: {reason}"))]
+    DiagnosticsInitialization { reason: String },
+
     #[snafu(display("Invalid --bucket '{spec}' for --index-type timestamp: {source}"))]
     InvalidBucket {
         spec: String,
