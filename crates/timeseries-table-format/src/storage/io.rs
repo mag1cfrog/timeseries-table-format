@@ -99,7 +99,11 @@ struct AtomicWritePausePoint {
 }
 
 #[cfg(test)]
-static ATOMIC_WRITE_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
+static ATOMIC_WRITE_OPEN_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static ATOMIC_WRITE_RENAME_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(test)]
@@ -126,10 +130,13 @@ impl AtomicWritePause {
 }
 
 #[cfg(test)]
-pub(crate) fn pause_atomic_write_before_rename(path: PathBuf) -> AtomicWritePause {
+fn pause_atomic_write_at(
+    pauses: &Mutex<HashMap<PathBuf, AtomicWritePausePoint>>,
+    path: PathBuf,
+) -> AtomicWritePause {
     let (entered_sender, entered_receiver) = oneshot::channel();
     let (release_sender, release_receiver) = oneshot::channel();
-    let previous = ATOMIC_WRITE_PAUSES
+    let previous = pauses
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(
@@ -147,8 +154,21 @@ pub(crate) fn pause_atomic_write_before_rename(path: PathBuf) -> AtomicWritePaus
 }
 
 #[cfg(test)]
-async fn wait_at_atomic_write_pause(path: &Path) {
-    let pause = ATOMIC_WRITE_PAUSES
+pub(crate) fn pause_atomic_write_before_open(path: PathBuf) -> AtomicWritePause {
+    pause_atomic_write_at(&ATOMIC_WRITE_OPEN_PAUSES, path)
+}
+
+#[cfg(test)]
+pub(crate) fn pause_atomic_write_before_rename(path: PathBuf) -> AtomicWritePause {
+    pause_atomic_write_at(&ATOMIC_WRITE_RENAME_PAUSES, path)
+}
+
+#[cfg(test)]
+async fn wait_at_atomic_write_pause(
+    pauses: &Mutex<HashMap<PathBuf, AtomicWritePausePoint>>,
+    path: &Path,
+) {
+    let pause = pauses
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(path);
@@ -443,13 +463,18 @@ pub async fn write_atomic(
             let tmp_path = abs.with_extension("tmp");
             let mut guard = FileCleanupGuard::new(tmp_path.clone());
 
+            #[cfg(test)]
+            wait_at_atomic_write_pause(&ATOMIC_WRITE_OPEN_PAUSES, &abs).await;
+
             {
-                let mut file = fs::File::create(&tmp_path)
-                    .await
+                // Opening through Tokio would leave a non-cancellable blocking
+                // task able to recreate this path after the future is dropped.
+                let file = std::fs::File::create(&tmp_path)
                     .map_err(BackendError::Local)
                     .context(OtherIoSnafu {
                         path: tmp_path.display().to_string(),
                     })?;
+                let mut file = fs::File::from_std(file);
 
                 file.write_all(contents)
                     .await
@@ -467,7 +492,7 @@ pub async fn write_atomic(
             }
 
             #[cfg(test)]
-            wait_at_atomic_write_pause(&abs).await;
+            wait_at_atomic_write_pause(&ATOMIC_WRITE_RENAME_PAUSES, &abs).await;
 
             // Keep publication and guard disarming in one synchronous poll so
             // dropping the future cannot publish CURRENT and then roll back
@@ -621,6 +646,7 @@ pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageRe
 mod tests {
 
     use super::*;
+    use std::sync::mpsc;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -687,6 +713,47 @@ mod tests {
 
         // The .tmp file should not remain after successful write.
         let tmp_path = tmp.path().join("clean.tmp");
+        assert!(!tmp_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cancelling_atomic_write_during_open_does_not_recreate_tmp() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let rel_path = Path::new("cancelled.txt");
+        let abs = tmp.path().join(rel_path);
+        let tmp_path = abs.with_extension("tmp");
+        let mut pause = pause_atomic_write_before_open(abs);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()?;
+
+        runtime.block_on(async {
+            let mut write = Box::pin(write_atomic(&location, rel_path, b"cancelled"));
+            tokio::select! {
+                () = pause.wait_until_paused() => {}
+                result = &mut write => panic!("atomic write completed before pause: {result:?}"),
+            }
+
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+            });
+            started_rx.await?;
+
+            pause.release();
+            assert!(futures::poll!(write.as_mut()).is_pending());
+            drop(write);
+            release_tx.send(())?;
+            blocker.await?;
+            TestResult::Ok(())
+        })?;
+        drop(runtime);
+
         assert!(!tmp_path.exists());
         Ok(())
     }
