@@ -1434,6 +1434,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn simultaneous_streaming_appends_publish_one_and_clean_loser() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        let loser_state_before = loser.state().clone();
+        let commit_path = temp.path().join(layout::commit_rel_path(2));
+        let mut pause = crate::storage::pause_atomic_write_before_rename(
+            temp.path().join(layout::current_rel_path()),
+        );
+        let mut winner_append =
+            Box::pin(winner.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?));
+
+        tokio::select! {
+            () = pause.wait_until_paused() => {}
+            result = &mut winner_append => panic!("winner completed before race: {result:?}"),
+        }
+
+        let mut data_before = std::fs::read_dir(temp.path().join("data"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        data_before.sort();
+        let coverage_before = coverage_files(temp.path())?;
+        let commit_before = std::fs::read(&commit_path)?;
+
+        let loser_error = loser
+            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .await
+            .expect_err("second simultaneous writer must lose commit 2");
+        assert!(matches!(
+            loser_error,
+            TableError::TransactionLog {
+                source: CommitError::Storage {
+                    source: StorageError::AlreadyExists { .. },
+                },
+            }
+        ));
+        assert_eq!(loser.state(), &loser_state_before);
+
+        let mut data_after = std::fs::read_dir(temp.path().join("data"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        data_after.sort();
+        assert_eq!(data_after, data_before);
+        assert_eq!(coverage_files(temp.path())?, coverage_before);
+        assert_eq!(std::fs::read(&commit_path)?, commit_before);
+
+        pause.release();
+        assert_eq!(winner_append.await?, 2);
+        assert_eq!(winner.state().version, 2);
+        assert_eq!(winner.state().segments.len(), 1);
+        assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn guarded_output_cleans_up_parquet_writer_creation_failure() -> TestResult {
         let temp = TempDir::new()?;
         let location = StorageLocation::local(temp.path());
