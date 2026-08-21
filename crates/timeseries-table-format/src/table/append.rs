@@ -713,6 +713,7 @@ impl TimeSeriesTable {
                 if batch.num_rows() != 0 {
                     break batch;
                 }
+                tokio::task::yield_now().await;
             };
 
             let relative_path = format!("data/{}.parquet", Uuid::new_v4());
@@ -731,6 +732,7 @@ impl TimeSeriesTable {
                     .context(AppendParquetSnafu)?;
                 writer.write(&first_batch).context(AppendParquetSnafu)?;
                 drop(first_batch);
+                tokio::task::yield_now().await;
 
                 for batch in reader {
                     let batch = batch.context(AppendSourceSnafu)?;
@@ -738,6 +740,8 @@ impl TimeSeriesTable {
                     if batch.num_rows() != 0 {
                         writer.write(&batch).context(AppendParquetSnafu)?;
                     }
+                    drop(batch);
+                    tokio::task::yield_now().await;
                 }
 
                 let sink = writer.into_inner().context(AppendParquetSnafu)?;
@@ -1224,6 +1228,74 @@ mod tests {
         assert!(!observations.next_before_schema.get());
         assert!(!observations.previous_batch_alive.get());
         assert_eq!(observations.next_calls.get(), 3);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_stream_yields_while_skipping_zero_row_batches() -> TestResult {
+        const BATCH_COUNT: usize = 64;
+
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
+        let (reader, observations) = InstrumentedReader::new(
+            zero.schema(),
+            (0..BATCH_COUNT).map(|_| Ok(zero.clone())).collect(),
+        );
+        let mut append = Box::pin(table.append(reader));
+
+        tokio::select! {
+            biased;
+            result = &mut append => panic!("append drained the reader without yielding: {result:?}"),
+            () = async {
+                while observations.next_calls.get() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+
+        assert!(observations.next_calls.get() < BATCH_COUNT);
+        drop(append);
+        assert_eq!(table.state().version, 1);
+        assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_streaming_append_during_batch_reads_removes_output() -> TestResult {
+        const BATCH_COUNT: usize = 64;
+
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(
+            batch.schema(),
+            (0..BATCH_COUNT).map(|_| Ok(batch.clone())).collect(),
+        );
+        let mut append = Box::pin(table.append(reader));
+
+        tokio::select! {
+            biased;
+            result = &mut append => panic!("append drained the reader without yielding: {result:?}"),
+            () = async {
+                while observations.next_calls.get() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+
+        assert!(observations.next_calls.get() < BATCH_COUNT);
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 1);
+        drop(append);
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 0);
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 
