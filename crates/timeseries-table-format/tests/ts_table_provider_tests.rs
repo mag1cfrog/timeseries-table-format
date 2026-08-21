@@ -1133,6 +1133,83 @@ async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
 }
 
 #[tokio::test]
+async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestResult {
+    let tmp = TempDir::new()?;
+    let location = TableLocation::local(tmp.path());
+    let mut table = TimeSeriesTable::create(location, make_table_meta(false)?).await?;
+    let source_path = "data/reordered.parquet";
+    let source_schema = Arc::new(Schema::new(vec![
+        Field::new("price", DataType::Float64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let source_batch = RecordBatch::try_new(
+        Arc::clone(&source_schema),
+        vec![
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 11.0, 21.0])),
+            Arc::new(StringArray::from(vec!["A", "B", "A", "B"])),
+            Arc::new(TimestampMillisecondArray::from(vec![
+                1_000, 2_000, 3_000, 4_000,
+            ])),
+        ],
+    )?;
+    std::fs::create_dir_all(tmp.path().join("data"))?;
+    let mut writer = ArrowWriter::try_new(
+        std::fs::File::create(tmp.path().join(source_path))?,
+        source_schema,
+        None,
+    )?;
+    writer.write(&source_batch)?;
+    writer.close()?;
+
+    table.append_parquet_segment(source_path).await?;
+    assert!(matches!(
+        table.state().segments[source_path].entity_layout,
+        SegmentEntityLayout::Mixed
+    ));
+    let canonical_schema = table.state().table_meta.logical_schema().cloned();
+    let expected = make_append_batch(&[
+        (1_000, "A", 10.0),
+        (2_000, "B", 20.0),
+        (3_000, "A", 11.0),
+        (4_000, "B", 21.0),
+    ])?;
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::new(table.clone()))?;
+    let batches = collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts").await?;
+    let actual = arrow_select::concat::concat_batches(&first_batch(&batches)?.schema(), &batches)?;
+    assert_eq!(actual, expected);
+
+    let report = table.optimize().await?;
+    assert_eq!(report.source_segments_replaced, 1);
+    assert_eq!(report.replacement_segments_written, 2);
+    assert_eq!(
+        table.state().table_meta.logical_schema(),
+        canonical_schema.as_ref()
+    );
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, Arc::new(table.clone()))?;
+    let batches = collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts").await?;
+    let actual = arrow_select::concat::concat_batches(&first_batch(&batches)?.schema(), &batches)?;
+    assert_eq!(actual, expected);
+
+    assert!(
+        table
+            .state()
+            .segments
+            .values()
+            .all(|segment| matches!(segment.entity_layout, SegmentEntityLayout::Single(_)))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult {
     let union = DataType::Union(
         UnionFields::try_new([0], [Field::new("member", DataType::Int64, true)])?,
