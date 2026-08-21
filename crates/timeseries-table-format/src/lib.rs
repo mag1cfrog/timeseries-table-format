@@ -34,8 +34,8 @@
 //! facade for applications that install a logger.
 //!
 //! The initial operation names include `table.open`, `table.create`,
-//! `table.refresh`, `table.append`, `transaction.commit`, and
-//! `coverage.recover`. Diagnostics exclude SQL, entity identities, record
+//! `table.refresh`, `table.append`, `table.optimize`, `transaction.commit`,
+//! and `coverage.recover`. Diagnostics exclude SQL, entity identities, record
 //! values, complete schemas, credentials, and environment variables.
 //! DataFusion remains the source of query execution metrics.
 
