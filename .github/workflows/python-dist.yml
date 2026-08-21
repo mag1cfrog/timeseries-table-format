@@ -7,7 +7,7 @@ on:
         description: JSON array of runner labels.
         required: false
         type: string
-        default: '["ubuntu-latest","macos-latest","macos-15-intel","windows-latest"]'
+        default: '["ubuntu-latest","macos-latest","macos-15-intel","windows-2022"]'
       include-sdist:
         description: Build sdist once on ubuntu.
         required: false

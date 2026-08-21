@@ -30,7 +30,7 @@ jobs:
       actions: read
       contents: read
     with:
-      os-json: '["ubuntu-latest","windows-latest"]'
+      os-json: '["ubuntu-latest","windows-2022"]'
       include-sdist: false
       run-pytest: false
       artifact-prefix: timeseries-table-format-testpypi-snapshot-wheel
@@ -73,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-2022]
         python-version: ["3.10", "3.14"]
 
     steps:
