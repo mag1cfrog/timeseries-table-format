@@ -1,7 +1,12 @@
 from types import ModuleType
-from typing import Literal
+from typing import Literal, Protocol
 
 import pyarrow
+
+class _ArrowStreamExportable(Protocol):
+    def __arrow_c_stream__(
+        self, requested_schema: object | None = None, /
+    ) -> object: ...
 
 __version__: str
 
@@ -249,6 +254,16 @@ class TimeSeriesTable:
             If the same complete entity identity already covers an incoming bucket. Different
             identities may reuse the same bucket.
         """
+        ...
+
+    def append(
+        self,
+        source: pyarrow.RecordBatch
+        | pyarrow.Table
+        | pyarrow.RecordBatchReader
+        | _ArrowStreamExportable,
+    ) -> int:
+        """Append an Arrow source and return the committed table version."""
         ...
 
     def optimize(self) -> OptimizeReport:

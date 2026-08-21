@@ -13,7 +13,7 @@ mod _native {
     use std::sync::{Arc, Mutex};
 
     use arrow_array::ffi::FFI_ArrowSchema;
-    use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+    use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
     use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 
     use datafusion::arrow::datatypes::DataType;
@@ -25,7 +25,7 @@ mod _native {
     use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 
     use pyo3::PyAny;
-    use pyo3::types::PyCapsule;
+    use pyo3::types::{PyCapsule, PyCapsuleMethods};
     use pyo3::{
         Bound, PyErr, PyResult, PyTypeInfo, Python,
         exceptions::{
@@ -188,6 +188,46 @@ mod _native {
         }
 
         py_err
+    }
+
+    fn record_batch_reader_from_python(
+        source: &Bound<'_, PyAny>,
+    ) -> PyResult<ArrowArrayStreamReader> {
+        let py = source.py();
+        let exporter = source.getattr("__arrow_c_stream__").map_err(|error| {
+            if error.is_instance_of::<PyAttributeError>(py) {
+                PyTypeError::new_err(
+                    "source must be a pyarrow.RecordBatch, pyarrow.Table, \
+                     pyarrow.RecordBatchReader, or an object implementing __arrow_c_stream__",
+                )
+            } else {
+                error
+            }
+        })?;
+        let capsule = exporter.call0().map_err(|error| {
+            let mapped = PyValueError::new_err("source.__arrow_c_stream__() failed");
+            mapped.set_cause(py, Some(error));
+            mapped
+        })?;
+        let capsule = capsule.cast::<PyCapsule>().map_err(|error| {
+            PyValueError::new_err(format!(
+                "source.__arrow_c_stream__() must return an Arrow C Stream capsule: {error}"
+            ))
+        })?;
+        let stream = capsule
+            .pointer_checked(Some(c"arrow_array_stream"))
+            .map_err(|error| {
+                let mapped = PyValueError::new_err("invalid Arrow C Stream capsule");
+                mapped.set_cause(py, Some(error));
+                mapped
+            })?
+            .cast::<FFI_ArrowArrayStream>();
+
+        // SAFETY: the capsule name and pointer were validated above. Arrow's capsule protocol
+        // transfers ownership by moving the stream and nulling the capsule's release callback.
+        unsafe { ArrowArrayStreamReader::from_raw(stream.as_ptr()) }.map_err(|error| {
+            PyValueError::new_err(format!("failed to import Arrow C Stream: {error}"))
+        })
     }
 
     fn datafusion_error_to_py_with_name_and_path(
@@ -1591,6 +1631,34 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                         table.append_parquet_segment(&parquet_path).await
                     }
                 },
+                move |py, err| {
+                    table_error_to_py_with_root(
+                        py,
+                        &table_root_for_err,
+                        &entity_columns_for_err,
+                        err,
+                    )
+                },
+            )
+        }
+
+        /// Append Arrow batches to the table and return the committed version.
+        ///
+        /// `source` must be a `pyarrow.RecordBatch`, `pyarrow.Table`,
+        /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
+        /// The stream is consumed lazily while the GIL is released.
+        fn append(&mut self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<u64> {
+            let reader = record_batch_reader_from_python(source)?;
+            let reader = Box::new(reader) as Box<dyn RecordBatchReader + Send>;
+            let rt = tokio_runner::global_runtime()?;
+            let table_root_for_err = self.table_root.clone();
+            let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
+            let table = &mut self.inner;
+
+            tokio_runner::run_blocking_map_err(
+                py,
+                rt.as_ref(),
+                async move { table.append(reader).await },
                 move |py, err| {
                     table_error_to_py_with_root(
                         py,
