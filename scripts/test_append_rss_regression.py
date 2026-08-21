@@ -51,7 +51,7 @@ Command being timed: "tstable append"
         sys.platform.startswith("linux") and GNU_TIME.is_file(),
         "GNU time is unavailable",
     )
-    def test_measure_append_times_external_staging(self) -> None:
+    def test_measure_append_accepts_generated_segment_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_tstable = root / "tstable"
@@ -66,7 +66,7 @@ if sys.argv[1] == "create":
     table.mkdir(parents=True)
 elif sys.argv[1] == "append":
     source = Path(sys.argv[sys.argv.index("--parquet") + 1])
-    destination = table / "data" / source.name
+    destination = table / "data" / "generated.parquet"
     destination.parent.mkdir(parents=True)
     shutil.copyfile(source, destination)
 else:

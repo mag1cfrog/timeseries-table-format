@@ -5,18 +5,18 @@ parameter sweeps.
 
 ## Verify bounded append RSS
 
-Use `scripts/append_rss_regression.py` to check that appending a Parquet file does
-not consume memory in proportion to an unprojected payload column. The script
-generates approximately 128 MiB and 1 GiB uncompressed inputs, creates a fresh
-table for each input, and measures the production `tstable append` process while
-it copies the external file into the table.
+Use `scripts/append_rss_regression.py` to check peak RSS while streaming larger
+Parquet inputs through `tstable append`. The script generates approximately 128
+MiB and 1 GiB uncompressed inputs, creates a fresh table for each input, and
+measures the production command while it decodes the source and writes one
+table-managed segment.
 
 This check requires:
 
 - Linux.
 - GNU `/usr/bin/time`.
 - `uv` and the repository's locked Python dependencies.
-- Approximately 2.5 GiB of free disk space for inputs and staged copies.
+- Approximately 2.5 GiB of free disk space for inputs and table-managed segments.
 
 Install PyArrow without building the Python extension:
 

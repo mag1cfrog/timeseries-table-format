@@ -112,7 +112,8 @@ index column.
 
 ### `append` — Add data to a table
 
-Appends a Parquet file as a new segment. The persisted index specification determines the column and type; append accepts no override.
+Streams a local Parquet file through Arrow into a new table-managed segment. The persisted index
+specification determines the column and type; append accepts no override.
 
 ```bash
 tstable append \
@@ -127,7 +128,12 @@ tstable append \
 | `--timing` | | Print elapsed time |
 
 **Notes:**
-- An external Parquet file is copied into the table's `data/` directory
+- The source file is read lazily and remains unchanged, including when it is already under the
+  table root
+- The table writes the rows to a generated path under `data/`; it does not adopt the source path
+  or filename
+- Success prints `Appended table version: <VERSION>`; `--timing` adds elapsed milliseconds on the
+  same line
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
 - Parquet rows need not be sorted by the index column
 - Overlapping index buckets cause an error only for the same complete entity identity; tables

@@ -234,9 +234,13 @@ def measure_append(
     env["LC_ALL"] = "C"
     run_checked(append_command, env)
 
-    staged_path = table_root / "data" / input_path.name
-    if not staged_path.is_file():
-        raise RuntimeError(f"append did not stage the external input at {staged_path}")
+    data_dir = table_root / "data"
+    managed_segments = list(data_dir.glob("*.parquet"))
+    if len(managed_segments) != 1:
+        raise RuntimeError(
+            f"append created {len(managed_segments)} managed Parquet files under "
+            f"{data_dir}; expected exactly one"
+        )
 
     return {
         "input_file_bytes": input_path.stat().st_size,
@@ -268,7 +272,7 @@ def positive_int(raw: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Prove tstable append RSS is independent of unprojected payload size."
+        description="Check tstable streaming append RSS as Parquet input size grows."
     )
     parser.add_argument("--tstable", type=Path, help="existing tstable binary")
     parser.add_argument("--small-mib", type=positive_int, default=128)
