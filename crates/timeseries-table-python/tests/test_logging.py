@@ -134,3 +134,80 @@ def test_native_logging_cache_can_be_refreshed_after_level_changes():
         )
         """
     )
+
+
+def test_reload_does_not_duplicate_native_records():
+    _run_isolated(
+        """
+        import importlib
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(Capture())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        importlib.reload(ttf._native)
+        ttf = importlib.reload(ttf)
+
+        with tempfile.TemporaryDirectory() as directory:
+            ttf.TimeSeriesTable.create(
+                table_root=str(Path(directory) / "table"),
+                index_column="ts",
+                index_type="timestamp",
+                bucket="1h",
+            )
+
+        created = [
+            record
+            for record in records
+            if "Created time-series table" in record.getMessage()
+        ]
+        assert len(created) == 1
+        """
+    )
+
+
+def test_operation_exception_is_not_duplicated_as_an_error_record():
+    _run_isolated(
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(Capture())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing"
+            try:
+                ttf.TimeSeriesTable.open(str(missing))
+            except ttf.TimeseriesTableError as error:
+                error_message = str(error)
+            else:
+                raise AssertionError("opening a missing table unexpectedly succeeded")
+
+        assert not any(record.levelno >= logging.ERROR for record in records)
+        assert all(error_message not in record.getMessage() for record in records)
+        """
+    )
