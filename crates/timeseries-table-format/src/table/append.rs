@@ -104,9 +104,10 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
     if let Err(error) = result {
         let outcome = if matches!(
             error,
-            TableError::TransactionLog {
-                source: CommitError::AmbiguousOutcome { .. },
-            }
+            TableError::AppendCommitAmbiguous { .. }
+                | TableError::TransactionLog {
+                    source: CommitError::AmbiguousOutcome { .. },
+                }
         ) {
             "ambiguous"
         } else {
@@ -841,13 +842,14 @@ impl TimeSeriesTable {
                     data_guard.disarm();
                     Ok(version)
                 }
-                Err(
-                    error @ TableError::TransactionLog {
-                        source: CommitError::AmbiguousOutcome { .. },
-                    },
-                ) => {
+                Err(TableError::TransactionLog {
+                    source: source @ CommitError::AmbiguousOutcome { .. },
+                }) => {
                     data_guard.disarm();
-                    Err(error)
+                    Err(TableError::AppendCommitAmbiguous {
+                        segment_path: relative_path,
+                        source,
+                    })
                 }
                 Err(source) => {
                     let error = self
@@ -1562,6 +1564,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_stream_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        let loser_state_before = loser.state().clone();
+
+        winner
+            .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+            .await?;
+        let data_before = data_files(temp.path())?;
+        let coverage_before = coverage_files(temp.path())?;
+
+        let error = loser
+            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .await
+            .expect_err("stale streaming append must conflict");
+
+        assert!(matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::Conflict {
+                    expected: 1,
+                    found: 2,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(loser.state(), &loser_state_before);
+        assert_eq!(data_files(temp.path())?, data_before);
+        assert_eq!(coverage_files(temp.path())?, coverage_before);
+        assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .next()
+                .map(|segment| { temp.path().join(&segment.path) }),
+            data_before.first().cloned()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let commit_path = temp.path().join(layout::commit_rel_path(2));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
+        let capture = TraceCapture::default();
+
+        let error = capture
+            .run(table.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?))
+            .await
+            .expect_err("failed commit cleanup must be ambiguous");
+        let TableError::AppendCommitAmbiguous {
+            segment_path,
+            source,
+        } = error
+        else {
+            panic!("unexpected error: {error}");
+        };
+
+        assert!(matches!(source, CommitError::AmbiguousOutcome { .. }));
+        assert!(segment_path.starts_with("data/"));
+        assert!(temp.path().join(&segment_path).is_file());
+        assert_eq!(
+            data_files(temp.path())?,
+            vec![temp.path().join(&segment_path)]
+        );
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(commit_path.exists());
+        assert_eq!(coverage_files(temp.path())?.len(), 2);
+        let append_span = capture
+            .spans()
+            .into_iter()
+            .find(|span| span.name == "table.append")
+            .expect("table.append span");
+        assert_eq!(append_span.fields.get("segment_path"), Some(&segment_path));
+        assert_eq!(
+            append_span.fields.get("outcome").map(String::as_str),
+            Some("ambiguous")
+        );
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1);
+        assert!(reopened.state().segments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_conflict_reports_every_failed_cleanup_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        winner
+            .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+            .await?;
+        let data_before = data_files(temp.path())?;
+        let coverage_before = coverage_files(temp.path())?;
+
+        for dir in [
+            Path::new("data"),
+            Path::new(layout::SEGMENT_COVERAGE_DIR),
+            Path::new(layout::TABLE_SNAPSHOT_DIR),
+        ] {
+            crate::storage::inject_cleanup_failure(temp.path().join(dir));
+        }
+        let error = loser
+            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .await
+            .expect_err("conflict cleanup failures must be reported");
+        let message = error.to_string();
+
+        assert!(message.contains("Commit conflict"));
+        let data_after = data_files(temp.path())?;
+        assert_eq!(data_after.len(), data_before.len() + 1);
+        let coverage_after = coverage_files(temp.path())?;
+        assert_eq!(coverage_after.len(), coverage_before.len() + 2);
+        let mut failed_paths = data_after
+            .iter()
+            .filter(|path| !data_before.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        failed_paths.extend(
+            coverage_after
+                .keys()
+                .filter(|path| !coverage_before.contains_key(*path))
+                .map(|path| temp.path().join(path)),
+        );
+        for path in failed_paths {
+            assert!(
+                message.contains(
+                    path.file_name()
+                        .expect("failed cleanup filename")
+                        .to_str()
+                        .expect("UTF-8 cleanup filename")
+                ),
+                "missing cleanup diagnostic for {}",
+                path.display()
+            );
+        }
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_stream_validates_schema_before_creating_data() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
@@ -1693,6 +1854,18 @@ mod tests {
                 }
             }
         }
+        Ok(files)
+    }
+
+    fn data_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+        let dir = root.join("data");
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = std::fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        files.sort();
         Ok(files)
     }
 

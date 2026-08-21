@@ -110,6 +110,19 @@ pub enum TableError {
         source: ParquetError,
     },
 
+    /// A streaming append may have committed, so its generated data path must
+    /// be preserved until the caller resolves the transaction outcome.
+    #[snafu(display(
+        "Append commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
+    ))]
+    AppendCommitAmbiguous {
+        /// Generated table-relative Parquet path that was preserved.
+        segment_path: String,
+        /// Ambiguous transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
+    },
+
     /// Append failed and its provisional external Parquet copy could not be removed.
     #[snafu(display(
         "Append failed: {source}; failed to remove provisional Parquet copy at {path}: {cleanup_error}"
