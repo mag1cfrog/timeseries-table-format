@@ -281,29 +281,24 @@ impl TimeSeriesTable {
                 r.set_context("relative_path", &relative_path);
             }
             let version = self
-                .append_parquet_segment_file(&relative_path, report, "external_path")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    report,
+                    "external_path",
+                    prepared_guard.as_mut(),
+                )
                 .await?;
             Ok((version, relative_path))
         }
         .await;
 
         match append_result {
-            Ok(result) => {
-                if let Some(guard) = prepared_guard.as_mut() {
-                    guard.disarm();
-                }
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(
                 error @ TableError::TransactionLog {
                     source: CommitError::AmbiguousOutcome { .. },
                 },
-            ) => {
-                if let Some(guard) = prepared_guard.as_mut() {
-                    guard.disarm();
-                }
-                Err(error)
-            }
+            ) => Err(error),
             Err(source) if prepared.created => {
                 let cleanup =
                     storage::remove_file(self.location().as_ref(), &prepared.relative_path).await;
@@ -328,6 +323,7 @@ impl TimeSeriesTable {
         relative_path: &str,
         mut report: Option<&mut AppendReportBuilder>,
         source_mode: &'static str,
+        mut owned_data_guard: Option<&mut storage::FileCleanupGuard>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -606,11 +602,17 @@ impl TimeSeriesTable {
             .await
         {
             Ok(version) => {
+                if let Some(guard) = owned_data_guard.as_mut() {
+                    guard.disarm();
+                }
                 segment_sidecar_guard.disarm();
                 snapshot_sidecar_guard.disarm();
                 version
             }
             Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
+                if let Some(guard) = owned_data_guard.as_mut() {
+                    guard.disarm();
+                }
                 segment_sidecar_guard.disarm();
                 snapshot_sidecar_guard.disarm();
                 return Err(TableError::TransactionLog { source });
@@ -758,22 +760,21 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .append_parquet_segment_file(&relative_path, None, "arrow_stream")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    None,
+                    "arrow_stream",
+                    Some(&mut data_guard),
+                )
                 .await
             {
-                Ok(version) => {
-                    data_guard.disarm();
-                    Ok(version)
-                }
+                Ok(version) => Ok(version),
                 Err(TableError::TransactionLog {
                     source: source @ CommitError::AmbiguousOutcome { .. },
-                }) => {
-                    data_guard.disarm();
-                    Err(TableError::AppendCommitAmbiguous {
-                        segment_path: relative_path,
-                        source,
-                    })
-                }
+                }) => Err(TableError::AppendCommitAmbiguous {
+                    segment_path: relative_path,
+                    source,
+                }),
                 Err(source) => {
                     let error = self
                         .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
@@ -810,7 +811,7 @@ impl TimeSeriesTable {
         let result = async {
             let relative_path = self.normalize_new_segment_path(relative_path).await?;
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            self.append_parquet_segment_file(&relative_path, None, "table_relative")
+            self.append_parquet_segment_file(&relative_path, None, "table_relative", None)
                 .await
         }
         .await;
@@ -909,7 +910,12 @@ impl TimeSeriesTable {
             let mut report = AppendReportBuilder::new();
             report.set_context("relative_path", &relative_path);
             let version = self
-                .append_parquet_segment_file(&relative_path, Some(&mut report), "table_relative")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    Some(&mut report),
+                    "table_relative",
+                    None,
+                )
                 .await?;
             Ok((version, report.finish()))
         }
@@ -945,6 +951,7 @@ mod tests {
         datatypes::{DataType, Field, Fields, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
     };
+    use futures::FutureExt;
     use parquet::arrow::ArrowWriter;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::cell::Cell;
@@ -956,6 +963,26 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Weak};
     use tempfile::TempDir;
+    use tracing::{Event, Subscriber, instrument::WithSubscriber};
+    use tracing_subscriber::{
+        Layer,
+        layer::{Context, SubscriberExt},
+    };
+
+    #[derive(Clone, Copy)]
+    struct PanicOnAppendEvent;
+
+    impl<S: Subscriber> Layer<S> for PanicOnAppendEvent {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().name() == "table.append" {
+                panic!("injected post-commit append observer panic");
+            }
+        }
+    }
+
+    fn panic_on_append_dispatch() -> tracing::Dispatch {
+        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnAppendEvent))
+    }
 
     #[derive(Default)]
     struct ReaderObservations {
@@ -1451,6 +1478,70 @@ mod tests {
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state().version, 1);
         assert!(reopened.state().segments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_commit_observer_panic_preserves_owned_data_files() -> TestResult {
+        let streamed_root = TempDir::new()?;
+        let streamed_location = TableLocation::local(streamed_root.path());
+        let mut streamed_table =
+            TimeSeriesTable::create(streamed_location.clone(), make_basic_table_meta()).await?;
+        let callsite_guard = panic_on_append_dispatch();
+        let outcome = std::panic::AssertUnwindSafe(
+            streamed_table
+                .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+                .with_subscriber(panic_on_append_dispatch()),
+        )
+        .catch_unwind()
+        .await;
+        drop(callsite_guard);
+        assert!(outcome.is_err());
+        let reopened = TimeSeriesTable::open(streamed_location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .all(|segment| streamed_root.path().join(&segment.path).is_file())
+        );
+
+        let copied_root = TempDir::new()?;
+        let copied_location = TableLocation::local(copied_root.path());
+        let mut copied_table =
+            TimeSeriesTable::create(copied_location.clone(), make_basic_table_meta()).await?;
+        let external_root = TempDir::new()?;
+        let external_path = external_root.path().join("external.parquet");
+        write_test_parquet(
+            &external_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 0,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )?;
+        let callsite_guard = panic_on_append_dispatch();
+        let outcome = std::panic::AssertUnwindSafe(
+            copied_table
+                .append_parquet_from_path(&external_path)
+                .with_subscriber(panic_on_append_dispatch()),
+        )
+        .catch_unwind()
+        .await;
+        drop(callsite_guard);
+        assert!(outcome.is_err());
+        let reopened = TimeSeriesTable::open(copied_location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .all(|segment| copied_root.path().join(&segment.path).is_file())
+        );
         Ok(())
     }
 
