@@ -1,3 +1,6 @@
+import gc
+import threading
+import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -233,3 +236,79 @@ def test_append_overlap_preserves_exception_type_and_table_root(tmp_path):
     assert getattr(excinfo.value, "table_root", None) == root
     assert table.version() == 2
     assert _append_artifacts(root) == append_artifacts
+
+
+@pytest.mark.parametrize("fail_after_first", [False, True])
+def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
+    testing = _testing_module()
+    root = tmp_path / "table"
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="x",
+        index_type="int64",
+        bucket_width=1,
+    )
+    source, counter = testing._test_append_release_counted_stream(
+        fail_after_first=fail_after_first
+    )
+
+    if fail_after_first:
+        with pytest.raises(
+            ttf.TimeseriesTableError, match="test append stream failure"
+        ):
+            table.append(source)
+        assert table.version() == 1
+        assert _append_artifacts(str(root)) == []
+    else:
+        assert table.append(source) == 2
+
+    assert counter.count == 1
+    del source
+    gc.collect()
+    assert counter.count == 1
+
+
+def test_append_releases_gil_while_consuming_slow_native_stream(tmp_path):
+    testing = _testing_module()
+    duration_ms = 500
+
+    def count_while(function) -> int:
+        ready = threading.Event()
+        stop = threading.Event()
+        counter = [0]
+
+        def count():
+            ready.set()
+            while not stop.is_set():
+                counter[0] += 1
+
+        thread = threading.Thread(target=count)
+        thread.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            function()
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        return counter[0]
+
+    baseline = count_while(lambda: time.sleep(duration_ms / 1000))
+    root = tmp_path / "table"
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="value",
+        index_type="int64",
+        bucket_width=1,
+    )
+    source = testing._test_sql_reader_delayed_batches(
+        batch_count=5,
+        rows_per_batch=1,
+        delay_millis=duration_ms // 5,
+    )
+
+    during_append = count_while(lambda: table.append(source))
+
+    assert table.version() == 2
+    assert baseline > 0
+    assert during_append >= max(1, int(baseline * 0.2))

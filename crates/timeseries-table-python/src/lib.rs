@@ -1877,6 +1877,89 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         RecordBatch::try_new(schema.clone(), vec![array])
     }
 
+    #[cfg(feature = "test-utils")]
+    #[pyclass(name = "_AppendStreamReleaseCounter")]
+    struct AppendStreamReleaseCounter {
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[pymethods]
+    impl AppendStreamReleaseCounter {
+        #[getter]
+        fn count(&self) -> usize {
+            self.count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Test-only helper: return a native stream whose reader drop count is observable.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    #[pyo3(signature = (*, fail_after_first))]
+    fn _test_append_release_counted_stream(
+        py: Python<'_>,
+        fail_after_first: bool,
+    ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ReleaseCountingReader {
+            schema: SchemaRef,
+            batch: Option<RecordBatch>,
+            fail_after_first: bool,
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Iterator for ReleaseCountingReader {
+            type Item = Result<RecordBatch, ArrowError>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if let Some(batch) = self.batch.take() {
+                    return Some(Ok(batch));
+                }
+                if std::mem::take(&mut self.fail_after_first) {
+                    return Some(Err(ArrowError::CDataInterface(
+                        "test append stream failure".to_string(),
+                    )));
+                }
+                None
+            }
+        }
+
+        impl RecordBatchReader for ReleaseCountingReader {
+            fn schema(&self) -> SchemaRef {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        impl Drop for ReleaseCountingReader {
+            fn drop(&mut self) {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = make_test_i64_batch(&schema, 1, 2)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let stream = FFI_ArrowArrayStream::new(Box::new(ReleaseCountingReader {
+            schema,
+            batch: Some(batch),
+            fail_after_first,
+            count: Arc::clone(&count),
+        }));
+        let capsule = PyCapsule::new_with_value(py, stream, c"arrow_array_stream")?;
+        let source = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: Some(capsule.into_any().unbind()),
+            },
+        )?;
+        let counter = Py::new(py, AppendStreamReleaseCounter { count })?;
+
+        Ok((source, counter))
+    }
+
     /// Test-only helper: return a reader that yields one batch, then raises a mid-stream error.
     #[cfg(feature = "test-utils")]
     #[pyfunction]
@@ -2302,6 +2385,11 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             )?)?;
             testing.add_function(pyo3::wrap_pyfunction!(
                 _test_sql_reader_midstream_error,
+                py
+            )?)?;
+            testing.add_class::<AppendStreamReleaseCounter>()?;
+            testing.add_function(pyo3::wrap_pyfunction!(
+                _test_append_release_counted_stream,
                 py
             )?)?;
             testing.add_function(pyo3::wrap_pyfunction!(
