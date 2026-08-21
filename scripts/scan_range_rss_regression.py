@@ -13,17 +13,10 @@ import tempfile
 from pathlib import Path
 from typing import TypedDict
 
-from append_rss_regression import (
-    GNU_TIME,
-    MIB,
-    REPO_ROOT,
-    parse_max_rss_bytes,
-    positive_int,
-    require_bounded_rss,
-    write_summary,
-)
-
-
+MIB = 1024 * 1024
+MAX_RSS_LABEL = "Maximum resident set size (kbytes)"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GNU_TIME = Path("/usr/bin/time")
 DEFAULT_SMALL_ROW_GROUPS = 32
 DEFAULT_LARGE_ROW_GROUPS = 256
 DEFAULT_ROWS_PER_GROUP = 4_096
@@ -40,6 +33,57 @@ class CaseMeasurement(TypedDict):
     scan: dict[str, object]
     peak_rss_bytes: int
     command: str
+
+
+def parse_max_rss_bytes(time_output: str) -> int:
+    """Extract GNU time's peak RSS value and convert KiB to bytes."""
+    for line in time_output.splitlines():
+        label, separator, raw_value = line.partition(":")
+        if label.strip() != MAX_RSS_LABEL:
+            continue
+        if not separator:
+            break
+        try:
+            rss_kib = int(raw_value.strip())
+        except ValueError as error:
+            raise ValueError(
+                f"invalid {MAX_RSS_LABEL}: {raw_value.strip()!r}"
+            ) from error
+        if rss_kib <= 0:
+            raise ValueError(f"invalid {MAX_RSS_LABEL}: {rss_kib}")
+        return rss_kib * 1024
+
+    raise ValueError(f"missing {MAX_RSS_LABEL}")
+
+
+def require_bounded_rss(
+    small_rss_bytes: int, large_rss_bytes: int, max_delta_bytes: int
+) -> int:
+    """Return the signed RSS delta, failing only when it exceeds the limit."""
+    if min(small_rss_bytes, large_rss_bytes, max_delta_bytes) < 0:
+        raise ValueError("RSS values and maximum delta must be non-negative")
+
+    delta_bytes = large_rss_bytes - small_rss_bytes
+    if delta_bytes > max_delta_bytes:
+        raise RuntimeError(
+            f"peak RSS grew by {delta_bytes} bytes; limit is {max_delta_bytes} bytes"
+        )
+    return delta_bytes
+
+
+def write_summary(summary: dict[str, object], output_path: Path | None) -> None:
+    encoded = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(encoded, encoding="utf-8")
+    sys.stdout.write(encoded)
+
+
+def positive_int(raw: str) -> int:
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return value
 
 
 def require_linux_dependencies() -> None:
