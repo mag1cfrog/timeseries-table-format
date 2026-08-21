@@ -263,7 +263,40 @@ class TimeSeriesTable:
         | pyarrow.RecordBatchReader
         | _ArrowStreamExportable,
     ) -> int:
-        """Append an Arrow source and return the committed table version."""
+        """Append Arrow data and return the committed table version.
+
+        Parameters
+        ----------
+        source:
+            A `pyarrow.RecordBatch`, `pyarrow.Table`, `pyarrow.RecordBatchReader`, or another
+            object implementing `__arrow_c_stream__`. File paths, pandas objects, NumPy arrays,
+            mappings, row iterables, and arbitrary batch iterables are not converted implicitly.
+
+        Returns
+        -------
+        int
+            The newly committed table version.
+
+        Notes
+        -----
+        Arrow streams are consumed lazily without staging or collecting the complete input in
+        Python. `RecordBatch` and `Table` sources remain usable after append; readers and other
+        single-use streams are consumed. After importing the stream, append releases the GIL.
+
+        Raises
+        ------
+        TypeError
+            If `source` is not one of the supported Arrow forms.
+        ValueError
+            If the Arrow C Stream exporter or capsule is invalid.
+        CoverageOverlapError
+            If incoming coverage overlaps committed coverage for the same entity.
+        SchemaMismatchError
+            If the Arrow schema does not match the table's established schema.
+        TimeseriesTableError
+            For other table, storage, transaction, or stream failures. The exception includes a
+            `table_root` attribute.
+        """
         ...
 
     def optimize(self) -> OptimizeReport:
