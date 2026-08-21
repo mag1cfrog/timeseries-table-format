@@ -1415,6 +1415,74 @@ async fn streaming_append_round_trips_composite_entity_identity_order() -> TestR
 }
 
 #[tokio::test]
+async fn streaming_append_randomized_partitions_preserve_exact_rows() -> TestResult {
+    for case_seed in [1_u64, 0x1234_5678, 0xdead_beef, u64::MAX] {
+        let mut random = case_seed;
+        let mut rows = (0..128)
+            .map(|row| {
+                (
+                    i64::from(row) * 60_000,
+                    if row % 2 == 0 { "A" } else { "B" },
+                    f64::from(row) + 0.25,
+                )
+            })
+            .collect::<Vec<_>>();
+        for end in (1..rows.len()).rev() {
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            rows.swap(end, random as usize % (end + 1));
+        }
+
+        let empty = make_append_batch(&[])?;
+        let mut batches = vec![empty.clone(), empty.clone()];
+        let mut offset = 0;
+        while offset < rows.len() {
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            if random & 3 == 0 {
+                batches.push(empty.clone());
+            }
+            let end = (offset + 1 + random as usize % 19).min(rows.len());
+            batches.push(make_append_batch(&rows[offset..end])?);
+            offset = end;
+        }
+        batches.extend([empty.clone(), empty]);
+
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
+        assert_eq!(table.append(batches).await?, 2, "seed {case_seed:#x}");
+
+        drop(table);
+        let reopened = Arc::new(TimeSeriesTable::open(location).await?);
+        assert_eq!(reopened.state().version, 2, "seed {case_seed:#x}");
+        assert_eq!(reopened.state().segments.len(), 1, "seed {case_seed:#x}");
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>(),
+            128,
+            "seed {case_seed:#x}"
+        );
+
+        let ctx = SessionContext::new();
+        let _provider = register_provider(&ctx, reopened)?;
+        let result =
+            collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts, symbol").await?;
+        let actual =
+            arrow_select::concat::concat_batches(&first_batch(&result)?.schema(), &result)?;
+        rows.sort_by_key(|row| row.0);
+        assert_eq!(actual, make_append_batch(&rows)?, "seed {case_seed:#x}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn count_star_returns_all_rows() -> TestResult {
     let tmp = TempDir::new()?;
     let table = create_two_segment_table(&tmp).await?;
