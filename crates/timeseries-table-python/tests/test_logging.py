@@ -213,6 +213,36 @@ def test_operation_exception_is_not_duplicated_as_an_error_record():
     )
 
 
+def test_logging_handler_failure_does_not_fail_committed_operation():
+    _run_isolated(
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        class BrokenHandler(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("log sink failed")
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(BrokenHandler())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        with tempfile.TemporaryDirectory() as directory:
+            table = ttf.TimeSeriesTable.create(
+                table_root=str(Path(directory) / "table"),
+                index_column="ts",
+                index_type="int64",
+                bucket_width=10,
+            )
+            assert table.version() == 1
+        """
+    )
+
+
 def test_native_records_exclude_sensitive_operation_inputs():
     _run_isolated(
         """

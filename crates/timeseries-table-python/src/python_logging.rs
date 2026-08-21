@@ -3,7 +3,7 @@
 use std::{borrow::Cow, sync::OnceLock};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
-use pyo3::{PyResult, Python, exceptions::PyRuntimeError};
+use pyo3::{PyErr, PyResult, Python, exceptions::PyRuntimeError};
 use pyo3_log::{Caching, Logger, ResetHandle};
 
 const LOGGER_ROOT: &str = "timeseries_table_format";
@@ -42,9 +42,16 @@ impl Log for PythonLogger {
             .line(record.line())
             .build();
 
-        // Logging may outlive the Python objects that initiated background native work.
-        // Drop records once the interpreter can no longer be attached safely.
-        let _ = Python::try_attach(|_| self.inner.log(&record));
+        // Preserve an existing exception, but contain handler failures so logging cannot turn a
+        // committed operation into a reported failure. During shutdown, drop the record instead.
+        let _ = Python::try_attach(|py| {
+            let pending_error = PyErr::take(py);
+            self.inner.log(&record);
+            let _ = PyErr::take(py);
+            if let Some(error) = pending_error {
+                error.restore(py);
+            }
+        });
     }
 
     fn flush(&self) {
