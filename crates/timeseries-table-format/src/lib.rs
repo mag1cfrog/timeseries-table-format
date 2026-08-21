@@ -33,9 +33,10 @@
 //! diagnostics are forwarded to the standard [`log`](https://docs.rs/log)
 //! facade for applications that install a logger.
 //!
-//! Diagnostics such as `coverage.recover` exclude SQL, entity identities,
-//! record values, complete schemas, credentials, and environment variables.
-//! DataFusion remains the source of query execution metrics.
+//! The initial operation names include `table.open`, `table.create`,
+//! `table.refresh`, and `coverage.recover`. Diagnostics exclude SQL, entity
+//! identities, record values, complete schemas, credentials, and environment
+//! variables. DataFusion remains the source of query execution metrics.
 
 pub mod coverage;
 #[cfg(feature = "datafusion")]
