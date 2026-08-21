@@ -24,6 +24,9 @@ build/
 dist/
 **/*.egg-info/
 
+# Generated documentation
+docs-site/site/
+
 # maturin wheel output (note: `target/` is already ignored above)
 target/wheels/
 

@@ -26,6 +26,10 @@ columns remain ordinary SQL columns for filtering and grouping.
 `TimeSeriesTable.optimize()` returns this immutable report for both rewrites and successful
 no-ops.
 
+Optimization may change physical row order. It preserves logical rows, schema, and per-entity
+coverage, but it does not combine small files or accept a target file size. Replaced source files
+may remain on disk until a future vacuum operation removes unreferenced files.
+
 ::: timeseries_table_format.OptimizeReport
     options:
       members: true

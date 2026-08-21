@@ -82,4 +82,5 @@ nav:
       - TimeSeriesTable: reference/timeseries_table.md
       - Notebook display: reference/notebook_display.md
       - Exceptions: reference/exceptions.md
+  - Contributing: contributing.md
   - Help and troubleshooting: troubleshooting.md

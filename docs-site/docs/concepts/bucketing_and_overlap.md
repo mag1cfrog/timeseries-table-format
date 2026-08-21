@@ -13,6 +13,10 @@ the ordered index.
 The Parquet column must match the configured Arrow type exactly. The library does not infer
 timestamps from integers or convert between signed and unsigned values.
 
+Parquet rows do not need to be sorted by the ordered index before append. The term "ordered
+index" describes the chronological domain used for coverage, not the physical order of input
+rows.
+
 ## Buckets
 
 Buckets drive coverage and overlap checks; they do not resample data.
@@ -30,6 +34,8 @@ excluded, written `[start, end)`.
 `entity_columns` is an ordered list of columns that identifies independent time series inside one
 logical table. For `entity_columns=["exchange", "symbol"]`, the identity `("NASDAQ", "NVDA")`
 is distinct from `("NYSE", "NVDA")`. The configured column order defines the composite identity.
+Each entity column name must be unique, and the ordered-index column cannot also be an entity
+column.
 
 Entity columns support Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
 String and large-string values share one canonical string representation. Integer identities keep
