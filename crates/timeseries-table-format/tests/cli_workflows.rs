@@ -4,7 +4,10 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
-use std::{io, result::Result as StdResult};
+use std::{
+    io::{self, Seek, SeekFrom, Write},
+    result::Result as StdResult,
+};
 
 use arrow::array::{
     ArrayRef, Float64Builder, Int64Array, StringArray, StringBuilder, TimestampMillisecondArray,
@@ -14,6 +17,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::file::properties::WriterProperties;
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use tempfile::TempDir;
 use timeseries_table_format::{
     metadata::{
@@ -978,6 +982,57 @@ fn cli_append_corrupt_source_fails_before_transaction() -> StdResult<(), Box<dyn
     assert_eq!(std::fs::read(&source)?, source_before);
     assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
     assert!(!table_root.join("data").exists());
+    Ok(())
+}
+
+#[test]
+fn cli_append_late_decode_failure_leaves_no_partial_append()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let source = tmp.path().join("late-corruption.parquet");
+    let properties = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::UNCOMPRESSED)
+        .set_dictionary_enabled(false)
+        .set_max_row_group_row_count(Some(2_048))
+        .build();
+    let rows = (0..=2_048)
+        .map(|value| (i64::from(value) * 60_000, "A", f64::from(value)))
+        .collect::<Vec<_>>();
+    write_parquet_rows_with_properties(&source, &rows, Some(properties))?;
+
+    let reader = SerializedFileReader::new(std::fs::File::open(&source)?)?;
+    let second_page = reader.metadata().row_group(1).column(0).data_page_offset() as u64;
+    drop(reader);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)?;
+    file.seek(SeekFrom::Start(second_page))?;
+    file.write_all(&[0xFF; 16])?;
+    file.flush()?;
+    drop(file);
+
+    let source_before = std::fs::read(&source)?;
+    let state_before = open_table_blocking(&table_root)?.state().clone();
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Arrow batch source error"));
+    assert!(stderr.contains(&source.display().to_string()));
+    assert!(stderr.contains(&table_root.display().to_string()));
+    assert_eq!(std::fs::read(&source)?, source_before);
+    assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
+    let data_dir = table_root.join("data");
+    assert!(!data_dir.exists() || std::fs::read_dir(data_dir)?.next().is_none());
     Ok(())
 }
 
