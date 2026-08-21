@@ -12,13 +12,17 @@ use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
 use crate::storage::{
-    BackendError, OtherIoSnafu, StorageLocation, StorageResult, TempFileGuard, create_new_file,
+    BackendError, FileCleanupGuard, OtherIoSnafu, StorageLocation, StorageResult, create_new_file,
     create_parent_dir, join_local,
 };
 
 #[cfg(test)]
 static FINISH_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+static WRITE_FAILURES: LazyLock<Mutex<Vec<(PathBuf, usize)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 #[cfg(test)]
 pub(crate) fn inject_output_finish_failure(path: PathBuf) {
@@ -29,11 +33,47 @@ pub(crate) fn inject_output_finish_failure(path: PathBuf) {
 }
 
 #[cfg(test)]
-fn take_output_finish_failure(path: &Path) -> bool {
-    FINISH_FAILURES
+pub(crate) fn inject_output_write_failure(path_prefix: PathBuf, write_number: usize) {
+    assert!(write_number > 0);
+    WRITE_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(path)
+        .push((path_prefix, write_number));
+}
+
+#[cfg(test)]
+fn take_output_finish_failure(path: &Path) -> bool {
+    let mut failures = FINISH_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(target) = failures
+        .iter()
+        .find(|target| path.starts_with(target))
+        .cloned()
+    else {
+        return false;
+    };
+    failures.remove(&target)
+}
+
+#[cfg(test)]
+fn take_output_write_failure(path: &Path) -> bool {
+    let mut failures = WRITE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(index) = failures
+        .iter()
+        .position(|(prefix, _)| path.starts_with(prefix))
+    else {
+        return false;
+    };
+    if failures[index].1 == 1 {
+        failures.remove(index);
+        true
+    } else {
+        failures[index].1 -= 1;
+        false
+    }
 }
 
 enum LocalFinish {
@@ -46,7 +86,7 @@ struct LocalSink {
     path: PathBuf,
     finish: LocalFinish,
     writer: io::BufWriter<std::fs::File>,
-    guard: TempFileGuard,
+    guard: FileCleanupGuard,
 }
 
 impl LocalSink {
@@ -64,7 +104,7 @@ impl LocalSink {
             })?;
 
         let writer = io::BufWriter::new(file);
-        let guard = TempFileGuard::new(tmp_path.clone());
+        let guard = FileCleanupGuard::new(tmp_path.clone());
 
         Ok(Self {
             path: tmp_path,
@@ -76,9 +116,9 @@ impl LocalSink {
 
     async fn open_new(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
         let path = join_local(location, rel_path)?;
-        let file = create_new_file(&path).await?.into_std().await;
+        let file = create_new_file(&path).await?;
         let writer = io::BufWriter::new(file);
-        let guard = TempFileGuard::new(path.clone());
+        let guard = FileCleanupGuard::new(path.clone());
         Ok(Self {
             path,
             finish: LocalFinish::Keep,
@@ -89,6 +129,14 @@ impl LocalSink {
 
     fn writer(&mut self) -> &mut dyn Write {
         &mut self.writer
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if take_output_write_failure(&self.path) {
+            return Err(io::Error::other("injected output write failure"));
+        }
+        self.writer.write(bytes)
     }
 
     async fn finish(&mut self) -> StorageResult<()> {
@@ -159,6 +207,18 @@ impl OutputSink {
         match self.inner {
             OutputSinkInner::Local(mut s) => s.finish().await,
         }
+    }
+}
+
+impl Write for OutputSink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match &mut self.inner {
+            OutputSinkInner::Local(s) => s.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer().flush()
     }
 }
 

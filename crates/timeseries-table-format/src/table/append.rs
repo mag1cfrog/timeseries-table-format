@@ -11,6 +11,12 @@
 use std::path::Path;
 use std::time::Instant;
 
+use arrow::{
+    array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
+    datatypes::{Schema, SchemaRef},
+    error::ArrowError,
+};
+use parquet::arrow::ArrowWriter as ParquetArrowWriter;
 use snafu::prelude::*;
 use uuid::Uuid;
 
@@ -31,6 +37,7 @@ use crate::{
         logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
     },
     metadata::{
+        logical_schema::LogicalSchema,
         schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
         segments::SegmentEntityLayout,
     },
@@ -42,11 +49,11 @@ use super::{
     TimeSeriesTable,
     append_report::{AppendReport, AppendReportBuilder},
     error::{
-        CoverageBucketSnafu, CoverageOverlapSnafu, DuplicateSegmentPathSnafu,
-        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
+        AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
+        DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
         EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
-        MissingCanonicalSchemaSnafu, SegmentCoverageSnafu, SegmentMetaSnafu,
-        SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
+        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
+        SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
     },
 };
 
@@ -94,9 +101,10 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
     if let Err(error) = result {
         let outcome = if matches!(
             error,
-            TableError::TransactionLog {
-                source: CommitError::AmbiguousOutcome { .. },
-            }
+            TableError::AppendCommitAmbiguous { .. }
+                | TableError::TransactionLog {
+                    source: CommitError::AmbiguousOutcome { .. },
+                }
         ) {
             "ambiguous"
         } else {
@@ -106,16 +114,86 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
     }
 }
 
+/// Marker used to distinguish reader inputs from materialized batch inputs.
+///
+/// This type exists only to keep the blanket [`RecordBatchReader`]
+/// implementation disjoint from the direct batch implementations.
+#[doc(hidden)]
+pub struct RecordBatchReaderKind;
+
+/// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
+///
+/// Implementations preserve non-`Send` readers. The `Kind` parameter is an
+/// inference-only coherence marker and should not normally be specified by
+/// callers.
+pub trait IntoBatchStream<Kind = RecordBatchReaderKind> {
+    /// Reader produced from this source.
+    type Reader: RecordBatchReader;
+
+    /// Convert this source without collecting its batches.
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError>;
+}
+
+impl<R> IntoBatchStream<RecordBatchReaderKind> for R
+where
+    R: RecordBatchReader,
+{
+    type Reader = R;
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        Ok(self)
+    }
+}
+
+impl IntoBatchStream<ArrowRecordBatch> for ArrowRecordBatch {
+    type Reader = Box<dyn RecordBatchReader + Send>;
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        let schema = self.schema();
+        Ok(Box::new(RecordBatchIterator::new(
+            std::iter::once(Ok(self)),
+            schema,
+        )))
+    }
+}
+
+impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
+    type Reader = Box<dyn RecordBatchReader + Send>;
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        let schema = self
+            .first()
+            .map(ArrowRecordBatch::schema)
+            .ok_or(TableError::EmptyAppendSource)?;
+        Ok(Box::new(RecordBatchIterator::new(
+            self.into_iter().map(Ok::<_, ArrowError>),
+            schema,
+        )))
+    }
+}
+
+fn ensure_batch_schema(schema: &SchemaRef, batch: &ArrowRecordBatch) -> Result<(), TableError> {
+    if batch.schema() == *schema {
+        Ok(())
+    } else {
+        Err(TableError::AppendSource {
+            source: ArrowError::SchemaError(
+                "record batch schema does not match its reader schema".to_string(),
+            ),
+        })
+    }
+}
+
 impl TimeSeriesTable {
-    async fn rollback_created_sidecars(
+    async fn rollback_created_artifacts(
         &self,
-        created_sidecars: &[String],
+        created_paths: &[String],
         source: TableError,
     ) -> TableError {
         let mut cleanup_errors = Vec::new();
-        for path in created_sidecars.iter().rev() {
+        for path in created_paths.iter().rev() {
             if let Err(error) =
-                storage::remove_file(self.location().as_ref(), Path::new(path)).await
+                storage::remove_file_if_exists(self.location().as_ref(), Path::new(path)).await
             {
                 cleanup_errors.push(format!("{path}: {error}"));
             }
@@ -148,6 +226,31 @@ impl TimeSeriesTable {
         Ok(normalized)
     }
 
+    fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
+        ensure_existing_segments_have_coverage(&self.state)?;
+        let segment_schema = LogicalSchema::try_from_arrow_schema(schema).map_err(|source| {
+            TableError::AppendSource {
+                source: ArrowError::SchemaError(source.to_string()),
+            }
+        })?;
+        ensure_index_spec_matches_schema(&segment_schema, &self.index)
+            .context(SchemaCompatibilitySnafu)?;
+
+        match self.state.table_meta.logical_schema.as_ref() {
+            None if self.state.version == 1 => Ok(()),
+            None => MissingCanonicalSchemaSnafu {
+                version: self.state.version,
+            }
+            .fail(),
+            Some(table_schema) => {
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)
+            }
+        }?;
+
+        Ok(())
+    }
+
     async fn append_parquet_path_file(
         &mut self,
         parquet_path: &Path,
@@ -159,6 +262,17 @@ impl TimeSeriesTable {
             .await
             .context(StorageSnafu)?;
         let prepared_path = prepared.relative_path.to_string_lossy().into_owned();
+        let mut prepared_guard = if prepared.created {
+            let mut guard = storage::prepare_file_cleanup_guard(
+                self.location().as_ref(),
+                &prepared.relative_path,
+            )
+            .context(StorageSnafu)?;
+            guard.arm();
+            Some(guard)
+        } else {
+            None
+        };
 
         let append_result = async {
             let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
@@ -167,7 +281,12 @@ impl TimeSeriesTable {
                 r.set_context("relative_path", &relative_path);
             }
             let version = self
-                .append_parquet_segment_file(&relative_path, report, "external_path")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    report,
+                    "external_path",
+                    prepared_guard.as_mut(),
+                )
                 .await?;
             Ok((version, relative_path))
         }
@@ -181,8 +300,12 @@ impl TimeSeriesTable {
                 },
             ) => Err(error),
             Err(source) if prepared.created => {
-                match storage::remove_file(self.location().as_ref(), &prepared.relative_path).await
-                {
+                let cleanup =
+                    storage::remove_file(self.location().as_ref(), &prepared.relative_path).await;
+                if let Some(guard) = prepared_guard.as_mut() {
+                    guard.disarm();
+                }
+                match cleanup {
                     Ok(()) => Err(source),
                     Err(cleanup_error) => Err(TableError::ExternalParquetRollback {
                         path: prepared.relative_path.display().to_string(),
@@ -200,6 +323,7 @@ impl TimeSeriesTable {
         relative_path: &str,
         mut report: Option<&mut AppendReportBuilder>,
         source_mode: &'static str,
+        mut owned_data_guard: Option<&mut storage::FileCleanupGuard>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -418,15 +542,24 @@ impl TimeSeriesTable {
 
         let step_start = Instant::now();
         let mut created_sidecars = Vec::new();
+        let mut segment_sidecar_guard =
+            storage::prepare_file_cleanup_guard(self.location().as_ref(), Path::new(&seg_cov_path))
+                .context(StorageSnafu)?;
         write_coverage_sidecar_new_bytes(self.location(), Path::new(&seg_cov_path), &seg_cov_bytes)
             .await
             .map_err(|source| TableError::CoverageSidecar { source })?;
+        segment_sidecar_guard.arm();
         created_sidecars.push(seg_cov_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
         }
 
         let step_start = Instant::now();
+        let mut snapshot_sidecar_guard = storage::prepare_file_cleanup_guard(
+            self.location().as_ref(),
+            Path::new(&snapshot_path),
+        )
+        .context(StorageSnafu)?;
         if let Err(source) = write_coverage_sidecar_new_bytes(
             self.location(),
             Path::new(&snapshot_path),
@@ -435,10 +568,13 @@ impl TimeSeriesTable {
         .await
         {
             let error = TableError::CoverageSidecar { source };
-            return Err(self
-                .rollback_created_sidecars(&created_sidecars, error)
-                .await);
+            let error = self
+                .rollback_created_artifacts(&created_sidecars, error)
+                .await;
+            segment_sidecar_guard.disarm();
+            return Err(error);
         }
+        snapshot_sidecar_guard.arm();
         created_sidecars.push(snapshot_path.clone());
         if let Some(r) = report.as_mut() {
             r.push_step("write_snapshot_sidecar", step_start.elapsed(), Vec::new());
@@ -462,7 +598,13 @@ impl TimeSeriesTable {
         let step_start = Instant::now();
         let new_version = match self
             .log
-            .commit_with_expected_version(expected_version, actions)
+            .commit_with_path_preservation(expected_version, actions, || {
+                if let Some(guard) = owned_data_guard.as_mut() {
+                    guard.disarm();
+                }
+                segment_sidecar_guard.disarm();
+                snapshot_sidecar_guard.disarm();
+            })
             .await
         {
             Ok(version) => version,
@@ -471,9 +613,12 @@ impl TimeSeriesTable {
             }
             Err(source) => {
                 let error = TableError::TransactionLog { source };
-                return Err(self
-                    .rollback_created_sidecars(&created_sidecars, error)
-                    .await);
+                let error = self
+                    .rollback_created_artifacts(&created_sidecars, error)
+                    .await;
+                segment_sidecar_guard.disarm();
+                snapshot_sidecar_guard.disarm();
+                return Err(error);
             }
         };
         if let Some(r) = report.as_mut() {
@@ -528,6 +673,116 @@ impl TimeSeriesTable {
         Ok(new_version)
     }
 
+    /// Append Arrow record batches into one table-managed Parquet segment.
+    ///
+    /// Rows need not be ordered by the table's ordered index. The source is
+    /// consumed incrementally and is never collected by this method.
+    #[tracing::instrument(
+        name = "table.append",
+        level = "debug",
+        skip_all,
+        fields(
+            source_mode = "arrow_stream",
+            expected_version = self.state.version,
+            segment_path = tracing::field::Empty,
+            row_count = tracing::field::Empty,
+            file_size_bytes = tracing::field::Empty,
+            committed_version = tracing::field::Empty,
+            entity_layout = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
+    pub async fn append<S, Kind>(&mut self, source: S) -> Result<u64, TableError>
+    where
+        S: IntoBatchStream<Kind>,
+    {
+        let result = async {
+            let mut reader = source.into_batch_stream()?;
+            let schema = reader.schema();
+            self.validate_stream_schema(schema.as_ref())?;
+
+            let first_batch = loop {
+                let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
+                    return Err(TableError::EmptyAppendSource);
+                };
+                ensure_batch_schema(&schema, &batch)?;
+                if batch.num_rows() != 0 {
+                    break batch;
+                }
+                tokio::task::yield_now().await;
+            };
+
+            let relative_path = format!("data/{}.parquet", Uuid::new_v4());
+            tracing::Span::current().record("segment_path", relative_path.as_str());
+            let mut data_guard = storage::prepare_file_cleanup_guard(
+                self.location().as_ref(),
+                Path::new(&relative_path),
+            )
+            .context(StorageSnafu)?;
+            let sink =
+                storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
+                    .await
+                    .context(StorageSnafu)?;
+            let write_result = async {
+                let mut writer = ParquetArrowWriter::try_new(sink, schema.clone(), None)
+                    .context(AppendParquetSnafu)?;
+                writer.write(&first_batch).context(AppendParquetSnafu)?;
+                drop(first_batch);
+                tokio::task::yield_now().await;
+
+                for batch in reader {
+                    let batch = batch.context(AppendSourceSnafu)?;
+                    ensure_batch_schema(&schema, &batch)?;
+                    if batch.num_rows() != 0 {
+                        writer.write(&batch).context(AppendParquetSnafu)?;
+                    }
+                    drop(batch);
+                    tokio::task::yield_now().await;
+                }
+
+                let sink = writer.into_inner().context(AppendParquetSnafu)?;
+                sink.finish().await.context(StorageSnafu)
+            }
+            .await;
+            if let Err(source) = write_result {
+                let error = self
+                    .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
+                    .await;
+                data_guard.disarm();
+                return Err(error);
+            }
+            data_guard.arm();
+
+            match self
+                .append_parquet_segment_file(
+                    &relative_path,
+                    None,
+                    "arrow_stream",
+                    Some(&mut data_guard),
+                )
+                .await
+            {
+                Ok(version) => Ok(version),
+                Err(TableError::TransactionLog {
+                    source: source @ CommitError::AmbiguousOutcome { .. },
+                }) => Err(TableError::AppendCommitAmbiguous {
+                    segment_path: relative_path,
+                    source,
+                }),
+                Err(source) => {
+                    let error = self
+                        .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
+                        .await;
+                    data_guard.disarm();
+                    Err(error)
+                }
+            }
+        }
+        .await;
+        record_append_failure(&result);
+        result
+    }
+
     /// Append a Parquet segment using its canonical relative path as identity.
     ///
     /// Rows need not be ordered by the table's ordered index.
@@ -550,7 +805,7 @@ impl TimeSeriesTable {
         let result = async {
             let relative_path = self.normalize_new_segment_path(relative_path).await?;
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            self.append_parquet_segment_file(&relative_path, None, "table_relative")
+            self.append_parquet_segment_file(&relative_path, None, "table_relative", None)
                 .await
         }
         .await;
@@ -649,7 +904,12 @@ impl TimeSeriesTable {
             let mut report = AppendReportBuilder::new();
             report.set_context("relative_path", &relative_path);
             let version = self
-                .append_parquet_segment_file(&relative_path, Some(&mut report), "table_relative")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    Some(&mut report),
+                    "table_relative",
+                    None,
+                )
                 .await?;
             Ok((version, report.finish()))
         }
@@ -680,20 +940,1078 @@ mod tests {
     use arrow::{
         array::{
             ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
-            TimestampMillisecondArray, UInt64Array,
+            TimestampMillisecondArray, UInt64Array, new_null_array,
         },
-        datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit},
+        datatypes::{DataType, Field, Fields, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
     };
+    use futures::FutureExt;
     use parquet::arrow::ArrowWriter;
     use parquet::file::reader::{FileReader, SerializedFileReader};
+    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom, Write};
     use std::num::NonZeroU64;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::rc::Rc;
+    use std::sync::{Arc, Weak};
     use tempfile::TempDir;
+    use tracing::{Event, Subscriber, instrument::WithSubscriber, span::Id};
+    use tracing_subscriber::{
+        Layer,
+        layer::{Context, SubscriberExt},
+        registry::LookupSpan,
+    };
+
+    #[derive(Clone, Copy)]
+    enum PanicObservation {
+        AppendEvent,
+        CommitClose,
+    }
+
+    #[derive(Clone, Copy)]
+    struct PanicOnObservation(PanicObservation);
+
+    impl<S> Layer<S> for PanicOnObservation
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if matches!(self.0, PanicObservation::AppendEvent)
+                && event.metadata().name() == "table.append"
+            {
+                panic!("injected post-commit append observer panic");
+            }
+        }
+
+        fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+            if matches!(self.0, PanicObservation::CommitClose)
+                && ctx
+                    .metadata(&id)
+                    .is_some_and(|metadata| metadata.name() == "transaction.commit")
+            {
+                panic!("injected transaction commit close panic");
+            }
+        }
+    }
+
+    fn panic_on_observation_dispatch(observation: PanicObservation) -> tracing::Dispatch {
+        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnObservation(observation)))
+    }
+
+    #[derive(Default)]
+    struct ReaderObservations {
+        schema_calls: Cell<usize>,
+        next_calls: Cell<usize>,
+        next_before_schema: Cell<bool>,
+        previous_batch_alive: Cell<bool>,
+    }
+
+    struct InstrumentedReader {
+        schema: SchemaRef,
+        batches: std::vec::IntoIter<Result<RecordBatch, ArrowError>>,
+        observations: Rc<ReaderObservations>,
+        previous_array: Option<Weak<dyn arrow::array::Array>>,
+    }
+
+    impl InstrumentedReader {
+        fn new(
+            schema: SchemaRef,
+            batches: Vec<Result<RecordBatch, ArrowError>>,
+        ) -> (Self, Rc<ReaderObservations>) {
+            let observations = Rc::new(ReaderObservations::default());
+            (
+                Self {
+                    schema,
+                    batches: batches.into_iter(),
+                    observations: Rc::clone(&observations),
+                    previous_array: None,
+                },
+                observations,
+            )
+        }
+
+        fn one(batch: RecordBatch) -> Self {
+            let (reader, _) = Self::new(batch.schema(), vec![Ok(batch)]);
+            reader
+        }
+    }
+
+    impl Iterator for InstrumentedReader {
+        type Item = Result<RecordBatch, ArrowError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.observations
+                .next_calls
+                .set(self.observations.next_calls.get() + 1);
+            if self.observations.schema_calls.get() == 0 {
+                self.observations.next_before_schema.set(true);
+            }
+            if self
+                .previous_array
+                .as_ref()
+                .is_some_and(|array| array.strong_count() != 0)
+            {
+                self.observations.previous_batch_alive.set(true);
+            }
+
+            let next = self.batches.next();
+            if let Some(Ok(batch)) = &next {
+                self.previous_array = Some(Arc::downgrade(batch.column(0)));
+            }
+            next
+        }
+    }
+
+    impl RecordBatchReader for InstrumentedReader {
+        fn schema(&self) -> arrow::datatypes::SchemaRef {
+            self.observations
+                .schema_calls
+                .set(self.observations.schema_calls.get() + 1);
+            Arc::clone(&self.schema)
+        }
+    }
+
+    fn input_batch(values: Vec<i64>) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))])
+    }
+
+    fn time_series_batch(
+        timestamps: Vec<i64>,
+        symbols: Vec<&str>,
+        prices: Vec<f64>,
+    ) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(timestamps)),
+                Arc::new(StringArray::from(symbols)),
+                Arc::new(Float64Array::from(prices)),
+            ],
+        )
+    }
+
+    fn timestamp_only_meta() -> TableMeta {
+        TableMeta::new_time_series_with_schema(
+            IndexSpec {
+                column: "ts".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::Timestamp {
+                    bucket: TimeBucket::Minutes(1),
+                    timezone: None,
+                },
+            },
+            LogicalSchema::new(vec![LogicalField {
+                name: "ts".to_string(),
+                data_type: LogicalDataType::Timestamp {
+                    unit: LogicalTimestampUnit::Millis,
+                    timezone: None,
+                },
+                nullable: false,
+            }])
+            .expect("valid timestamp-only schema"),
+        )
+    }
+
+    fn timestamp_only_batch(row_count: usize) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from_iter_values(
+                (0..row_count).map(|value| value as i64),
+            ))],
+        )
+    }
+
+    #[tokio::test]
+    async fn lossy_schema_is_rejected_before_reading_or_creating_artifacts() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut meta = timestamp_only_meta();
+        meta.logical_schema = None;
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Int8, true),
+        ]));
+        let (reader, observations) = InstrumentedReader::new(schema, Vec::new());
+
+        assert!(matches!(
+            table.append(reader).await,
+            Err(TableError::AppendSource {
+                source: ArrowError::SchemaError(_)
+            })
+        ));
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    fn assert_batches<R>(reader: R, expected: &[RecordBatch]) -> TestResult
+    where
+        R: RecordBatchReader,
+    {
+        assert_eq!(reader.schema(), expected[0].schema());
+        let actual = reader.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn into_batch_stream_accepts_all_required_input_forms() -> TestResult {
+        let first = input_batch(vec![1, 2])?;
+        let second = input_batch(vec![3])?;
+
+        assert_batches(
+            first.clone().into_batch_stream()?,
+            std::slice::from_ref(&first),
+        )?;
+        assert_batches(
+            vec![first.clone(), second.clone()].into_batch_stream()?,
+            &[first.clone(), second.clone()],
+        )?;
+
+        let iterator = RecordBatchIterator::new(vec![Ok(first.clone())], first.schema());
+        assert_batches(iterator.into_batch_stream()?, std::slice::from_ref(&first))?;
+        assert_batches(
+            InstrumentedReader::one(first.clone()).into_batch_stream()?,
+            std::slice::from_ref(&first),
+        )?;
+
+        let boxed: Box<dyn RecordBatchReader> = Box::new(RecordBatchIterator::new(
+            vec![Ok(first.clone())],
+            first.schema(),
+        ));
+        assert_batches(boxed.into_batch_stream()?, std::slice::from_ref(&first))?;
+
+        let sendable: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+            vec![Ok(second.clone())],
+            second.schema(),
+        ));
+        assert_batches(sendable.into_batch_stream()?, std::slice::from_ref(&second))?;
+        Ok(())
+    }
+
+    #[test]
+    fn into_batch_stream_rejects_schema_less_vec() {
+        let result = Vec::<RecordBatch>::new().into_batch_stream();
+        assert!(matches!(result, Err(TableError::EmptyAppendSource)));
+    }
+
+    #[tokio::test]
+    async fn append_stream_writes_one_segment_and_returns_versions() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        assert_eq!(table.append(vec![first, second]).await?, 2);
+        assert_eq!(table.state().segments.len(), 1);
+        let Some(segment) = table.state().segments.values().next() else {
+            return Err("missing streamed segment".into());
+        };
+        assert_eq!(segment.row_count, 2);
+        assert!(temp.path().join(&segment.path).is_file());
+
+        let third = time_series_batch(vec![120_000], vec!["A"], vec![3.0])?;
+        assert_eq!(table.append(third).await?, 3);
+        assert_eq!(table.state().segments.len(), 2);
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 3);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>(),
+            3
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        let (reader, observations) =
+            InstrumentedReader::new(first.schema(), vec![Ok(first), Ok(second)]);
+
+        assert_eq!(table.append(reader).await?, 2);
+        assert!(observations.schema_calls.get() > 0);
+        assert!(!observations.next_before_schema.get());
+        assert!(!observations.previous_batch_alive.get());
+        assert_eq!(observations.next_calls.get(), 3);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_stream_yields_while_skipping_zero_row_batches() -> TestResult {
+        const BATCH_COUNT: usize = 64;
+
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
+        let (reader, observations) = InstrumentedReader::new(
+            zero.schema(),
+            (0..BATCH_COUNT).map(|_| Ok(zero.clone())).collect(),
+        );
+        let mut append = Box::pin(table.append(reader));
+
+        tokio::select! {
+            biased;
+            result = &mut append => panic!("append drained the reader without yielding: {result:?}"),
+            () = async {
+                while observations.next_calls.get() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+
+        assert!(observations.next_calls.get() < BATCH_COUNT);
+        drop(append);
+        assert_eq!(table.state().version, 1);
+        assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_streaming_append_during_batch_reads_removes_output() -> TestResult {
+        const BATCH_COUNT: usize = 64;
+
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(
+            batch.schema(),
+            (0..BATCH_COUNT).map(|_| Ok(batch.clone())).collect(),
+        );
+        let mut append = Box::pin(table.append(reader));
+
+        tokio::select! {
+            biased;
+            result = &mut append => panic!("append drained the reader without yielding: {result:?}"),
+            () = async {
+                while observations.next_calls.get() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+
+        assert!(observations.next_calls.get() < BATCH_COUNT);
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 1);
+        drop(append);
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 0);
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_rejects_empty_sources_before_creating_data() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
+        let schema = zero.schema();
+
+        assert!(matches!(
+            table.append(vec![zero.clone(), zero]).await,
+            Err(TableError::EmptyAppendSource)
+        ));
+        let empty = RecordBatchIterator::new(Vec::<Result<RecordBatch, ArrowError>>::new(), schema);
+        assert!(matches!(
+            table.append(empty).await,
+            Err(TableError::EmptyAppendSource)
+        ));
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(!temp.path().join("data").exists());
+
+        let data = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let leading_zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
+        assert_eq!(table.append(vec![leading_zero, data]).await?, 2);
+        assert_eq!(table.state().version, 2);
+        assert_eq!(table.state().segments.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_cleans_up_after_later_schema_or_source_error() -> TestResult {
+        for source_error in [false, true] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                    .await?;
+            let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+            let later = if source_error {
+                Err(ArrowError::ComputeError(
+                    "injected batch source failure".to_string(),
+                ))
+            } else {
+                Ok(input_batch(vec![1])?)
+            };
+            let (reader, _) = InstrumentedReader::new(first.schema(), vec![Ok(first), later]);
+
+            let error = table
+                .append(reader)
+                .await
+                .expect_err("later batch must fail the append");
+            assert!(matches!(error, TableError::AppendSource { .. }));
+            assert_eq!(table.state().version, 1);
+            assert!(table.state().segments.is_empty());
+            assert!(
+                std::fs::read_dir(temp.path().join("data"))?
+                    .next()
+                    .is_none()
+            );
+            assert!(coverage_files(temp.path())?.is_empty());
+            assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_cleans_up_writer_lifecycle_failures() -> TestResult {
+        #[derive(Clone, Copy, Debug)]
+        enum Stage {
+            Write,
+            Close,
+            Finish,
+        }
+
+        for stage in [Stage::Write, Stage::Close, Stage::Finish] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                    .await?;
+            let data_dir = temp.path().join("data");
+            match stage {
+                Stage::Write => crate::storage::inject_output_write_failure(data_dir.clone(), 2),
+                Stage::Close => crate::storage::inject_output_write_failure(data_dir.clone(), 1),
+                Stage::Finish => crate::storage::inject_output_finish_failure(data_dir.clone()),
+            }
+            let row_count = if matches!(stage, Stage::Write) {
+                parquet::file::properties::DEFAULT_MAX_ROW_GROUP_ROW_COUNT
+            } else {
+                1
+            };
+
+            let result = table.append(timestamp_only_batch(row_count)?).await;
+            let Err(error) = result else {
+                panic!("{stage:?} writer failure was not injected");
+            };
+            if matches!(stage, Stage::Finish) {
+                assert!(matches!(error, TableError::Storage { .. }), "{stage:?}");
+            } else {
+                assert!(
+                    matches!(error, TableError::AppendParquet { .. }),
+                    "{stage:?}: {error}"
+                );
+            }
+            assert_eq!(table.state().version, 1, "{stage:?}");
+            assert!(table.state().segments.is_empty(), "{stage:?}");
+            assert!(std::fs::read_dir(&data_dir)?.next().is_none(), "{stage:?}");
+            assert!(coverage_files(temp.path())?.is_empty(), "{stage:?}");
+            assert!(
+                !temp.path().join(layout::commit_rel_path(2)).exists(),
+                "{stage:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_streaming_append_before_publication_removes_owned_artifacts() -> TestResult
+    {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let commit_path = temp.path().join(layout::commit_rel_path(2));
+        let current_path = temp.path().join(layout::current_rel_path());
+        let current_temp_path = current_path.with_extension("tmp");
+        let mut pause = crate::storage::pause_atomic_write_before_rename(current_path);
+        let mut append = Box::pin(table.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?));
+
+        tokio::select! {
+            () = pause.wait_until_paused() => {}
+            result = &mut append => panic!("append completed before cancellation: {result:?}"),
+        }
+
+        assert!(commit_path.is_file());
+        assert!(current_temp_path.is_file());
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 1);
+        assert_eq!(coverage_files(temp.path())?.len(), 2);
+        let before_publication = TimeSeriesTable::open(location.clone()).await?;
+        assert_eq!(before_publication.state().version, 1);
+        assert!(before_publication.state().segments.is_empty());
+
+        drop(append);
+        pause.release();
+
+        assert!(!commit_path.exists());
+        assert!(!current_temp_path.exists());
+        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 0);
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1);
+        assert!(reopened.state().segments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_commit_observer_panic_preserves_owned_data_files() -> TestResult {
+        let streamed_root = TempDir::new()?;
+        let streamed_location = TableLocation::local(streamed_root.path());
+        let mut streamed_table =
+            TimeSeriesTable::create(streamed_location.clone(), make_basic_table_meta()).await?;
+        let callsite_guard = panic_on_observation_dispatch(PanicObservation::CommitClose);
+        let outcome = std::panic::AssertUnwindSafe(
+            streamed_table
+                .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+                .with_subscriber(panic_on_observation_dispatch(PanicObservation::CommitClose)),
+        )
+        .catch_unwind()
+        .await;
+        drop(callsite_guard);
+        assert!(outcome.is_err());
+        let reopened = TimeSeriesTable::open(streamed_location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .all(|segment| streamed_root.path().join(&segment.path).is_file())
+        );
+
+        let copied_root = TempDir::new()?;
+        let copied_location = TableLocation::local(copied_root.path());
+        let mut copied_table =
+            TimeSeriesTable::create(copied_location.clone(), make_basic_table_meta()).await?;
+        let external_root = TempDir::new()?;
+        let external_path = external_root.path().join("external.parquet");
+        write_test_parquet(
+            &external_path,
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 0,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )?;
+        let callsite_guard = panic_on_observation_dispatch(PanicObservation::AppendEvent);
+        let outcome = std::panic::AssertUnwindSafe(
+            copied_table
+                .append_parquet_from_path(&external_path)
+                .with_subscriber(panic_on_observation_dispatch(PanicObservation::AppendEvent)),
+        )
+        .catch_unwind()
+        .await;
+        drop(callsite_guard);
+        assert!(outcome.is_err());
+        let reopened = TimeSeriesTable::open(copied_location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .all(|segment| copied_root.path().join(&segment.path).is_file())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn simultaneous_streaming_appends_publish_one_and_clean_loser() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        let loser_state_before = loser.state().clone();
+        let commit_path = temp.path().join(layout::commit_rel_path(2));
+        let mut pause = crate::storage::pause_atomic_write_before_rename(
+            temp.path().join(layout::current_rel_path()),
+        );
+        let mut winner_append =
+            Box::pin(winner.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?));
+
+        tokio::select! {
+            () = pause.wait_until_paused() => {}
+            result = &mut winner_append => panic!("winner completed before race: {result:?}"),
+        }
+
+        let mut data_before = std::fs::read_dir(temp.path().join("data"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        data_before.sort();
+        let coverage_before = coverage_files(temp.path())?;
+        let commit_before = std::fs::read(&commit_path)?;
+
+        let loser_error = loser
+            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .await
+            .expect_err("second simultaneous writer must lose commit 2");
+        assert!(matches!(
+            loser_error,
+            TableError::TransactionLog {
+                source: CommitError::Storage {
+                    source: StorageError::AlreadyExists { .. },
+                },
+            }
+        ));
+        assert_eq!(loser.state(), &loser_state_before);
+
+        let mut data_after = std::fs::read_dir(temp.path().join("data"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        data_after.sort();
+        assert_eq!(data_after, data_before);
+        assert_eq!(coverage_files(temp.path())?, coverage_before);
+        assert_eq!(std::fs::read(&commit_path)?, commit_before);
+
+        pause.release();
+        assert_eq!(winner_append.await?, 2);
+        assert_eq!(winner.state().version, 2);
+        assert_eq!(winner.state().segments.len(), 1);
+        assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn guarded_output_cleans_up_parquet_writer_creation_failure() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        let path = Path::new("data/create-failure.parquet");
+        let sink = storage::open_new_output_sink(&location, path).await?;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "unsupported",
+            DataType::Struct(arrow::datatypes::Fields::empty()),
+            true,
+        )]));
+
+        assert!(ParquetArrowWriter::try_new(sink, schema, None).is_err());
+        assert!(!temp.path().join(path).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_preserves_writer_error_and_failed_cleanup_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                .await?;
+        let data_dir = temp.path().join("data");
+        crate::storage::inject_output_write_failure(data_dir.clone(), 1);
+        crate::storage::inject_cleanup_failure(data_dir.clone());
+
+        let error = table
+            .append(timestamp_only_batch(1)?)
+            .await
+            .expect_err("writer and cleanup failures must fail append");
+        let TableError::AppendRollback {
+            source,
+            cleanup_errors,
+        } = error
+        else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(matches!(*source, TableError::AppendParquet { .. }));
+        assert_eq!(cleanup_errors.len(), 1);
+        let remaining = std::fs::read_dir(&data_dir)?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(remaining.len(), 1);
+        let remaining_path = remaining[0].path();
+        assert!(
+            cleanup_errors[0].contains(
+                remaining_path
+                    .file_name()
+                    .expect("remaining data filename")
+                    .to_str()
+                    .expect("UTF-8 data filename")
+            )
+        );
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        let loser_state_before = loser.state().clone();
+
+        winner
+            .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+            .await?;
+        let data_before = data_files(temp.path())?;
+        let coverage_before = coverage_files(temp.path())?;
+
+        let error = loser
+            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .await
+            .expect_err("stale streaming append must conflict");
+
+        assert!(matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::Conflict {
+                    expected: 1,
+                    found: 2,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(loser.state(), &loser_state_before);
+        assert_eq!(data_files(temp.path())?, data_before);
+        assert_eq!(coverage_files(temp.path())?, coverage_before);
+        assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .next()
+                .map(|segment| { temp.path().join(&segment.path) }),
+            data_before.first().cloned()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let commit_path = temp.path().join(layout::commit_rel_path(2));
+        crate::storage::inject_write_new_failure(commit_path.clone(), true);
+        let capture = TraceCapture::default();
+
+        let error = capture
+            .run(table.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?))
+            .await
+            .expect_err("failed commit cleanup must be ambiguous");
+        let TableError::AppendCommitAmbiguous {
+            segment_path,
+            source,
+        } = error
+        else {
+            panic!("unexpected error: {error}");
+        };
+
+        assert!(matches!(source, CommitError::AmbiguousOutcome { .. }));
+        assert!(segment_path.starts_with("data/"));
+        assert!(temp.path().join(&segment_path).is_file());
+        assert_eq!(
+            data_files(temp.path())?,
+            vec![temp.path().join(&segment_path)]
+        );
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(commit_path.exists());
+        assert_eq!(coverage_files(temp.path())?.len(), 2);
+        let append_span = capture
+            .spans()
+            .into_iter()
+            .find(|span| span.name == "table.append")
+            .expect("table.append span");
+        assert_eq!(append_span.fields.get("segment_path"), Some(&segment_path));
+        assert_eq!(
+            append_span.fields.get("outcome").map(String::as_str),
+            Some("ambiguous")
+        );
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1);
+        assert!(reopened.state().segments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_conflict_reports_every_failed_cleanup_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut loser = TimeSeriesTable::open(location.clone()).await?;
+        winner
+            .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+            .await?;
+        let data_before = data_files(temp.path())?;
+        let coverage_before = coverage_files(temp.path())?;
+
+        for dir in [
+            Path::new("data"),
+            Path::new(layout::SEGMENT_COVERAGE_DIR),
+            Path::new(layout::TABLE_SNAPSHOT_DIR),
+        ] {
+            crate::storage::inject_cleanup_failure(temp.path().join(dir));
+        }
+        let error = loser
+            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .await
+            .expect_err("conflict cleanup failures must be reported");
+        let message = error.to_string();
+
+        assert!(message.contains("Commit conflict"));
+        let data_after = data_files(temp.path())?;
+        assert_eq!(data_after.len(), data_before.len() + 1);
+        let coverage_after = coverage_files(temp.path())?;
+        assert_eq!(coverage_after.len(), coverage_before.len() + 2);
+        let mut failed_paths = data_after
+            .iter()
+            .filter(|path| !data_before.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        failed_paths.extend(
+            coverage_after
+                .keys()
+                .filter(|path| !coverage_before.contains_key(*path))
+                .map(|path| temp.path().join(path)),
+        );
+        for path in failed_paths {
+            assert!(
+                message.contains(
+                    path.file_name()
+                        .expect("failed cleanup filename")
+                        .to_str()
+                        .expect("UTF-8 cleanup filename")
+                ),
+                "missing cleanup diagnostic for {}",
+                path.display()
+            );
+        }
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_validates_schema_before_creating_data() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+
+        assert!(matches!(
+            table.append(input_batch(vec![1])?).await,
+            Err(TableError::SchemaCompatibility { .. })
+        ));
+        assert_eq!(table.state().version, 1);
+        assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_removes_owned_data_after_overlap() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        assert_eq!(table.append(batch.clone()).await?, 2);
+
+        assert!(matches!(
+            table.append(batch).await,
+            Err(TableError::EntityCoverageOverlap { .. })
+        ));
+        assert_eq!(table.state().version, 2);
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("data"))?
+                .collect::<Result<Vec<_>, _>>()?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_adopts_schema_on_first_append() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut meta = make_basic_table_meta();
+        meta.logical_schema = None;
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        assert_eq!(table.append(batch).await?, 2);
+        assert!(table.state().table_meta.logical_schema.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_preserves_exact_schema_across_append_and_optimize() -> TestResult {
+        let timezone = "America/Phoenix";
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, Some(timezone.into())),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new(
+                "items",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+            Field::new(
+                "attrs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Binary, true),
+                        ])),
+                        false,
+                    )),
+                    true,
+                ),
+                true,
+            ),
+        ]));
+        let expected = LogicalSchema::try_from_arrow_schema(&schema).expect("logical schema");
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, 0]).with_timezone(timezone)),
+                Arc::new(StringArray::from(vec!["A", "B"])),
+                new_null_array(schema.field(2).data_type(), 2),
+                new_null_array(schema.field(3).data_type(), 2),
+            ],
+        )?;
+
+        for has_canonical_schema in [true, false] {
+            let temp = TempDir::new()?;
+            let location = TableLocation::local(temp.path());
+            let mut meta = TableMeta::new_time_series_with_schema(
+                IndexSpec {
+                    column: "ts".to_string(),
+                    entity_columns: vec!["symbol".to_string()],
+                    kind: IndexKind::Timestamp {
+                        bucket: TimeBucket::Minutes(1),
+                        timezone: Some(timezone.to_string()),
+                    },
+                },
+                expected.clone(),
+            );
+            if !has_canonical_schema {
+                meta.logical_schema = None;
+            }
+            let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+            assert_eq!(table.append(batch.clone()).await?, 2);
+            assert_eq!(
+                table.state().table_meta.logical_schema.as_ref(),
+                Some(&expected)
+            );
+
+            let later_path = "data/same-arrow-schema.parquet";
+            let later_batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        TimestampMillisecondArray::from(vec![120_000, 120_000])
+                            .with_timezone(timezone),
+                    ),
+                    Arc::new(StringArray::from(vec!["A", "B"])),
+                    new_null_array(schema.field(2).data_type(), 2),
+                    new_null_array(schema.field(3).data_type(), 2),
+                ],
+            )?;
+            let mut writer = ArrowWriter::try_new(
+                File::create(temp.path().join(later_path))?,
+                Arc::clone(&schema),
+                None,
+            )?;
+            writer.write(&later_batch)?;
+            writer.close()?;
+            assert_eq!(table.append_parquet_segment(later_path).await?, 3);
+
+            let report = table.optimize().await?;
+            assert_eq!(report.committed_version, 4);
+            assert_eq!(report.candidate_source_segments, 2);
+            assert_eq!(report.replacement_segments_written, 4);
+            assert_eq!(report.rows_read, 4);
+            assert_eq!(report.rows_written, 4);
+            assert!(
+                table
+                    .state()
+                    .segments
+                    .values()
+                    .all(|segment| matches!(segment.entity_layout, SegmentEntityLayout::Single(_)))
+            );
+            let reopened = TimeSeriesTable::open(location).await?;
+            assert_eq!(
+                reopened.state().table_meta.logical_schema.as_ref(),
+                Some(&expected)
+            );
+        }
+        Ok(())
+    }
 
     fn registered_index(kind: IndexKind) -> IndexSpec {
         IndexSpec {
@@ -775,6 +2093,18 @@ mod tests {
                 }
             }
         }
+        Ok(files)
+    }
+
+    fn data_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+        let dir = root.join("data");
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = std::fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        files.sort();
         Ok(files)
     }
 
@@ -2662,7 +3992,7 @@ mod tests {
             example_bucket,
             example_bucket_range: logical_bucket_range(&table.index.kind, example_bucket)?,
         };
-        let err = table.rollback_created_sidecars(&sidecars, source).await;
+        let err = table.rollback_created_artifacts(&sidecars, source).await;
         let message = err.to_string();
 
         assert!(matches!(

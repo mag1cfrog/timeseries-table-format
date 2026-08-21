@@ -1,18 +1,17 @@
+#[cfg(test)]
+use futures::channel::oneshot;
 use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, prelude::*};
 #[cfg(test)]
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{LazyLock, Mutex},
 };
 use std::{
     io,
     path::{Path, PathBuf},
 };
-use tokio::{
-    fs::{self, OpenOptions},
-    io::AsyncWriteExt,
-};
+use tokio::{fs, io::AsyncWriteExt};
 
 use crate::storage::{
     BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageLocation, StorageResult,
@@ -20,19 +19,27 @@ use crate::storage::{
 };
 
 /// Guard that removes a file on drop unless disarmed.
-pub(super) struct TempFileGuard {
+pub(crate) struct FileCleanupGuard {
     path: PathBuf,
     armed: bool,
 }
 
-impl TempFileGuard {
+impl FileCleanupGuard {
     pub(super) fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
 
+    fn prepared(path: PathBuf) -> Self {
+        Self { path, armed: false }
+    }
+
+    pub(crate) fn arm(&mut self) {
+        self.armed = true;
+    }
+
     /// Disarm the guard so the file is NOT removed on drop.
     /// Call this after a successful rename.
-    pub(super) fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 
@@ -49,9 +56,13 @@ impl TempFileGuard {
     }
 }
 
-impl Drop for TempFileGuard {
+impl Drop for FileCleanupGuard {
     fn drop(&mut self) {
         if self.armed {
+            #[cfg(test)]
+            if has_cleanup_failure(&self.path) {
+                return;
+            }
             // Best-effort cleanup; ignore errors since we're likely already handling another error.
             let _ = std::fs::remove_file(&self.path);
         }
@@ -82,6 +93,92 @@ static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
+struct AtomicWritePausePoint {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static ATOMIC_WRITE_OPEN_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static ATOMIC_WRITE_RENAME_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) struct AtomicWritePause {
+    entered: Option<oneshot::Receiver<()>>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl AtomicWritePause {
+    pub(crate) async fn wait_until_paused(&mut self) {
+        self.entered
+            .take()
+            .expect("pause wait called once")
+            .await
+            .expect("atomic write reached rename pause");
+    }
+
+    pub(crate) fn release(mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+fn pause_atomic_write_at(
+    pauses: &Mutex<HashMap<PathBuf, AtomicWritePausePoint>>,
+    path: PathBuf,
+) -> AtomicWritePause {
+    let (entered_sender, entered_receiver) = oneshot::channel();
+    let (release_sender, release_receiver) = oneshot::channel();
+    let previous = pauses
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            path,
+            AtomicWritePausePoint {
+                entered: entered_sender,
+                release: release_receiver,
+            },
+        );
+    assert!(previous.is_none(), "atomic write pause already installed");
+    AtomicWritePause {
+        entered: Some(entered_receiver),
+        release: Some(release_sender),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn pause_atomic_write_before_open(path: PathBuf) -> AtomicWritePause {
+    pause_atomic_write_at(&ATOMIC_WRITE_OPEN_PAUSES, path)
+}
+
+#[cfg(test)]
+pub(crate) fn pause_atomic_write_before_rename(path: PathBuf) -> AtomicWritePause {
+    pause_atomic_write_at(&ATOMIC_WRITE_RENAME_PAUSES, path)
+}
+
+#[cfg(test)]
+async fn wait_at_atomic_write_pause(
+    pauses: &Mutex<HashMap<PathBuf, AtomicWritePausePoint>>,
+    path: &Path,
+) {
+    let pause = pauses
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path);
+    if let Some(pause) = pause {
+        let _ = pause.entered.send(());
+        let _ = pause.release.await;
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn inject_write_new_failure(path: PathBuf, cleanup_fails: bool) {
     if cleanup_fails {
         inject_cleanup_failure(path.clone());
@@ -110,10 +207,26 @@ fn take_write_new_failure(path: &Path) -> bool {
 
 #[cfg(test)]
 fn take_cleanup_failure(path: &Path) -> bool {
+    let mut failures = CLEANUP_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(target) = failures
+        .iter()
+        .find(|target| path.starts_with(target))
+        .cloned()
+    else {
+        return false;
+    };
+    failures.remove(&target)
+}
+
+#[cfg(test)]
+fn has_cleanup_failure(path: &Path) -> bool {
     CLEANUP_FAILURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(path)
+        .iter()
+        .any(|target| path.starts_with(target))
 }
 
 #[cfg(test)]
@@ -126,7 +239,7 @@ fn write_failure(path: &Path) -> StorageError {
 }
 
 async fn cleanup_created_file(
-    guard: &mut TempFileGuard,
+    guard: &mut FileCleanupGuard,
     path: &Path,
     operation: StorageError,
 ) -> StorageError {
@@ -137,7 +250,7 @@ async fn cleanup_created_file(
 }
 
 async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
-    let mut guard = TempFileGuard::new(path.to_owned());
+    let mut guard = FileCleanupGuard::new(path.to_owned());
     #[cfg(test)]
     let injected_write_failure = take_write_new_failure(path);
     let result = async {
@@ -176,14 +289,16 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
     }
 }
 
-pub(super) async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
+pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File> {
     create_parent_dir(path).await?;
 
-    match OpenOptions::new()
+    // Keep exclusive creation synchronous. Tokio filesystem opens run in a
+    // non-cancellable blocking task that may create the path after its future
+    // has been dropped.
+    match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .await
     {
         Ok(file) => Ok(file),
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
@@ -224,8 +339,8 @@ pub(crate) async fn copy_new_from_local(
                 }
             })?;
             let destination = join_local(location, rel_path)?;
-            let mut destination_file = create_new_file(&destination).await?;
-            let mut guard = TempFileGuard::new(destination.clone());
+            let mut destination_file = fs::File::from_std(create_new_file(&destination).await?);
+            let mut guard = FileCleanupGuard::new(destination.clone());
             #[cfg(test)]
             let injected_copy_failure = take_write_new_failure(&destination);
 
@@ -275,6 +390,15 @@ pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> StorageResul
     match location {
         StorageLocation::Local(root) => Ok(root.join(native_path)),
     }
+}
+
+/// Prepare a disarmed cleanup guard for a path this operation will create.
+/// Arm it immediately after exclusive creation succeeds.
+pub(crate) fn prepare_file_cleanup_guard(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<FileCleanupGuard> {
+    Ok(FileCleanupGuard::prepared(join_local(location, rel_path)?))
 }
 
 /// Open a stored Parquet file for asynchronous range reads.
@@ -337,15 +461,20 @@ pub async fn write_atomic(
             create_parent_dir(&abs).await?;
 
             let tmp_path = abs.with_extension("tmp");
-            let mut guard = TempFileGuard::new(tmp_path.clone());
+            let mut guard = FileCleanupGuard::new(tmp_path.clone());
+
+            #[cfg(test)]
+            wait_at_atomic_write_pause(&ATOMIC_WRITE_OPEN_PAUSES, &abs).await;
 
             {
-                let mut file = fs::File::create(&tmp_path)
-                    .await
+                // Opening through Tokio would leave a non-cancellable blocking
+                // task able to recreate this path after the future is dropped.
+                let file = std::fs::File::create(&tmp_path)
                     .map_err(BackendError::Local)
                     .context(OtherIoSnafu {
                         path: tmp_path.display().to_string(),
                     })?;
+                let mut file = fs::File::from_std(file);
 
                 file.write_all(contents)
                     .await
@@ -362,8 +491,13 @@ pub async fn write_atomic(
                     })?;
             }
 
-            fs::rename(&tmp_path, &abs)
-                .await
+            #[cfg(test)]
+            wait_at_atomic_write_pause(&ATOMIC_WRITE_RENAME_PAUSES, &abs).await;
+
+            // Keep publication and guard disarming in one synchronous poll so
+            // dropping the future cannot publish CURRENT and then roll back
+            // the commit file before this function observes success.
+            std::fs::rename(&tmp_path, &abs)
                 .map_err(BackendError::Local)
                 .context(OtherIoSnafu {
                     path: abs.display().to_string(),
@@ -456,7 +590,7 @@ pub async fn write_new(
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
-            let file = create_new_file(&abs).await?;
+            let file = fs::File::from_std(create_new_file(&abs).await?);
             write_created_file(file, &abs, contents).await
         }
     }
@@ -512,6 +646,7 @@ pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageRe
 mod tests {
 
     use super::*;
+    use std::sync::mpsc;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -578,6 +713,47 @@ mod tests {
 
         // The .tmp file should not remain after successful write.
         let tmp_path = tmp.path().join("clean.tmp");
+        assert!(!tmp_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cancelling_atomic_write_during_open_does_not_recreate_tmp() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let rel_path = Path::new("cancelled.txt");
+        let abs = tmp.path().join(rel_path);
+        let tmp_path = abs.with_extension("tmp");
+        let mut pause = pause_atomic_write_before_open(abs);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()?;
+
+        runtime.block_on(async {
+            let mut write = Box::pin(write_atomic(&location, rel_path, b"cancelled"));
+            tokio::select! {
+                () = pause.wait_until_paused() => {}
+                result = &mut write => panic!("atomic write completed before pause: {result:?}"),
+            }
+
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+            });
+            started_rx.await?;
+
+            pause.release();
+            assert!(futures::poll!(write.as_mut()).is_pending());
+            drop(write);
+            release_tx.send(())?;
+            blocker.await?;
+            TestResult::Ok(())
+        })?;
+        drop(runtime);
+
         assert!(!tmp_path.exists());
         Ok(())
     }

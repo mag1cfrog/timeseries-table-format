@@ -33,7 +33,7 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::ensure_index_spec_matches_schema,
+        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta},
         table_metadata::IndexSpec,
     },
@@ -349,11 +349,11 @@ async fn validate_source(
     let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
         .await
         .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
-    if source_schema != *table_schema {
-        return Err(invalid_input(format!(
-            "source schema does not exactly match the committed table schema: source {source_schema:?}, table {table_schema:?}"
-        )));
-    }
+    ensure_schema_exact_match(table_schema, &source_schema, index).map_err(|error| {
+        invalid_input(format!(
+            "source schema is incompatible with the committed table schema: {error}"
+        ))
+    })?;
 
     let (actual_meta, _) = segment_meta_from_parquet(location, Path::new(&source.path), index)
         .await
@@ -444,11 +444,11 @@ async fn rewrite_inner(
         let output_schema = logical_schema_from_parquet(location, Path::new(&data_path))
             .await
             .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
-        if output_schema != *table_schema {
-            return Err(invalid_output(format!(
-                "replacement {data_path} changed the committed schema"
-            )));
-        }
+        ensure_schema_exact_match(table_schema, &output_schema, index).map_err(|error| {
+            invalid_output(format!(
+                "replacement {data_path} changed the committed schema: {error}"
+            ))
+        })?;
         let (mut meta, _) = segment_meta_from_parquet(location, Path::new(&data_path), index)
             .await
             .map_err(|source| EntityRewriteError::SegmentInspection { source })?;

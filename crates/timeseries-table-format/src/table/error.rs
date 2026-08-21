@@ -86,16 +86,41 @@ pub enum TableError {
         cleanup_errors: Vec<String>,
     },
 
-    /// Append failed and one or more owned coverage sidecars could not be removed.
-    #[snafu(display(
-        "Append failed: {source}; coverage sidecar rollback also failed: {cleanup_errors:?}"
-    ))]
+    /// Append failed and one or more attempt-owned artifacts could not be removed.
+    #[snafu(display("Append failed: {source}; artifact rollback also failed: {cleanup_errors:?}"))]
     AppendRollback {
         /// Original append failure that triggered rollback.
         #[snafu(source)]
         source: Box<TableError>,
-        /// Cleanup failures, including each affected sidecar path.
+        /// Cleanup failures, including each affected attempt-owned path.
         cleanup_errors: Vec<String>,
+    },
+
+    /// A batch source failed while yielding rows for a streaming append.
+    #[snafu(display("Arrow batch source error while appending: {source}"))]
+    AppendSource {
+        /// Arrow error returned by the source reader.
+        source: ArrowError,
+    },
+
+    /// Parquet schema conversion or streaming output failed during append.
+    #[snafu(display("Parquet write error while appending: {source}"))]
+    AppendParquet {
+        /// Parquet writer error.
+        source: ParquetError,
+    },
+
+    /// A streaming append may have committed, so its generated data path must
+    /// be preserved until the caller resolves the transaction outcome.
+    #[snafu(display(
+        "Append commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
+    ))]
+    AppendCommitAmbiguous {
+        /// Generated table-relative Parquet path that was preserved.
+        segment_path: String,
+        /// Ambiguous transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
     },
 
     /// Append failed and its provisional external Parquet copy could not be removed.
@@ -111,6 +136,10 @@ pub enum TableError {
         /// Storage failure encountered while removing the provisional copy.
         cleanup_error: StorageError,
     },
+
+    /// An append source contained no rows.
+    #[snafu(display("Cannot append an empty Arrow batch source"))]
+    EmptyAppendSource,
 
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
