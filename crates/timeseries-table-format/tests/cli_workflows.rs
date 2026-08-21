@@ -12,7 +12,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+use parquet::file::properties::WriterProperties;
 use tempfile::TempDir;
 use timeseries_table_format::{
     metadata::{
@@ -246,6 +247,14 @@ fn write_parquet_rows(
     path: &Path,
     rows: &[(i64, &str, f64)],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    write_parquet_rows_with_properties(path, rows, None)
+}
+
+fn write_parquet_rows_with_properties(
+    path: &Path,
+    rows: &[(i64, &str, f64)],
+    properties: Option<WriterProperties>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -281,7 +290,7 @@ fn write_parquet_rows(
     )?;
 
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), None)?;
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), properties)?;
     writer.write(&batch)?;
     writer.close()?;
 
@@ -652,6 +661,19 @@ fn cli_optimize_help_exposes_only_the_table_argument() -> StdResult<(), Box<dyn 
 }
 
 #[test]
+fn cli_append_help_describes_streaming_parquet_import() -> StdResult<(), Box<dyn std::error::Error>>
+{
+    let output = run_cli(&["append", "--help"])?;
+    assert_cli_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stream a local Parquet file into a new table-managed segment"));
+    assert!(stdout.contains("--table <TABLE>"));
+    assert!(stdout.contains("--parquet <PARQUET>"));
+    assert!(stdout.contains("--timing"));
+    Ok(())
+}
+
+#[test]
 fn cli_optimize_rewrites_mixed_segments_and_reports_repeated_no_op()
 -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
@@ -845,6 +867,121 @@ fn cli_append_outside_root_streams_without_copying() -> StdResult<(), Box<dyn st
 }
 
 #[test]
+fn cli_append_timing_reports_version_and_elapsed() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let source = tmp.path().join("timed.parquet");
+    write_parquet_rows(&source, &[(0, "A", 1.0)])?;
+
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+        "--timing",
+    ])?;
+    assert_cli_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    let elapsed = stdout
+        .strip_prefix("Appended table version: 2 (elapsed_ms: ")
+        .and_then(|value| value.strip_suffix(")\n"))
+        .ok_or_else(|| io::Error::other(format!("unexpected stdout: {stdout}")))?;
+    elapsed.parse::<u128>()?;
+    Ok(())
+}
+
+#[test]
+fn cli_append_consumes_multiple_source_row_groups() -> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let source = tmp.path().join("row-groups.parquet");
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1))
+        .build();
+    write_parquet_rows_with_properties(
+        &source,
+        &[(0, "A", 1.0), (60_000, "B", 2.0), (120_000, "C", 3.0)],
+        Some(properties),
+    )?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&source)?)?;
+    assert_eq!(builder.metadata().num_row_groups(), 3);
+
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+    assert_cli_success(&output);
+    let table = open_table_blocking(&table_root)?;
+    let segment = table
+        .state()
+        .segments
+        .values()
+        .next()
+        .ok_or_else(|| io::Error::other("segment missing"))?;
+    assert_eq!(segment.row_count, 3);
+    Ok(())
+}
+
+#[test]
+fn cli_append_missing_source_reports_path_without_mutation()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let source = tmp.path().join("missing.parquet");
+    let state_before = open_table_blocking(&table_root)?.state().clone();
+
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Failed to read Parquet source"));
+    assert!(stderr.contains(&source.display().to_string()));
+    assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
+    assert!(!table_root.join("data").exists());
+    Ok(())
+}
+
+#[test]
+fn cli_append_corrupt_source_fails_before_transaction() -> StdResult<(), Box<dyn std::error::Error>>
+{
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let source = tmp.path().join("corrupt.parquet");
+    std::fs::write(&source, b"not parquet")?;
+    let source_before = std::fs::read(&source)?;
+    let state_before = open_table_blocking(&table_root)?.state().clone();
+
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        source.to_string_lossy().as_ref(),
+    ])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Failed to read Parquet source"));
+    assert!(stderr.contains(&source.display().to_string()));
+    assert_eq!(std::fs::read(&source)?, source_before);
+    assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
+    assert!(!table_root.join("data").exists());
+    Ok(())
+}
+
+#[test]
 fn cli_failed_external_append_preserves_its_source() -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
@@ -875,9 +1012,50 @@ fn cli_failed_external_append_preserves_its_source() -> StdResult<(), Box<dyn st
     ])?;
 
     assert!(!output.status.success(), "append should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&source_path.display().to_string()));
+    assert!(stderr.contains(&table_root.display().to_string()));
     assert_eq!(std::fs::read(&source_path)?, source_before);
     assert!(!table_root.join("data/invalid-external.parquet").exists());
     assert!(!table_root.join("_coverage").exists());
+    assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
+    Ok(())
+}
+
+#[test]
+fn cli_append_overlap_reports_source_and_preserves_state()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let first = tmp.path().join("first.parquet");
+    write_parquet_rows(&first, &[(0, "A", 1.0)])?;
+    assert_cli_success(&run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        first.to_string_lossy().as_ref(),
+    ])?);
+
+    let overlap = tmp.path().join("overlap.parquet");
+    write_parquet_rows(&overlap, &[(30_000, "B", 2.0)])?;
+    let source_before = std::fs::read(&overlap)?;
+    let state_before = open_table_blocking(&table_root)?.state().clone();
+    let output = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        overlap.to_string_lossy().as_ref(),
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("overlap"));
+    assert!(stderr.contains(&overlap.display().to_string()));
+    assert!(stderr.contains(&table_root.display().to_string()));
+    assert_eq!(std::fs::read(&overlap)?, source_before);
     assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
     Ok(())
 }
