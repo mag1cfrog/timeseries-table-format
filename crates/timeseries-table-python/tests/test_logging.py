@@ -343,3 +343,75 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
         assert str(table_root) not in message
         """
     )
+
+
+def test_enabled_logging_does_not_deadlock_public_native_operations():
+    _run_isolated(
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("timeseries_table_format")
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(Capture())
+        logger.propagate = False
+
+        import timeseries_table_format as ttf
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            table_root = root / "table"
+            segment = root / "mixed.parquet"
+            table = ttf.TimeSeriesTable.create(
+                table_root=str(table_root),
+                index_column="tick",
+                index_type="uint64",
+                bucket_width=10,
+                entity_columns=["device_id"],
+            )
+            pq.write_table(
+                pa.table(
+                    {
+                        "tick": pa.array([0, 10], type=pa.uint64()),
+                        "device_id": ["A", "B"],
+                        "reading": [1, 2],
+                    }
+                ),
+                segment,
+            )
+            assert table.append_parquet(str(segment)) == 2
+            assert table.optimize().no_op is False
+
+            session = ttf.Session()
+            session.register_tstable("readings", str(table_root))
+            assert session.sql("SELECT count(*) AS count FROM readings")[
+                "count"
+            ].to_pylist() == [2]
+
+            reader = session.sql_reader("SELECT reading FROM readings")
+            try:
+                assert sorted(reader.read_all()["reading"].to_pylist()) == [1, 2]
+            finally:
+                reader.close()
+
+        messages = "\\n".join(record.getMessage() for record in records)
+        for event_name in (
+            "table.create",
+            "table.append",
+            "table.optimize",
+            "table.open",
+            "table.scan.plan",
+        ):
+            assert event_name in messages
+        """
+    )
