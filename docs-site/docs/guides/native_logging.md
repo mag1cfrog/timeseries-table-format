@@ -39,8 +39,8 @@ Configuring the `timeseries_table_format` parent applies to these children
 through normal Python logger inheritance.
 
 Project `DEBUG`, `INFO`, `WARNING`, and `ERROR` records can be forwarded.
-Third-party dependency records also use the project root, but dependency
-`DEBUG` records are filtered because they may contain SQL text or query plans.
+Third-party dependency records are not forwarded because their messages are
+outside the package's privacy contract.
 `RUST_LOG` does not configure logging for the Python extension.
 
 ## Change levels at runtime

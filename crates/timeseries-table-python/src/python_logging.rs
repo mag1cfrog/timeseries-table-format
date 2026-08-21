@@ -1,8 +1,8 @@
 //! Bridge native Rust diagnostics into Python's logging hierarchy.
 
-use std::{borrow::Cow, sync::OnceLock};
+use std::sync::OnceLock;
 
-use log::{Level, LevelFilter, Log, Metadata, Record};
+use log::{LevelFilter, Log, Metadata, Record};
 use pyo3::{PyErr, PyResult, Python, exceptions::PyRuntimeError};
 use pyo3_log::{Caching, Logger, ResetHandle};
 
@@ -15,38 +15,19 @@ struct PythonLogger {
 
 impl Log for PythonLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        if !level_enabled(metadata.target(), metadata.level()) {
-            return false;
-        }
-
-        let target = namespaced_target(metadata.target());
-        let metadata = Metadata::builder()
-            .level(metadata.level())
-            .target(target.as_ref())
-            .build();
-        self.inner.enabled(&metadata)
+        is_project_target(metadata.target()) && self.inner.enabled(metadata)
     }
 
     fn log(&self, record: &Record<'_>) {
-        if !level_enabled(record.target(), record.level()) {
+        if !is_project_target(record.target()) {
             return;
         }
-
-        let target = namespaced_target(record.target());
-        let record = Record::builder()
-            .args(*record.args())
-            .level(record.level())
-            .target(target.as_ref())
-            .module_path(record.module_path())
-            .file(record.file())
-            .line(record.line())
-            .build();
 
         // Preserve an existing exception, but contain handler failures so logging cannot turn a
         // committed operation into a reported failure. During shutdown, drop the record instead.
         let _ = Python::try_attach(|py| {
             let pending_error = PyErr::take(py);
-            self.inner.log(&record);
+            self.inner.log(record);
             let _ = PyErr::take(py);
             if let Some(error) = pending_error {
                 error.restore(py);
@@ -63,20 +44,6 @@ fn is_project_target(target: &str) -> bool {
     target == LOGGER_ROOT
         || target.starts_with("timeseries_table_format::")
         || target.starts_with("timeseries_table_format.")
-}
-
-fn level_enabled(target: &str, level: Level) -> bool {
-    is_project_target(target) || level <= Level::Info
-}
-
-fn namespaced_target(target: &str) -> Cow<'_, str> {
-    if is_project_target(target) {
-        Cow::Borrowed(target)
-    } else if target.is_empty() {
-        Cow::Borrowed(LOGGER_ROOT)
-    } else {
-        Cow::Owned(format!("{LOGGER_ROOT}::{target}"))
-    }
 }
 
 pub(crate) fn install(py: Python<'_>) -> PyResult<()> {
@@ -111,42 +78,15 @@ pub(crate) fn refresh_cache() {
 
 #[cfg(test)]
 mod tests {
-    use log::Level;
-
-    use super::{level_enabled, namespaced_target};
+    use super::is_project_target;
 
     #[test]
-    fn native_targets_share_the_public_python_namespace() {
-        assert_eq!(
-            namespaced_target("timeseries_table_format"),
-            "timeseries_table_format"
-        );
-        assert_eq!(
-            namespaced_target("timeseries_table_format::table"),
-            "timeseries_table_format::table"
-        );
-        assert_eq!(
-            namespaced_target("timeseries_table_format.table"),
-            "timeseries_table_format.table"
-        );
-        assert_eq!(
-            namespaced_target("datafusion::execution"),
-            "timeseries_table_format::datafusion::execution"
-        );
-        assert_eq!(
-            namespaced_target("timeseries_table_formatting"),
-            "timeseries_table_format::timeseries_table_formatting"
-        );
-        assert_eq!(namespaced_target(""), "timeseries_table_format");
-    }
-
-    #[test]
-    fn dependency_debug_records_are_filtered_before_python() {
-        assert!(level_enabled(
-            "timeseries_table_format::table",
-            Level::Debug
-        ));
-        assert!(level_enabled("datafusion::execution", Level::Info));
-        assert!(!level_enabled("datafusion::execution", Level::Debug));
+    fn only_project_targets_are_forwarded_to_python() {
+        assert!(is_project_target("timeseries_table_format"));
+        assert!(is_project_target("timeseries_table_format::table"));
+        assert!(is_project_target("timeseries_table_format.table"));
+        assert!(!is_project_target("datafusion::execution"));
+        assert!(!is_project_target("timeseries_table_formatting"));
+        assert!(!is_project_target(""));
     }
 }
