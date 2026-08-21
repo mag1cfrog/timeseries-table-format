@@ -11,10 +11,7 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
-use tokio::{
-    fs::{self, OpenOptions},
-    io::AsyncWriteExt,
-};
+use tokio::{fs, io::AsyncWriteExt};
 
 use crate::storage::{
     BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageLocation, StorageResult,
@@ -272,14 +269,16 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
     }
 }
 
-pub(super) async fn create_new_file(path: &Path) -> StorageResult<fs::File> {
+pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File> {
     create_parent_dir(path).await?;
 
-    match OpenOptions::new()
+    // Keep exclusive creation synchronous. Tokio filesystem opens run in a
+    // non-cancellable blocking task that may create the path after its future
+    // has been dropped.
+    match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .await
     {
         Ok(file) => Ok(file),
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
@@ -320,7 +319,7 @@ pub(crate) async fn copy_new_from_local(
                 }
             })?;
             let destination = join_local(location, rel_path)?;
-            let mut destination_file = create_new_file(&destination).await?;
+            let mut destination_file = fs::File::from_std(create_new_file(&destination).await?);
             let mut guard = FileCleanupGuard::new(destination.clone());
             #[cfg(test)]
             let injected_copy_failure = take_write_new_failure(&destination);
@@ -566,7 +565,7 @@ pub async fn write_new(
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
-            let file = create_new_file(&abs).await?;
+            let file = fs::File::from_std(create_new_file(&abs).await?);
             write_created_file(file, &abs, contents).await
         }
     }

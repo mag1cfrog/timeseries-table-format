@@ -116,7 +116,7 @@ impl LocalSink {
 
     async fn open_new(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
         let path = join_local(location, rel_path)?;
-        let file = create_new_file(&path).await?.into_std().await;
+        let file = create_new_file(&path).await?;
         let writer = io::BufWriter::new(file);
         let guard = FileCleanupGuard::new(path.clone());
         Ok(Self {
