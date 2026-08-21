@@ -193,11 +193,11 @@ fn ensure_batch_schema(schema: &SchemaRef, batch: &ArrowRecordBatch) -> Result<(
 impl TimeSeriesTable {
     async fn rollback_created_artifacts(
         &self,
-        created_sidecars: &[String],
+        created_paths: &[String],
         source: TableError,
     ) -> TableError {
         let mut cleanup_errors = Vec::new();
-        for path in created_sidecars.iter().rev() {
+        for path in created_paths.iter().rev() {
             if let Err(error) =
                 storage::remove_file_if_exists(self.location().as_ref(), Path::new(path)).await
             {

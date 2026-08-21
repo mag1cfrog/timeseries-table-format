@@ -92,7 +92,7 @@ pub enum TableError {
         /// Original append failure that triggered rollback.
         #[snafu(source)]
         source: Box<TableError>,
-        /// Cleanup failures, including each affected sidecar path.
+        /// Cleanup failures, including each affected attempt-owned path.
         cleanup_errors: Vec<String>,
     },
 
