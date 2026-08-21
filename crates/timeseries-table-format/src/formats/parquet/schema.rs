@@ -5,8 +5,11 @@
 
 use std::path::Path;
 
-use parquet::arrow::async_reader::AsyncFileReader;
+use parquet::arrow::{
+    ARROW_SCHEMA_META_KEY, async_reader::AsyncFileReader, parquet_to_arrow_schema,
+};
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
+use parquet::errors::ParquetError;
 use parquet::file::metadata::FileMetaData;
 use parquet::schema::types::{SchemaDescriptor, Type};
 use snafu::Backtrace;
@@ -517,7 +520,9 @@ fn parquet_type_to_logical_field(
     })
 }
 
-fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, LogicalSchemaError> {
+fn logical_schema_from_physical_parquet(
+    meta: &FileMetaData,
+) -> Result<LogicalSchema, LogicalSchemaError> {
     let fields = meta
         .schema_descr()
         .root_schema()
@@ -529,7 +534,43 @@ fn logical_schema_from_metadata(meta: &FileMetaData) -> Result<LogicalSchema, Lo
     LogicalSchema::new(fields)
 }
 
+fn logical_schema_from_file_metadata(
+    meta: &FileMetaData,
+    path: &str,
+) -> Result<LogicalSchema, SegmentMetaError> {
+    let has_arrow_schema = meta.key_value_metadata().is_some_and(|metadata| {
+        metadata
+            .iter()
+            .any(|entry| entry.key == ARROW_SCHEMA_META_KEY)
+    });
+    if !has_arrow_schema {
+        return logical_schema_from_physical_parquet(meta).map_err(|source| {
+            SegmentMetaError::LogicalSchemaInvalid {
+                path: path.to_string(),
+                source,
+            }
+        });
+    }
+
+    let arrow_schema = parquet_to_arrow_schema(meta.schema_descr(), meta.key_value_metadata())
+        .map_err(|source| SegmentMetaError::ParquetRead {
+            path: path.to_string(),
+            source,
+            backtrace: Backtrace::capture(),
+        })?;
+    LogicalSchema::try_from_arrow_schema(&arrow_schema).map_err(|source| {
+        SegmentMetaError::ParquetRead {
+            path: path.to_string(),
+            source: ParquetError::ArrowError(source.to_string()),
+            backtrace: Backtrace::capture(),
+        }
+    })
+}
+
 /// Derive a logical schema from a stored Parquet segment footer.
+///
+/// Embedded Arrow schema metadata is preferred when present so Arrow-only
+/// distinctions remain exact. Files without it use the physical Parquet schema.
 pub async fn logical_schema_from_parquet(
     location: &TableLocation,
     rel_path: &Path,
@@ -547,15 +588,18 @@ pub async fn logical_schema_from_parquet(
                 backtrace: Backtrace::capture(),
             })?;
 
-    logical_schema_from_metadata(metadata.file_metadata()).map_err(|source| {
-        SegmentError::from(SegmentMetaError::LogicalSchemaInvalid { path, source })
-    })
+    logical_schema_from_file_metadata(metadata.file_metadata(), &path).map_err(SegmentError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transaction_log::segments::SegmentIoError;
+    use arrow::{
+        array::{RecordBatch, TimestampMillisecondArray, new_null_array},
+        datatypes::{DataType, Field, Fields, Schema},
+    };
+    use parquet::arrow::ArrowWriter;
     use parquet::basic::{LogicalType, Repetition, TimeUnit};
     use parquet::column::writer::ColumnWriter;
     use parquet::data_type::{ByteArray, FixedLenByteArray, Int96};
@@ -573,7 +617,7 @@ mod tests {
 
     fn logical_schema_from_test_file(path: &Path) -> TestResult<LogicalSchema> {
         let reader = SerializedFileReader::new(File::open(path)?)?;
-        Ok(logical_schema_from_metadata(
+        Ok(logical_schema_from_physical_parquet(
             reader.metadata().file_metadata(),
         )?)
     }
@@ -684,6 +728,62 @@ mod tests {
         assert_eq!(schema.columns().len(), 1);
         assert_eq!(schema.columns()[0].name, "value");
         assert_eq!(schema.columns()[0].data_type, LogicalDataType::Int64);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_schema_preserves_embedded_arrow_schema() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/arrow-schema.parquet");
+        let abs_path = tmp.path().join(rel_path);
+        std::fs::create_dir_all(abs_path.parent().ok_or("parent directory")?)?;
+        let timezone = "America/Phoenix";
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Millisecond,
+                    Some(timezone.into()),
+                ),
+                false,
+            ),
+            Field::new(
+                "items",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+            Field::new(
+                "attrs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Binary, true),
+                        ])),
+                        false,
+                    )),
+                    true,
+                ),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0]).with_timezone(timezone)),
+                new_null_array(schema.field(1).data_type(), 1),
+                new_null_array(schema.field(2).data_type(), 1),
+            ],
+        )?;
+        let mut writer = ArrowWriter::try_new(File::create(abs_path)?, Arc::clone(&schema), None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        let actual =
+            logical_schema_from_parquet(&TableLocation::local(tmp.path()), rel_path).await?;
+        let expected = LogicalSchema::try_from_arrow_schema(&schema)?;
+        assert_eq!(actual, expected);
         Ok(())
     }
 
@@ -962,7 +1062,7 @@ mod tests {
         write_schema_only_parquet(&abs, schema)?;
 
         let reader = SerializedFileReader::new(File::open(abs)?)?;
-        match logical_schema_from_metadata(reader.metadata().file_metadata()) {
+        match logical_schema_from_physical_parquet(reader.metadata().file_metadata()) {
             Err(source) => {
                 assert_eq!(source, expected);
                 Ok(())

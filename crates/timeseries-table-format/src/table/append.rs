@@ -172,12 +172,6 @@ impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     }
 }
 
-fn logical_schema_from_arrow(schema: &Schema) -> Result<LogicalSchema, TableError> {
-    LogicalSchema::try_from_arrow_schema(schema).map_err(|source| TableError::AppendSource {
-        source: ArrowError::SchemaError(source.to_string()),
-    })
-}
-
 fn ensure_batch_schema(schema: &SchemaRef, batch: &ArrowRecordBatch) -> Result<(), TableError> {
     if batch.schema() == *schema {
         Ok(())
@@ -232,9 +226,13 @@ impl TimeSeriesTable {
         Ok(normalized)
     }
 
-    fn validate_stream_schema(&self, schema: &Schema) -> Result<LogicalSchema, TableError> {
+    fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
         ensure_existing_segments_have_coverage(&self.state)?;
-        let segment_schema = logical_schema_from_arrow(schema)?;
+        let segment_schema = LogicalSchema::try_from_arrow_schema(schema).map_err(|source| {
+            TableError::AppendSource {
+                source: ArrowError::SchemaError(source.to_string()),
+            }
+        })?;
         ensure_index_spec_matches_schema(&segment_schema, &self.index)
             .context(SchemaCompatibilitySnafu)?;
 
@@ -250,7 +248,7 @@ impl TimeSeriesTable {
             }
         }?;
 
-        Ok(segment_schema)
+        Ok(())
     }
 
     async fn append_parquet_path_file(
@@ -283,7 +281,7 @@ impl TimeSeriesTable {
                 r.set_context("relative_path", &relative_path);
             }
             let version = self
-                .append_parquet_segment_file(&relative_path, report, "external_path", None)
+                .append_parquet_segment_file(&relative_path, report, "external_path")
                 .await?;
             Ok((version, relative_path))
         }
@@ -330,7 +328,6 @@ impl TimeSeriesTable {
         relative_path: &str,
         mut report: Option<&mut AppendReportBuilder>,
         source_mode: &'static str,
-        declared_schema: Option<&LogicalSchema>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -370,15 +367,14 @@ impl TimeSeriesTable {
         }
 
         let step_start = Instant::now();
-        let parquet_schema = logical_schema_from_parquet(self.location(), rel_path)
+        let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
             .context(SegmentMetaSnafu)?;
-        ensure_index_spec_matches_schema(&parquet_schema, &self.index).context(
+        ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
             SegmentSchemaCompatibilitySnafu {
                 path: relative_path.to_string(),
             },
         )?;
-        let segment_schema = declared_schema.unwrap_or(&parquet_schema);
         if let Some(r) = report.as_mut() {
             r.push_step("logical_schema", step_start.elapsed(), Vec::new());
         }
@@ -406,7 +402,7 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, segment_schema, &self.index).context(
+                ensure_schema_exact_match(table_schema, &segment_schema, &self.index).context(
                     SegmentSchemaCompatibilitySnafu {
                         path: relative_path.to_string(),
                     },
@@ -707,7 +703,7 @@ impl TimeSeriesTable {
         let result = async {
             let mut reader = source.into_batch_stream()?;
             let schema = reader.schema();
-            let logical_schema = self.validate_stream_schema(schema.as_ref())?;
+            self.validate_stream_schema(schema.as_ref())?;
 
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
@@ -762,12 +758,7 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .append_parquet_segment_file(
-                    &relative_path,
-                    None,
-                    "arrow_stream",
-                    Some(&logical_schema),
-                )
+                .append_parquet_segment_file(&relative_path, None, "arrow_stream")
                 .await
             {
                 Ok(version) => {
@@ -819,7 +810,7 @@ impl TimeSeriesTable {
         let result = async {
             let relative_path = self.normalize_new_segment_path(relative_path).await?;
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            self.append_parquet_segment_file(&relative_path, None, "table_relative", None)
+            self.append_parquet_segment_file(&relative_path, None, "table_relative")
                 .await
         }
         .await;
@@ -918,12 +909,7 @@ impl TimeSeriesTable {
             let mut report = AppendReportBuilder::new();
             report.set_context("relative_path", &relative_path);
             let version = self
-                .append_parquet_segment_file(
-                    &relative_path,
-                    Some(&mut report),
-                    "table_relative",
-                    None,
-                )
+                .append_parquet_segment_file(&relative_path, Some(&mut report), "table_relative")
                 .await?;
             Ok((version, report.finish()))
         }
@@ -1808,7 +1794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_preserves_declared_logical_schema() -> TestResult {
+    async fn append_stream_preserves_exact_schema_across_append_and_optimize() -> TestResult {
         let timezone = "America/Phoenix";
         let schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -1816,6 +1802,7 @@ mod tests {
                 DataType::Timestamp(ArrowTimeUnit::Millisecond, Some(timezone.into())),
                 false,
             ),
+            Field::new("symbol", DataType::Utf8, false),
             Field::new(
                 "items",
                 DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
@@ -1841,9 +1828,10 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
-                Arc::new(TimestampMillisecondArray::from(vec![0]).with_timezone(timezone)),
-                new_null_array(schema.field(1).data_type(), 1),
-                new_null_array(schema.field(2).data_type(), 1),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 0]).with_timezone(timezone)),
+                Arc::new(StringArray::from(vec!["A", "B"])),
+                new_null_array(schema.field(2).data_type(), 2),
+                new_null_array(schema.field(3).data_type(), 2),
             ],
         )?;
 
@@ -1853,7 +1841,7 @@ mod tests {
             let mut meta = TableMeta::new_time_series_with_schema(
                 IndexSpec {
                     column: "ts".to_string(),
-                    entity_columns: Vec::new(),
+                    entity_columns: vec!["symbol".to_string()],
                     kind: IndexKind::Timestamp {
                         bucket: TimeBucket::Minutes(1),
                         timezone: Some(timezone.to_string()),
@@ -1870,6 +1858,42 @@ mod tests {
             assert_eq!(
                 table.state().table_meta.logical_schema.as_ref(),
                 Some(&expected)
+            );
+
+            let later_path = "data/same-arrow-schema.parquet";
+            let later_batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        TimestampMillisecondArray::from(vec![120_000, 120_000])
+                            .with_timezone(timezone),
+                    ),
+                    Arc::new(StringArray::from(vec!["A", "B"])),
+                    new_null_array(schema.field(2).data_type(), 2),
+                    new_null_array(schema.field(3).data_type(), 2),
+                ],
+            )?;
+            let mut writer = ArrowWriter::try_new(
+                File::create(temp.path().join(later_path))?,
+                Arc::clone(&schema),
+                None,
+            )?;
+            writer.write(&later_batch)?;
+            writer.close()?;
+            assert_eq!(table.append_parquet_segment(later_path).await?, 3);
+
+            let report = table.optimize().await?;
+            assert_eq!(report.committed_version, 4);
+            assert_eq!(report.candidate_source_segments, 2);
+            assert_eq!(report.replacement_segments_written, 4);
+            assert_eq!(report.rows_read, 4);
+            assert_eq!(report.rows_written, 4);
+            assert!(
+                table
+                    .state()
+                    .segments
+                    .values()
+                    .all(|segment| matches!(segment.entity_layout, SegmentEntityLayout::Single(_)))
             );
             let reopened = TimeSeriesTable::open(location).await?;
             assert_eq!(
