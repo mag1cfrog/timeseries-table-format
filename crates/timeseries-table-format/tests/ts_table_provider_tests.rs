@@ -3,6 +3,7 @@
 
 use std::num::NonZeroU64;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -10,7 +11,8 @@ use arrow::array::{
     StringBuilder, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use arrow::record_batch::RecordBatch;
+use arrow::error::ArrowError;
+use arrow::record_batch::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use chrono::Utc;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
@@ -32,7 +34,7 @@ use timeseries_table_format::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use timeseries_table_format::storage::{TableLocation, layout};
-use timeseries_table_format::table::TimeSeriesTable;
+use timeseries_table_format::table::{TableError, TimeSeriesTable};
 use timeseries_table_format::transaction_log::{
     Commit, IndexKind, IndexSpec, LogAction, TableMeta, TimeBucket,
 };
@@ -179,6 +181,32 @@ fn make_rows(start: i64, count: usize, symbol: &'static str, price_base: f64) ->
             price: Some(price_base + idx as f64),
         })
         .collect()
+}
+
+fn make_append_batch(rows: &[(i64, &str, f64)]) -> TestResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMillisecondArray::from(
+                rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+            )),
+        ],
+    )?)
 }
 
 fn minutes_to_millis(minutes: i64) -> i64 {
@@ -1002,6 +1030,93 @@ fn scalar_i64_from_array(array: &dyn Array) -> Result<i64, Box<dyn std::error::E
         }
         other => Err(format!("unexpected scalar type {other:?}").into()),
     }
+}
+
+#[tokio::test]
+async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
+    let tmp = TempDir::new()?;
+    let location = TableLocation::local(tmp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
+
+    assert!(matches!(
+        table.append(Vec::<RecordBatch>::new()).await,
+        Err(TableError::EmptyAppendSource)
+    ));
+    assert_eq!(table.state().version, 1);
+    assert!(table.state().segments.is_empty());
+
+    assert_eq!(
+        table
+            .append(make_append_batch(&[(60_000, "A", 11.0), (0, "B", 10.0),])?)
+            .await?,
+        2
+    );
+    assert_eq!(
+        table
+            .append(vec![
+                make_append_batch(&[(180_000, "B", 13.0)])?,
+                make_append_batch(&[(120_000, "A", 12.0)])?,
+            ])
+            .await?,
+        3
+    );
+
+    let iterator_batch = make_append_batch(&[(240_000, "A", 14.0)])?;
+    let iterator =
+        RecordBatchIterator::new(vec![Ok(iterator_batch.clone())], iterator_batch.schema());
+    assert_eq!(table.append(iterator).await?, 4);
+
+    let non_send_batch = make_append_batch(&[(300_000, "B", 15.0)])?;
+    let non_send_schema = non_send_batch.schema();
+    let not_send = Rc::new(());
+    let mut non_send_batch = Some(non_send_batch);
+    let non_send = RecordBatchIterator::new(
+        std::iter::from_fn(move || {
+            let _keep_reader_non_send = &not_send;
+            non_send_batch.take().map(Ok::<_, ArrowError>)
+        }),
+        non_send_schema,
+    );
+    assert_eq!(table.append(non_send).await?, 5);
+
+    let boxed_batch = make_append_batch(&[(360_000, "A", 16.0)])?;
+    let boxed: Box<dyn RecordBatchReader> = Box::new(RecordBatchIterator::new(
+        vec![Ok(boxed_batch.clone())],
+        boxed_batch.schema(),
+    ));
+    assert_eq!(table.append(boxed).await?, 6);
+
+    let sendable_batch = make_append_batch(&[(420_000, "B", 17.0)])?;
+    let sendable: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+        vec![Ok(sendable_batch.clone())],
+        sendable_batch.schema(),
+    ));
+    assert_eq!(table.append(sendable).await?, 7);
+
+    drop(table);
+    let reopened = Arc::new(TimeSeriesTable::open(location).await?);
+    assert_eq!(reopened.state().version, 7);
+    assert_eq!(reopened.state().segments.len(), 6);
+
+    let ctx = SessionContext::new();
+    let _provider = register_provider(&ctx, reopened)?;
+    let batches =
+        collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts, symbol").await?;
+    let actual = arrow_select::concat::concat_batches(&first_batch(&batches)?.schema(), &batches)?;
+    assert_eq!(
+        actual,
+        make_append_batch(&[
+            (0, "B", 10.0),
+            (60_000, "A", 11.0),
+            (120_000, "A", 12.0),
+            (180_000, "B", 13.0),
+            (240_000, "A", 14.0),
+            (300_000, "B", 15.0),
+            (360_000, "A", 16.0),
+            (420_000, "B", 17.0),
+        ])?
+    );
+    Ok(())
 }
 
 #[tokio::test]
