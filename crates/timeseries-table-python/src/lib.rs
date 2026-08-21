@@ -51,6 +51,12 @@ mod _native {
         tokio_runner,
     };
 
+    /// Refresh cached native logging levels after changing Python logging configuration.
+    #[pyfunction]
+    fn refresh_logging_cache() {
+        crate::python_logging::refresh_cache();
+    }
+
     enum RegisterTsTableError {
         Table(timeseries_table_format::table::TableError),
         DataFusion(DFError),
@@ -2187,6 +2193,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         crate::python_logging::install(m.py())?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+        m.add_function(pyo3::wrap_pyfunction!(refresh_logging_cache, m)?)?;
 
         // Export classes
         m.add_class::<Session>()?;

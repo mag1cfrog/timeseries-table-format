@@ -80,7 +80,7 @@ def test_native_operation_uses_python_logging_namespace():
     )
 
 
-def test_native_logging_follows_runtime_level_changes():
+def test_native_logging_cache_can_be_refreshed_after_level_changes():
     _run_isolated(
         """
         import logging
@@ -111,6 +111,15 @@ def test_native_logging_follows_runtime_level_changes():
             assert records == []
 
             logger.setLevel(logging.INFO)
+            ttf.TimeSeriesTable.create(
+                table_root=str(root / "still-quiet"),
+                index_column="ts",
+                index_type="timestamp",
+                bucket="1h",
+            )
+            assert records == []
+
+            ttf.refresh_logging_cache()
             ttf.TimeSeriesTable.create(
                 table_root=str(root / "visible"),
                 index_column="ts",
