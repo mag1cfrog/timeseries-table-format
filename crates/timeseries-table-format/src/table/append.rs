@@ -598,23 +598,17 @@ impl TimeSeriesTable {
         let step_start = Instant::now();
         let new_version = match self
             .log
-            .commit_with_expected_version(expected_version, actions)
+            .commit_with_path_preservation(expected_version, actions, || {
+                if let Some(guard) = owned_data_guard.as_mut() {
+                    guard.disarm();
+                }
+                segment_sidecar_guard.disarm();
+                snapshot_sidecar_guard.disarm();
+            })
             .await
         {
-            Ok(version) => {
-                if let Some(guard) = owned_data_guard.as_mut() {
-                    guard.disarm();
-                }
-                segment_sidecar_guard.disarm();
-                snapshot_sidecar_guard.disarm();
-                version
-            }
+            Ok(version) => version,
             Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
-                if let Some(guard) = owned_data_guard.as_mut() {
-                    guard.disarm();
-                }
-                segment_sidecar_guard.disarm();
-                snapshot_sidecar_guard.disarm();
                 return Err(TableError::TransactionLog { source });
             }
             Err(source) => {
@@ -963,25 +957,47 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Weak};
     use tempfile::TempDir;
-    use tracing::{Event, Subscriber, instrument::WithSubscriber};
+    use tracing::{Event, Subscriber, instrument::WithSubscriber, span::Id};
     use tracing_subscriber::{
         Layer,
         layer::{Context, SubscriberExt},
+        registry::LookupSpan,
     };
 
     #[derive(Clone, Copy)]
-    struct PanicOnAppendEvent;
+    enum PanicObservation {
+        AppendEvent,
+        CommitClose,
+    }
 
-    impl<S: Subscriber> Layer<S> for PanicOnAppendEvent {
+    #[derive(Clone, Copy)]
+    struct PanicOnObservation(PanicObservation);
+
+    impl<S> Layer<S> for PanicOnObservation
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
         fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-            if event.metadata().name() == "table.append" {
+            if matches!(self.0, PanicObservation::AppendEvent)
+                && event.metadata().name() == "table.append"
+            {
                 panic!("injected post-commit append observer panic");
+            }
+        }
+
+        fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+            if matches!(self.0, PanicObservation::CommitClose)
+                && ctx
+                    .metadata(&id)
+                    .is_some_and(|metadata| metadata.name() == "transaction.commit")
+            {
+                panic!("injected transaction commit close panic");
             }
         }
     }
 
-    fn panic_on_append_dispatch() -> tracing::Dispatch {
-        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnAppendEvent))
+    fn panic_on_observation_dispatch(observation: PanicObservation) -> tracing::Dispatch {
+        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnObservation(observation)))
     }
 
     #[derive(Default)]
@@ -1487,11 +1503,11 @@ mod tests {
         let streamed_location = TableLocation::local(streamed_root.path());
         let mut streamed_table =
             TimeSeriesTable::create(streamed_location.clone(), make_basic_table_meta()).await?;
-        let callsite_guard = panic_on_append_dispatch();
+        let callsite_guard = panic_on_observation_dispatch(PanicObservation::CommitClose);
         let outcome = std::panic::AssertUnwindSafe(
             streamed_table
                 .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
-                .with_subscriber(panic_on_append_dispatch()),
+                .with_subscriber(panic_on_observation_dispatch(PanicObservation::CommitClose)),
         )
         .catch_unwind()
         .await;
@@ -1499,6 +1515,7 @@ mod tests {
         assert!(outcome.is_err());
         let reopened = TimeSeriesTable::open(streamed_location).await?;
         assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
         assert!(
             reopened
                 .state()
@@ -1523,11 +1540,11 @@ mod tests {
                 price: 1.0,
             }],
         )?;
-        let callsite_guard = panic_on_append_dispatch();
+        let callsite_guard = panic_on_observation_dispatch(PanicObservation::AppendEvent);
         let outcome = std::panic::AssertUnwindSafe(
             copied_table
                 .append_parquet_from_path(&external_path)
-                .with_subscriber(panic_on_append_dispatch()),
+                .with_subscriber(panic_on_observation_dispatch(PanicObservation::AppendEvent)),
         )
         .catch_unwind()
         .await;
@@ -1535,6 +1552,7 @@ mod tests {
         assert!(outcome.is_err());
         let reopened = TimeSeriesTable::open(copied_location).await?;
         assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
         assert!(
             reopened
                 .state()

@@ -176,6 +176,31 @@ impl TransactionLogStore {
     /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
     ///    "create only if not exists" semantics (atomic guard).
     /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
+    pub(crate) async fn commit_with_expected_version(
+        &self,
+        expected: u64,
+        actions: Vec<LogAction>,
+    ) -> Result<u64, CommitError> {
+        self.commit_inner(expected, actions, || {}).await
+    }
+
+    /// Commit while preserving newly created paths that may be referenced.
+    ///
+    /// `preserve_referenced_paths` runs before post-outcome tracing when the
+    /// commit succeeds or becomes ambiguous.
+    pub(crate) async fn commit_with_path_preservation<F>(
+        &self,
+        expected: u64,
+        actions: Vec<LogAction>,
+        preserve_referenced_paths: F,
+    ) -> Result<u64, CommitError>
+    where
+        F: FnOnce(),
+    {
+        self.commit_inner(expected, actions, preserve_referenced_paths)
+            .await
+    }
+
     #[tracing::instrument(
         name = "transaction.commit",
         level = "debug",
@@ -191,11 +216,15 @@ impl TransactionLogStore {
             outcome = tracing::field::Empty
         )
     )]
-    pub(crate) async fn commit_with_expected_version(
+    async fn commit_inner<F>(
         &self,
         expected: u64,
         actions: Vec<LogAction>,
-    ) -> Result<u64, CommitError> {
+        on_commit_may_exist: F,
+    ) -> Result<u64, CommitError>
+    where
+        F: FnOnce(),
+    {
         let span = tracing::Span::current();
 
         // 1) Guard on CURRENT
@@ -268,6 +297,7 @@ impl TransactionLogStore {
                 cleanup_error,
                 ..
             }) => {
+                on_commit_may_exist();
                 span.record("failure_stage", "atomic_create");
                 span.record("outcome", "ambiguous");
                 return Err(CommitError::AmbiguousOutcome {
@@ -303,8 +333,12 @@ impl TransactionLogStore {
                 .rollback_unpublished_commit(&commit_rel, publish_error)
                 .await;
             commit_guard.disarm();
+            let ambiguous = matches!(&error, CommitError::AmbiguousOutcome { .. });
+            if ambiguous {
+                on_commit_may_exist();
+            }
             span.record("failure_stage", "current_publication");
-            if matches!(&error, CommitError::AmbiguousOutcome { .. }) {
+            if ambiguous {
                 span.record("rollback_outcome", "failed");
                 span.record("outcome", "ambiguous");
             } else {
@@ -315,6 +349,7 @@ impl TransactionLogStore {
         }
 
         commit_guard.disarm();
+        on_commit_may_exist();
 
         span.record("committed_version", version);
         span.record("outcome", "succeeded");
