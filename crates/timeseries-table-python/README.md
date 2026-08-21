@@ -52,6 +52,28 @@ Use `Session.register_parquet(name, path)` to query a standalone Parquet file or
 Directories must contain at least one Parquet file so their schema can be inferred; registering an
 empty directory raises `DataFusionError`.
 
+## Native logging
+
+Native table diagnostics use Python's standard `logging` hierarchy. Configure the
+`timeseries_table_format` logger before the first table operation:
+
+```python
+import logging
+
+logger = logging.getLogger("timeseries_table_format")
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+logger.addHandler(handler)
+
+import timeseries_table_format as ttf
+
+# Native table operations now emit through this logger hierarchy.
+```
+
+The package does not install handlers or configure the root logger. See
+[Configure native logging](https://mag1cfrog.github.io/timeseries-table-format/guides/native_logging/)
+for logger hierarchy, level caching, privacy, troubleshooting, and telemetry integration details.
+
 ## Notebook display (Jupyter/IPython)
 
 In IPython/Jupyter (including VS Code notebooks), `pyarrow.Table` results will display as a bounded HTML preview by default (the return type is still a real `pyarrow.Table`).
@@ -416,3 +438,4 @@ directory and cleans it up on exit).
 - Append fails with an ordered-index error: the column must exactly match the configured Arrow `timestamp(...)`, `int64`, or `uint64` type; Timestamp units must also remain consistent across segments.
 - `SchemaMismatchError` on append: the new Parquet segment schema must match the table's adopted schema (column names and types).
 - SQL errors / parameter placeholders: try an explicit `CAST(...)` for placeholders used in `SELECT` projections.
+- Native logging is missing or duplicated: see [Configure native logging](https://mag1cfrog.github.io/timeseries-table-format/guides/native_logging/) for handlers, propagation, and runtime level changes.
