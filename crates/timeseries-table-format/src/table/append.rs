@@ -232,7 +232,7 @@ impl TimeSeriesTable {
         Ok(normalized)
     }
 
-    fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
+    fn validate_stream_schema(&self, schema: &Schema) -> Result<LogicalSchema, TableError> {
         ensure_existing_segments_have_coverage(&self.state)?;
         let segment_schema = logical_schema_from_arrow(schema)?;
         ensure_index_spec_matches_schema(&segment_schema, &self.index)
@@ -248,7 +248,9 @@ impl TimeSeriesTable {
                 ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
                     .context(SchemaCompatibilitySnafu)
             }
-        }
+        }?;
+
+        Ok(segment_schema)
     }
 
     async fn append_parquet_path_file(
@@ -281,7 +283,7 @@ impl TimeSeriesTable {
                 r.set_context("relative_path", &relative_path);
             }
             let version = self
-                .append_parquet_segment_file(&relative_path, report, "external_path")
+                .append_parquet_segment_file(&relative_path, report, "external_path", None)
                 .await?;
             Ok((version, relative_path))
         }
@@ -328,6 +330,7 @@ impl TimeSeriesTable {
         relative_path: &str,
         mut report: Option<&mut AppendReportBuilder>,
         source_mode: &'static str,
+        declared_schema: Option<&LogicalSchema>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -367,14 +370,15 @@ impl TimeSeriesTable {
         }
 
         let step_start = Instant::now();
-        let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
+        let parquet_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
             .context(SegmentMetaSnafu)?;
-        ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
+        ensure_index_spec_matches_schema(&parquet_schema, &self.index).context(
             SegmentSchemaCompatibilitySnafu {
                 path: relative_path.to_string(),
             },
         )?;
+        let segment_schema = declared_schema.unwrap_or(&parquet_schema);
         if let Some(r) = report.as_mut() {
             r.push_step("logical_schema", step_start.elapsed(), Vec::new());
         }
@@ -402,7 +406,7 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index).context(
+                ensure_schema_exact_match(table_schema, segment_schema, &self.index).context(
                     SegmentSchemaCompatibilitySnafu {
                         path: relative_path.to_string(),
                     },
@@ -703,7 +707,7 @@ impl TimeSeriesTable {
         let result = async {
             let mut reader = source.into_batch_stream()?;
             let schema = reader.schema();
-            self.validate_stream_schema(schema.as_ref())?;
+            let logical_schema = self.validate_stream_schema(schema.as_ref())?;
 
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
@@ -758,7 +762,12 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .append_parquet_segment_file(&relative_path, None, "arrow_stream")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    None,
+                    "arrow_stream",
+                    Some(&logical_schema),
+                )
                 .await
             {
                 Ok(version) => {
@@ -810,7 +819,7 @@ impl TimeSeriesTable {
         let result = async {
             let relative_path = self.normalize_new_segment_path(relative_path).await?;
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            self.append_parquet_segment_file(&relative_path, None, "table_relative")
+            self.append_parquet_segment_file(&relative_path, None, "table_relative", None)
                 .await
         }
         .await;
@@ -909,7 +918,12 @@ impl TimeSeriesTable {
             let mut report = AppendReportBuilder::new();
             report.set_context("relative_path", &relative_path);
             let version = self
-                .append_parquet_segment_file(&relative_path, Some(&mut report), "table_relative")
+                .append_parquet_segment_file(
+                    &relative_path,
+                    Some(&mut report),
+                    "table_relative",
+                    None,
+                )
                 .await?;
             Ok((version, report.finish()))
         }
@@ -940,9 +954,9 @@ mod tests {
     use arrow::{
         array::{
             ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
-            TimestampMillisecondArray, UInt64Array,
+            TimestampMillisecondArray, UInt64Array, new_null_array,
         },
-        datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit},
+        datatypes::{DataType, Field, Fields, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
     };
     use parquet::arrow::ArrowWriter;
@@ -1790,6 +1804,79 @@ mod tests {
         let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
         assert_eq!(table.append(batch).await?, 2);
         assert!(table.state().table_meta.logical_schema.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_stream_preserves_declared_logical_schema() -> TestResult {
+        let timezone = "America/Phoenix";
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, Some(timezone.into())),
+                false,
+            ),
+            Field::new(
+                "items",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+            Field::new(
+                "attrs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Binary, true),
+                        ])),
+                        false,
+                    )),
+                    true,
+                ),
+                true,
+            ),
+        ]));
+        let expected = LogicalSchema::try_from_arrow_schema(&schema).expect("logical schema");
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0]).with_timezone(timezone)),
+                new_null_array(schema.field(1).data_type(), 1),
+                new_null_array(schema.field(2).data_type(), 1),
+            ],
+        )?;
+
+        for has_canonical_schema in [true, false] {
+            let temp = TempDir::new()?;
+            let location = TableLocation::local(temp.path());
+            let mut meta = TableMeta::new_time_series_with_schema(
+                IndexSpec {
+                    column: "ts".to_string(),
+                    entity_columns: Vec::new(),
+                    kind: IndexKind::Timestamp {
+                        bucket: TimeBucket::Minutes(1),
+                        timezone: Some(timezone.to_string()),
+                    },
+                },
+                expected.clone(),
+            );
+            if !has_canonical_schema {
+                meta.logical_schema = None;
+            }
+            let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+
+            assert_eq!(table.append(batch.clone()).await?, 2);
+            assert_eq!(
+                table.state().table_meta.logical_schema.as_ref(),
+                Some(&expected)
+            );
+            let reopened = TimeSeriesTable::open(location).await?;
+            assert_eq!(
+                reopened.state().table_meta.logical_schema.as_ref(),
+                Some(&expected)
+            );
+        }
         Ok(())
     }
 
