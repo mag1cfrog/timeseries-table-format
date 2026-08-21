@@ -51,7 +51,6 @@ fn metadata_pruning_accepts_only_exact_supported_entity_literals() -> DFResult<(
     Ok(())
 }
 
-#[cfg(feature = "test-counters")]
 fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
@@ -90,6 +89,82 @@ fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
     .expect("valid logical schema");
 
     crate::metadata::table_metadata::TableMeta::new_time_series_with_schema(index, logical_schema)
+}
+
+#[tokio::test]
+async fn scan_records_safe_segment_planning_counts() -> crate::table::test_util::TestResult {
+    use datafusion::{
+        catalog::TableProvider,
+        prelude::{SessionContext, col, lit},
+    };
+
+    use crate::{
+        storage::TableLocation,
+        table::{
+            TimeSeriesTable,
+            test_util::{TestRow, TraceCapture, write_test_parquet},
+        },
+    };
+
+    let tmp = tempfile::TempDir::new()?;
+    let mut table =
+        TimeSeriesTable::create(TableLocation::local(tmp.path()), make_table_meta()).await?;
+    for (path, symbol) in [("data/a.parquet", "A"), ("data/b.parquet", "B")] {
+        write_test_parquet(
+            &tmp.path().join(path),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 0,
+                symbol,
+                price: 1.0,
+            }],
+        )?;
+        table.append_parquet_segment(path).await?;
+    }
+
+    let snapshot_version = table.state().version;
+    let provider = TsTableProvider::try_new(Arc::new(table))?;
+    let state = SessionContext::new().state();
+    let projection = vec![0, 2];
+    let filters = vec![col("symbol").eq(lit("A"))];
+    let capture = TraceCapture::default();
+
+    capture
+        .run(provider.scan(&state, Some(&projection), &filters, Some(1)))
+        .await?;
+
+    let spans: Vec<_> = capture
+        .spans()
+        .into_iter()
+        .filter(|span| span.name == "table.scan.plan")
+        .collect();
+    assert_eq!(spans.len(), 1, "expected one table.scan.plan span");
+    assert_eq!(spans[0].level, tracing::Level::DEBUG);
+    for (field, expected) in [
+        ("snapshot_version", snapshot_version.to_string()),
+        ("total_candidate_segments", "2".to_string()),
+        ("selected_segments", "1".to_string()),
+        ("pruned_segments", "1".to_string()),
+        ("filter_count", "1".to_string()),
+        ("projection_column_count", "2".to_string()),
+        ("limit", "1".to_string()),
+    ] {
+        assert_eq!(spans[0].fields.get(field), Some(&expected));
+    }
+    assert!(
+        capture
+            .events()
+            .iter()
+            .all(|event| event.name != "table.scan.plan")
+    );
+    for value in spans[0].fields.values() {
+        for forbidden in ["symbol", "A", "BinaryExpr", "RecordBatch", "LogicalSchema"] {
+            assert!(!value.contains(forbidden));
+        }
+        assert!(!value.contains(&tmp.path().display().to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "test-counters")]

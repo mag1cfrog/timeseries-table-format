@@ -34,10 +34,11 @@
 //! facade for applications that install a logger.
 //!
 //! The initial operation names include `table.open`, `table.create`,
-//! `table.refresh`, `table.append`, `table.optimize`, `transaction.commit`,
-//! and `coverage.recover`. Diagnostics exclude SQL, entity identities, record
-//! values, complete schemas, credentials, and environment variables.
-//! DataFusion remains the source of query execution metrics.
+//! `table.refresh`, `table.append`, `table.optimize`, `table.scan.plan`,
+//! `transaction.commit`, and `coverage.recover`. Diagnostics exclude SQL,
+//! entity identities, record values, complete schemas, credentials, and
+//! environment variables. `table.scan.plan` covers physical plan construction
+//! only; DataFusion remains the source of query execution metrics.
 
 pub mod coverage;
 #[cfg(feature = "datafusion")]
