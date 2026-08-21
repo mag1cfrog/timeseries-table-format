@@ -119,14 +119,14 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
 /// This type exists only to keep the blanket [`RecordBatchReader`]
 /// implementation disjoint from the direct batch implementations.
 #[doc(hidden)]
-pub struct RecordBatchReaderSource;
+pub struct RecordBatchReaderKind;
 
 /// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
 ///
-/// Implementations preserve non-`Send` readers. The `Source` parameter is an
+/// Implementations preserve non-`Send` readers. The `Kind` parameter is an
 /// inference-only coherence marker and should not normally be specified by
 /// callers.
-pub trait IntoBatchStream<Source = RecordBatchReaderSource> {
+pub trait IntoBatchStream<Kind = RecordBatchReaderKind> {
     /// Reader produced from this source.
     type Reader: RecordBatchReader;
 
@@ -134,7 +134,7 @@ pub trait IntoBatchStream<Source = RecordBatchReaderSource> {
     fn into_batch_stream(self) -> Result<Self::Reader, TableError>;
 }
 
-impl<R> IntoBatchStream<RecordBatchReaderSource> for R
+impl<R> IntoBatchStream<RecordBatchReaderKind> for R
 where
     R: RecordBatchReader,
 {
@@ -696,9 +696,9 @@ impl TimeSeriesTable {
             outcome = tracing::field::Empty
         )
     )]
-    pub async fn append<S, Source>(&mut self, source: S) -> Result<u64, TableError>
+    pub async fn append<S, Kind>(&mut self, source: S) -> Result<u64, TableError>
     where
-        S: IntoBatchStream<Source>,
+        S: IntoBatchStream<Kind>,
     {
         let result = async {
             let mut reader = source.into_batch_stream()?;
