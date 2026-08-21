@@ -37,9 +37,7 @@ use timeseries_table_format::metadata::logical_schema::{
 use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::{TableError, TimeSeriesTable};
-use timeseries_table_format::transaction_log::{
-    Commit, IndexKind, IndexSpec, LogAction, TableMeta, TimeBucket,
-};
+use timeseries_table_format::transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -747,9 +745,7 @@ async fn create_zoned_pruning_table(
     timezone: &str,
     segments: &[(&str, &str, &str, f64)],
 ) -> TestResult<TimeSeriesTable> {
-    // Parquet logical schema extraction does not preserve named timezones, so
-    // append the real files first and record the canonical zoned schema after.
-    let meta = make_table_meta(false)?;
+    let meta = make_table_meta_with_timezone(false, Some(timezone))?;
     let mut table = TimeSeriesTable::create(TableLocation::local(tmp.path()), meta).await?;
 
     for &(file, min, max, price) in segments {
@@ -775,41 +771,7 @@ async fn create_zoned_pruning_table(
         )?;
         table.append_parquet_segment(&path).await?;
     }
-
-    let base_version = table.state().version;
-    let coverage_path = table
-        .state()
-        .table_coverage
-        .as_ref()
-        .ok_or("expected table coverage after append")?
-        .coverage_path
-        .clone();
-    let index_kind = make_index_spec_with_timezone(Some(timezone)).kind;
-    let commit = Commit {
-        version: base_version + 1,
-        base_version,
-        timestamp: Utc::now(),
-        actions: vec![
-            LogAction::UpdateTableMeta(make_table_meta_with_timezone(false, Some(timezone))?),
-            LogAction::UpdateTableCoverage {
-                index_kind,
-                coverage_path,
-            },
-        ],
-    };
-    tokio::fs::write(
-        tmp.path().join(layout::commit_rel_path(commit.version)),
-        serde_json::to_vec(&commit)?,
-    )
-    .await?;
-    tokio::fs::write(
-        tmp.path().join(layout::current_rel_path()),
-        format!("{}\n", commit.version),
-    )
-    .await?;
-    drop(table);
-
-    Ok(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?)
+    Ok(table)
 }
 
 async fn create_single_segment_table_with_props(
