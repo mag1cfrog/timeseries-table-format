@@ -167,7 +167,7 @@ fn make_index_spec_with_timezone(timezone: Option<&str>) -> IndexSpec {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            bucket: TimeBucket::Seconds(1),
             timezone: timezone.map(str::to_string),
         },
     }
@@ -291,7 +291,7 @@ fn make_composite_table_meta() -> TableMeta {
 fn make_rows(start: i64, count: usize, symbol: &'static str, price_base: f64) -> Vec<TestRow> {
     (0..count)
         .map(|idx| TestRow {
-            ts_millis: start + idx as i64,
+            ts_millis: start + idx as i64 * 1_000,
             symbol,
             price: Some(price_base + idx as f64),
         })
@@ -1785,9 +1785,9 @@ async fn order_by_limit_returns_descending_rows() -> TestResult {
     assert_eq!(
         values,
         vec![
-            minutes_to_millis(3) + 4,
-            minutes_to_millis(3) + 3,
-            minutes_to_millis(3) + 2,
+            minutes_to_millis(3) + 4_000,
+            minutes_to_millis(3) + 3_000,
+            minutes_to_millis(3) + 2_000,
         ]
     );
     Ok(())
@@ -2214,7 +2214,7 @@ async fn time_filter_returns_correct_rows() -> TestResult {
     let batches = collect_batches(
         &ctx,
         "SELECT COUNT(*) FROM t \
-         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:01Z'",
+         WHERE ts >= '1970-01-01T00:03:00Z' AND ts < '1970-01-01T00:03:05Z'",
     )
     .await?;
     let count = scalar_u64(&batches)?;
@@ -2327,7 +2327,7 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
     let min_ts = scalar_i64_from_array(batch.column(0).as_ref())?;
     let max_ts = scalar_i64_from_array(batch.column(1).as_ref())?;
     assert_eq!(min_ts, minutes_to_millis(1));
-    assert_eq!(max_ts, minutes_to_millis(3) + 4);
+    assert_eq!(max_ts, minutes_to_millis(3) + 4_000);
     Ok(())
 }
 
@@ -2650,7 +2650,7 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
             (
                 FILES[5],
                 "2024-03-09T06:30:00Z",
-                "2024-03-09T06:30:00.001Z",
+                "2024-03-09T06:30:01Z",
                 60.0,
             ),
         ],

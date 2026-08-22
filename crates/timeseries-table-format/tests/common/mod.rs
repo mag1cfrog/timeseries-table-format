@@ -35,7 +35,7 @@ pub fn write_parquet_rows_with_base(path: &Path, rows: usize, base_ts: i64) -> T
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let rnd = seed;
         let ts = base_ts + (i as i64) * 1_000;
-        let symbol = "SYM1".to_string();
+        let symbol = format!("SYM{i}");
         let price = 100.0 + (rnd % 10_000) as f64 / 100.0;
         let volume = 1_000 + (rnd % 5_000) as i64;
         let is_trade = i % 2 == 0;

@@ -655,20 +655,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_coverage_rejects_duplicate_within_one_worker() -> TestResult {
+    async fn compute_coverage_rejects_equal_and_distinct_timestamp_duplicates() -> TestResult {
         let tmp = TempDir::new()?;
-        let rel_path = Path::new("data/same-worker-duplicate.parquet");
-        write_parquet_with_timestamps(&tmp.path().join(rel_path), &[Some(1_000), Some(30_000)])?;
+        for (name, values) in [
+            ("equal", [Some(1_000), Some(1_000)]),
+            ("distinct", [Some(1_000), Some(30_000)]),
+        ] {
+            let rel_path = Path::new("data").join(format!("{name}-timestamp-duplicate.parquet"));
+            write_parquet_with_timestamps(&tmp.path().join(&rel_path), &values)?;
 
-        let error = compute_segment_coverage(
+            let error = compute_segment_coverage(
+                &TableLocation::local(tmp.path()),
+                &rel_path,
+                &timestamp_index("ts", TimeBucket::Minutes(1)),
+            )
+            .await
+            .expect_err("same-worker duplicate must be rejected");
+
+            assert_implicit_duplicate(error, &rel_path.display().to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_respects_exact_timestamp_boundary() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/timestamp-boundary.parquet");
+        write_parquet_with_timestamps(&tmp.path().join(rel_path), &[Some(59_999), Some(60_000)])?;
+
+        let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
             &timestamp_index("ts", TimeBucket::Minutes(1)),
         )
-        .await
-        .expect_err("same-worker duplicate must be rejected");
+        .await?;
 
-        assert_implicit_duplicate(error, "data/same-worker-duplicate.parquet");
+        assert_eq!(
+            coverage.present().iter().collect::<Vec<_>>(),
+            vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]
+        );
         Ok(())
     }
 
@@ -805,6 +830,70 @@ mod tests {
                 unsigned_values.into_iter().map(IndexValue::UInt64)
             )
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_rejects_integer_duplicates_at_domain_boundaries() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+
+        for (name, values, expected_range) in [
+            ("negative", [-10, -1], "[-10, 0)"),
+            ("zero", [0, 9], "[0, 10)"),
+            (
+                "maximum",
+                [i64::MAX - 7, i64::MAX],
+                "[9223372036854775800, 9223372036854775807]",
+            ),
+        ] {
+            let rel_path = Path::new("data").join(format!("int64-{name}-duplicate.parquet"));
+            write_parquet_batch(
+                &tmp.path().join(&rel_path),
+                Schema::new(vec![Field::new("index", DataType::Int64, false)]),
+                vec![Arc::new(Int64Array::from(values.to_vec()))],
+            )?;
+
+            let error = compute_segment_coverage(&location, &rel_path, &int64_index("index", 10))
+                .await
+                .expect_err("signed duplicate must be rejected");
+            assert!(matches!(
+                error,
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: None,
+                    example_bucket_range,
+                    ..
+                } if example_bucket_range.to_string() == expected_range
+            ));
+        }
+
+        for (name, values, expected_range) in [
+            ("boundary", [10, 11], "[10, 20)"),
+            (
+                "maximum",
+                [u64::MAX - 5, u64::MAX],
+                "[18446744073709551610, 18446744073709551615]",
+            ),
+        ] {
+            let rel_path = Path::new("data").join(format!("uint64-{name}-duplicate.parquet"));
+            write_parquet_batch(
+                &tmp.path().join(&rel_path),
+                Schema::new(vec![Field::new("index", DataType::UInt64, false)]),
+                vec![Arc::new(UInt64Array::from(values.to_vec()))],
+            )?;
+
+            let error = compute_segment_coverage(&location, &rel_path, &uint64_index("index", 10))
+                .await
+                .expect_err("unsigned duplicate must be rejected");
+            assert!(matches!(
+                error,
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: None,
+                    example_bucket_range,
+                    ..
+                } if example_bucket_range.to_string() == expected_range
+            ));
+        }
         Ok(())
     }
 

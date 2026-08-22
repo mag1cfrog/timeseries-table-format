@@ -165,7 +165,7 @@ async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
             DataType::UInt64,
             Arc::new(UInt64Array::from(vec![
                 i64::MAX as u64 + 1,
-                i64::MAX as u64 + 8,
+                i64::MAX as u64 + 9,
             ])),
             IndexKind::UInt64 {
                 bucket_width: NonZeroU64::new(8).unwrap(),

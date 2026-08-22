@@ -2456,10 +2456,7 @@ mod tests {
         Ok(())
     }
 
-    fn write_composite_entity_parquet(path: &Path, rows: &[(i64, &str, &str, f64)]) -> TestResult {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    fn composite_entity_batch(rows: &[(i64, &str, &str, f64)]) -> Result<RecordBatch, ArrowError> {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
@@ -2470,7 +2467,7 @@ mod tests {
             Field::new("venue", DataType::Utf8, false),
             Field::new("price", DataType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(
+        RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
                 Arc::new(TimestampMillisecondArray::from(
@@ -2486,7 +2483,15 @@ mod tests {
                     rows.iter().map(|row| row.3).collect::<Vec<_>>(),
                 )),
             ],
-        )?;
+        )
+    }
+
+    fn write_composite_entity_parquet(path: &Path, rows: &[(i64, &str, &str, f64)]) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let batch = composite_entity_batch(rows)?;
+        let schema = batch.schema();
         let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
         writer.write(&batch)?;
         writer.close()?;
@@ -2573,6 +2578,81 @@ mod tests {
 
         assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
         assert!(table.state().table_meta.logical_schema.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_interval_across_input_batches_is_rejected() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                .await?;
+
+        let error = table
+            .append(vec![
+                timestamp_only_batch_from_values([0])?,
+                timestamp_only_batch_from_values([30_000])?,
+            ])
+            .await
+            .expect_err("duplicate split across input batches must fail");
+
+        assert!(matches!(
+            error,
+            TableError::DuplicateIndexInterval {
+                example_identity: None,
+                example_index_interval,
+                ..
+            } if example_index_interval.to_string()
+                == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn composite_identity_uses_every_component_for_duplicates() -> TestResult {
+        let temp = TempDir::new()?;
+        let index = IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string(), "venue".to_string()],
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        };
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            TableMeta::new_time_series(index),
+        )
+        .await?;
+
+        assert_eq!(
+            table
+                .append(composite_entity_batch(&[
+                    (0, "A", "X", 1.0),
+                    (0, "A", "Y", 2.0),
+                ])?)
+                .await?,
+            2
+        );
+        let state_before = table.state().clone();
+
+        let error = table
+            .append(composite_entity_batch(&[
+                (60_000, "A", "Z", 3.0),
+                (90_000, "A", "Z", 4.0),
+            ])?)
+            .await
+            .expect_err("matching composite identity must be rejected");
+
+        assert!(matches!(
+            error,
+            TableError::DuplicateIndexInterval {
+                example_identity: Some(example_identity),
+                ..
+            } if example_identity.components()
+                == [EntityValue::from("A"), EntityValue::from("Z")]
+        ));
+        assert_eq!(table.state(), &state_before);
         Ok(())
     }
 

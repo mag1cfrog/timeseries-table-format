@@ -682,7 +682,7 @@ mod tests {
         write_arrow_parquet_with_unit(
             &temp.path().join(source_path),
             TimeUnit::Millisecond,
-            &[Some(1_000), Some(2_000), Some(3_000), Some(4_000)],
+            &[Some(1_000), Some(2_000), Some(61_000), Some(62_000)],
             &["A", "B", "A", "B"],
             &[10.0, 20.0, 11.0, 21.0],
         )?;
@@ -793,7 +793,7 @@ mod tests {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let source_path = "data/mixed.parquet";
-        let timestamps = [1_000, 2_000, 3_000, 4_000, 5_000, 6_000];
+        let timestamps = [1_000, 2_000, 61_000, 4_000, 62_000, 64_000];
         let symbols = [
             "tenant-secret-b",
             "tenant-secret-a",
@@ -899,21 +899,21 @@ mod tests {
             actual[&EntityValue::from("tenant-secret-a")],
             vec![
                 (2_000, "tenant-secret-a".to_string(), 20.0),
-                (5_000, "tenant-secret-a".to_string(), 21.0),
+                (62_000, "tenant-secret-a".to_string(), 21.0),
             ]
         );
         assert_eq!(
             actual[&EntityValue::from("tenant-secret-b")],
             vec![
                 (1_000, "tenant-secret-b".to_string(), 10.0),
-                (3_000, "tenant-secret-b".to_string(), 11.0),
+                (61_000, "tenant-secret-b".to_string(), 11.0),
             ]
         );
         assert_eq!(
             actual[&EntityValue::from("tenant-secret-c")],
             vec![
                 (4_000, "tenant-secret-c".to_string(), 30.0),
-                (6_000, "tenant-secret-c".to_string(), 31.0),
+                (64_000, "tenant-secret-c".to_string(), 31.0),
             ]
         );
         Ok(())
@@ -967,7 +967,7 @@ mod tests {
             vec![
                 Arc::new(StringArray::from(regions)) as ArrayRef,
                 Arc::new(TimestampMillisecondArray::from_iter_values(
-                    (0..row_count).map(|row| row as i64 * 1_000),
+                    (0..row_count).map(|row| row as i64 * 60_000),
                 )),
                 Arc::new(StringArray::from(symbols)),
                 Arc::new(payload),

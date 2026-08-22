@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use super::{
     ArtifactReport, BenchmarkReport, ColumnChecksums, Mode, RequiredNullable,
     TableDefinitionReport, TimingReport, ValidationReport, Workload, WriterPropertiesReport,
-    benchmark_table_definition_report, invalid_data, writer_properties_report,
+    benchmark_table_definition_report, expected_coverage_ratio, invalid_data,
+    writer_properties_report,
 };
 
 const GNU_TIME: &str = "/usr/bin/time";
@@ -502,7 +503,7 @@ fn validate_reported_table_result(
     mode: Mode,
 ) -> Result<(), io::Error> {
     let expected_row_groups = workload.row_count.div_ceil(workload.row_group_rows as u64) as usize;
-    if validation.coverage_ratio != 1.0
+    if validation.coverage_ratio != expected_coverage_ratio(workload)
         || validation.index_min != 0
         || validation.index_max != u64::from(u32::MAX)
         || validation.row_count != workload.row_count

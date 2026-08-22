@@ -585,8 +585,8 @@ mod tests {
             &[
                 Some(start_millis + 1_000),
                 Some(start_millis + 2_000),
-                Some(start_millis + 3_000),
-                Some(start_millis + 4_000),
+                Some(start_millis + 61_000),
+                Some(start_millis + 62_000),
             ],
             &["A", "B", "A", "B"],
             &[10.0, 20.0, 11.0, 21.0],
@@ -746,7 +746,7 @@ mod tests {
         write_arrow_parquet_with_unit(
             &temp.path().join(fixture_path),
             TimeUnit::Millisecond,
-            &[Some(1_000), Some(2_000), Some(3_000), Some(4_000)],
+            &[Some(1_000), Some(2_000), Some(61_000), Some(62_000)],
             &["A", "B", "A", "B"],
             &[10.0, 20.0, 11.0, 21.0],
         )
@@ -885,7 +885,7 @@ mod tests {
         let fixture_path = "data/numeric-mixed.parquet";
         write_int32_entity_parquet(
             &temp.path().join(fixture_path),
-            &[1_000, 2_000, 3_000, 4_000],
+            &[1_000, 2_000, 61_000, 62_000],
             &[-1, i32::MAX, -1, i32::MAX],
             &[10.0, 20.0, 11.0, 21.0],
         )
@@ -941,7 +941,7 @@ mod tests {
         .await?;
         append_mixed_source(&mut table, temp.path(), "data/first.parquet", 0).await?;
         let broken_path =
-            append_mixed_source(&mut table, temp.path(), "data/broken.parquet", 60_000).await?;
+            append_mixed_source(&mut table, temp.path(), "data/broken.parquet", 120_000).await?;
         let state_before = table.state().clone();
         let objects_before = optimization_objects(temp.path()).expect("optimization objects");
         std::fs::remove_file(temp.path().join(broken_path)).expect("remove later source");
@@ -973,7 +973,7 @@ mod tests {
             &mut concurrent,
             temp.path(),
             "data/concurrent.parquet",
-            60_000,
+            120_000,
         )
         .await?;
         let objects_before = optimization_objects(temp.path()).expect("optimization objects");
@@ -1109,7 +1109,7 @@ mod tests {
         .await?;
         let source_paths = [
             append_mixed_source(&mut table, temp.path(), "data/first.parquet", 0).await?,
-            append_mixed_source(&mut table, temp.path(), "data/second.parquet", 60_000).await?,
+            append_mixed_source(&mut table, temp.path(), "data/second.parquet", 120_000).await?,
         ];
         let sources = source_paths
             .iter()
@@ -1226,7 +1226,7 @@ mod tests {
         let mut scan = reopened
             .scan_range(
                 chrono::DateTime::from_timestamp_millis(0).expect("range start"),
-                chrono::DateTime::from_timestamp_millis(120_000).expect("range end"),
+                chrono::DateTime::from_timestamp_millis(240_000).expect("range end"),
             )
             .await?;
         let mut rows = 0;
