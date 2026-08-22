@@ -112,7 +112,7 @@ jobs:
       fail-fast: false
       matrix:
         task:
-          - RSS regression checks
+          - scan RSS harness
           - feature isolation
           - lints and docs
           - default tests
@@ -159,7 +159,7 @@ jobs:
           python-version: "3.12"
 
       - name: Setup uv
-        if: matrix.task == 'RSS regression checks'
+        if: matrix.task == 'scan RSS harness'
         uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
         with:
           version: "0.10.0"
@@ -182,8 +182,8 @@ jobs:
           python scripts/test_check_release_version.py
           python scripts/check_release_version.py
 
-      - name: process RSS regression checks
-        if: matrix.task == 'RSS regression checks'
+      - name: check scan RSS harness
+        if: matrix.task == 'scan RSS harness'
         run: |
           uv sync --project crates/timeseries-table-python --locked --no-install-project
           crates/timeseries-table-python/.venv/bin/ruff check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
