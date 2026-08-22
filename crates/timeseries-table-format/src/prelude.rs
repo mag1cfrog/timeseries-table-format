@@ -5,7 +5,8 @@
 
 pub use crate::coverage;
 pub use crate::{
-    IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError, IntoBatchStream,
-    LogicalDataType, LogicalField, LogicalSchema, OptimizeReport, ParseTimeBucketError, TableError,
-    TableLocation, TableMeta, TimeBucket, TimeSeriesTable, validate_index_range,
+    AppendRequest, IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
+    IntoBatchStream, LogicalDataType, LogicalField, LogicalSchema, OptimizeReport,
+    ParseTimeBucketError, TableError, TableLocation, TableMeta, TimeBucket, TimeSeriesTable,
+    validate_index_range,
 };

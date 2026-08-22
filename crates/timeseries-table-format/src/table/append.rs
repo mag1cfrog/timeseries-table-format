@@ -8,8 +8,7 @@
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
-use std::path::Path;
-use std::time::Instant;
+use std::{marker::PhantomData, path::Path, time::Instant};
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
@@ -17,6 +16,7 @@ use arrow::{
     error::ArrowError,
 };
 use parquet::arrow::ArrowWriter as ParquetArrowWriter;
+use parquet::file::properties::WriterProperties;
 use snafu::prelude::*;
 use uuid::Uuid;
 
@@ -130,8 +130,72 @@ pub trait IntoBatchStream<Kind = RecordBatchReaderKind> {
     /// Reader produced from this source.
     type Reader: RecordBatchReader;
 
+    /// Return a per-append Parquet row-group limit, when configured.
+    #[doc(hidden)]
+    fn configured_max_rows_per_row_group(&self) -> Option<usize> {
+        None
+    }
+
     /// Convert this source without collecting its batches.
     fn into_batch_stream(self) -> Result<Self::Reader, TableError>;
+}
+
+/// One Arrow source plus physical settings for a single append.
+///
+/// Pass the source directly to [`TimeSeriesTable::append`] to use the current
+/// Parquet writer defaults. Wrap it in `AppendRequest` only when one append
+/// needs an explicit output row-group limit. A nested request inherits its
+/// source's limit unless the outer request replaces it.
+#[derive(Debug)]
+#[must_use = "an append request has no effect until passed to TimeSeriesTable::append"]
+pub struct AppendRequest<S> {
+    source: S,
+    max_rows_per_row_group: Option<usize>,
+}
+
+impl<S> AppendRequest<S> {
+    /// Create a request without adding a row-group override.
+    ///
+    /// Ordinary Arrow sources therefore use the current Parquet writer
+    /// defaults. If `source` already carries a limit, this request inherits it
+    /// until [`max_rows_per_row_group`](Self::max_rows_per_row_group) replaces
+    /// it.
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            max_rows_per_row_group: None,
+        }
+    }
+
+    /// Limit output Parquet row groups to this many rows for this append.
+    ///
+    /// This controls rows, not bytes, input batches, or source-file row-group
+    /// boundaries, and replaces any limit already carried by the source. Zero
+    /// is rejected by [`TimeSeriesTable::append`] before the source is inspected
+    /// or consumed.
+    pub fn max_rows_per_row_group(mut self, max_rows_per_row_group: usize) -> Self {
+        self.max_rows_per_row_group = Some(max_rows_per_row_group);
+        self
+    }
+}
+
+// Wrapping `Kind` in `PhantomData` keeps this impl disjoint from direct source
+// implementations while preserving inference without another public marker type.
+#[doc(hidden)]
+impl<S, Kind> IntoBatchStream<PhantomData<Kind>> for AppendRequest<S>
+where
+    S: IntoBatchStream<Kind>,
+{
+    type Reader = S::Reader;
+
+    fn configured_max_rows_per_row_group(&self) -> Option<usize> {
+        self.max_rows_per_row_group
+            .or_else(|| self.source.configured_max_rows_per_row_group())
+    }
+
+    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+        self.source.into_batch_stream()
+    }
 }
 
 impl<R> IntoBatchStream<RecordBatchReaderKind> for R
@@ -677,6 +741,9 @@ impl TimeSeriesTable {
     ///
     /// Rows need not be ordered by the table's ordered index. The source is
     /// consumed incrementally and is never collected by this method.
+    /// Wrap the source in [`AppendRequest`] and call
+    /// [`AppendRequest::max_rows_per_row_group`] to limit output Parquet row
+    /// groups for only this append.
     #[tracing::instrument(
         name = "table.append",
         level = "debug",
@@ -697,6 +764,12 @@ impl TimeSeriesTable {
         S: IntoBatchStream<Kind>,
     {
         let result = async {
+            let max_rows_per_row_group = source.configured_max_rows_per_row_group();
+            if max_rows_per_row_group == Some(0) {
+                return Err(TableError::InvalidMaxRowsPerRowGroup {
+                    max_rows_per_row_group: 0,
+                });
+            }
             let mut reader = source.into_batch_stream()?;
             let schema = reader.schema();
             self.validate_stream_schema(schema.as_ref())?;
@@ -724,8 +797,14 @@ impl TimeSeriesTable {
                     .await
                     .context(StorageSnafu)?;
             let write_result = async {
-                let mut writer = ParquetArrowWriter::try_new(sink, schema.clone(), None)
-                    .context(AppendParquetSnafu)?;
+                let writer_properties = max_rows_per_row_group.map(|max_rows| {
+                    WriterProperties::builder()
+                        .set_max_row_group_row_count(Some(max_rows))
+                        .build()
+                });
+                let mut writer =
+                    ParquetArrowWriter::try_new(sink, schema.clone(), writer_properties)
+                        .context(AppendParquetSnafu)?;
                 writer.write(&first_batch).context(AppendParquetSnafu)?;
                 drop(first_batch);
                 tokio::task::yield_now().await;
@@ -946,7 +1025,7 @@ mod tests {
         record_batch::RecordBatch,
     };
     use futures::FutureExt;
-    use parquet::arrow::ArrowWriter;
+    use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::cell::Cell;
     use std::collections::BTreeMap;
@@ -1222,6 +1301,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_request_nested_settings_inherit_and_override() -> TestResult {
+        for (inner_limit, outer_limit, expected_row_groups) in
+            [(3, None, vec![3, 3, 1]), (0, Some(2), vec![2, 2, 2, 1])]
+        {
+            let temp = TempDir::new()?;
+            let location = TableLocation::local(temp.path());
+            let mut table =
+                TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+            let request = AppendRequest::new(
+                AppendRequest::new(vec![timestamp_only_batch(2)?, timestamp_only_batch(5)?])
+                    .max_rows_per_row_group(inner_limit),
+            );
+            let request = match outer_limit {
+                Some(limit) => request.max_rows_per_row_group(limit),
+                None => request,
+            };
+
+            assert_eq!(table.append(request).await?, 2);
+
+            let (segment_path, row_count) = table
+                .state()
+                .segments
+                .values()
+                .next()
+                .map(|segment| (segment.path.clone(), segment.row_count))
+                .ok_or("missing appended segment")?;
+            assert_eq!(row_count, 7);
+            let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(
+                temp.path().join(segment_path),
+            )?)?;
+            let row_group_rows = builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|row_group| row_group.num_rows())
+                .collect::<Vec<_>>();
+            assert_eq!(row_group_rows, expected_row_groups);
+
+            let reopened = TimeSeriesTable::open(location).await?;
+            assert_eq!(reopened.state().version, 2);
+            assert_eq!(reopened.state().segments.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_request_nested_zero_is_rejected_before_inspecting_source() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+        let request = AppendRequest::new(AppendRequest::new(reader).max_rows_per_row_group(0));
+
+        assert!(matches!(
+            table.append(request).await,
+            Err(TableError::InvalidMaxRowsPerRowGroup {
+                max_rows_per_row_group: 0
+            })
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_request_without_limit_matches_direct_append() -> TestResult {
+        let direct_root = TempDir::new()?;
+        let request_root = TempDir::new()?;
+        let mut direct = TimeSeriesTable::create(
+            TableLocation::local(direct_root.path()),
+            make_basic_table_meta(),
+        )
+        .await?;
+        let mut requested = TimeSeriesTable::create(
+            TableLocation::local(request_root.path()),
+            make_basic_table_meta(),
+        )
+        .await?;
+        let source = vec![
+            time_series_batch(vec![0], vec!["A"], vec![1.0])?,
+            time_series_batch(vec![60_000], vec!["A"], vec![2.0])?,
+        ];
+
+        assert_eq!(direct.append(source.clone()).await?, 2);
+        assert_eq!(requested.append(AppendRequest::new(source)).await?, 2);
+
+        let direct_path = &direct
+            .state()
+            .segments
+            .values()
+            .next()
+            .ok_or("missing direct segment")?
+            .path;
+        let request_path = &requested
+            .state()
+            .segments
+            .values()
+            .next()
+            .ok_or("missing requested segment")?
+            .path;
+        assert_eq!(
+            std::fs::read(direct_root.path().join(direct_path))?,
+            std::fs::read(request_root.path().join(request_path))?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_request_rejects_zero_before_inspecting_source() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+
+        assert!(matches!(
+            table
+                .append(AppendRequest::new(reader).max_rows_per_row_group(0))
+                .await,
+            Err(TableError::InvalidMaxRowsPerRowGroup {
+                max_rows_per_row_group: 0
+            })
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_stream_writes_one_segment_and_returns_versions() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
@@ -1374,7 +1595,9 @@ mod tests {
 
     #[tokio::test]
     async fn append_stream_cleans_up_after_later_schema_or_source_error() -> TestResult {
-        for source_error in [false, true] {
+        for (configured, source_error) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let temp = TempDir::new()?;
             let mut table =
                 TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1389,20 +1612,41 @@ mod tests {
             };
             let (reader, _) = InstrumentedReader::new(first.schema(), vec![Ok(first), later]);
 
-            let error = table
-                .append(reader)
-                .await
-                .expect_err("later batch must fail the append");
-            assert!(matches!(error, TableError::AppendSource { .. }));
-            assert_eq!(table.state().version, 1);
-            assert!(table.state().segments.is_empty());
+            let result = if configured {
+                table
+                    .append(AppendRequest::new(reader).max_rows_per_row_group(1))
+                    .await
+            } else {
+                table.append(reader).await
+            };
+            let error = result.expect_err("later batch must fail the append");
+            assert!(
+                matches!(error, TableError::AppendSource { .. }),
+                "configured={configured}, source_error={source_error}"
+            );
+            assert_eq!(
+                table.state().version,
+                1,
+                "configured={configured}, source_error={source_error}"
+            );
+            assert!(
+                table.state().segments.is_empty(),
+                "configured={configured}, source_error={source_error}"
+            );
             assert!(
                 std::fs::read_dir(temp.path().join("data"))?
                     .next()
-                    .is_none()
+                    .is_none(),
+                "configured={configured}, source_error={source_error}"
             );
-            assert!(coverage_files(temp.path())?.is_empty());
-            assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+            assert!(
+                coverage_files(temp.path())?.is_empty(),
+                "configured={configured}, source_error={source_error}"
+            );
+            assert!(
+                !temp.path().join(layout::commit_rel_path(2)).exists(),
+                "configured={configured}, source_error={source_error}"
+            );
         }
         Ok(())
     }
@@ -1706,7 +1950,10 @@ mod tests {
         let coverage_before = coverage_files(temp.path())?;
 
         let error = loser
-            .append(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+            .append(
+                AppendRequest::new(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
+                    .max_rows_per_row_group(1),
+            )
             .await
             .expect_err("stale streaming append must conflict");
 
@@ -1750,7 +1997,12 @@ mod tests {
         let capture = TraceCapture::default();
 
         let error = capture
-            .run(table.append(time_series_batch(vec![0], vec!["A"], vec![1.0])?))
+            .run(
+                table.append(
+                    AppendRequest::new(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+                        .max_rows_per_row_group(1),
+                ),
+            )
             .await
             .expect_err("failed commit cleanup must be ambiguous");
         let TableError::AppendCommitAmbiguous {
@@ -1876,7 +2128,9 @@ mod tests {
         assert_eq!(table.append(batch.clone()).await?, 2);
 
         assert!(matches!(
-            table.append(batch).await,
+            table
+                .append(AppendRequest::new(batch).max_rows_per_row_group(1))
+                .await,
             Err(TableError::EntityCoverageOverlap { .. })
         ));
         assert_eq!(table.state().version, 2);
