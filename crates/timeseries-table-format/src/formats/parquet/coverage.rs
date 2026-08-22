@@ -32,8 +32,8 @@ use snafu::{Backtrace, Snafu};
 use tokio::task::JoinSet;
 
 use crate::{
-    coverage::bucket::{BucketError, bucket_id},
-    coverage::{Coverage, EntityIdentityError},
+    coverage::bucket::{BucketError, LogicalBucketRange, bucket_id, logical_bucket_range},
+    coverage::{Bucket, Coverage, EntityIdentity, EntityIdentityError},
     metadata::{
         segments::ParquetIndexColumnError,
         table_metadata::{IndexKind, IndexSpec, IndexValue},
@@ -113,6 +113,19 @@ pub enum SegmentCoverageError {
         path: String,
         /// Bucket mapping failure.
         source: BucketError,
+    },
+
+    /// Two rows for the same entity occupy one ordered-index interval.
+    #[snafu(display("Duplicate ordered-index interval {example_bucket_range} in segment {path}"))]
+    DuplicateIndexInterval {
+        /// Path to the segment file.
+        path: String,
+        /// Complete entity identity, or `None` for a table without entity columns.
+        example_identity: Option<EntityIdentity>,
+        /// Internal coverage bucket identity for the conflicting interval.
+        example_bucket: Bucket,
+        /// Logical ordered-index interval occupied by both rows.
+        example_bucket_range: LogicalBucketRange,
     },
 
     /// A configured entity column is missing from the segment.
@@ -210,13 +223,32 @@ pub(super) fn insert_bucket(
     path: &str,
     index: &IndexSpec,
     value: IndexValue,
-) -> Result<(), SegmentCoverageError> {
+) -> Result<(Bucket, bool), SegmentCoverageError> {
     let bucket = bucket_id(&index.kind, &value).map_err(|source| SegmentCoverageError::Bucket {
         path: path.to_string(),
         source,
     })?;
-    bitmap.insert(bucket);
-    Ok(())
+    Ok((bucket, bitmap.insert(bucket)))
+}
+
+pub(super) fn duplicate_index_interval_error(
+    path: &str,
+    index: &IndexSpec,
+    identity: Option<&EntityIdentity>,
+    bucket: Bucket,
+) -> SegmentCoverageError {
+    match logical_bucket_range(&index.kind, bucket) {
+        Ok(example_bucket_range) => SegmentCoverageError::DuplicateIndexInterval {
+            path: path.to_string(),
+            example_identity: identity.cloned(),
+            example_bucket: bucket,
+            example_bucket_range,
+        },
+        Err(source) => SegmentCoverageError::Bucket {
+            path: path.to_string(),
+            source,
+        },
+    }
 }
 
 fn add_array_buckets<T, F>(
@@ -232,11 +264,17 @@ where
 {
     if array.null_count() == 0 {
         for &raw in array.values() {
-            insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            let (bucket, inserted) = insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            if !inserted {
+                return Err(duplicate_index_interval_error(path, index, None, bucket));
+            }
         }
     } else {
         for raw in array.iter().flatten() {
-            insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            let (bucket, inserted) = insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            if !inserted {
+                return Err(duplicate_index_interval_error(path, index, None, bucket));
+            }
         }
     }
     Ok(())
@@ -407,6 +445,13 @@ pub async fn compute_segment_coverage(
             source: ParquetError::General(format!("row-group scan task failed: {source}")),
             backtrace: Backtrace::capture(),
         })??;
+        if !merged.is_disjoint(&bitmap)
+            && let Some(duplicate) = (&merged & &bitmap).min()
+        {
+            return Err(duplicate_index_interval_error(
+                &path, index, None, duplicate,
+            ));
+        }
         merged |= bitmap;
     }
 
@@ -558,18 +603,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_coverage_supports_nulls_and_dedup_and_multiple_specs() -> TestResult {
+    async fn compute_coverage_supports_nulls_and_multiple_specs() -> TestResult {
         let tmp = TempDir::new()?;
         let rel_path = Path::new("data/seg.parquet");
         let abs_path = tmp.path().join(rel_path);
 
-        // Two points in bucket 0, one point in bucket 60 (1 hour), and one null.
-        let ts_values = vec![Some(1_000), Some(30_000), Some(3_600_000), None];
+        let ts_values = vec![Some(1_000), Some(3_600_000), None];
         write_parquet_with_timestamps(&abs_path, &ts_values)?;
 
         let location = TableLocation::local(tmp.path());
 
-        // Minutes bucket: 1 second and 30 seconds map to bucket 0; 3600s -> bucket 60.
         let cov_min = compute_segment_coverage(
             &location,
             rel_path,
@@ -579,7 +622,6 @@ mod tests {
         let buckets_min: Vec<u64> = cov_min.present().iter().collect();
         assert_eq!(buckets_min, vec![EPOCH_BUCKET, EPOCH_BUCKET + 60]);
 
-        // Hours bucket: 1 second -> bucket 0; 3600s -> bucket 1.
         let cov_hr = compute_segment_coverage(
             &location,
             rel_path,
@@ -589,6 +631,76 @@ mod tests {
         let buckets_hr: Vec<u64> = cov_hr.present().iter().collect();
         assert_eq!(buckets_hr, vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]);
 
+        Ok(())
+    }
+
+    fn assert_implicit_duplicate(error: SegmentCoverageError, expected_path: &str) {
+        match error {
+            SegmentCoverageError::DuplicateIndexInterval {
+                path,
+                example_identity,
+                example_bucket,
+                example_bucket_range,
+            } => {
+                assert_eq!(path, expected_path);
+                assert_eq!(example_identity, None);
+                assert_eq!(example_bucket, EPOCH_BUCKET);
+                assert_eq!(
+                    example_bucket_range.to_string(),
+                    "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+                );
+            }
+            other => panic!("expected duplicate interval error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_rejects_duplicate_within_one_worker() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/same-worker-duplicate.parquet");
+        write_parquet_with_timestamps(&tmp.path().join(rel_path), &[Some(1_000), Some(30_000)])?;
+
+        let error = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("same-worker duplicate must be rejected");
+
+        assert_implicit_duplicate(error, "data/same-worker-duplicate.parquet");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_coverage_rejects_duplicate_across_parallel_workers() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/cross-worker-duplicate.parquet");
+        assert_eq!(resolve_rg_settings(2), (2, 1));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        )]));
+        write_parquet_batches(
+            &tmp.path().join(rel_path),
+            Arc::clone(&schema),
+            vec![
+                timestamp_batch(Arc::clone(&schema), &[Some(1_000)]),
+                timestamp_batch(Arc::clone(&schema), &[Some(30_000)]),
+            ],
+            WriterProperties::builder().build(),
+        )?;
+
+        let error = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("cross-worker duplicate must be rejected");
+
+        assert_implicit_duplicate(error, "data/cross-worker-duplicate.parquet");
         Ok(())
     }
 
@@ -604,7 +716,7 @@ mod tests {
         let batches = vec![
             timestamp_batch(Arc::clone(&schema), &[Some(1_000), Some(61_000)]),
             timestamp_batch(Arc::clone(&schema), &[Some(121_000), None]),
-            timestamp_batch(Arc::clone(&schema), &[Some(181_000), Some(1_000)]),
+            timestamp_batch(Arc::clone(&schema), &[Some(181_000), Some(241_000)]),
         ];
         write_parquet_batches(
             &tmp.path().join(rel_path),
@@ -625,7 +737,8 @@ mod tests {
                 EPOCH_BUCKET,
                 EPOCH_BUCKET + 1,
                 EPOCH_BUCKET + 2,
-                EPOCH_BUCKET + 3
+                EPOCH_BUCKET + 3,
+                EPOCH_BUCKET + 4
             ]
         );
         Ok(())
@@ -642,17 +755,14 @@ mod tests {
             DataType::Int64,
             true,
         )]));
-        let signed_values = [i64::MIN, -11, -1, 0, 9, 10, i64::MAX];
+        let signed_values = [i64::MIN, -11, -1, 0, 10, i64::MAX];
         write_parquet_batches(
             &tmp.path().join(signed_path),
             Arc::clone(&signed_schema),
             vec![
                 int64_batch(Arc::clone(&signed_schema), &[Some(i64::MIN), Some(-11)]),
                 int64_batch(Arc::clone(&signed_schema), &[None, Some(-1), Some(0)]),
-                int64_batch(
-                    Arc::clone(&signed_schema),
-                    &[Some(9), Some(10), Some(i64::MAX)],
-                ),
+                int64_batch(Arc::clone(&signed_schema), &[Some(10), Some(i64::MAX)]),
             ],
             WriterProperties::builder().build(),
         )?;
@@ -672,12 +782,12 @@ mod tests {
             DataType::UInt64,
             true,
         )]));
-        let unsigned_values = [0, 9, 10, i64::MAX as u64 + 1, u64::MAX];
+        let unsigned_values = [0, 10, i64::MAX as u64 + 1, u64::MAX];
         write_parquet_batches(
             &tmp.path().join(unsigned_path),
             Arc::clone(&unsigned_schema),
             vec![
-                uint64_batch(Arc::clone(&unsigned_schema), &[Some(0), Some(9)]),
+                uint64_batch(Arc::clone(&unsigned_schema), &[Some(0)]),
                 uint64_batch(Arc::clone(&unsigned_schema), &[None, Some(10)]),
                 uint64_batch(
                     Arc::clone(&unsigned_schema),

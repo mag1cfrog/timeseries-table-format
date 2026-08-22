@@ -1,6 +1,9 @@
 //! Exact row-aligned entity coverage extraction from Parquet segments.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    path::Path,
+};
 
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow_array::{
@@ -28,7 +31,10 @@ use crate::{
 
 use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 use super::{
-    coverage::{SegmentCoverageError, arrow_index_error, insert_bucket, timestamp_value},
+    coverage::{
+        SegmentCoverageError, arrow_index_error, duplicate_index_interval_error, insert_bucket,
+        timestamp_value,
+    },
     schema::validate_parquet_index,
 };
 
@@ -226,9 +232,28 @@ async fn compute_from_stream(
 
         for row in 0..batch.num_rows() {
             let identity = entity_identity_at(&entities, row, path)?;
-            let bitmap = by_identity.entry(identity).or_default();
             if let Some(value) = ordered_index.value(row, path, index)? {
-                insert_bucket(bitmap, path, index, value)?;
+                match by_identity.entry(identity) {
+                    Entry::Occupied(mut entry) => {
+                        let (bucket, inserted) =
+                            insert_bucket(entry.get_mut(), path, index, value)?;
+                        if !inserted {
+                            return Err(duplicate_index_interval_error(
+                                path,
+                                index,
+                                Some(entry.key()),
+                                bucket,
+                            ));
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        let (_, inserted) =
+                            insert_bucket(entry.insert(RoaringTreemap::new()), path, index, value)?;
+                        debug_assert!(inserted);
+                    }
+                }
+            } else {
+                by_identity.entry(identity).or_default();
             }
         }
 
@@ -366,6 +391,14 @@ pub async fn compute_segment_entity_coverage(
             source: ParquetError::General(format!("row-group scan task failed: {source}")),
             backtrace: Backtrace::capture(),
         })??;
+        if let Some((identity, bucket)) = merged.overlap_example(&coverage) {
+            return Err(duplicate_index_interval_error(
+                &path,
+                index,
+                Some(identity),
+                bucket,
+            ));
+        }
         merged.union_inplace(&coverage);
     }
 
@@ -469,8 +502,8 @@ mod tests {
         let rel_path = Path::new("segment.parquet");
         write_timestamp_segment(
             &temp.path().join(rel_path),
-            vec!["A", "B", "A", "B", "A"],
-            vec![Some(0), Some(7_200_000), Some(3_600_000), None, Some(0)],
+            vec!["A", "B", "A", "B"],
+            vec![Some(0), Some(7_200_000), Some(3_600_000), None],
             None,
         )?;
 
@@ -520,8 +553,10 @@ mod tests {
         let rel_path = Path::new("segment.parquet");
         let mut entities = vec!["A"; INSPECTION_BATCH_SIZE];
         entities.push("B");
-        let mut timestamps = vec![Some(0); INSPECTION_BATCH_SIZE];
-        timestamps.push(Some(3_600_000));
+        let mut timestamps = (0..INSPECTION_BATCH_SIZE)
+            .map(|bucket| Some(bucket as i64 * 3_600_000))
+            .collect::<Vec<_>>();
+        timestamps.push(Some(INSPECTION_BATCH_SIZE as i64 * 3_600_000));
         write_timestamp_segment(&temp.path().join(rel_path), entities, timestamps, None)?;
 
         let coverage = compute_segment_entity_coverage(
@@ -531,19 +566,28 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        let a_buckets = buckets(&coverage, "A");
+        assert_eq!(a_buckets.len(), INSPECTION_BATCH_SIZE);
+        assert_eq!(a_buckets.first(), Some(&EPOCH_BUCKET));
+        assert_eq!(
+            a_buckets.last(),
+            Some(&(EPOCH_BUCKET + INSPECTION_BATCH_SIZE as u64 - 1))
+        );
+        assert_eq!(
+            buckets(&coverage, "B"),
+            vec![EPOCH_BUCKET + INSPECTION_BATCH_SIZE as u64]
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn identities_change_across_row_groups() -> TestResult {
+    async fn same_bucket_for_different_identities_across_row_groups() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
         write_timestamp_segment(
             &temp.path().join(rel_path),
             vec!["A", "B"],
-            vec![Some(0), Some(3_600_000)],
+            vec![Some(0), Some(0)],
             Some(1),
         )?;
 
@@ -555,7 +599,7 @@ mod tests {
         .await?;
 
         assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET]);
         Ok(())
     }
 
@@ -983,8 +1027,8 @@ mod tests {
         let signed_batch = RecordBatch::try_new(
             signed_schema,
             vec![
-                Arc::new(StringArray::from(vec!["A"; 6])),
-                Arc::new(Int64Array::from(vec![-11, -10, -1, 0, 9, 10])),
+                Arc::new(StringArray::from(vec!["A"; 4])),
+                Arc::new(Int64Array::from(vec![-11, -10, 0, 10])),
             ],
         )?;
         write_batch(&temp.path().join(signed_path), &signed_batch, None)?;
@@ -1020,8 +1064,8 @@ mod tests {
         let unsigned_batch = RecordBatch::try_new(
             unsigned_schema,
             vec![
-                Arc::new(StringArray::from(vec!["A"; 4])),
-                Arc::new(UInt64Array::from(vec![0, 9, 10, u64::MAX])),
+                Arc::new(StringArray::from(vec!["A"; 3])),
+                Arc::new(UInt64Array::from(vec![0, 10, u64::MAX])),
             ],
         )?;
         write_batch(&temp.path().join(unsigned_path), &unsigned_batch, None)?;
@@ -1044,13 +1088,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicates_collapse_and_null_indexes_preserve_empty_identities() -> TestResult {
+    async fn null_indexes_preserve_empty_identities() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
         write_timestamp_segment(
             &temp.path().join(rel_path),
-            vec!["A", "A", "B", "C"],
-            vec![Some(0), Some(0), None, None],
+            vec!["A", "B", "C"],
+            vec![Some(0), None, None],
             None,
         )?;
 
@@ -1066,6 +1110,71 @@ mod tests {
         assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
         assert!(coverage.get(&identity("B")).expect("B coverage").is_empty());
         assert!(coverage.get(&identity("C")).expect("C coverage").is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_for_one_entity_is_rejected_with_identity() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        write_timestamp_segment(
+            &temp.path().join(rel_path),
+            vec!["A", "A"],
+            vec![Some(0), Some(30_000)],
+            None,
+        )?;
+
+        let error = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await
+        .expect_err("duplicate entity interval must be rejected");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::DuplicateIndexInterval {
+                path,
+                example_identity: Some(example_identity),
+                example_bucket: EPOCH_BUCKET,
+                example_bucket_range,
+            } if path == "segment.parquet"
+                && example_identity == identity("A")
+                && example_bucket_range.to_string()
+                    == "[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_for_one_entity_across_parallel_workers_is_rejected() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        assert_eq!(resolve_rg_settings(2), (2, 1));
+        write_timestamp_segment(
+            &temp.path().join(rel_path),
+            vec!["A", "A"],
+            vec![Some(0), Some(30_000)],
+            Some(1),
+        )?;
+
+        let error = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await
+        .expect_err("cross-worker entity duplicate must be rejected");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::DuplicateIndexInterval {
+                example_identity: Some(example_identity),
+                example_bucket: EPOCH_BUCKET,
+                ..
+            } if example_identity == identity("A")
+        ));
         Ok(())
     }
 

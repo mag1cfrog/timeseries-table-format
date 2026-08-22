@@ -427,6 +427,9 @@ impl EntityCoverage {
     pub fn overlap_example<'a>(&'a self, other: &Self) -> Option<(&'a EntityIdentity, Bucket)> {
         self.iter().find_map(|(identity, coverage)| {
             let other_coverage = other.get(identity)?;
+            if coverage.present().is_disjoint(other_coverage.present()) {
+                return None;
+            }
             coverage
                 .intersect(other_coverage)
                 .present()
