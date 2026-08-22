@@ -1,13 +1,13 @@
 #![allow(missing_docs)]
 
-use std::{num::NonZeroU64, process::Stdio, sync::Arc, time::Duration};
+use std::{fs::File, num::NonZeroU64, process::Stdio, sync::Arc, time::Duration};
 
 use arrow::{
     array::{ArrayRef, Int64Array, UInt64Array},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use tempfile::TempDir;
 use timeseries_table_format::{
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
@@ -248,7 +248,8 @@ async fn shell_interactive_existing_table_skips_first_append_prompt() -> TestRes
     {
         let location = TableLocation::local(&table_root);
         let mut table = TimeSeriesTable::open(location).await?;
-        table.append_parquet_segment("data/seg.parquet").await?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&seg_path)?)?.build()?;
+        table.append(reader).await?;
     }
 
     let input = format!("{}\nexit\n", table_root.display());

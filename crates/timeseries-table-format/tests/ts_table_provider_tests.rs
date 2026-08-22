@@ -1,11 +1,12 @@
 //! Integration tests for the DataFusion table provider.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arrow::array::{
     Array, ArrayRef, Float64Array, Float64Builder, Int32Array, Int64Array, StringArray,
@@ -53,6 +54,94 @@ where
     table
         .append(AppendRequest::new(source).max_rows_per_row_group(1))
         .await
+}
+
+static FIXTURE_NAME_MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn lock_fixture_name_map() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    FIXTURE_NAME_MAP
+        .get_or_init(Default::default)
+        .lock()
+        .expect("fixture name registry")
+}
+
+fn original_fixture_name(name: &str) -> String {
+    lock_fixture_name_map()
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn find_fixture_position_in_plan(plan: &str, fixture_name: &str) -> Option<usize> {
+    plan.find(fixture_name).or_else(|| {
+        lock_fixture_name_map()
+            .iter()
+            .find_map(|(actual, fixture)| {
+                if fixture == fixture_name {
+                    plan.find(actual)
+                } else {
+                    None
+                }
+            })
+    })
+}
+
+async fn append_parquet_fixture(
+    table: &mut TimeSeriesTable,
+    root: &Path,
+    relative_path: &str,
+) -> TestResult<(u64, String)> {
+    let existing_paths = table.state().segments.keys().cloned().collect::<Vec<_>>();
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(root.join(relative_path))?)?.build()?;
+    let version = table.append(reader).await?;
+    let committed_path = table
+        .state()
+        .segments
+        .keys()
+        .find(|path| !existing_paths.contains(path))
+        .expect("newly committed segment")
+        .clone();
+    let committed_name = Path::new(&committed_path)
+        .file_name()
+        .expect("committed segment filename")
+        .to_string_lossy()
+        .into_owned();
+    let fixture_name = Path::new(relative_path)
+        .file_name()
+        .expect("fixture filename")
+        .to_string_lossy()
+        .into_owned();
+    lock_fixture_name_map().insert(committed_name, fixture_name);
+    Ok((version, committed_path))
+}
+
+async fn append_fixture_preserving_parquet_layout(
+    table: &mut TimeSeriesTable,
+    root: &Path,
+    relative_path: &str,
+) -> TestResult<u64> {
+    let (version, committed_path) = append_parquet_fixture(table, root, relative_path).await?;
+    let committed_file = root.join(&committed_path);
+    std::fs::copy(root.join(relative_path), &committed_file)?;
+    let commit_path = root.join(layout::commit_rel_path(version));
+    let mut commit: serde_json::Value = serde_json::from_slice(&std::fs::read(&commit_path)?)?;
+    let segment = commit["actions"]
+        .as_array_mut()
+        .and_then(|actions| {
+            actions
+                .iter_mut()
+                .find_map(|action| action.get_mut("AddSegment"))
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("append commit AddSegment action");
+    segment.insert(
+        "file_size".to_string(),
+        committed_file.metadata()?.len().into(),
+    );
+    std::fs::write(commit_path, serde_json::to_vec(&commit)?)?;
+    *table = TimeSeriesTable::open(TableLocation::local(root)).await?;
+    Ok(version)
 }
 
 #[derive(Clone)]
@@ -453,7 +542,7 @@ async fn append_int64_segment(
         Arc::new(Int64Array::from(values.to_vec())),
         tags,
     )?;
-    table.append_parquet_segment(rel_path).await?;
+    append_parquet_fixture(table, root, rel_path).await?;
     Ok(())
 }
 
@@ -471,7 +560,7 @@ async fn append_uint64_segment(
         Arc::new(UInt64Array::from(values.to_vec())),
         tags,
     )?;
-    table.append_parquet_segment(rel_path).await?;
+    append_parquet_fixture(table, root, rel_path).await?;
     Ok(())
 }
 
@@ -577,10 +666,10 @@ async fn create_two_segment_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
     let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
 
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
-    table.append_parquet_segment("data/seg-a.parquet").await?;
+    append_parquet_fixture(&mut table, tmp.path(), "data/seg-a.parquet").await?;
 
     write_segment(tmp.path(), "data/seg-b.parquet", &rows_b, false)?;
-    table.append_parquet_segment("data/seg-b.parquet").await?;
+    append_parquet_fixture(&mut table, tmp.path(), "data/seg-b.parquet").await?;
 
     Ok(table)
 }
@@ -623,7 +712,7 @@ async fn create_entity_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTabl
 
     for (path, rows) in segments {
         write_segment(tmp.path(), path, &rows, false)?;
-        table.append_parquet_segment(path).await?;
+        append_parquet_fixture(&mut table, tmp.path(), path).await?;
     }
 
     Ok(table)
@@ -720,7 +809,7 @@ async fn create_int32_entity_pruning_table(tmp: &TempDir) -> TestResult<TimeSeri
     ];
     for (path, timestamps, device_ids, prices) in segments {
         write_int32_entity_segment(tmp.path(), path, &timestamps, &device_ids, &prices)?;
-        table.append_parquet_segment(path).await?;
+        append_parquet_fixture(&mut table, tmp.path(), path).await?;
     }
     Ok(table)
 }
@@ -748,7 +837,7 @@ async fn create_utc_pruning_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> 
             },
         ];
         write_segment(tmp.path(), &path, &rows, false)?;
-        table.append_parquet_segment(&path).await?;
+        append_parquet_fixture(&mut table, tmp.path(), &path).await?;
     }
 
     Ok(table)
@@ -783,7 +872,7 @@ async fn create_zoned_pruning_table(
             None,
             Some(timezone),
         )?;
-        table.append_parquet_segment(&path).await?;
+        append_parquet_fixture(&mut table, tmp.path(), &path).await?;
     }
     Ok(table)
 }
@@ -798,7 +887,7 @@ async fn create_single_segment_table_with_props(
 
     let abs = tmp.path().join(rel_path);
     write_parquet_with_props(&abs, rows, false, Some(props))?;
-    table.append_parquet_segment(rel_path).await?;
+    append_fixture_preserving_parquet_layout(&mut table, tmp.path(), rel_path).await?;
 
     Ok(table)
 }
@@ -868,7 +957,7 @@ async fn run_numeric_query(
 fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str]) {
     for file in all_files {
         assert_eq!(
-            plan.contains(file),
+            find_fixture_position_in_plan(plan, file).is_some(),
             expected_files.contains(file),
             "unexpected selection for {file}; plan:\n{plan}"
         );
@@ -877,7 +966,7 @@ fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str])
     let positions = expected_files
         .iter()
         .map(|file| {
-            plan.find(file)
+            find_fixture_position_in_plan(plan, file)
                 .unwrap_or_else(|| panic!("expected plan to contain {file}; plan:\n{plan}"))
         })
         .collect::<Vec<_>>();
@@ -901,7 +990,7 @@ fn planned_file_names(plan: &dyn ExecutionPlan) -> TestResult<Vec<String>> {
             file.object_meta
                 .location
                 .filename()
-                .map(str::to_string)
+                .map(original_fixture_name)
                 .ok_or_else(|| "planned file path has no filename".into())
         })
         .collect()
@@ -1238,9 +1327,15 @@ async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestRe
     writer.write(&source_batch)?;
     writer.close()?;
 
-    table.append_parquet_segment(source_path).await?;
+    append_parquet_fixture(&mut table, tmp.path(), source_path).await?;
+    let committed_source_path = table
+        .state()
+        .segments
+        .keys()
+        .next()
+        .expect("committed source");
     assert!(matches!(
-        table.state().segments[source_path].entity_layout,
+        table.state().segments[committed_source_path].entity_layout,
         SegmentEntityLayout::Mixed
     ));
     let canonical_schema = table.state().table_meta.logical_schema().cloned();
@@ -1732,7 +1827,7 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     let rel_path = "data/seg-missing-size.parquet";
     write_segment(tmp.path(), rel_path, &rows, false)?;
 
-    table.append_parquet_segment(rel_path).await?;
+    append_parquet_fixture(&mut table, tmp.path(), rel_path).await?;
     drop(table);
 
     remove_committed_file_size(tmp.path(), 2).await?;
@@ -1756,7 +1851,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
     let mut writer = TimeSeriesTable::create(location.clone(), meta).await?;
     let rows_a = make_rows(minutes_to_millis(1), 5, "A", 10.0);
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
-    writer.append_parquet_segment("data/seg-a.parquet").await?;
+    append_parquet_fixture(&mut writer, tmp.path(), "data/seg-a.parquet").await?;
 
     let provider_table = Arc::new(TimeSeriesTable::open(location.clone()).await?);
     let ctx = SessionContext::new();
@@ -1768,7 +1863,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
 
     let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
     write_segment(tmp.path(), "data/seg-b.parquet", &rows_b, false)?;
-    writer.append_parquet_segment("data/seg-b.parquet").await?;
+    append_parquet_fixture(&mut writer, tmp.path(), "data/seg-b.parquet").await?;
 
     let refreshed_batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
     let refreshed_count = scalar_u64(&refreshed_batches)?;
@@ -1955,14 +2050,7 @@ async fn explain_prunes_segments_on_time_filter() -> TestResult {
     let seg_a = "seg-a.parquet";
     let seg_b = "seg-b.parquet";
 
-    assert!(
-        plan.contains(seg_b),
-        "expected plan to include {seg_b}; plan:\n{plan}"
-    );
-    assert!(
-        !plan.contains(seg_a),
-        "expected plan to exclude {seg_a}; plan:\n{plan}"
-    );
+    assert_planned_files(&plan, &[seg_a, seg_b], &[seg_b]);
     Ok(())
 }
 
@@ -1982,14 +2070,7 @@ async fn explain_retains_matching_single_entity_segments() -> TestResult {
     let seg_a = "seg-a.parquet";
     let seg_b = "seg-b.parquet";
 
-    assert!(
-        plan.contains(seg_a),
-        "expected plan to include {seg_a}; plan:\n{plan}"
-    );
-    assert!(
-        plan.contains(seg_b),
-        "expected plan to include {seg_b}; plan:\n{plan}"
-    );
+    assert_planned_files(&plan, &[seg_a, seg_b], &[seg_a, seg_b]);
     Ok(())
 }
 

@@ -501,7 +501,7 @@ mod tests {
 
         let rel = "data/segment.parquet";
         test_common::write_parquet_rows(&tmp.path().join(rel), rows)?;
-        table.append_parquet_segment(rel).await?;
+        crate::append_parquet_file(&mut table, tmp.path(), &tmp.path().join(rel)).await?;
 
         Ok((tmp, rows))
     }

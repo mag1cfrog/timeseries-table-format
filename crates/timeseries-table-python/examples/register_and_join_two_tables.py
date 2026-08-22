@@ -30,6 +30,14 @@ def _write_volumes_parquet(path: Path) -> None:
     pq.write_table(tbl, str(path))
 
 
+def _parquet_reader(path: Path) -> pa.RecordBatchReader:
+    parquet_file = pq.ParquetFile(path)
+    return pa.RecordBatchReader.from_batches(
+        parquet_file.schema_arrow,
+        parquet_file.iter_batches(),
+    )
+
+
 def run(*, base_dir: Path) -> pa.Table:
     prices_root = base_dir / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
@@ -42,7 +50,7 @@ def run(*, base_dir: Path) -> pa.Table:
     )
     prices_seg = base_dir / "prices.parquet"
     _write_prices_parquet(prices_seg)
-    prices.append_parquet(str(prices_seg))
+    prices.append(_parquet_reader(prices_seg))
 
     volumes_root = base_dir / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
@@ -55,7 +63,7 @@ def run(*, base_dir: Path) -> pa.Table:
     )
     volumes_seg = base_dir / "volumes.parquet"
     _write_volumes_parquet(volumes_seg)
-    volumes.append_parquet(str(volumes_seg))
+    volumes.append(_parquet_reader(volumes_seg))
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(prices_root))

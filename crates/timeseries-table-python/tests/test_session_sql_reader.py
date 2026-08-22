@@ -7,6 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 import timeseries_table_format._native as native
 
@@ -429,7 +431,7 @@ def test_session_sql_reader_registered_tstable_and_join(tmp_path):
     dim_path = tmp_path / "dim.parquet"
     _write_prices_parquet(str(prices_path))
     _write_dim_parquet(str(dim_path))
-    prices.append_parquet(str(prices_path))
+    prices.append(parquet_reader(prices_path))
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))

@@ -230,32 +230,6 @@ class TimeSeriesTable:
         """Open an existing time-series table at `table_root`."""
         ...
 
-    def append_parquet(
-        self,
-        parquet_path: str,
-        copy_if_outside: bool = True,
-    ) -> int:
-        """Append a Parquet segment to the table and return the new table version.
-
-        The persisted ordered-index specification determines the required column and exact
-        Arrow type; append accepts no index override.
-
-        Parameters
-        ----------
-        parquet_path:
-            Path to a Parquet file.
-        copy_if_outside:
-            If `True`, copies the file under the table root before appending.
-            If `False`, `parquet_path` must be a table-relative storage key.
-
-        Raises
-        ------
-        CoverageOverlapError:
-            If the same complete entity identity already covers an incoming bucket. Different
-            identities may reuse the same bucket.
-        """
-        ...
-
     def append(
         self,
         source: pyarrow.RecordBatch
@@ -362,9 +336,6 @@ class _TestingModule(ModuleType):
         @property
         def count(self) -> int: ...
 
-    def _test_trigger_overlap(
-        self, table_root: str, first_parquet_path: str, second_parquet_path: str
-    ) -> None: ...
     def _test_sleep_without_gil(self, millis: int) -> None: ...
     def _test_session_table_exists(self, session: Session, name: str) -> bool: ...
     def _test_sql_reader_unsupported_schema(self) -> None: ...

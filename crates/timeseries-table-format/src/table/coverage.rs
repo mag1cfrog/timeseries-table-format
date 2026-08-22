@@ -577,7 +577,7 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU64, path::Path};
+    use std::{collections::BTreeSet, num::NonZeroU64, path::Path};
 
     use super::*;
     use crate::{
@@ -594,8 +594,9 @@ mod tests {
         },
         storage::TableLocation,
         table::test_util::{
-            TestResult, TestRow, TraceCapture, make_basic_table_meta, make_int32_entity_table_meta,
-            utc_datetime, write_int32_entity_parquet, write_test_parquet,
+            TestResult, TestRow, TraceCapture, append_parquet_fixture, make_basic_table_meta,
+            make_int32_entity_table_meta, utc_datetime, write_int32_entity_parquet,
+            write_test_parquet,
         },
     };
     use chrono::{DateTime, TimeZone, Utc};
@@ -652,11 +653,23 @@ mod tests {
         tmp: &TempDir,
         rel_path: &str,
         rows: &[TestRow],
-    ) -> HelperResult<()> {
+    ) -> HelperResult<String> {
         let abs = tmp.path().join(rel_path);
         write_test_parquet(&abs, true, false, rows)?;
-        table.append_parquet_segment(rel_path).await?;
-        Ok(())
+        let existing_paths = table
+            .state()
+            .segments
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        append_parquet_fixture(table, rel_path).await?;
+        table
+            .state()
+            .segments
+            .keys()
+            .find(|path| !existing_paths.contains(*path))
+            .cloned()
+            .ok_or_else(|| "append did not add a segment".into())
     }
 
     #[tokio::test]
@@ -706,7 +719,7 @@ mod tests {
         let wrong_type_bytes = entity_coverage_to_bytes(&wrong_type)?;
         table.state_mut().table_coverage = None;
         let segment_path = "data/entity-arity.parquet";
-        append_segment(
+        let committed_segment_path = append_segment(
             &mut table,
             &tmp,
             segment_path,
@@ -720,7 +733,7 @@ mod tests {
         let segment_coverage_path = table
             .state()
             .segments
-            .get(segment_path)
+            .get(&committed_segment_path)
             .and_then(|segment| segment.coverage_path.clone())
             .expect("segment coverage path");
         tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_type_bytes).await?;
@@ -735,7 +748,7 @@ mod tests {
                 path,
                 coverage_path,
                 source,
-            } if path == segment_path
+            } if path == committed_segment_path
                 && coverage_path == segment_coverage_path
                 && matches!(
                     &*source,
@@ -825,7 +838,7 @@ mod tests {
             &[-1, i32::MAX],
             &[10.0, 20.0],
         )?;
-        table.append_parquet_segment(path).await?;
+        append_parquet_fixture(&mut table, path).await?;
         let start = ts_from_secs(0);
         let end = ts_from_secs(120);
 

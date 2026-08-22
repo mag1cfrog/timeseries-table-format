@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -7,7 +8,10 @@ use arrow::array::{Float64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{TimeZone, Utc};
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{
+    ArrowWriter,
+    arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
+};
 use tempfile::TempDir;
 use timeseries_table_format::{
     coverage::EntityCoverage,
@@ -26,6 +30,12 @@ fn ts_from_secs(secs: i64) -> Result<chrono::DateTime<Utc>, &'static str> {
     Utc.timestamp_opt(secs, 0)
         .single()
         .ok_or("invalid timestamp")
+}
+
+fn open_parquet_batches(
+    path: impl AsRef<Path>,
+) -> Result<ParquetRecordBatchReader, Box<dyn std::error::Error>> {
+    Ok(ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?.build()?)
 }
 
 #[tokio::test]
@@ -52,9 +62,15 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         &[(240_000, "A", 50.0), (241_000, "A", 60.0)],
     )?;
 
-    let v2 = table.append_parquet_segment(rel1).await?;
-    let v3 = table.append_parquet_segment(rel2).await?;
-    let v4 = table.append_parquet_segment(rel3).await?;
+    let v2 = table
+        .append(open_parquet_batches(tmp.path().join(rel1))?)
+        .await?;
+    let v3 = table
+        .append(open_parquet_batches(tmp.path().join(rel2))?)
+        .await?;
+    let v4 = table
+        .append(open_parquet_batches(tmp.path().join(rel3))?)
+        .await?;
     assert_eq!((v2, v3, v4), (2, 3, 4));
     assert_eq!(table.state().version, 4);
 
@@ -100,7 +116,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
     write_parquet_rows(&tmp.path().join(rel_overlap), &[(121_500, "A", 70.0)])?;
     let err = reopened
-        .append_parquet_segment(rel_overlap)
+        .append(open_parquet_batches(tmp.path().join(rel_overlap))?)
         .await
         .expect_err("overlapping append should fail");
     assert!(matches!(err, TableError::EntityCoverageOverlap { .. }));
@@ -137,16 +153,24 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     )?;
 
     table
-        .append_parquet_segment("data/cov-query-a.parquet")
+        .append(open_parquet_batches(
+            tmp.path().join("data/cov-query-a.parquet"),
+        )?)
         .await?;
     table
-        .append_parquet_segment("data/cov-query-b.parquet")
+        .append(open_parquet_batches(
+            tmp.path().join("data/cov-query-b.parquet"),
+        )?)
         .await?;
     table
-        .append_parquet_segment("data/cov-query-c.parquet")
+        .append(open_parquet_batches(
+            tmp.path().join("data/cov-query-c.parquet"),
+        )?)
         .await?;
     table
-        .append_parquet_segment("data/cov-query-d.parquet")
+        .append(open_parquet_batches(
+            tmp.path().join("data/cov-query-d.parquet"),
+        )?)
         .await?;
 
     // Re-open to exercise snapshot loading path.

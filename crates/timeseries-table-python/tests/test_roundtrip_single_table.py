@@ -4,6 +4,8 @@ import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -47,7 +49,7 @@ def test_create_append_register_sql_roundtrip(tmp_path):
 
     seg_path = tmp_path / "seg.parquet"
     _write_prices_parquet(str(seg_path), ts_type=pa.timestamp("us"))
-    tstable.append_parquet(str(seg_path))
+    tstable.append(parquet_reader(seg_path))
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))
@@ -112,7 +114,7 @@ def test_uint64_create_append_session_roundtrip_and_signed_rollback(tmp_path):
     version_before = tstable.version()
 
     with pytest.raises(ttf.TimeseriesTableError, match="expected uint64"):
-        tstable.append_parquet(str(signed))
+        tstable.append(parquet_reader(signed))
 
     assert tstable.version() == version_before
     assert ttf.TimeSeriesTable.open(str(table_root)).version() == version_before
@@ -131,7 +133,7 @@ def test_uint64_create_append_session_roundtrip_and_signed_rollback(tmp_path):
         ),
         unsigned,
     )
-    tstable.append_parquet(str(unsigned))
+    tstable.append(parquet_reader(unsigned))
 
     sess = ttf.Session()
     sess.register_tstable("counters", str(table_root))
@@ -163,7 +165,7 @@ def test_register_tstable_before_first_append_fails_then_succeeds(tmp_path):
 
     seg_path = tmp_path / "seg.parquet"
     _write_prices_parquet(str(seg_path), ts_type=pa.timestamp("us"))
-    tstable.append_parquet(str(seg_path))
+    tstable.append(parquet_reader(seg_path))
 
     sess.register_tstable("prices", str(table_root))
     out = sess.sql("select count(*) as n from prices")
@@ -185,7 +187,7 @@ def test_append_rejects_time_column_wrong_type(tmp_path, bad_ts_type: pa.DataTyp
     seg_path = tmp_path / "seg.parquet"
     _write_prices_parquet(str(seg_path), ts_type=bad_ts_type)
     with pytest.raises(ttf.TimeseriesTableError) as excinfo:
-        tstable.append_parquet(str(seg_path))
+        tstable.append(parquet_reader(seg_path))
 
     # Realistic pain point: upstream produced epoch values or strings for `ts`,
     # which would silently break time pruning/coverage unless rejected.
@@ -211,7 +213,7 @@ def test_append_rejects_time_column_unit_mismatch_after_schema_adoption(
     # First append adopts the canonical schema with microsecond timestamps.
     seg1 = tmp_path / "seg1.parquet"
     _write_prices_parquet(str(seg1), ts_type=pa.timestamp("us"))
-    tstable.append_parquet(str(seg1))
+    tstable.append(parquet_reader(seg1))
 
     # Second append uses a different timestamp unit, which is a common real-world
     # pitfall when mixing pandas/pyarrow writers (e.g. default ns) with other tools.
@@ -234,7 +236,7 @@ def test_append_rejects_time_column_unit_mismatch_after_schema_adoption(
     pq.write_table(tbl2, str(seg2))
 
     with pytest.raises(ttf.SchemaMismatchError) as excinfo:
-        tstable.append_parquet(str(seg2))
+        tstable.append(parquet_reader(seg2))
 
     assert getattr(excinfo.value, "table_root", None) == str(table_root)
     msg = str(excinfo.value).lower()

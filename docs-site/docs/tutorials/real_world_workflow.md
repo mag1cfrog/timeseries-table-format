@@ -12,6 +12,8 @@ Create the table on the first run. Open it on later runs:
 ```python
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import timeseries_table_format as ttf
 
 TABLE_ROOT = Path("prices_table")
@@ -43,11 +45,16 @@ def ingest_files(new_files: list[Path]) -> None:
     table = open_or_create_table()
 
     for segment in sorted(new_files):
-        version = table.append_parquet(str(segment))
+        parquet_file = pq.ParquetFile(segment)
+        reader = pa.RecordBatchReader.from_batches(
+            parquet_file.schema_arrow,
+            parquet_file.iter_batches(),
+        )
+        version = table.append(reader)
         print(f"appended {segment.name} at table version {version}")
 ```
 
-If a file overlaps existing coverage, `append_parquet(...)` raises
+If a file overlaps existing coverage, `append(...)` raises
 `CoverageOverlapError` and leaves that append uncommitted.
 
 !!! warning "Do not blindly ignore overlap errors"

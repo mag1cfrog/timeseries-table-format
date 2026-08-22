@@ -2,6 +2,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 import threading
 
@@ -121,7 +123,7 @@ def test_session_tables_sorted_and_deregister(tmp_path):
 
     prices_seg = tmp_path / "prices.parquet"
     _write_prices_parquet(str(prices_seg))
-    tstable.append_parquet(str(prices_seg))
+    tstable.append(parquet_reader(prices_seg))
 
     symbols_path = tmp_path / "symbols.parquet"
     _write_symbols_parquet(str(symbols_path))

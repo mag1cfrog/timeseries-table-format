@@ -10,7 +10,7 @@ TimeseriesTableError
 |-- StorageError          - filesystem or I/O problem (e.g. missing path, permission denied)
 |-- ConflictError         - concurrent modification conflict on table metadata
 |-- CoverageOverlapError  - append rejected because its coverage overlaps existing data
-|-- SchemaMismatchError   - Parquet schema does not match the table's established schema
+|-- SchemaMismatchError   - incoming Arrow schema does not match the table's established schema
 `-- DataFusionError       - SQL query failed inside the DataFusion engine
 ```
 
@@ -20,11 +20,11 @@ TimeseriesTableError
 directory doesn't exist, a file is missing, or a permissions problem. The error message includes
 the path that caused the problem.
 
-**`CoverageOverlapError`** - raised by `append_parquet(...)` when the incoming segment covers a
+**`CoverageOverlapError`** - raised by `append(...)` when the incoming source covers a
 bucket that is already occupied for the same entity. This is intentional - it protects you from
 double-ingesting data. The exception carries:
 
-- `segment_path` - which file triggered the rejection
+- `segment_path` - the generated table-relative path for the rejected segment
 - `overlap_count` - how many entity/bucket pairs overlap on an entity-aware table, or how many
   buckets overlap on a table without entity columns
 - `example_entity_identity` - one overlapping identity as a dictionary in configured
@@ -40,7 +40,7 @@ message.
 
 See [Buckets + overlap](../concepts/bucketing_and_overlap.md) for background.
 
-**`SchemaMismatchError`** - raised when a Parquet file you try to append has a schema that
+**`SchemaMismatchError`** - raised when an Arrow source you try to append has a schema that
 conflicts with the table's established schema (set on the first successful append).
 
 **`ConflictError`** - raised when a concurrent modification to the table metadata is detected.

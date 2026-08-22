@@ -657,7 +657,13 @@ def main(argv: list[str]) -> int:
                         "(or set TMPDIR to such a directory)."
                     ) from e
                 raise
-            tbl.append_parquet(str(seg_path), copy_if_outside=False)
+            parquet_file = pq.ParquetFile(seg_path)
+            tbl.append(
+                pa.RecordBatchReader.from_batches(
+                    parquet_file.schema_arrow,
+                    parquet_file.iter_batches(),
+                )
+            )
 
             sess = ttf.Session()
             sess.register_tstable("prices", str(table_root))

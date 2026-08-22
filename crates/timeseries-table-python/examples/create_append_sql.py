@@ -39,12 +39,16 @@ def run(*, table_root: Path, rows: int) -> pa.Table:
         timezone=None,
     )
 
-    # In real usage, your Parquet file may live outside the table root.
-    # By default, append will copy segments under the table root if needed.
     seg_path = table_root / "incoming" / "input.parquet"
     seg_path.parent.mkdir(parents=True, exist_ok=True)
     _write_tiny_prices_parquet(seg_path)
-    new_version = tbl.append_parquet(str(seg_path))
+    parquet_file = pq.ParquetFile(seg_path)
+    new_version = tbl.append(
+        pa.RecordBatchReader.from_batches(
+            parquet_file.schema_arrow,
+            parquet_file.iter_batches(),
+        )
+    )
     print(f"Appended segment, table version is now {new_version}")
 
     sess = ttf.Session()

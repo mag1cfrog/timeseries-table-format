@@ -1,28 +1,30 @@
 //! Prepare and scan deterministic tables for the core scan RSS benchmark.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::array::{ArrayRef, BinaryBuilder, RecordBatch, TimestampMillisecondArray};
+use arrow::array::{
+    ArrayRef, BinaryBuilder, RecordBatch, RecordBatchIterator, TimestampMillisecondArray,
+};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::error::ArrowError;
 use chrono::Duration;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::{EnabledStatistics, WriterProperties};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use timeseries_table_format::{
+    AppendRequest,
     metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta, TimeBucket},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
 
-const SEGMENT_PATH: &str = "data/segment.parquet";
 const TIME_COLUMN: &str = "ts";
 const SCAN_BATCH_SIZE: usize = 8_192;
 
@@ -67,73 +69,37 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn write_segment(
-    path: &Path,
-    row_groups: usize,
+fn generated_batch(
+    schema: &Arc<Schema>,
+    group: usize,
     rows_per_group: usize,
     payload_bytes: usize,
-) -> Result<(u64, usize, u64), Box<dyn std::error::Error>> {
-    let total_rows = row_groups
+) -> Result<RecordBatch, ArrowError> {
+    let first = group
         .checked_mul(rows_per_group)
-        .ok_or_else(|| invalid_data("total row count overflow"))?;
-    i64::try_from(total_rows).map_err(|_| invalid_data("timestamps exceed i64"))?;
-
-    let schema = benchmark_schema();
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::UNCOMPRESSED)
-        .set_dictionary_enabled(false)
-        .set_statistics_enabled(EnabledStatistics::None)
-        .set_max_row_group_row_count(Some(rows_per_group))
-        .build();
-    let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), Some(properties))?;
-    let payload = vec![0xA5; payload_bytes];
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| ArrowError::ComputeError("timestamp overflow".to_string()))?;
+    let end = first
+        .checked_add(
+            i64::try_from(rows_per_group)
+                .map_err(|_| ArrowError::ComputeError("rows per group exceed i64".to_string()))?,
+        )
+        .ok_or_else(|| ArrowError::ComputeError("timestamp overflow".to_string()))?;
     let payload_capacity = rows_per_group
         .checked_mul(payload_bytes)
-        .ok_or_else(|| invalid_data("row-group payload size overflow"))?;
-    let mut max_batch_memory_bytes = 0;
+        .ok_or_else(|| ArrowError::ComputeError("row-group payload size overflow".to_string()))?;
 
-    for group in 0..row_groups {
-        let first = group
-            .checked_mul(rows_per_group)
-            .and_then(|value| i64::try_from(value).ok())
-            .ok_or_else(|| invalid_data("timestamp overflow"))?;
-        let end = first
-            .checked_add(i64::try_from(rows_per_group)?)
-            .ok_or_else(|| invalid_data("timestamp overflow"))?;
-        let timestamps = TimestampMillisecondArray::from_iter_values(first..end);
-        let mut payloads = BinaryBuilder::with_capacity(rows_per_group, payload_capacity);
-        for _ in 0..rows_per_group {
-            payloads.append_value(&payload);
-        }
-        let columns: Vec<ArrayRef> = vec![Arc::new(timestamps), Arc::new(payloads.finish())];
-        let batch = RecordBatch::try_new(schema.clone(), columns)?;
-        max_batch_memory_bytes = max_batch_memory_bytes.max(batch.get_array_memory_size());
-        writer.write(&batch)?;
-        writer.flush()?;
+    let timestamps = TimestampMillisecondArray::from_iter_values(first..end);
+    let mut payloads = BinaryBuilder::with_capacity(rows_per_group, payload_capacity);
+    let mut payload = vec![0xA5; payload_bytes];
+    for row in first..end {
+        let row = row.to_le_bytes();
+        let prefix_len = payload.len().min(row.len());
+        payload[..prefix_len].copy_from_slice(&row[..prefix_len]);
+        payloads.append_value(&payload);
     }
-
-    let metadata = writer.close()?;
-    if metadata.num_row_groups() != row_groups {
-        return Err(invalid_data(format!(
-            "expected {row_groups} row groups, wrote {}",
-            metadata.num_row_groups()
-        ))
-        .into());
-    }
-    let max_row_group_bytes = metadata
-        .row_groups()
-        .iter()
-        .map(|row_group| u64::try_from(row_group.total_byte_size()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .max()
-        .unwrap_or(0);
-
-    Ok((
-        u64::try_from(total_rows)?,
-        max_batch_memory_bytes,
-        max_row_group_bytes,
-    ))
+    let columns: Vec<ArrayRef> = vec![Arc::new(timestamps), Arc::new(payloads.finish())];
+    RecordBatch::try_new(schema.clone(), columns)
 }
 
 async fn prepare(
@@ -150,15 +116,11 @@ async fn prepare(
         .into());
     }
 
-    let segment_path = table_root.join(SEGMENT_PATH);
-    std::fs::create_dir_all(
-        segment_path
-            .parent()
-            .ok_or_else(|| invalid_data("segment path has no parent"))?,
-    )?;
-    let (total_rows, max_generated_batch_memory_bytes, max_row_group_bytes) =
-        write_segment(&segment_path, row_groups, rows_per_group, payload_bytes)?;
-    let segment_file_bytes = std::fs::metadata(&segment_path)?.len();
+    let total_rows = row_groups
+        .checked_mul(rows_per_group)
+        .ok_or_else(|| invalid_data("total row count overflow"))?;
+    i64::try_from(total_rows).map_err(|_| invalid_data("timestamps exceed i64"))?;
+    let expected_rows_per_group = i64::try_from(rows_per_group)?;
 
     let index = IndexSpec {
         column: TIME_COLUMN.to_string(),
@@ -170,20 +132,68 @@ async fn prepare(
     };
     let location = TableLocation::local(&table_root);
     let mut table = TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
-    table.append_parquet_segment(SEGMENT_PATH).await?;
+    let schema = benchmark_schema();
+    let max_generated_batch_memory_bytes = Cell::new(0);
+    {
+        let batches = (0..row_groups).map(|group| {
+            let batch = generated_batch(&schema, group, rows_per_group, payload_bytes)?;
+            max_generated_batch_memory_bytes.set(
+                max_generated_batch_memory_bytes
+                    .get()
+                    .max(batch.get_array_memory_size()),
+            );
+            Ok(batch)
+        });
+        let reader = RecordBatchIterator::new(batches, schema.clone());
+        table
+            .append(AppendRequest::new(reader).max_rows_per_row_group(rows_per_group))
+            .await?;
+    }
+
+    let segment = table
+        .state()
+        .segments
+        .values()
+        .next()
+        .ok_or_else(|| invalid_data("prepared table has no segment"))?;
+    if table.state().segments.len() != 1 || segment.row_count != u64::try_from(total_rows)? {
+        return Err(invalid_data("prepared table has unexpected segment metadata").into());
+    }
+    let segment_path = segment.path.clone();
+    let segment_file = table_root.join(&segment_path);
+    let segment_file_bytes = std::fs::metadata(&segment_file)?.len();
+    let metadata = ParquetRecordBatchReaderBuilder::try_new(File::open(&segment_file)?)?;
+    if metadata.metadata().num_row_groups() != row_groups
+        || metadata
+            .metadata()
+            .row_groups()
+            .iter()
+            .any(|row_group| row_group.num_rows() != expected_rows_per_group)
+    {
+        return Err(invalid_data("configured row-group shape was not preserved").into());
+    }
+    let max_row_group_bytes = metadata
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|row_group| u64::try_from(row_group.total_byte_size()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
 
     println!(
         "{}",
         serde_json::to_string(&json!({
             "mode": "prepare",
             "table_path": table_root,
-            "segment_path": SEGMENT_PATH,
+            "segment_path": segment_path,
             "segment_file_bytes": segment_file_bytes,
             "row_group_count": row_groups,
             "rows_per_row_group": rows_per_group,
             "total_rows": total_rows,
             "payload_bytes_per_row": payload_bytes,
-            "max_generated_batch_memory_bytes": max_generated_batch_memory_bytes,
+            "max_generated_batch_memory_bytes": max_generated_batch_memory_bytes.get(),
             "max_row_group_bytes": max_row_group_bytes,
             "process_id": std::process::id(),
         }))?

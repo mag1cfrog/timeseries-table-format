@@ -30,10 +30,12 @@ also shows a numeric identity component.
 
 ## 2. Append a Parquet segment
 
-`append_parquet(...)` adds the file as one table segment. This example's file
-contains both NVDA and AAPL rows in the same hourly buckets. A segment does not
-need to contain only one identity. The Parquet `ts` column must be an Arrow
-timestamp because that is the index type stored in the table metadata.
+The example opens the Parquet file lazily as a `RecordBatchReader` and passes
+it to `append(...)`. Append consumes the batches incrementally and writes one
+table-owned segment. The source contains both NVDA and AAPL rows in the same
+hourly buckets; a segment does not need to contain only one identity. The
+Parquet `ts` column must be an Arrow timestamp because that is the index type
+stored in the table metadata.
 
 If another file covers an existing bucket for NVDA, the append raises
 `CoverageOverlapError` for that identity/bucket pair. AAPL coverage in that
@@ -72,7 +74,7 @@ Both entity columns remain normal SQL columns. You can use
 `WHERE exchange_id = 1 AND symbol = 'NVDA'` to select one identity or group by
 both columns to calculate independent aggregates.
 
-You now have a self-contained table root that can accept more non-overlapping
+You now have a locally queryable table root that can accept more non-overlapping
 Parquet segments.
 
 Next, learn how to [append files incrementally](real_world_workflow.md).

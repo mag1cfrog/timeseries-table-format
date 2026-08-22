@@ -4,6 +4,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -39,7 +41,7 @@ def _make_table_with_schema(root, seg_path) -> ttf.TimeSeriesTable:
         timezone=None,
     )
     _write_parquet(str(seg_path))
-    tbl.append_parquet(str(seg_path))  # this should cause schema adoption
+    tbl.append(parquet_reader(seg_path))  # this should cause schema adoption
     return tbl
 
 
@@ -57,7 +59,7 @@ def test_register_tstable_succeeds_and_replaces(tmp_path):
 
     seg = tmp_path / "seg.parquet"
     _write_parquet(str(seg))
-    tbl.append_parquet(str(seg))
+    tbl.append(parquet_reader(seg))
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(root))
@@ -159,7 +161,7 @@ def test_register_tstable_never_appended_table_raises_then_succeeds_after_append
     # After first append, the table should adopt a canonical schema.
     seg = tmp_path / "seg.parquet"
     _write_parquet(str(seg))
-    tbl.append_parquet(str(seg))
+    tbl.append(parquet_reader(seg))
 
     # Now registration should succeed.
     sess.register_tstable("prices", str(root))

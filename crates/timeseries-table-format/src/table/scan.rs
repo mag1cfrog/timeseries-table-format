@@ -660,7 +660,7 @@ mod tests {
                 Some(i64::MAX),
             ])),
         )?;
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         assert_eq!(collect_i64_index(&table, -2, 2).await?, [-2, -1, 0, 1]);
         assert_eq!(
@@ -696,7 +696,7 @@ mod tests {
                 Some(u64::MAX),
             ])),
         )?;
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         assert_eq!(
             collect_u64_index(&table, start, u64::MAX).await?,
@@ -1291,8 +1291,8 @@ mod tests {
             ],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         // Query spans both segments but excludes the last row of the second segment.
         let start = Utc.timestamp_millis_opt(1_500).single().expect("valid ts");
@@ -1339,7 +1339,7 @@ mod tests {
             ],
         )?;
 
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         let start = Utc.timestamp_millis_opt(1_000).single().expect("valid ts");
         let end = Utc.timestamp_millis_opt(2_000).single().expect("valid ts");
@@ -1423,7 +1423,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         let start = Utc
             .timestamp_opt(1, 500_000_000)
@@ -1460,7 +1460,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         let start = Utc
             .timestamp_opt(1, 250_000_000)
@@ -1493,7 +1493,7 @@ mod tests {
             &[1.0, 2.0, 3.0],
         )?;
 
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         let start = Utc.timestamp_millis_opt(500).single().unwrap();
         let end = Utc.timestamp_millis_opt(2_500).single().unwrap();
@@ -1708,8 +1708,8 @@ mod tests {
         )?;
 
         // Append in reverse index order to exercise segment discovery.
-        table.append_parquet_segment(rel_b).await?;
-        table.append_parquet_segment(rel_a).await?;
+        append_parquet_fixture(&mut table, rel_b).await?;
+        append_parquet_fixture(&mut table, rel_a).await?;
 
         let start = Utc.timestamp_millis_opt(50_000).single().unwrap();
         let end = Utc.timestamp_millis_opt(150_000).single().unwrap();
@@ -1759,8 +1759,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         let start = Utc.timestamp_millis_opt(1_500).single().unwrap();
         let end = Utc.timestamp_millis_opt(2_000).single().unwrap();
@@ -1827,10 +1827,20 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel).await?;
+        append_parquet_fixture(&mut table, rel).await?;
 
         // Corrupt the file after append so scan encounters a read failure.
-        let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+        let committed_path = table
+            .state()
+            .segments
+            .values()
+            .next()
+            .expect("appended segment")
+            .path
+            .clone();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join(&committed_path))?;
         f.set_len(4)?;
 
         let start = Utc.timestamp_millis_opt(0).single().unwrap();
@@ -1844,7 +1854,7 @@ mod tests {
             .expect_err("corrupt segment should fail");
 
         assert!(matches!(err, TableError::ParquetRead { .. }));
-        assert!(err.to_string().contains(rel));
+        assert!(err.to_string().contains(&committed_path));
         Ok(())
     }
 }

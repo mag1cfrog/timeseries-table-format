@@ -166,7 +166,7 @@ def test_create_rejects_invalid_python_bucket_width_before_io(tmp_path, bucket_w
     assert not root.exists()
 
 
-def test_runtime_signatures_expose_only_ordered_index_names():
+def test_create_signature_exposes_only_ordered_index_names():
     create = inspect.signature(ttf.TimeSeriesTable.create)
     assert list(create.parameters) == [
         "table_root",
@@ -178,7 +178,3 @@ def test_runtime_signatures_expose_only_ordered_index_names():
         "timezone",
     ]
     assert "time_column" not in create.parameters
-
-    append = inspect.signature(ttf.TimeSeriesTable.append_parquet)
-    assert list(append.parameters) == ["self", "parquet_path", "copy_if_outside"]
-    assert "time_column" not in append.parameters

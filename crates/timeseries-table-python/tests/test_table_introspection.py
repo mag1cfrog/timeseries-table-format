@@ -4,6 +4,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -196,7 +198,7 @@ def test_table_introspection_version_updates_after_append(tmp_path):
         close=[1.0, 2.0],
     )
 
-    v = tbl.append_parquet("data/seg.parquet", copy_if_outside=False)
+    v = tbl.append(parquet_reader(seg))
     assert isinstance(v, int)
     assert v > 1
     assert tbl.version() == v

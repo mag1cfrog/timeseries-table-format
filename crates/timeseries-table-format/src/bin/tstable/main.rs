@@ -321,16 +321,23 @@ fn open_parquet_batch_reader(parquet: &Path) -> CliResult<ParquetRecordBatchRead
         .context(ReadParquetSourceSnafu { path })
 }
 
+async fn append_parquet_file(
+    table: &mut TimeSeriesTable,
+    table_root: &Path,
+    parquet: &Path,
+) -> CliResult<u64> {
+    let reader = open_parquet_batch_reader(parquet)?;
+    table.append(reader).await.context(AppendSegmentSnafu {
+        table: table_root.display().to_string(),
+        parquet: parquet.display().to_string(),
+    })
+}
+
 async fn cmd_append(table: &Path, parquet: &Path, timing: bool) -> CliResult<()> {
     let start = Instant::now();
     let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
     let mut t = open_table(location, table).await?;
-    let reader = open_parquet_batch_reader(parquet)?;
-
-    let version = t.append(reader).await.context(AppendSegmentSnafu {
-        table: table.display().to_string(),
-        parquet: parquet.display().to_string(),
-    })?;
+    let version = append_parquet_file(&mut t, table, parquet).await?;
 
     if timing {
         println!(

@@ -123,20 +123,6 @@ pub enum TableError {
         source: CommitError,
     },
 
-    /// Append failed and its provisional external Parquet copy could not be removed.
-    #[snafu(display(
-        "Append failed: {source}; failed to remove provisional Parquet copy at {path}: {cleanup_error}"
-    ))]
-    ExternalParquetRollback {
-        /// Table-relative path of the provisional copy that may remain.
-        path: String,
-        /// Original append failure that triggered rollback.
-        #[snafu(source)]
-        source: Box<TableError>,
-        /// Storage failure encountered while removing the provisional copy.
-        cleanup_error: StorageError,
-    },
-
     /// An append source contained no rows.
     #[snafu(display("Cannot append an empty Arrow batch source"))]
     EmptyAppendSource,
@@ -414,13 +400,6 @@ pub enum TableError {
         segment_path: String,
         /// Complete identity whose rows all have null ordered-index values.
         identity: EntityIdentity,
-    },
-
-    /// A live segment already uses the normalized path supplied for append.
-    #[snafu(display("Segment path is already live: {path}"))]
-    DuplicateSegmentPath {
-        /// Canonical table-relative path that is already registered.
-        path: String,
     },
 
     /// Existing segment lacks a coverage_path when coverage is required.

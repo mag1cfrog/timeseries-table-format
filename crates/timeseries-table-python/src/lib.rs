@@ -1707,75 +1707,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             Ok(d)
         }
 
-        #[pyo3(signature = (parquet_path, copy_if_outside=true))]
-        /// Append a Parquet segment to the table.
-        ///
-        /// The persisted ordered-index specification determines the required column and exact
-        /// Arrow type; append accepts no index override. Rows need not be ordered by that index.
-        ///
-        /// Parameters
-        /// ----------
-        /// parquet_path:
-        ///     Path to a Parquet file.
-        /// copy_if_outside:
-        ///     If `True`, copies the file under the table root before appending.
-        ///     If `False`, `parquet_path` must be a table-relative storage key.
-        ///
-        /// Returns
-        /// -------
-        /// int
-        ///     The new table version after the append.
-        ///
-        /// Raises
-        /// ------
-        /// CoverageOverlapError:
-        ///     If the same complete entity identity already covers an incoming bucket. Different
-        ///     identities may reuse the same bucket.
-        /// SchemaMismatchError:
-        ///     If the segment schema does not match the table schema.
-        /// TimeseriesTableError:
-        ///     For other table errors. The exception includes a `table_root` attribute.
-        fn append_parquet(
-            &mut self,
-            py: Python<'_>,
-            parquet_path: String,
-            copy_if_outside: bool,
-        ) -> PyResult<u64> {
-            use crate::tokio_runner;
-
-            use std::path::Path;
-
-            let rt = tokio_runner::global_runtime()?;
-
-            let table_root_for_err = self.table_root.clone();
-            let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
-
-            let table = &mut self.inner;
-
-            tokio_runner::run_blocking_map_err(
-                py,
-                rt.as_ref(),
-                async move {
-                    if copy_if_outside {
-                        table
-                            .append_parquet_from_path(Path::new(&parquet_path))
-                            .await
-                            .map(|(version, _)| version)
-                    } else {
-                        table.append_parquet_segment(&parquet_path).await
-                    }
-                },
-                move |py, err| {
-                    table_error_to_py_with_root(
-                        py,
-                        &table_root_for_err,
-                        &entity_columns_for_err,
-                        err,
-                    )
-                },
-            )
-        }
-
         /// Append Arrow data to the table and return the committed version.
         ///
         /// `source` must be a `pyarrow.RecordBatch`, `pyarrow.Table`,
@@ -1840,68 +1771,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             )?;
             Ok(report.into())
         }
-    }
-
-    /// Test-only helper: creates a table at `table_root`, appends two Parquet
-    /// files, and expects the second append to fail with a coverage overlap.
-    #[cfg(feature = "test-utils")]
-    #[pyfunction]
-    fn _test_trigger_overlap(
-        py: Python<'_>,
-        table_root: &str,
-        first_parquet_path: &str,
-        second_parquet_path: &str,
-    ) -> PyResult<()> {
-        use crate::{error_map, tokio_runner};
-
-        let rt = tokio_runner::global_runtime()?;
-
-        let table_root = table_root.to_string();
-        let first_parquet_path = first_parquet_path.to_string();
-        let second_parquet_path = second_parquet_path.to_string();
-
-        tokio_runner::run_blocking_map_err(
-            py,
-            rt.as_ref(),
-            async move {
-                use std::path::Path;
-
-                use timeseries_table_format::table::TimeSeriesTable;
-                use timeseries_table_format::{
-                    storage::TableLocation,
-                    table::TableError,
-                    transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket},
-                };
-
-                let index = IndexSpec {
-                    column: "ts".to_string(),
-                    entity_columns: Vec::new(),
-                    kind: IndexKind::Timestamp {
-                        bucket: TimeBucket::Minutes(60),
-                        timezone: None,
-                    },
-                };
-
-                let meta = TableMeta::new_time_series(index);
-
-                let location = TableLocation::parse(&table_root)
-                    .map_err(|e| TableError::Storage { source: e })?;
-
-                let mut table = TimeSeriesTable::create(location, meta).await?;
-
-                let _v1 = table
-                    .append_parquet_from_path(Path::new(&first_parquet_path))
-                    .await?;
-                let _v2 = table
-                    .append_parquet_from_path(Path::new(&second_parquet_path))
-                    .await?;
-
-                Ok::<(), TableError>(())
-            },
-            move |py, err| error_map::table_error_to_py(py, err, &[]),
-        )?;
-
-        Ok(())
     }
 
     /// Test-only helper: blocks for `millis` while releasing the GIL.
@@ -2588,7 +2457,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             // Internal test-only hook (kept under a clearly private namespace).
             let py = m.py();
             let testing = PyModule::new(py, "timeseries_table_format._native._testing")?;
-            testing.add_function(pyo3::wrap_pyfunction!(_test_trigger_overlap, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_sleep_without_gil, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(_test_session_table_exists, py)?)?;
             testing.add_function(pyo3::wrap_pyfunction!(

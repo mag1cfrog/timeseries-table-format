@@ -1,58 +1,14 @@
 from typing import Protocol
-import os
-import tempfile
 import threading
 import time
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-import timeseries_table_format as ttf
 import timeseries_table_format._native as native
 
 
 class _TestingModule(Protocol):
-    def _test_trigger_overlap(
-        self, table_root: str, first_parquet_path: str, second_parquet_path: str
-    ) -> None: ...
     def _test_sleep_without_gil(self, millis: int) -> None: ...
-
-
-def test_coverage_overlap_maps_to_specific_exception():
-    testing: _TestingModule | None = getattr(native, "_testing", None)
-    if testing is None:
-        pytest.skip("Rust extension built without feature 'test-utils'")
-        return
-
-    with tempfile.TemporaryDirectory() as tmp:
-        table_root = os.path.join(tmp, "table")
-        first_parquet_path = os.path.join(tmp, "first.parquet")
-        second_parquet_path = os.path.join(tmp, "second.parquet")
-
-        ts = pa.array([0, 60 * 60 * 1_000_000], type=pa.timestamp("us"))
-        v = pa.array([1, 2], type=pa.int64())
-        tbl = pa.table({"ts": ts, "v": v})
-        pq.write_table(tbl, first_parquet_path)
-        pq.write_table(tbl, second_parquet_path)
-        with open(second_parquet_path, "rb") as source:
-            second_before = source.read()
-
-        with pytest.raises(ttf.CoverageOverlapError) as excinfo:
-            testing._test_trigger_overlap(
-                table_root, first_parquet_path, second_parquet_path
-            )
-
-        e = excinfo.value
-        assert isinstance(e.segment_path, str)
-        assert isinstance(e.overlap_count, int)
-        assert e.overlap_count > 0
-        assert e.example_entity_identity is None
-        assert e.example_bucket is None or isinstance(e.example_bucket, int)
-        assert os.path.exists(os.path.join(table_root, "data", "first.parquet"))
-        assert not os.path.exists(os.path.join(table_root, "data", "second.parquet"))
-        with open(second_parquet_path, "rb") as source:
-            assert source.read() == second_before
 
 
 def test_test_sleep_without_gil_allows_other_threads_to_run():

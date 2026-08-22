@@ -316,72 +316,6 @@ pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File>
     }
 }
 
-pub(crate) async fn copy_new_from_local(
-    location: &StorageLocation,
-    source: &Path,
-    rel_path: &Path,
-) -> StorageResult<()> {
-    match location {
-        StorageLocation::Local(_) => {
-            let mut source_file = fs::File::open(source).await.map_err(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    StorageError::NotFound {
-                        path: source.display().to_string(),
-                        source: BackendError::Local(error),
-                        backtrace: Backtrace::capture(),
-                    }
-                } else {
-                    StorageError::OtherIo {
-                        path: source.display().to_string(),
-                        source: BackendError::Local(error),
-                        backtrace: Backtrace::capture(),
-                    }
-                }
-            })?;
-            let destination = join_local(location, rel_path)?;
-            let mut destination_file = fs::File::from_std(create_new_file(&destination).await?);
-            let mut guard = FileCleanupGuard::new(destination.clone());
-            #[cfg(test)]
-            let injected_copy_failure = take_write_new_failure(&destination);
-
-            let result = async {
-                #[cfg(test)]
-                if injected_copy_failure {
-                    return Err(write_failure(&destination));
-                }
-
-                tokio::io::copy(&mut source_file, &mut destination_file)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: destination.display().to_string(),
-                    })?;
-                destination_file
-                    .sync_all()
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: destination.display().to_string(),
-                    })?;
-
-                Ok(())
-            }
-            .await;
-
-            match result {
-                Ok(()) => {
-                    guard.disarm();
-                    Ok(())
-                }
-                Err(operation) => {
-                    drop(destination_file);
-                    Err(cleanup_created_file(&mut guard, &destination, operation).await)
-                }
-            }
-        }
-    }
-}
-
 /// Validate a backend-relative storage key and resolve it under a local root.
 ///
 /// v0.1: only Local is supported.
@@ -851,28 +785,6 @@ mod tests {
 
         assert!(matches!(err, StorageError::OtherIo { .. }));
         assert!(!path.exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn copy_new_from_local_removes_target_after_copy_failure() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        tokio::fs::create_dir(&table_root).await?;
-        let location = StorageLocation::local(&table_root);
-        let source = tmp.path().join("source.parquet");
-        tokio::fs::write(&source, b"parquet").await?;
-        let rel_path = Path::new("data/copied.parquet");
-        let destination = table_root.join(rel_path);
-        inject_write_new_failure(destination.clone(), false);
-
-        let err = copy_new_from_local(&location, &source, rel_path)
-            .await
-            .expect_err("copy should fail");
-
-        assert!(matches!(err, StorageError::OtherIo { .. }));
-        assert!(!destination.exists());
-        assert_eq!(tokio::fs::read(source).await?, b"parquet");
         Ok(())
     }
 
