@@ -39,7 +39,13 @@ def run(*, table_root: Path) -> pa.Table:
     seg_path.parent.mkdir(parents=True, exist_ok=True)
     _write_tiny_prices_parquet(seg_path)
 
-    tbl.append_parquet(str(seg_path))
+    parquet_file = pq.ParquetFile(seg_path)
+    tbl.append(
+        pa.RecordBatchReader.from_batches(
+            parquet_file.schema_arrow,
+            parquet_file.iter_batches(),
+        )
+    )
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))
