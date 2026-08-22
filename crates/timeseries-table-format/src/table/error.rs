@@ -141,6 +141,15 @@ pub enum TableError {
     #[snafu(display("Cannot append an empty Arrow batch source"))]
     EmptyAppendSource,
 
+    /// A configured Parquet row group cannot contain zero rows.
+    #[snafu(display(
+        "Invalid maximum rows per Parquet row group: {max_rows_per_row_group}; expected a positive value"
+    ))]
+    InvalidMaxRowsPerRowGroup {
+        /// Rejected per-append row-group limit.
+        max_rows_per_row_group: usize,
+    },
+
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
     #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
     EmptyTable,

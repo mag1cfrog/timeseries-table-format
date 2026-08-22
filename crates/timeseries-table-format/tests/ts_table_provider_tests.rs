@@ -1,6 +1,7 @@
 //! Integration tests for the DataFusion table provider.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fs::File;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::rc::Rc;
@@ -26,7 +27,7 @@ use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use datafusion::scalar::ScalarValue;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 use timeseries_table_format::coverage::EntityValue;
@@ -38,8 +39,21 @@ use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::{TableError, TimeSeriesTable};
 use timeseries_table_format::transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket};
+use timeseries_table_format::{AppendRequest, IntoBatchStream};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+async fn append_with_single_row_groups<S, Kind>(
+    table: &mut TimeSeriesTable,
+    source: S,
+) -> Result<u64, TableError>
+where
+    S: IntoBatchStream<Kind>,
+{
+    table
+        .append(AppendRequest::new(source).max_rows_per_row_group(1))
+        .await
+}
 
 #[derive(Clone)]
 struct TestRow {
@@ -1059,25 +1073,49 @@ async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
     assert!(table.state().segments.is_empty());
 
     assert_eq!(
-        table
-            .append(make_append_batch(&[(60_000, "A", 11.0), (0, "B", 10.0),])?)
-            .await?,
+        append_with_single_row_groups(
+            &mut table,
+            make_append_batch(&[(60_000, "A", 11.0), (0, "B", 10.0),])?,
+        )
+        .await?,
         2
     );
+    let first_segment_path = table
+        .state()
+        .segments
+        .values()
+        .next()
+        .map(|segment| segment.path.clone())
+        .ok_or("missing configured append segment")?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(tmp.path().join(first_segment_path))?)?;
+    let row_group_rows = builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|row_group| row_group.num_rows())
+        .collect::<Vec<_>>();
+    assert_eq!(row_group_rows, vec![1, 1]);
+
     assert_eq!(
-        table
-            .append(vec![
+        append_with_single_row_groups(
+            &mut table,
+            vec![
                 make_append_batch(&[(180_000, "B", 13.0)])?,
                 make_append_batch(&[(120_000, "A", 12.0)])?,
-            ])
-            .await?,
+            ],
+        )
+        .await?,
         3
     );
 
     let iterator_batch = make_append_batch(&[(240_000, "A", 14.0)])?;
     let iterator =
         RecordBatchIterator::new(vec![Ok(iterator_batch.clone())], iterator_batch.schema());
-    assert_eq!(table.append(iterator).await?, 4);
+    assert_eq!(
+        append_with_single_row_groups(&mut table, iterator).await?,
+        4
+    );
 
     let non_send_batch = make_append_batch(&[(300_000, "B", 15.0)])?;
     let non_send_schema = non_send_batch.schema();
@@ -1090,21 +1128,27 @@ async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
         }),
         non_send_schema,
     );
-    assert_eq!(table.append(non_send).await?, 5);
+    assert_eq!(
+        append_with_single_row_groups(&mut table, non_send).await?,
+        5
+    );
 
     let boxed_batch = make_append_batch(&[(360_000, "A", 16.0)])?;
     let boxed: Box<dyn RecordBatchReader> = Box::new(RecordBatchIterator::new(
         vec![Ok(boxed_batch.clone())],
         boxed_batch.schema(),
     ));
-    assert_eq!(table.append(boxed).await?, 6);
+    assert_eq!(append_with_single_row_groups(&mut table, boxed).await?, 6);
 
     let sendable_batch = make_append_batch(&[(420_000, "B", 17.0)])?;
     let sendable: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
         vec![Ok(sendable_batch.clone())],
         sendable_batch.schema(),
     ));
-    assert_eq!(table.append(sendable).await?, 7);
+    assert_eq!(
+        append_with_single_row_groups(&mut table, sendable).await?,
+        7
+    );
 
     drop(table);
     let reopened = Arc::new(TimeSeriesTable::open(location).await?);
