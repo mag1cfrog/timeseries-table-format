@@ -47,12 +47,15 @@ pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
 pub(crate) async fn append_parquet_fixture(
     table: &mut TimeSeriesTable,
     relative_path: impl AsRef<Path>,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<u64, TableError> {
     let path = match table.location().storage() {
         StorageLocation::Local(root) => root.join(relative_path),
     };
-    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?.build()?;
-    Ok(table.append(reader).await?)
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(path).expect("open Parquet fixture"))
+            .and_then(|builder| builder.build())
+            .expect("read Parquet fixture metadata");
+    table.append(reader).await
 }
 
 #[derive(Clone)]

@@ -489,8 +489,9 @@ mod tests {
         },
         storage::{TableLocation, layout},
         table::test_util::{
-            CapturedSpan, TraceCapture, make_int32_entity_table_meta, make_table_meta_with_unit,
-            utc_datetime, write_arrow_parquet_with_unit, write_int32_entity_parquet,
+            CapturedSpan, TraceCapture, append_parquet_fixture, make_int32_entity_table_meta,
+            make_table_meta_with_unit, utc_datetime, write_arrow_parquet_with_unit,
+            write_int32_entity_parquet,
         },
         transaction_log::TableKind,
     };
@@ -577,7 +578,7 @@ mod tests {
         root: &Path,
         path: &str,
         start_millis: i64,
-    ) -> Result<(), TableError> {
+    ) -> Result<String, TableError> {
         write_arrow_parquet_with_unit(
             &root.join(path),
             TimeUnit::Millisecond,
@@ -591,12 +592,25 @@ mod tests {
             &[10.0, 20.0, 11.0, 21.0],
         )
         .expect("write mixed source");
-        table.append_parquet_segment(path).await?;
+        let existing_paths = table
+            .state()
+            .segments
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        append_parquet_fixture(table, path).await?;
+        let committed_path = table
+            .state()
+            .segments
+            .keys()
+            .find(|path| !existing_paths.contains(*path))
+            .expect("append added a segment")
+            .clone();
         assert_eq!(
-            table.state().segments[path].entity_layout,
+            table.state().segments[&committed_path].entity_layout,
             SegmentEntityLayout::Mixed
         );
-        Ok(())
+        Ok(committed_path)
     }
 
     #[test]
@@ -728,24 +742,31 @@ mod tests {
             make_table_meta_with_unit(LogicalTimestampUnit::Millis),
         )
         .await?;
-        let source_path = "data/mixed.parquet";
+        let fixture_path = "data/mixed.parquet";
         write_arrow_parquet_with_unit(
-            &temp.path().join(source_path),
+            &temp.path().join(fixture_path),
             TimeUnit::Millisecond,
             &[Some(1_000), Some(2_000), Some(3_000), Some(4_000)],
             &["A", "B", "A", "B"],
             &[10.0, 20.0, 11.0, 21.0],
         )
         .expect("write mixed source");
-        table.append_parquet_segment(source_path).await?;
+        append_parquet_fixture(&mut table, fixture_path).await?;
+        let source_path = table
+            .state()
+            .segments
+            .keys()
+            .next()
+            .expect("committed source")
+            .clone();
         let source = table
             .state()
             .segments
-            .get(source_path)
+            .get(&source_path)
             .expect("committed source")
             .clone();
         assert_eq!(source.entity_layout, SegmentEntityLayout::Mixed);
-        let source_bytes = std::fs::read(temp.path().join(source_path)).expect("source bytes");
+        let source_bytes = std::fs::read(temp.path().join(&source_path)).expect("source bytes");
         let source_coverage_path = source.coverage_path.as_deref().expect("source coverage");
         let source_coverage_bytes =
             std::fs::read(temp.path().join(source_coverage_path)).expect("source coverage bytes");
@@ -833,7 +854,7 @@ mod tests {
             assert_ne!(value, "A");
             assert_ne!(value, "B");
         }
-        assert!(!table.state().segments.contains_key(source_path));
+        assert!(!table.state().segments.contains_key(&source_path));
         assert_eq!(table.state().segments.len(), 2);
         assert!(
             table
@@ -844,7 +865,7 @@ mod tests {
         );
         assert_eq!(table.state().table_coverage, table_coverage);
         assert_eq!(
-            std::fs::read(temp.path().join(source_path)).expect("source remains"),
+            std::fs::read(temp.path().join(&source_path)).expect("source remains"),
             source_bytes
         );
         assert_eq!(
@@ -861,15 +882,21 @@ mod tests {
         let location = TableLocation::local(temp.path());
         let mut table =
             TimeSeriesTable::create(location.clone(), make_int32_entity_table_meta()).await?;
-        let source_path = "data/numeric-mixed.parquet";
+        let fixture_path = "data/numeric-mixed.parquet";
         write_int32_entity_parquet(
-            &temp.path().join(source_path),
+            &temp.path().join(fixture_path),
             &[1_000, 2_000, 3_000, 4_000],
             &[-1, i32::MAX, -1, i32::MAX],
             &[10.0, 20.0, 11.0, 21.0],
         )
         .expect("write numeric mixed source");
-        table.append_parquet_segment(source_path).await?;
+        append_parquet_fixture(&mut table, fixture_path).await?;
+        let source_path = table
+            .state()
+            .segments
+            .keys()
+            .next()
+            .expect("committed source");
         assert_eq!(
             table.state().segments[source_path].entity_layout,
             SegmentEntityLayout::Mixed
@@ -913,10 +940,11 @@ mod tests {
         )
         .await?;
         append_mixed_source(&mut table, temp.path(), "data/first.parquet", 0).await?;
-        append_mixed_source(&mut table, temp.path(), "data/broken.parquet", 60_000).await?;
+        let broken_path =
+            append_mixed_source(&mut table, temp.path(), "data/broken.parquet", 60_000).await?;
         let state_before = table.state().clone();
         let objects_before = optimization_objects(temp.path()).expect("optimization objects");
-        std::fs::remove_file(temp.path().join("data/broken.parquet")).expect("remove later source");
+        std::fs::remove_file(temp.path().join(broken_path)).expect("remove later source");
 
         let error = table.optimize().await.expect_err("later staging must fail");
 
@@ -1079,10 +1107,14 @@ mod tests {
             make_table_meta_with_unit(LogicalTimestampUnit::Millis),
         )
         .await?;
-        let source_paths = ["data/first.parquet", "data/second.parquet"];
-        append_mixed_source(&mut table, temp.path(), source_paths[0], 0).await?;
-        append_mixed_source(&mut table, temp.path(), source_paths[1], 60_000).await?;
-        let sources = source_paths.map(|path| table.state().segments[path].clone());
+        let source_paths = [
+            append_mixed_source(&mut table, temp.path(), "data/first.parquet", 0).await?,
+            append_mixed_source(&mut table, temp.path(), "data/second.parquet", 60_000).await?,
+        ];
+        let sources = source_paths
+            .iter()
+            .map(|path| table.state().segments[path].clone())
+            .collect::<Vec<_>>();
         let expected_coverage = table.load_table_entity_snapshot_coverage_readonly().await?;
         let coverage_pointer = table
             .state()
@@ -1150,7 +1182,7 @@ mod tests {
         assert!(
             commit.actions[..2]
                 .iter()
-                .zip(source_paths)
+                .zip(&source_paths)
                 .all(|(action, expected)| matches!(
                     action,
                     LogAction::RemoveSegment { path } if path == expected
