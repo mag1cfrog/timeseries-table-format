@@ -2999,8 +2999,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         let state = table.state.clone();
         let ptr = state
@@ -3057,8 +3057,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         let state = table.state.clone();
         let ptr = state
@@ -3101,7 +3101,7 @@ mod tests {
                 price: 10.0,
             }],
         )?;
-        table.append_parquet_segment(existing).await?;
+        append_parquet_fixture(&mut table, existing).await?;
 
         let snapshot_path = table
             .state
@@ -3125,8 +3125,7 @@ mod tests {
             }],
         )?;
 
-        let err = table
-            .append_parquet_segment(overlapping)
+        let err = append_parquet_fixture(&mut table, overlapping)
             .await
             .expect_err("overlap must be rejected");
         assert!(matches!(err, TableError::EntityCoverageOverlap { .. }));
@@ -3153,7 +3152,7 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
 
         let mut state = table.state.clone();
         state.table_coverage = None;
@@ -3216,8 +3215,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         let mut state = table.state.clone();
         state.table_coverage = None;
