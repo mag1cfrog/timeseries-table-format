@@ -146,6 +146,23 @@ def test_append_preserves_protocol_failure_as_cause(tmp_path):
     assert _data_and_coverage_files(root) == []
 
 
+@pytest.mark.parametrize(
+    "exception_type", [KeyboardInterrupt, SystemExit, GeneratorExit]
+)
+def test_append_preserves_protocol_control_flow_exceptions(tmp_path, exception_type):
+    class InterruptedSource:
+        def __arrow_c_stream__(self):
+            raise exception_type("cancel append")
+
+    table, root = _create_table(tmp_path)
+
+    with pytest.raises(exception_type, match="cancel append"):
+        table.append(InterruptedSource())
+
+    assert table.version() == 1
+    assert _data_and_coverage_files(root) == []
+
+
 def test_append_rejects_non_capsule_protocol_result_before_mutation(tmp_path):
     class BrokenSource:
         def __arrow_c_stream__(self):
@@ -305,6 +322,34 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
     else:
         assert table.append(source) == 2
 
+    assert counter.count == 1
+    del source
+    gc.collect()
+    assert counter.count == 1
+
+
+def test_append_maps_missing_stream_error_details_and_releases_once(tmp_path):
+    testing = _testing_module()
+    root = tmp_path / "table"
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="x",
+        index_type="int64",
+        bucket_width=1,
+    )
+    source, counter = testing._test_append_stream_with_release_counter(
+        fail_after_first=True,
+        with_error_details=False,
+    )
+
+    with pytest.raises(
+        ttf.TimeseriesTableError, match="failed without error details"
+    ) as excinfo:
+        table.append(source)
+
+    assert getattr(excinfo.value, "table_root", None) == str(root)
+    assert table.version() == 1
+    assert _data_and_coverage_files(str(root)) == []
     assert counter.count == 1
     del source
     gc.collect()

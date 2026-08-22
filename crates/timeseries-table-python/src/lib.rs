@@ -10,9 +10,10 @@ mod tokio_runner;
 mod _native {
 
     use std::collections::BTreeSet;
+    use std::ffi::{c_char, c_void};
     use std::sync::{Arc, Mutex};
 
-    use arrow_array::ffi::FFI_ArrowSchema;
+    use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
     use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
     use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 
@@ -29,8 +30,8 @@ mod _native {
     use pyo3::{
         Bound, PyErr, PyResult, PyTypeInfo, Python,
         exceptions::{
-            PyAttributeError, PyImportError, PyKeyError, PyNotImplementedError, PyRuntimeError,
-            PyRuntimeWarning, PyTypeError, PyValueError,
+            PyAttributeError, PyException, PyImportError, PyKeyError, PyNotImplementedError,
+            PyRuntimeError, PyRuntimeWarning, PyTypeError, PyValueError,
         },
         prelude::*,
         pyclass, pymethods,
@@ -190,6 +191,130 @@ mod _native {
         py_err
     }
 
+    /// Own the imported stream behind callbacks that always provide an error message.
+    ///
+    /// The Arrow C Stream contract permits a null error description, but arrow-rs 59.2.0
+    /// unwraps it. Every callback below is installed together, and `private_data` remains a valid
+    /// boxed adapter until the release callback clears and drops it.
+    struct ArrowStreamErrorMessageAdapter {
+        source: FFI_ArrowArrayStream,
+    }
+
+    // Only malformed callback invocations reach this path; any nonzero value reports failure.
+    const INVALID_ARROW_STREAM_CALLBACK: i32 = 1;
+    const ARROW_STREAM_ERROR_WITHOUT_DETAILS: &std::ffi::CStr =
+        c"Arrow C Stream operation failed without error details";
+
+    unsafe extern "C" fn adapted_arrow_stream_get_schema(
+        stream: *mut FFI_ArrowArrayStream,
+        out: *mut FFI_ArrowSchema,
+    ) -> i32 {
+        let Some(stream) = (unsafe { stream.as_mut() }) else {
+            return INVALID_ARROW_STREAM_CALLBACK;
+        };
+        let Some(adapter) = (unsafe {
+            stream
+                .private_data
+                .cast::<ArrowStreamErrorMessageAdapter>()
+                .as_mut()
+        }) else {
+            return INVALID_ARROW_STREAM_CALLBACK;
+        };
+        let Some(get_schema) = adapter.source.get_schema else {
+            return INVALID_ARROW_STREAM_CALLBACK;
+        };
+
+        unsafe { get_schema(&mut adapter.source, out) }
+    }
+
+    unsafe extern "C" fn adapted_arrow_stream_get_next(
+        stream: *mut FFI_ArrowArrayStream,
+        out: *mut FFI_ArrowArray,
+    ) -> i32 {
+        let Some(stream) = (unsafe { stream.as_mut() }) else {
+            return INVALID_ARROW_STREAM_CALLBACK;
+        };
+        let Some(adapter) = (unsafe {
+            stream
+                .private_data
+                .cast::<ArrowStreamErrorMessageAdapter>()
+                .as_mut()
+        }) else {
+            return INVALID_ARROW_STREAM_CALLBACK;
+        };
+        let Some(get_next) = adapter.source.get_next else {
+            return INVALID_ARROW_STREAM_CALLBACK;
+        };
+
+        unsafe { get_next(&mut adapter.source, out) }
+    }
+
+    unsafe extern "C" fn adapted_arrow_stream_get_last_error(
+        stream: *mut FFI_ArrowArrayStream,
+    ) -> *const c_char {
+        let Some(stream) = (unsafe { stream.as_mut() }) else {
+            return ARROW_STREAM_ERROR_WITHOUT_DETAILS.as_ptr();
+        };
+        let Some(adapter) = (unsafe {
+            stream
+                .private_data
+                .cast::<ArrowStreamErrorMessageAdapter>()
+                .as_mut()
+        }) else {
+            return ARROW_STREAM_ERROR_WITHOUT_DETAILS.as_ptr();
+        };
+        let Some(get_last_error) = adapter.source.get_last_error else {
+            return ARROW_STREAM_ERROR_WITHOUT_DETAILS.as_ptr();
+        };
+        let message = unsafe { get_last_error(&mut adapter.source) };
+        if message.is_null() {
+            ARROW_STREAM_ERROR_WITHOUT_DETAILS.as_ptr()
+        } else {
+            message
+        }
+    }
+
+    unsafe extern "C" fn release_adapted_arrow_stream(stream: *mut FFI_ArrowArrayStream) {
+        let Some(stream) = (unsafe { stream.as_mut() }) else {
+            return;
+        };
+        if stream.release.is_none() {
+            return;
+        }
+
+        stream.get_schema = None;
+        stream.get_next = None;
+        stream.get_last_error = None;
+        stream.release = None;
+        let private_data = std::mem::replace(&mut stream.private_data, std::ptr::null_mut());
+        if !private_data.is_null() {
+            drop(unsafe { Box::from_raw(private_data.cast::<ArrowStreamErrorMessageAdapter>()) });
+        }
+    }
+
+    fn arrow_stream_with_error_message_fallback(
+        source: FFI_ArrowArrayStream,
+    ) -> Result<FFI_ArrowArrayStream, &'static str> {
+        if source.release.is_none() {
+            return Err("input stream is already released");
+        }
+        if source.get_schema.is_none() {
+            return Err("input stream has no get_schema callback");
+        }
+        if source.get_next.is_none() {
+            return Err("input stream has no get_next callback");
+        }
+
+        Ok(FFI_ArrowArrayStream {
+            get_schema: Some(adapted_arrow_stream_get_schema),
+            get_next: Some(adapted_arrow_stream_get_next),
+            get_last_error: Some(adapted_arrow_stream_get_last_error),
+            release: Some(release_adapted_arrow_stream),
+            private_data: Box::into_raw(Box::new(ArrowStreamErrorMessageAdapter { source }))
+                .cast::<c_void>(),
+        })
+    }
+
     fn import_arrow_stream_from_python(
         source: &Bound<'_, PyAny>,
     ) -> PyResult<ArrowArrayStreamReader> {
@@ -205,6 +330,9 @@ mod _native {
             }
         })?;
         let capsule = exporter.call0().map_err(|error| {
+            if !error.is_instance_of::<PyException>(py) {
+                return error;
+            }
             let mapped = PyValueError::new_err("source.__arrow_c_stream__() failed");
             mapped.set_cause(py, Some(error));
             mapped
@@ -214,7 +342,7 @@ mod _native {
                 "source.__arrow_c_stream__() must return an Arrow C Stream capsule: {error}"
             ))
         })?;
-        let stream = capsule
+        let stream_pointer = capsule
             .pointer_checked(Some(c"arrow_array_stream"))
             .map_err(|error| {
                 let mapped = PyValueError::new_err("invalid Arrow C Stream capsule");
@@ -224,9 +352,14 @@ mod _native {
             .cast::<FFI_ArrowArrayStream>();
 
         // SAFETY: the Arrow PyCapsule protocol requires a capsule with this checked name to point
-        // to a valid, aligned, initialized FFI_ArrowArrayStream. `from_raw` moves that stream and
-        // nulls the capsule's release callback.
-        unsafe { ArrowArrayStreamReader::from_raw(stream.as_ptr()) }.map_err(|error| {
+        // to a valid, aligned, initialized FFI_ArrowArrayStream. `from_raw` moves the stream and
+        // replaces the capsule's value with a released stream.
+        let stream = unsafe { FFI_ArrowArrayStream::from_raw(stream_pointer.as_ptr()) };
+        let stream = arrow_stream_with_error_message_fallback(stream).map_err(|error| {
+            PyValueError::new_err(format!("failed to import Arrow C Stream: {error}"))
+        })?;
+
+        ArrowArrayStreamReader::try_new(stream).map_err(|error| {
             PyValueError::new_err(format!("failed to import Arrow C Stream: {error}"))
         })
     }
@@ -1895,10 +2028,11 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     /// Test-only helper: return a native stream whose reader drop count is observable.
     #[cfg(feature = "test-utils")]
     #[pyfunction]
-    #[pyo3(signature = (*, fail_after_first))]
+    #[pyo3(signature = (*, fail_after_first, with_error_details=true))]
     fn _test_append_stream_with_release_counter(
         py: Python<'_>,
         fail_after_first: bool,
+        with_error_details: bool,
     ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1938,16 +2072,23 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             }
         }
 
+        unsafe extern "C" fn no_error_details(_stream: *mut FFI_ArrowArrayStream) -> *const c_char {
+            std::ptr::null()
+        }
+
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
         let batch = make_test_i64_batch(&schema, 1, 2)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let count = Arc::new(AtomicUsize::new(0));
-        let stream = FFI_ArrowArrayStream::new(Box::new(ReleaseCountingReader {
+        let mut stream = FFI_ArrowArrayStream::new(Box::new(ReleaseCountingReader {
             schema,
             batch: Some(batch),
             fail_after_first,
             count: Arc::clone(&count),
         }));
+        if !with_error_details {
+            stream.get_last_error = Some(no_error_details);
+        }
         let capsule = PyCapsule::new_with_value(py, stream, c"arrow_array_stream")?;
         let source = Py::new(
             py,
@@ -1966,7 +2107,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     fn _test_append_stream_with_schema_import_error(
         py: Python<'_>,
     ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
-        use arrow_array::ffi::FFI_ArrowArray;
         use std::ffi::{c_char, c_void};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
