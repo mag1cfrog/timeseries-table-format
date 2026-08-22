@@ -59,7 +59,7 @@ pub use metadata::table_metadata::{
 pub use storage::TableLocation;
 pub use table::{
     OptimizeReport, TableError, TimeSeriesTable,
-    append::{AppendRequest, IntoBatchStream},
+    append::{AppendRequest, IntoRecordBatchReader},
 };
 
 /// DataFusion table provider (enabled by default).

@@ -40,16 +40,16 @@ use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::{TableError, TimeSeriesTable};
 use timeseries_table_format::transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket};
-use timeseries_table_format::{AppendRequest, IntoBatchStream};
+use timeseries_table_format::{AppendRequest, IntoRecordBatchReader};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-async fn append_with_single_row_groups<S, Kind>(
+async fn append_with_single_row_groups<S, SourceKind>(
     table: &mut TimeSeriesTable,
     source: S,
 ) -> Result<u64, TableError>
 where
-    S: IntoBatchStream<Kind>,
+    S: IntoRecordBatchReader<SourceKind>,
 {
     table
         .append(AppendRequest::new(source).max_rows_per_row_group(1))

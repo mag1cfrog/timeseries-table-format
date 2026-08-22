@@ -118,25 +118,25 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
 /// This type exists only to keep the blanket [`RecordBatchReader`]
 /// implementation disjoint from the direct batch implementations.
 #[doc(hidden)]
-pub struct RecordBatchReaderKind;
+pub struct RecordBatchReaderSourceKind;
 
 /// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
 ///
-/// Implementations preserve non-`Send` readers. The `Kind` parameter is an
+/// Implementations preserve non-`Send` readers. The `SourceKind` parameter is an
 /// inference-only coherence marker and should not normally be specified by
 /// callers.
-pub trait IntoBatchStream<Kind = RecordBatchReaderKind> {
+pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
     /// Reader produced from this source.
     type Reader: RecordBatchReader;
 
     /// Return a per-append Parquet row-group limit, when configured.
     #[doc(hidden)]
-    fn configured_max_rows_per_row_group(&self) -> Option<usize> {
+    fn effective_max_rows_per_row_group(&self) -> Option<usize> {
         None
     }
 
     /// Convert this source without collecting its batches.
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError>;
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError>;
 }
 
 /// One Arrow source plus physical settings for a single append.
@@ -178,40 +178,40 @@ impl<S> AppendRequest<S> {
     }
 }
 
-// Wrapping `Kind` in `PhantomData` keeps this impl disjoint from direct source
+// Wrapping `SourceKind` in `PhantomData` keeps this impl disjoint from direct source
 // implementations while preserving inference without another public marker type.
 #[doc(hidden)]
-impl<S, Kind> IntoBatchStream<PhantomData<Kind>> for AppendRequest<S>
+impl<S, SourceKind> IntoRecordBatchReader<PhantomData<SourceKind>> for AppendRequest<S>
 where
-    S: IntoBatchStream<Kind>,
+    S: IntoRecordBatchReader<SourceKind>,
 {
     type Reader = S::Reader;
 
-    fn configured_max_rows_per_row_group(&self) -> Option<usize> {
+    fn effective_max_rows_per_row_group(&self) -> Option<usize> {
         self.max_rows_per_row_group
-            .or_else(|| self.source.configured_max_rows_per_row_group())
+            .or_else(|| self.source.effective_max_rows_per_row_group())
     }
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
-        self.source.into_batch_stream()
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+        self.source.into_record_batch_reader()
     }
 }
 
-impl<R> IntoBatchStream<RecordBatchReaderKind> for R
+impl<R> IntoRecordBatchReader<RecordBatchReaderSourceKind> for R
 where
     R: RecordBatchReader,
 {
     type Reader = R;
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
         Ok(self)
     }
 }
 
-impl IntoBatchStream<ArrowRecordBatch> for ArrowRecordBatch {
+impl IntoRecordBatchReader<ArrowRecordBatch> for ArrowRecordBatch {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
         let schema = self.schema();
         Ok(Box::new(RecordBatchIterator::new(
             std::iter::once(Ok(self)),
@@ -220,10 +220,10 @@ impl IntoBatchStream<ArrowRecordBatch> for ArrowRecordBatch {
     }
 }
 
-impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
+impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
         let schema = self
             .first()
             .map(ArrowRecordBatch::schema)
@@ -607,18 +607,18 @@ impl TimeSeriesTable {
             outcome = tracing::field::Empty
         )
     )]
-    pub async fn append<S, Kind>(&mut self, source: S) -> Result<u64, TableError>
+    pub async fn append<S, SourceKind>(&mut self, source: S) -> Result<u64, TableError>
     where
-        S: IntoBatchStream<Kind>,
+        S: IntoRecordBatchReader<SourceKind>,
     {
         let result = async {
-            let max_rows_per_row_group = source.configured_max_rows_per_row_group();
+            let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
                 return Err(TableError::InvalidMaxRowsPerRowGroup {
                     max_rows_per_row_group: 0,
                 });
             }
-            let mut reader = source.into_batch_stream()?;
+            let mut reader = source.into_record_batch_reader()?;
             let schema = reader.schema();
             self.validate_stream_schema(schema.as_ref())?;
 
@@ -948,23 +948,26 @@ mod tests {
     }
 
     #[test]
-    fn into_batch_stream_accepts_all_required_input_forms() -> TestResult {
+    fn into_record_batch_reader_accepts_all_required_input_forms() -> TestResult {
         let first = input_batch(vec![1, 2])?;
         let second = input_batch(vec![3])?;
 
         assert_batches(
-            first.clone().into_batch_stream()?,
+            first.clone().into_record_batch_reader()?,
             std::slice::from_ref(&first),
         )?;
         assert_batches(
-            vec![first.clone(), second.clone()].into_batch_stream()?,
+            vec![first.clone(), second.clone()].into_record_batch_reader()?,
             &[first.clone(), second.clone()],
         )?;
 
         let iterator = RecordBatchIterator::new(vec![Ok(first.clone())], first.schema());
-        assert_batches(iterator.into_batch_stream()?, std::slice::from_ref(&first))?;
         assert_batches(
-            InstrumentedReader::one(first.clone()).into_batch_stream()?,
+            iterator.into_record_batch_reader()?,
+            std::slice::from_ref(&first),
+        )?;
+        assert_batches(
+            InstrumentedReader::one(first.clone()).into_record_batch_reader()?,
             std::slice::from_ref(&first),
         )?;
 
@@ -972,19 +975,25 @@ mod tests {
             vec![Ok(first.clone())],
             first.schema(),
         ));
-        assert_batches(boxed.into_batch_stream()?, std::slice::from_ref(&first))?;
+        assert_batches(
+            boxed.into_record_batch_reader()?,
+            std::slice::from_ref(&first),
+        )?;
 
         let sendable: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
             vec![Ok(second.clone())],
             second.schema(),
         ));
-        assert_batches(sendable.into_batch_stream()?, std::slice::from_ref(&second))?;
+        assert_batches(
+            sendable.into_record_batch_reader()?,
+            std::slice::from_ref(&second),
+        )?;
         Ok(())
     }
 
     #[test]
-    fn into_batch_stream_rejects_schema_less_vec() {
-        let result = Vec::<RecordBatch>::new().into_batch_stream();
+    fn into_record_batch_reader_rejects_schema_less_vec() {
+        let result = Vec::<RecordBatch>::new().into_record_batch_reader();
         assert!(matches!(result, Err(TableError::EmptyAppendSource)));
     }
 
