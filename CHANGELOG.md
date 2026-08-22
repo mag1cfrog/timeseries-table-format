@@ -4,6 +4,52 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.5.0
+
+
+### Bug Fixes
+
+- Make streaming append cleanup safer and APIs clearer ([#371](https://github.com/mag1cfrog/timeseries-table-format/pull/371)) ([48da5b5](https://github.com/mag1cfrog/timeseries-table-format/commit/48da5b59cf2c645445fd0e0c6a0ebde4f87e2b70))
+
+
+### Code Refactoring
+
+- Remove legacy path-first append APIs ([b967711](https://github.com/mag1cfrog/timeseries-table-format/commit/b967711cbc8741f6f4c27b3da5457c5d8f81ea4f)) - **Breaking:** remove legacy path-first append APIs
+
+
+### Documentation
+
+- Make the documentation site canonical for Python package guidance ([01f2747](https://github.com/mag1cfrog/timeseries-table-format/commit/01f27470b711d7464312714d7b3998d580ac4e71))
+
+
+### Features
+
+- Expose native Rust diagnostics through standard Python logging ([9e8a147](https://github.com/mag1cfrog/timeseries-table-format/commit/9e8a14733903c0514f5c9057ceab0e6cc7629683))
+
+- Add Python Arrow stream append bindings ([#366](https://github.com/mag1cfrog/timeseries-table-format/pull/366)) ([791f7ef](https://github.com/mag1cfrog/timeseries-table-format/commit/791f7efab0a27dddd1de71d13256843b6a0e3aa7))
+
+- Upgrade DataFusion to 55 and Arrow/Parquet to 59.2, align public APIs, and document migration changes ([8c36850](https://github.com/mag1cfrog/timeseries-table-format/commit/8c36850cf32365362487ae19dc9f16c518815ffb)) - **Breaking:** Public Arrow and DataFusion API types now use the upgraded dependency versions. Empty Parquet directories are rejected at registration, and the Rust MSRV is now 1.94.0.
+
+- Add structured diagnostics for table operations, recovery, transaction commits, and scan planning ([ec264d1](https://github.com/mag1cfrog/timeseries-table-format/commit/ec264d10b6e25470280b787a6f0e290f0abde104))
+
+- Surface configurable structured diagnostics from the tstable CLI ([17c8d7f](https://github.com/mag1cfrog/timeseries-table-format/commit/17c8d7f24aa3326f386374715ea41afaae6da218))
+
+- Add core Rust streaming append transaction ([#364](https://github.com/mag1cfrog/timeseries-table-format/pull/364)) ([0ab1812](https://github.com/mag1cfrog/timeseries-table-format/commit/0ab18121b2dd796f77a0fb75a4f68b8a5b46f141))
+
+- Route CLI Parquet imports through streaming append ([#365](https://github.com/mag1cfrog/timeseries-table-format/pull/365)) ([4902723](https://github.com/mag1cfrog/timeseries-table-format/commit/4902723c02c7fd611b78ddd3d73be4d6ede58851))
+
+- Add per-append Parquet row-group sizing ([5d47600](https://github.com/mag1cfrog/timeseries-table-format/commit/5d47600d85c3a5441af757f1b1f9c0d8efca702a))
+
+- Support lossless scalar widening during append ([de01516](https://github.com/mag1cfrog/timeseries-table-format/commit/de015166a1239b0e7e5e430d4aa08da0faf9a4c1))
+
+
+### Perf
+
+- Benchmark streaming append against path-first pipeline ([#367](https://github.com/mag1cfrog/timeseries-table-format/pull/367)) ([61cbe2e](https://github.com/mag1cfrog/timeseries-table-format/commit/61cbe2e320485ca68c688bd736621b622fafc0c5))
+
+- Benchmark direct lossless widening during append ([752ed44](https://github.com/mag1cfrog/timeseries-table-format/commit/752ed444b40d77cc92be4b5cb6c2e3be405f905d))
+
+
 ## 0.4.0
 
 
