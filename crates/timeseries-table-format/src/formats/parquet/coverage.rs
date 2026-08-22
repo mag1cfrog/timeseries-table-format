@@ -462,7 +462,7 @@ mod tests {
     use super::*;
     use std::{fs::File, io::SeekFrom, num::NonZeroU64, sync::Arc};
 
-    use crate::metadata::table_metadata::TimeBucket;
+    use crate::metadata::table_metadata::TimeIndexGranularity;
     use arrow::{
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
@@ -484,33 +484,33 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const EPOCH_BUCKET: u64 = 0x8000_0000_0000_0000;
 
-    fn timestamp_index(column: &str, bucket: TimeBucket) -> IndexSpec {
+    fn timestamp_index(column: &str, index_granularity: TimeIndexGranularity) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Timestamp {
-                bucket,
+                index_granularity,
                 timezone: None,
             },
         }
     }
 
-    fn int64_index(column: &str, bucket_width: u64) -> IndexSpec {
+    fn int64_index(column: &str, index_granularity: u64) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(bucket_width).expect("nonzero test bucket"),
+                index_granularity: NonZeroU64::new(index_granularity).expect("nonzero test bucket"),
             },
         }
     }
 
-    fn uint64_index(column: &str, bucket_width: u64) -> IndexSpec {
+    fn uint64_index(column: &str, index_granularity: u64) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(bucket_width).expect("nonzero test bucket"),
+                index_granularity: NonZeroU64::new(index_granularity).expect("nonzero test bucket"),
             },
         }
     }
@@ -615,7 +615,7 @@ mod tests {
         let cov_min = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
         let buckets_min: Vec<u64> = cov_min.present().iter().collect();
@@ -624,7 +624,7 @@ mod tests {
         let cov_hr = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Hours(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Hours(1)),
         )
         .await?;
         let buckets_hr: Vec<u64> = cov_hr.present().iter().collect();
@@ -664,7 +664,7 @@ mod tests {
             let error = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                &timestamp_index("ts", TimeBucket::Minutes(1)),
+                &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
             )
             .await
             .expect_err("same-worker duplicate must be rejected");
@@ -683,7 +683,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
 
@@ -717,7 +717,7 @@ mod tests {
         let error = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("cross-worker duplicate must be rejected");
@@ -750,7 +750,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
         assert_eq!(
@@ -907,7 +907,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Seconds(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Seconds(1)),
         )
         .await?;
         assert_eq!(coverage.cardinality(), row_count as u64);
@@ -933,7 +933,7 @@ mod tests {
         let error = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("duplicate split across decoder batches must be rejected");
@@ -982,7 +982,7 @@ mod tests {
             let coverage = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                &timestamp_index("ts", TimeBucket::Seconds(1)),
+                &timestamp_index("ts", TimeIndexGranularity::Seconds(1)),
             )
             .await?;
             assert_eq!(
@@ -1005,7 +1005,7 @@ mod tests {
             let coverage = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                &timestamp_index("ts", TimeBucket::Minutes(1)),
+                &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
             )
             .await?;
             assert!(coverage.present().is_empty());
@@ -1061,7 +1061,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
         assert_eq!(
@@ -1087,7 +1087,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("missing_ts", TimeBucket::Minutes(1)),
+            &timestamp_index("missing_ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected missing column error");
@@ -1132,7 +1132,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected unsupported arrow type");
@@ -1193,7 +1193,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Seconds(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Seconds(1)),
         )
         .await?;
 
@@ -1214,7 +1214,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected storage error");
@@ -1243,7 +1243,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected parquet read error");
@@ -1290,7 +1290,7 @@ mod tests {
         let err = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .unwrap_err();

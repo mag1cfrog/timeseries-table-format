@@ -6,7 +6,7 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
-use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket};
+use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity};
 use crate::storage::TableLocation;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::{LogAction, TransactionLogStore};
@@ -20,7 +20,7 @@ fn make_basic_table_meta() -> TableMeta {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     };

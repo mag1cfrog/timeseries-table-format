@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn segment_bounds_validate_domain_and_native_order() {
         let signed = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let valid = SegmentMeta {
             path: "data/valid.parquet".to_string(),

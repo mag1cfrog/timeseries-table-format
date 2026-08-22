@@ -1,7 +1,7 @@
 use arrow::error::ArrowError;
 use parquet::errors::ParquetError;
 use std::path::PathBuf;
-use timeseries_table_format::metadata::table_metadata::ParseTimeBucketError;
+use timeseries_table_format::metadata::table_metadata::ParseTimeIndexGranularityError;
 use timeseries_table_format::table::TableError;
 
 use snafu::Snafu;
@@ -17,7 +17,7 @@ pub enum CliError {
     #[snafu(display("Invalid --bucket '{spec}' for --index-type timestamp: {source}"))]
     InvalidBucket {
         spec: String,
-        source: ParseTimeBucketError,
+        source: ParseTimeIndexGranularityError,
     },
 
     #[snafu(display("Invalid {option} for --index-type {index_type}: {reason}"))]

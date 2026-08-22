@@ -20,7 +20,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use timeseries_table_format::{
     AppendRequest,
-    metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -130,7 +130,7 @@ async fn prepare(
         column: TIME_COLUMN.to_string(),
         entity_columns: Vec::new(),
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Seconds(1),
+            index_granularity: TimeIndexGranularity::Seconds(1),
             timezone: None,
         },
     };

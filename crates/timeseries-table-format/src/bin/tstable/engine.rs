@@ -424,7 +424,7 @@ mod tests {
         metadata::logical_schema::{
             LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
-        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
         storage::TableLocation,
         table::TimeSeriesTable,
     };
@@ -442,7 +442,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };

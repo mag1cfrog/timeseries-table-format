@@ -294,7 +294,7 @@ mod tests {
     use crate::storage::{StorageError, TableLocation};
     use crate::transaction_log::{
         FileFormat, IndexKind, IndexSpec, LogAction, SegmentEntityLayout, SegmentMeta, TableKind,
-        TableMeta, TimeBucket, TransactionLogStore,
+        TableMeta, TimeIndexGranularity, TransactionLogStore,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
@@ -315,7 +315,7 @@ mod tests {
                 column: "ts".to_string(),
                 entity_columns: entity_columns.clone(),
                 kind: IndexKind::Timestamp {
-                    bucket: TimeBucket::Minutes(1),
+                    index_granularity: TimeIndexGranularity::Minutes(1),
                     timezone: None,
                 },
             }),
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_table_state_rejects_unsupported_format_version() -> TestResult {
+    async fn rebuild_table_state_rejects_version_6_metadata() -> TestResult {
         let (tmp, store) = create_test_log_store();
         let log_dir = tmp.path().join(layout::LOG_DIR_NAME);
         tokio::fs::create_dir_all(&log_dir).await?;
@@ -500,13 +500,16 @@ mod tests {
                 "actions": [{
                     "UpdateTableMeta": {
                         "kind": {"TimeSeries": {
-                            "timestamp_column": "ts",
+                            "column": "ts",
                             "entity_columns": ["symbol"],
-                            "bucket": {"Minutes": 1}
+                            "kind": {
+                                "type": "timestamp",
+                                "index_granularity": {"Minutes": 1}
+                            }
                         }},
                         "logical_schema": null,
                         "created_at": "2025-01-01T00:00:00Z",
-                        "format_version": 2
+                        "format_version": 6
                     }
                 }]
             }"#,
@@ -517,12 +520,12 @@ mod tests {
         let err = store
             .rebuild_table_state()
             .await
-            .expect_err("old format version should be rejected");
+            .expect_err("version 6 should be rejected");
         assert!(matches!(
             err,
             CommitError::UnsupportedFormatVersion {
                 expected: TABLE_FORMAT_VERSION,
-                found: 2,
+                found: 6,
             }
         ));
         Ok(())
@@ -843,7 +846,7 @@ mod tests {
                     LogAction::UpdateTableMeta(sample_table_meta()),
                     LogAction::UpdateTableCoverage {
                         index_kind: IndexKind::Int64 {
-                            bucket_width: std::num::NonZeroU64::new(1).unwrap(),
+                            index_granularity: std::num::NonZeroU64::new(1).unwrap(),
                         },
                         coverage_path: "_coverage/table/1-mismatched.roar".to_string(),
                     },

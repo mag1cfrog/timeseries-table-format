@@ -18,7 +18,7 @@ use parquet::{
 };
 use snafu::ResultExt;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
     table::{OptimizeReport, TimeSeriesTable},
 };
@@ -211,10 +211,11 @@ struct QueryArgs {
     backend: BackendArg,
 }
 
-fn parse_time_bucket(spec: &str) -> CliResult<TimeBucket> {
-    spec.parse::<TimeBucket>().context(InvalidBucketSnafu {
-        spec: spec.to_string(),
-    })
+fn parse_time_bucket(spec: &str) -> CliResult<TimeIndexGranularity> {
+    spec.parse::<TimeIndexGranularity>()
+        .context(InvalidBucketSnafu {
+            spec: spec.to_string(),
+        })
 }
 
 fn parse_bucket_width(spec: &str, index_type: IndexTypeArg) -> CliResult<NonZeroU64> {
@@ -266,7 +267,7 @@ async fn cmd_create(
                 .as_deref()
                 .ok_or_else(|| invalid("--bucket", "is required"))?;
             IndexKind::Timestamp {
-                bucket: parse_time_bucket(bucket)?,
+                index_granularity: parse_time_bucket(bucket)?,
                 timezone,
             }
         }
@@ -280,11 +281,11 @@ async fn cmd_create(
             let value = bucket_width
                 .as_deref()
                 .ok_or_else(|| invalid("--bucket-width", "is required"))?;
-            let bucket_width = parse_bucket_width(value, index_type)?;
+            let index_granularity = parse_bucket_width(value, index_type)?;
 
             match index_type {
-                IndexTypeArg::Int64 => IndexKind::Int64 { bucket_width },
-                IndexTypeArg::UInt64 => IndexKind::UInt64 { bucket_width },
+                IndexTypeArg::Int64 => IndexKind::Int64 { index_granularity },
+                IndexTypeArg::UInt64 => IndexKind::UInt64 { index_granularity },
                 IndexTypeArg::Timestamp => unreachable!(),
             }
         }

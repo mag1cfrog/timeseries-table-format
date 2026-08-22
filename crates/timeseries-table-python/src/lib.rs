@@ -1481,7 +1481,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             use timeseries_table_format::storage::TableLocation;
             use timeseries_table_format::table::TableError;
             use timeseries_table_format::transaction_log::{
-                IndexKind, IndexSpec, TableMeta, TimeBucket,
+                IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
             };
 
             let invalid = |field: &str, reason: String| {
@@ -1507,9 +1507,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                     let bucket = bucket.as_deref().ok_or_else(|| {
                         invalid("bucket", "is required for timestamp indexes".to_string())
                     })?;
-                    let bucket = TimeBucket::parse(bucket)
+                    let bucket = TimeIndexGranularity::parse(bucket)
                         .map_err(|error| invalid("bucket", error.to_string()))?;
-                    IndexKind::Timestamp { bucket, timezone }
+                    IndexKind::Timestamp {
+                        index_granularity: bucket,
+                        timezone,
+                    }
                 }
                 "int64" | "uint64" => {
                     if bucket.is_some() {
@@ -1548,9 +1551,13 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                         .ok_or_else(|| invalid("bucket_width", "must be at least 1".to_string()))?;
 
                     if index_type == "int64" {
-                        IndexKind::Int64 { bucket_width }
+                        IndexKind::Int64 {
+                            index_granularity: bucket_width,
+                        }
                     } else {
-                        IndexKind::UInt64 { bucket_width }
+                        IndexKind::UInt64 {
+                            index_granularity: bucket_width,
+                        }
                     }
                 }
                 _ => {
@@ -1682,7 +1689,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///     }
         ///     ```
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            use timeseries_table_format::transaction_log::{IndexKind, TimeBucket};
+            use timeseries_table_format::transaction_log::{IndexKind, TimeIndexGranularity};
 
             let spec = self.inner.index_spec();
             let d = PyDict::new(py);
@@ -1690,18 +1697,22 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             d.set_item("entity_columns", spec.entity_columns.clone())?;
             d.set_item("kind", spec.kind.name())?;
             match &spec.kind {
-                IndexKind::Timestamp { bucket, timezone } => {
-                    let bucket = match bucket {
-                        TimeBucket::Seconds(n) => format!("{n}s"),
-                        TimeBucket::Minutes(n) => format!("{n}m"),
-                        TimeBucket::Hours(n) => format!("{n}h"),
-                        TimeBucket::Days(n) => format!("{n}d"),
+                IndexKind::Timestamp {
+                    index_granularity,
+                    timezone,
+                } => {
+                    let bucket = match index_granularity {
+                        TimeIndexGranularity::Seconds(n) => format!("{n}s"),
+                        TimeIndexGranularity::Minutes(n) => format!("{n}m"),
+                        TimeIndexGranularity::Hours(n) => format!("{n}h"),
+                        TimeIndexGranularity::Days(n) => format!("{n}d"),
                     };
                     d.set_item("bucket", bucket)?;
                     d.set_item("timezone", timezone.clone())?;
                 }
-                IndexKind::Int64 { bucket_width } | IndexKind::UInt64 { bucket_width } => {
-                    d.set_item("bucket_width", bucket_width.get())?;
+                IndexKind::Int64 { index_granularity }
+                | IndexKind::UInt64 { index_granularity } => {
+                    d.set_item("bucket_width", index_granularity.get())?;
                 }
             }
 

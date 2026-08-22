@@ -16,7 +16,7 @@ use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
 /// Current table metadata / log format version written by new tables.
 ///
 /// Bumped when persisted table semantics require version-aware decoding.
-pub const TABLE_FORMAT_VERSION: u32 = 6;
+pub const TABLE_FORMAT_VERSION: u32 = 7;
 
 /// The high-level "kind" of table.
 ///
@@ -141,29 +141,31 @@ impl TableMeta {
 /// versions (for example, partial updates or additive fields).
 pub type TableMetaDelta = TableMeta;
 
-/// Errors produced when parsing a human-friendly time bucket spec (e.g. `1h`).
+/// Errors produced when parsing a human-friendly time index granularity (e.g. `1h`).
 #[derive(Debug, Snafu, PartialEq, Eq)]
-pub enum ParseTimeBucketError {
+pub enum ParseTimeIndexGranularityError {
     /// The spec string was empty or only whitespace.
-    #[snafu(display("time bucket spec is empty"))]
+    #[snafu(display("time index granularity is empty"))]
     Empty,
 
     /// The spec did not include a numeric value.
-    #[snafu(display("time bucket spec '{spec}' is missing a numeric value"))]
+    #[snafu(display("time index granularity '{spec}' is missing a numeric value"))]
     MissingNumber {
         /// The original spec string.
         spec: String,
     },
 
     /// The spec did not include a required unit suffix.
-    #[snafu(display("time bucket spec '{spec}' is missing a unit suffix (expected s|m|h|d)"))]
+    #[snafu(display(
+        "time index granularity '{spec}' is missing a unit suffix (expected s|m|h|d)"
+    ))]
     MissingUnit {
         /// The original spec string.
         spec: String,
     },
 
     /// The numeric portion of the spec failed to parse.
-    #[snafu(display("invalid bucket value in '{spec}': {source}"))]
+    #[snafu(display("invalid index granularity value in '{spec}': {source}"))]
     InvalidNumber {
         /// The original spec string.
         spec: String,
@@ -172,7 +174,7 @@ pub enum ParseTimeBucketError {
     },
 
     /// The parsed numeric value was zero.
-    #[snafu(display("bucket value must be > 0 (got {value}) in '{spec}'"))]
+    #[snafu(display("index granularity value must be > 0 (got {value}) in '{spec}'"))]
     NonPositive {
         /// The original spec string.
         spec: String,
@@ -181,7 +183,7 @@ pub enum ParseTimeBucketError {
     },
 
     /// The parsed numeric value did not fit in a `u32`.
-    #[snafu(display("bucket value too large for u32 (got {value}) in '{spec}'"))]
+    #[snafu(display("index granularity value too large for u32 (got {value}) in '{spec}'"))]
     TooLarge {
         /// The original spec string.
         spec: String,
@@ -190,7 +192,9 @@ pub enum ParseTimeBucketError {
     },
 
     /// The spec used an unsupported unit suffix.
-    #[snafu(display("unknown time bucket unit '{unit}' in '{spec}' (expected s|m|h|d)"))]
+    #[snafu(display(
+        "unknown time index granularity unit '{unit}' in '{spec}' (expected s|m|h|d)"
+    ))]
     UnknownUnit {
         /// The original spec string.
         spec: String,
@@ -199,29 +203,29 @@ pub enum ParseTimeBucketError {
     },
 }
 
-/// Granularity for time buckets used by coverage/bitmap logic.
+/// Time interval size used by coverage bitmap logic.
 ///
 /// This does not affect physical storage directly, but describes how the time
 /// axis is discretized when building coverage bitmaps and computing gaps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum TimeBucket {
-    /// A bucket spanning a fixed number of seconds.
+pub enum TimeIndexGranularity {
+    /// A fixed number of seconds.
     Seconds(u32),
-    /// A bucket spanning a fixed number of minutes.
+    /// A fixed number of minutes.
     Minutes(u32),
-    /// A bucket spanning a fixed number of hours.
+    /// A fixed number of hours.
     Hours(u32),
-    /// A bucket spanning a fixed number of days.
+    /// A fixed number of days.
     Days(u32),
 }
 
-impl FromStr for TimeBucket {
-    type Err = ParseTimeBucketError;
+impl FromStr for TimeIndexGranularity {
+    type Err = ParseTimeIndexGranularityError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let spec = input.trim();
         if spec.is_empty() {
-            return Err(ParseTimeBucketError::Empty);
+            return Err(ParseTimeIndexGranularityError::Empty);
         }
 
         // Split into numeric prefix + unit suffix (unit starts at first alphabetic char).
@@ -231,14 +235,14 @@ impl FromStr for TimeBucket {
             .map(|(i, _)| i);
 
         let Some(unit_start) = unit_start else {
-            return Err(ParseTimeBucketError::MissingUnit {
+            return Err(ParseTimeIndexGranularityError::MissingUnit {
                 spec: spec.to_string(),
             });
         };
 
         if unit_start == 0 {
             // No leading digits (e.g. "h")
-            return Err(ParseTimeBucketError::MissingNumber {
+            return Err(ParseTimeIndexGranularityError::MissingNumber {
                 spec: spec.to_string(),
             });
         }
@@ -248,27 +252,28 @@ impl FromStr for TimeBucket {
         let unit_str = unit_str.trim();
 
         if unit_str.is_empty() {
-            return Err(ParseTimeBucketError::MissingUnit {
+            return Err(ParseTimeIndexGranularityError::MissingUnit {
                 spec: spec.to_string(),
             });
         }
 
-        let value: u64 = num_str
-            .parse()
-            .map_err(|source| ParseTimeBucketError::InvalidNumber {
-                spec: spec.to_string(),
-                source,
-            })?;
+        let value: u64 =
+            num_str
+                .parse()
+                .map_err(|source| ParseTimeIndexGranularityError::InvalidNumber {
+                    spec: spec.to_string(),
+                    source,
+                })?;
 
         if value == 0 {
-            return Err(ParseTimeBucketError::NonPositive {
+            return Err(ParseTimeIndexGranularityError::NonPositive {
                 spec: spec.to_string(),
                 value,
             });
         }
 
         if value > u32::MAX as u64 {
-            return Err(ParseTimeBucketError::TooLarge {
+            return Err(ParseTimeIndexGranularityError::TooLarge {
                 spec: spec.to_string(),
                 value,
             });
@@ -278,11 +283,11 @@ impl FromStr for TimeBucket {
         let unit = unit_str.to_ascii_lowercase();
 
         match unit.as_str() {
-            "s" | "sec" | "secs" | "second" | "seconds" => Ok(TimeBucket::Seconds(v)),
-            "m" | "min" | "mins" | "minute" | "minutes" => Ok(TimeBucket::Minutes(v)),
-            "h" | "hr" | "hrs" | "hour" | "hours" => Ok(TimeBucket::Hours(v)),
-            "d" | "day" | "days" => Ok(TimeBucket::Days(v)),
-            _ => Err(ParseTimeBucketError::UnknownUnit {
+            "s" | "sec" | "secs" | "second" | "seconds" => Ok(TimeIndexGranularity::Seconds(v)),
+            "m" | "min" | "mins" | "minute" | "minutes" => Ok(TimeIndexGranularity::Minutes(v)),
+            "h" | "hr" | "hrs" | "hour" | "hours" => Ok(TimeIndexGranularity::Hours(v)),
+            "d" | "day" | "days" => Ok(TimeIndexGranularity::Days(v)),
+            _ => Err(ParseTimeIndexGranularityError::UnknownUnit {
                 spec: spec.to_string(),
                 unit: unit_str.to_string(),
             }),
@@ -290,17 +295,17 @@ impl FromStr for TimeBucket {
     }
 }
 
-impl TimeBucket {
-    /// Parse a human-friendly time bucket spec (e.g. `1h`, `15m`, `30s`, `2d`).
+impl TimeIndexGranularity {
+    /// Parse a human-friendly time index granularity (e.g. `1h`, `15m`, `30s`, `2d`).
     ///
-    /// This is a convenience wrapper around `str::parse` for `TimeBucket`, and
+    /// This is a convenience wrapper around `str::parse` for [`TimeIndexGranularity`], and
     /// accepts common unit aliases (e.g. `sec`, `min`, `hr`, `day`).
     ///
     /// # Errors
-    /// Returns [`ParseTimeBucketError`] if the spec is empty, missing a unit,
+    /// Returns [`ParseTimeIndexGranularityError`] if the spec is empty, missing a unit,
     /// has an invalid or non-positive number, overflows `u32`, or uses an
     /// unsupported unit.
-    pub fn parse(spec: &str) -> Result<Self, ParseTimeBucketError> {
+    pub fn parse(spec: &str) -> Result<Self, ParseTimeIndexGranularityError> {
         spec.parse()
     }
 }
@@ -316,7 +321,7 @@ pub struct IndexSpec {
     #[serde(default)]
     pub entity_columns: Vec<String>,
 
-    /// Ordered value domain and coverage bucket configuration.
+    /// Ordered value domain and index granularity configuration.
     pub kind: IndexKind,
 }
 
@@ -353,27 +358,28 @@ impl IndexSpec {
     }
 }
 
-/// Ordered value domain and its coverage bucket configuration.
+/// Ordered value domain and its index granularity configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IndexKind {
-    /// Timestamp index with fixed time buckets and optional timezone metadata.
+    /// Timestamp index with a fixed granularity and optional timezone metadata.
     Timestamp {
-        /// Logical coverage bucket size.
-        bucket: TimeBucket,
+        /// Logical index interval size.
+        index_granularity: TimeIndexGranularity,
         /// Optional IANA timezone identifier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timezone: Option<String>,
     },
     /// Signed 64-bit integer index.
     Int64 {
-        /// Positive bucket width in index-value units.
-        bucket_width: NonZeroU64,
+        /// Positive index granularity in index-value units.
+        index_granularity: NonZeroU64,
     },
     /// Unsigned 64-bit integer index.
+    #[serde(rename = "uint64")]
     UInt64 {
-        /// Positive bucket width in index-value units.
-        bucket_width: NonZeroU64,
+        /// Positive index granularity in index-value units.
+        index_granularity: NonZeroU64,
     },
 }
 
@@ -387,17 +393,20 @@ impl IndexKind {
         }
     }
 
-    /// Validate bucket configuration not enforced by the Rust type system.
+    /// Validate index granularity not enforced by the Rust type system.
     pub fn validate(&self) -> Result<(), IndexSpecError> {
-        if let Self::Timestamp { bucket, .. } = self {
-            let width = match bucket {
-                TimeBucket::Seconds(width)
-                | TimeBucket::Minutes(width)
-                | TimeBucket::Hours(width)
-                | TimeBucket::Days(width) => *width,
+        if let Self::Timestamp {
+            index_granularity, ..
+        } = self
+        {
+            let width = match index_granularity {
+                TimeIndexGranularity::Seconds(width)
+                | TimeIndexGranularity::Minutes(width)
+                | TimeIndexGranularity::Hours(width)
+                | TimeIndexGranularity::Days(width) => *width,
             };
             if width == 0 {
-                return Err(IndexSpecError::ZeroTimeBucket);
+                return Err(IndexSpecError::ZeroTimeIndexGranularity);
             }
         }
         Ok(())
@@ -536,9 +545,9 @@ pub enum IndexSpecError {
         /// Conflicting column name.
         column: String,
     },
-    /// A timestamp bucket was constructed directly with a zero width.
-    #[snafu(display("timestamp bucket width must be nonzero"))]
-    ZeroTimeBucket,
+    /// A timestamp index granularity was constructed directly with a zero width.
+    #[snafu(display("timestamp index granularity must be nonzero"))]
+    ZeroTimeIndexGranularity,
 }
 
 /// Domain and range errors for [`IndexValue`].
@@ -592,7 +601,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         }
@@ -600,27 +609,58 @@ mod tests {
 
     #[test]
     fn index_spec_json_roundtrips_all_domains() {
-        let specs = [
-            sample_time_index_spec(),
-            IndexSpec {
-                column: "sequence".to_string(),
-                entity_columns: Vec::new(),
-                kind: IndexKind::Int64 {
-                    bucket_width: NonZeroU64::new(u64::MAX).unwrap(),
+        let cases = [
+            (
+                sample_time_index_spec(),
+                serde_json::json!({
+                    "column": "ts",
+                    "entity_columns": ["symbol"],
+                    "kind": {
+                        "type": "timestamp",
+                        "index_granularity": {"Minutes": 1}
+                    }
+                }),
+            ),
+            (
+                IndexSpec {
+                    column: "sequence".to_string(),
+                    entity_columns: Vec::new(),
+                    kind: IndexKind::Int64 {
+                        index_granularity: NonZeroU64::new(u64::MAX).unwrap(),
+                    },
                 },
-            },
-            IndexSpec {
-                column: "offset".to_string(),
-                entity_columns: vec!["source".to_string()],
-                kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(7).unwrap(),
+                serde_json::json!({
+                    "column": "sequence",
+                    "entity_columns": [],
+                    "kind": {
+                        "type": "int64",
+                        "index_granularity": u64::MAX
+                    }
+                }),
+            ),
+            (
+                IndexSpec {
+                    column: "offset".to_string(),
+                    entity_columns: vec!["source".to_string()],
+                    kind: IndexKind::UInt64 {
+                        index_granularity: NonZeroU64::new(7).unwrap(),
+                    },
                 },
-            },
+                serde_json::json!({
+                    "column": "offset",
+                    "entity_columns": ["source"],
+                    "kind": {
+                        "type": "uint64",
+                        "index_granularity": 7
+                    }
+                }),
+            ),
         ];
 
-        for spec in specs {
-            let json = serde_json::to_string(&spec).unwrap();
-            let restored: IndexSpec = serde_json::from_str(&json).unwrap();
+        for (spec, expected_json) in cases {
+            let json = serde_json::to_value(&spec).unwrap();
+            assert_eq!(json, expected_json);
+            let restored: IndexSpec = serde_json::from_value(json).unwrap();
             assert_eq!(restored, spec);
         }
     }
@@ -628,14 +668,13 @@ mod tests {
     #[test]
     fn index_spec_json_rejects_impossible_field_combinations() {
         let timestamp_with_integer_width = r#"{
-            "column":"ts",
-            "kind":{"type":"timestamp","bucket":{"Seconds":1},"bucket_width":1}
+            "column":"ts","kind":{"type":"timestamp","index_granularity":1}
         }"#;
         let integer_with_timestamp_bucket = r#"{
-            "column":"id",
-            "kind":{"type":"int64","bucket_width":1,"bucket":{"Seconds":1}}
+            "column":"id","kind":{"type":"int64","index_granularity":{"Seconds":1}}
         }"#;
-        let zero_integer_width = r#"{"column":"id","kind":{"type":"uint64","bucket_width":0}}"#;
+        let zero_integer_width =
+            r#"{"column":"id","kind":{"type":"uint64","index_granularity":0}}"#;
 
         assert!(serde_json::from_str::<IndexSpec>(timestamp_with_integer_width).is_err());
         assert!(serde_json::from_str::<IndexSpec>(integer_with_timestamp_bucket).is_err());
@@ -643,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn index_spec_validation_rejects_invalid_structure_and_time_bucket() {
+    fn index_spec_validation_rejects_invalid_structure_and_time_granularity() {
         let mut spec = sample_time_index_spec();
         spec.column.clear();
         assert_eq!(spec.validate(), Err(IndexSpecError::EmptyColumn));
@@ -666,10 +705,13 @@ mod tests {
 
         let mut spec = sample_time_index_spec();
         spec.kind = IndexKind::Timestamp {
-            bucket: TimeBucket::Seconds(0),
+            index_granularity: TimeIndexGranularity::Seconds(0),
             timezone: None,
         };
-        assert_eq!(spec.validate(), Err(IndexSpecError::ZeroTimeBucket));
+        assert_eq!(
+            spec.validate(),
+            Err(IndexSpecError::ZeroTimeIndexGranularity)
+        );
     }
 
     #[test]
@@ -713,7 +755,7 @@ mod tests {
         );
 
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         assert!(matches!(
             validate_index_range(&kind, &IndexValue::Int64(0), &IndexValue::Int64(1)),
@@ -755,133 +797,136 @@ mod tests {
     }
 
     #[test]
-    fn time_bucket_parse_accepts_basic_units() {
+    fn time_index_granularity_parse_accepts_basic_units() {
         let cases = [
-            ("1s", TimeBucket::Seconds(1)),
-            ("2m", TimeBucket::Minutes(2)),
-            ("3h", TimeBucket::Hours(3)),
-            ("4d", TimeBucket::Days(4)),
+            ("1s", TimeIndexGranularity::Seconds(1)),
+            ("2m", TimeIndexGranularity::Minutes(2)),
+            ("3h", TimeIndexGranularity::Hours(3)),
+            ("4d", TimeIndexGranularity::Days(4)),
         ];
 
         for (input, expected) in cases {
-            assert_eq!(input.parse::<TimeBucket>().unwrap(), expected);
+            assert_eq!(input.parse::<TimeIndexGranularity>().unwrap(), expected);
         }
     }
 
     #[test]
-    fn time_bucket_parse_accepts_aliases_case_and_whitespace() {
+    fn time_index_granularity_parse_accepts_aliases_case_and_whitespace() {
         let cases = [
-            ("1sec", TimeBucket::Seconds(1)),
-            ("1secs", TimeBucket::Seconds(1)),
-            ("1second", TimeBucket::Seconds(1)),
-            ("1seconds", TimeBucket::Seconds(1)),
-            ("1min", TimeBucket::Minutes(1)),
-            ("1mins", TimeBucket::Minutes(1)),
-            ("1minute", TimeBucket::Minutes(1)),
-            ("1minutes", TimeBucket::Minutes(1)),
-            ("1hr", TimeBucket::Hours(1)),
-            ("1hrs", TimeBucket::Hours(1)),
-            ("1hour", TimeBucket::Hours(1)),
-            ("1hours", TimeBucket::Hours(1)),
-            ("1day", TimeBucket::Days(1)),
-            ("1days", TimeBucket::Days(1)),
-            ("1H", TimeBucket::Hours(1)),
-            ("1MiN", TimeBucket::Minutes(1)),
-            ("  2h", TimeBucket::Hours(2)),
-            ("3d  ", TimeBucket::Days(3)),
-            ("  4m  ", TimeBucket::Minutes(4)),
-            ("1 h", TimeBucket::Hours(1)),
+            ("1sec", TimeIndexGranularity::Seconds(1)),
+            ("1secs", TimeIndexGranularity::Seconds(1)),
+            ("1second", TimeIndexGranularity::Seconds(1)),
+            ("1seconds", TimeIndexGranularity::Seconds(1)),
+            ("1min", TimeIndexGranularity::Minutes(1)),
+            ("1mins", TimeIndexGranularity::Minutes(1)),
+            ("1minute", TimeIndexGranularity::Minutes(1)),
+            ("1minutes", TimeIndexGranularity::Minutes(1)),
+            ("1hr", TimeIndexGranularity::Hours(1)),
+            ("1hrs", TimeIndexGranularity::Hours(1)),
+            ("1hour", TimeIndexGranularity::Hours(1)),
+            ("1hours", TimeIndexGranularity::Hours(1)),
+            ("1day", TimeIndexGranularity::Days(1)),
+            ("1days", TimeIndexGranularity::Days(1)),
+            ("1H", TimeIndexGranularity::Hours(1)),
+            ("1MiN", TimeIndexGranularity::Minutes(1)),
+            ("  2h", TimeIndexGranularity::Hours(2)),
+            ("3d  ", TimeIndexGranularity::Days(3)),
+            ("  4m  ", TimeIndexGranularity::Minutes(4)),
+            ("1 h", TimeIndexGranularity::Hours(1)),
         ];
 
         for (input, expected) in cases {
-            assert_eq!(input.parse::<TimeBucket>().unwrap(), expected);
+            assert_eq!(input.parse::<TimeIndexGranularity>().unwrap(), expected);
         }
     }
 
     #[test]
-    fn time_bucket_parse_rejects_empty_or_whitespace() {
+    fn time_index_granularity_parse_rejects_empty_or_whitespace() {
         let cases = ["", "   ", "\n\t"];
         for input in cases {
-            let err = input.parse::<TimeBucket>().unwrap_err();
-            assert!(matches!(err, ParseTimeBucketError::Empty));
+            let err = input.parse::<TimeIndexGranularity>().unwrap_err();
+            assert!(matches!(err, ParseTimeIndexGranularityError::Empty));
         }
     }
 
     #[test]
-    fn time_bucket_parse_rejects_missing_number() {
+    fn time_index_granularity_parse_rejects_missing_number() {
         let cases = ["h", " hr", "day", "abcmin"];
         for input in cases {
-            let err = input.parse::<TimeBucket>().unwrap_err();
+            let err = input.parse::<TimeIndexGranularity>().unwrap_err();
             assert!(
-                matches!(err, ParseTimeBucketError::MissingNumber { .. }),
+                matches!(err, ParseTimeIndexGranularityError::MissingNumber { .. }),
                 "expected MissingNumber for {input:?}, got {err:?}"
             );
         }
     }
 
     #[test]
-    fn time_bucket_parse_rejects_missing_unit() {
+    fn time_index_granularity_parse_rejects_missing_unit() {
         let cases = ["1", "  42  "];
         for input in cases {
-            let err = input.parse::<TimeBucket>().unwrap_err();
+            let err = input.parse::<TimeIndexGranularity>().unwrap_err();
             assert!(
-                matches!(err, ParseTimeBucketError::MissingUnit { .. }),
+                matches!(err, ParseTimeIndexGranularityError::MissingUnit { .. }),
                 "expected MissingUnit for {input:?}, got {err:?}"
             );
         }
     }
 
     #[test]
-    fn time_bucket_parse_rejects_invalid_number() {
+    fn time_index_granularity_parse_rejects_invalid_number() {
         let cases = ["1.5h", "1_000s"];
         for input in cases {
-            let err = input.parse::<TimeBucket>().unwrap_err();
+            let err = input.parse::<TimeIndexGranularity>().unwrap_err();
             assert!(
-                matches!(err, ParseTimeBucketError::InvalidNumber { .. }),
+                matches!(err, ParseTimeIndexGranularityError::InvalidNumber { .. }),
                 "expected InvalidNumber for {input:?}, got {err:?}"
             );
         }
     }
 
     #[test]
-    fn time_bucket_parse_rejects_non_positive() {
+    fn time_index_granularity_parse_rejects_non_positive() {
         let cases = ["0s", "0m"];
         for input in cases {
-            let err = input.parse::<TimeBucket>().unwrap_err();
+            let err = input.parse::<TimeIndexGranularity>().unwrap_err();
             assert!(
-                matches!(err, ParseTimeBucketError::NonPositive { value: 0, .. }),
+                matches!(
+                    err,
+                    ParseTimeIndexGranularityError::NonPositive { value: 0, .. }
+                ),
                 "expected NonPositive for {input:?}, got {err:?}"
             );
         }
     }
 
     #[test]
-    fn time_bucket_parse_rejects_too_large() {
+    fn time_index_granularity_parse_rejects_too_large() {
         let too_large = (u32::MAX as u64 + 1).to_string();
         let input = format!("{too_large}h");
-        let err = input.parse::<TimeBucket>().unwrap_err();
+        let err = input.parse::<TimeIndexGranularity>().unwrap_err();
         assert!(
-            matches!(err, ParseTimeBucketError::TooLarge { value, .. } if value == u32::MAX as u64 + 1),
+            matches!(err, ParseTimeIndexGranularityError::TooLarge { value, .. } if value == u32::MAX as u64 + 1),
             "expected TooLarge for {input:?}, got {err:?}"
         );
     }
 
     #[test]
-    fn time_bucket_parse_rejects_unknown_units() {
+    fn time_index_granularity_parse_rejects_unknown_units() {
         let cases = ["1w", "1ms", "1mo", "10msec"];
         for input in cases {
-            let err = input.parse::<TimeBucket>().unwrap_err();
+            let err = input.parse::<TimeIndexGranularity>().unwrap_err();
             assert!(
-                matches!(err, ParseTimeBucketError::UnknownUnit { .. }),
+                matches!(err, ParseTimeIndexGranularityError::UnknownUnit { .. }),
                 "expected UnknownUnit for {input:?}, got {err:?}"
             );
         }
     }
 
     #[test]
-    fn time_bucket_parse_matches_from_str() {
-        let via_method = TimeBucket::parse("5m").unwrap();
-        let via_trait: TimeBucket = "5m".parse().unwrap();
+    fn time_index_granularity_parse_matches_from_str() {
+        let via_method = TimeIndexGranularity::parse("5m").unwrap();
+        let via_trait: TimeIndexGranularity = "5m".parse().unwrap();
         assert_eq!(via_method, via_trait);
     }
 }

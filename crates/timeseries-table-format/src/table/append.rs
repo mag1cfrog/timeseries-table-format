@@ -765,7 +765,9 @@ mod tests {
     use crate::metadata::table_metadata::IndexValue;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
-    use crate::transaction_log::{CommitError, IndexKind, IndexSpec, TableMeta, TimeBucket};
+    use crate::transaction_log::{
+        CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
+    };
     use arrow::{
         array::{
             Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
@@ -924,7 +926,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         }
@@ -980,7 +982,7 @@ mod tests {
                 column: "seq".to_string(),
                 entity_columns: vec!["device_id".to_string()],
                 kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(u64::from(u32::MAX) + 1).unwrap(),
+                    index_granularity: NonZeroU64::new(u64::from(u32::MAX) + 1).unwrap(),
                 },
             },
             LogicalSchema::new(vec![
@@ -1044,7 +1046,7 @@ mod tests {
                 column: "ts".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::Timestamp {
-                    bucket: TimeBucket::Minutes(1),
+                    index_granularity: TimeIndexGranularity::Minutes(1),
                     timezone: None,
                 },
             },
@@ -1319,7 +1321,7 @@ mod tests {
                 column: "seq".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(1).unwrap(),
+                    index_granularity: NonZeroU64::new(1).unwrap(),
                 },
             },
             LogicalSchema::new(vec![LogicalField {
@@ -2379,7 +2381,7 @@ mod tests {
                     column: "ts".to_string(),
                     entity_columns: vec!["symbol".to_string()],
                     kind: IndexKind::Timestamp {
-                        bucket: TimeBucket::Minutes(1),
+                        index_granularity: TimeIndexGranularity::Minutes(1),
                         timezone: Some(timezone.to_string()),
                     },
                 },
@@ -2635,7 +2637,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string(), "venue".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -2787,7 +2789,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
@@ -2828,7 +2830,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
@@ -2884,7 +2886,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
@@ -2969,7 +2971,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
@@ -3169,7 +3171,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string(), "venue".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -3282,7 +3284,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["device_id".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -3894,7 +3896,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut winner =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
@@ -3927,7 +3929,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
@@ -4155,7 +4157,7 @@ mod tests {
         append_parquet_fixture(&mut table, rel1).await?;
 
         // Tamper snapshot pointer to a mismatching bucket spec.
-        let bad_bucket = TimeBucket::Hours(1);
+        let bad_bucket = TimeIndexGranularity::Hours(1);
         let ptr = table
             .state
             .table_coverage
@@ -4164,7 +4166,7 @@ mod tests {
             .clone();
         table.state.table_coverage = Some(TableCoveragePointer {
             index_kind: IndexKind::Timestamp {
-                bucket: bad_bucket.clone(),
+                index_granularity: bad_bucket.clone(),
                 timezone: None,
             },
             coverage_path: ptr.coverage_path.clone(),

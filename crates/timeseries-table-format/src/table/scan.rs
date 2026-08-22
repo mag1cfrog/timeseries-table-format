@@ -641,7 +641,7 @@ mod tests {
     async fn scan_range_filters_signed_integer_boundaries_and_nulls() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let mut table =
             TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
@@ -678,7 +678,7 @@ mod tests {
     async fn scan_range_preserves_large_unsigned_values() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let mut table =
             TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
@@ -709,7 +709,7 @@ mod tests {
     async fn scan_range_validates_typed_bounds_before_segment_checks() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let mut table =
             TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
@@ -833,7 +833,7 @@ mod tests {
     async fn integer_scan_skips_non_candidates_and_stops_after_error() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let mut table =
             TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
@@ -871,7 +871,7 @@ mod tests {
     async fn scan_range_reports_registered_and_decoded_index_types() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let mut table =
             TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))

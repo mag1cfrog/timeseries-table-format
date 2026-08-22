@@ -262,27 +262,30 @@ async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
     };
     let kind = match index_type {
         IndexTypeArg::Timestamp => {
-            let bucket = loop {
+            let index_granularity = loop {
                 let spec = prompt_non_empty("time bucket (e.g. 1s, 1m, 1h, 1d): ")?;
                 match parse_time_bucket(&spec) {
-                    Ok(bucket) => break bucket,
+                    Ok(index_granularity) => break index_granularity,
                     Err(error) => println!("{error}"),
                 }
             };
             let timezone = prompt_optional("timezone (optional, IANA TZ): ")?;
-            IndexKind::Timestamp { bucket, timezone }
+            IndexKind::Timestamp {
+                index_granularity,
+                timezone,
+            }
         }
         IndexTypeArg::Int64 | IndexTypeArg::UInt64 => {
-            let bucket_width = loop {
+            let index_granularity = loop {
                 let spec = prompt_non_empty("integer bucket width (positive index-value units): ")?;
                 match parse_bucket_width(&spec, index_type) {
-                    Ok(bucket_width) => break bucket_width,
+                    Ok(index_granularity) => break index_granularity,
                     Err(error) => println!("{error}"),
                 }
             };
             match index_type {
-                IndexTypeArg::Int64 => IndexKind::Int64 { bucket_width },
-                IndexTypeArg::UInt64 => IndexKind::UInt64 { bucket_width },
+                IndexTypeArg::Int64 => IndexKind::Int64 { index_granularity },
+                IndexTypeArg::UInt64 => IndexKind::UInt64 { index_granularity },
                 IndexTypeArg::Timestamp => unreachable!(),
             }
         }
@@ -1182,7 +1185,7 @@ mod tests {
         metadata::logical_schema::{
             LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
-        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
         storage::TableLocation,
         table::TimeSeriesTable,
     };
@@ -1218,7 +1221,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };

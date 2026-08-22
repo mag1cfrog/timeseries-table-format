@@ -8,7 +8,7 @@ use snafu::Snafu;
 use crate::{
     coverage::Bucket,
     metadata::table_metadata::{
-        IndexKind, IndexValue, IndexValueError, TimeBucket, validate_index_range,
+        IndexKind, IndexValue, IndexValueError, TimeIndexGranularity, validate_index_range,
     },
 };
 
@@ -99,12 +99,14 @@ impl fmt::Display for LogicalBucketRange {
     }
 }
 
-fn time_bucket_width_seconds(bucket: &TimeBucket) -> Result<u64, BucketError> {
-    let (value, multiplier) = match *bucket {
-        TimeBucket::Seconds(value) => (value, 1),
-        TimeBucket::Minutes(value) => (value, SECONDS_PER_MINUTE),
-        TimeBucket::Hours(value) => (value, SECONDS_PER_HOUR),
-        TimeBucket::Days(value) => (value, SECONDS_PER_DAY),
+fn time_index_granularity_seconds(
+    index_granularity: &TimeIndexGranularity,
+) -> Result<u64, BucketError> {
+    let (value, multiplier) = match *index_granularity {
+        TimeIndexGranularity::Seconds(value) => (value, 1),
+        TimeIndexGranularity::Minutes(value) => (value, SECONDS_PER_MINUTE),
+        TimeIndexGranularity::Hours(value) => (value, SECONDS_PER_HOUR),
+        TimeIndexGranularity::Days(value) => (value, SECONDS_PER_DAY),
     };
     if value == 0 {
         return Err(BucketError::ZeroTimeBucket);
@@ -119,18 +121,24 @@ fn signed_bucket_id(ordinal: i64) -> Bucket {
 /// Map seconds since the Unix epoch to a timestamp bucket identity.
 ///
 /// This lower-level helper is shared by the timestamp Parquet coverage path.
-pub fn bucket_id_from_epoch_secs(bucket: &TimeBucket, seconds: i64) -> Result<Bucket, BucketError> {
-    let width = i128::from(time_bucket_width_seconds(bucket)?);
+pub fn bucket_id_from_epoch_secs(
+    index_granularity: &TimeIndexGranularity,
+    seconds: i64,
+) -> Result<Bucket, BucketError> {
+    let width = i128::from(time_index_granularity_seconds(index_granularity)?);
     let ordinal = i128::from(seconds).div_euclid(width) as i64;
     Ok(signed_bucket_id(ordinal))
 }
 
-fn timestamp_bucket_id(bucket: &TimeBucket, value: DateTime<Utc>) -> Result<Bucket, BucketError> {
-    bucket_id_from_epoch_secs(bucket, value.timestamp())
+fn timestamp_bucket_id(
+    index_granularity: &TimeIndexGranularity,
+    value: DateTime<Utc>,
+) -> Result<Bucket, BucketError> {
+    bucket_id_from_epoch_secs(index_granularity, value.timestamp())
 }
 
-fn int64_bucket_id(value: i64, bucket_width: u64) -> Bucket {
-    let ordinal = i128::from(value).div_euclid(i128::from(bucket_width)) as i64;
+fn int64_bucket_id(value: i64, index_granularity: u64) -> Bucket {
+    let ordinal = i128::from(value).div_euclid(i128::from(index_granularity)) as i64;
     signed_bucket_id(ordinal)
 }
 
@@ -141,14 +149,17 @@ pub fn bucket_id(kind: &IndexKind, value: &IndexValue) -> Result<Bucket, BucketE
         .map_err(|source| BucketError::IndexValue { source })?;
 
     match (kind, value) {
-        (IndexKind::Timestamp { bucket, .. }, IndexValue::Timestamp(value)) => {
-            timestamp_bucket_id(bucket, *value)
+        (
+            IndexKind::Timestamp {
+                index_granularity, ..
+            },
+            IndexValue::Timestamp(value),
+        ) => timestamp_bucket_id(index_granularity, *value),
+        (IndexKind::Int64 { index_granularity }, IndexValue::Int64(value)) => {
+            Ok(int64_bucket_id(*value, index_granularity.get()))
         }
-        (IndexKind::Int64 { bucket_width }, IndexValue::Int64(value)) => {
-            Ok(int64_bucket_id(*value, bucket_width.get()))
-        }
-        (IndexKind::UInt64 { bucket_width }, IndexValue::UInt64(value)) => {
-            Ok(*value / bucket_width.get())
+        (IndexKind::UInt64 { index_granularity }, IndexValue::UInt64(value)) => {
+            Ok(*value / index_granularity.get())
         }
         _ => unreachable!("value domain was validated above"),
     }
@@ -166,11 +177,10 @@ pub fn logical_bucket_range(
 
     match kind {
         IndexKind::Timestamp {
-            bucket: time_bucket,
-            ..
+            index_granularity, ..
         } => {
             let ordinal = i128::from((bucket ^ SIGN_BIT) as i64);
-            let width = i128::from(time_bucket_width_seconds(time_bucket)?);
+            let width = i128::from(time_index_granularity_seconds(index_granularity)?);
             let domain_start = i128::from(DateTime::<Utc>::MIN_UTC.timestamp());
             let domain_end = i128::from(DateTime::<Utc>::MAX_UTC.timestamp()) + 1;
             let start = (ordinal * width).max(domain_start);
@@ -197,9 +207,9 @@ pub fn logical_bucket_range(
                 end_inclusive,
             ))
         }
-        IndexKind::Int64 { bucket_width } => {
+        IndexKind::Int64 { index_granularity } => {
             let ordinal = i128::from((bucket ^ SIGN_BIT) as i64);
-            let width = i128::from(bucket_width.get());
+            let width = i128::from(index_granularity.get());
             let domain_start = i128::from(i64::MIN);
             let domain_end = i128::from(i64::MAX) + 1;
             let start = (ordinal * width).max(domain_start);
@@ -215,8 +225,8 @@ pub fn logical_bucket_range(
                 end_inclusive,
             ))
         }
-        IndexKind::UInt64 { bucket_width } => {
-            let width = u128::from(bucket_width.get());
+        IndexKind::UInt64 { index_granularity } => {
+            let width = u128::from(index_granularity.get());
             let domain_end = u128::from(u64::MAX) + 1;
             let start = u128::from(bucket) * width;
             let end = ((u128::from(bucket) + 1) * width).min(domain_end);
@@ -283,16 +293,16 @@ mod tests {
 
     use super::*;
 
-    fn timestamp_kind(bucket: TimeBucket) -> IndexKind {
+    fn timestamp_kind(index_granularity: TimeIndexGranularity) -> IndexKind {
         IndexKind::Timestamp {
-            bucket,
+            index_granularity,
             timezone: None,
         }
     }
 
     #[test]
     fn timestamp_mapping_is_ordered_across_epoch() {
-        let kind = timestamp_kind(TimeBucket::Seconds(1));
+        let kind = timestamp_kind(TimeIndexGranularity::Seconds(1));
         let before = Utc.timestamp_opt(-1, 0).single().unwrap().into();
         let epoch = Utc.timestamp_opt(0, 0).single().unwrap().into();
         let after = Utc.timestamp_opt(1, 0).single().unwrap().into();
@@ -304,7 +314,7 @@ mod tests {
 
     #[test]
     fn timestamp_mapping_uses_euclidean_buckets_before_epoch() {
-        let bucket = TimeBucket::Minutes(1);
+        let bucket = TimeIndexGranularity::Minutes(1);
         assert_eq!(
             bucket_id_from_epoch_secs(&bucket, -61).unwrap(),
             SIGN_BIT - 2
@@ -324,7 +334,7 @@ mod tests {
     fn int64_mapping_handles_zero_and_extremes() {
         for width in [1, 3, u64::MAX] {
             let kind = IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(width).unwrap(),
+                index_granularity: NonZeroU64::new(width).unwrap(),
             };
             let values = [i64::MIN, -1, 0, 1, i64::MAX];
             let buckets: Vec<_> = values
@@ -335,7 +345,7 @@ mod tests {
         }
 
         let unit = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         assert_eq!(bucket_id(&unit, &i64::MIN.into()).unwrap(), 0);
         assert_eq!(bucket_id(&unit, &0i64.into()).unwrap(), SIGN_BIT);
@@ -345,14 +355,14 @@ mod tests {
     #[test]
     fn uint64_mapping_is_exact_through_max() {
         let unit = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         for value in [0, i64::MAX as u64 + 1, u64::MAX] {
             assert_eq!(bucket_id(&unit, &value.into()).unwrap(), value);
         }
 
         let width = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         assert_eq!(bucket_id(&width, &u64::MAX.into()).unwrap(), u64::MAX / 10);
     }
@@ -360,7 +370,7 @@ mod tests {
     #[test]
     fn logical_bucket_ranges_use_configured_index_units() {
         let signed_unit = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let signed_unit_bucket = bucket_id(&signed_unit, &50_464i64.into()).unwrap();
         assert_eq!(
@@ -371,7 +381,7 @@ mod tests {
         );
 
         let signed = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let signed_bucket = bucket_id(&signed, &(-11i64).into()).unwrap();
         assert_eq!(
@@ -382,7 +392,7 @@ mod tests {
         );
 
         let unsigned = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let unsigned_bucket = bucket_id(&unsigned, &50_464u64.into()).unwrap();
         assert_eq!(
@@ -392,7 +402,7 @@ mod tests {
             "[50460, 50470)"
         );
 
-        let timestamp = timestamp_kind(TimeBucket::Hours(1));
+        let timestamp = timestamp_kind(TimeIndexGranularity::Hours(1));
         let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
         let timestamp_bucket = bucket_id(&timestamp, &epoch.into()).unwrap();
         assert_eq!(
@@ -415,7 +425,7 @@ mod tests {
     #[test]
     fn logical_bucket_ranges_clip_at_domain_maximum() -> Result<(), BucketError> {
         let signed = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let signed_range =
             logical_bucket_range(&signed, bucket_id(&signed, &i64::MAX.into()).unwrap())?;
@@ -427,14 +437,14 @@ mod tests {
         assert!(!signed_min_range.end_inclusive());
 
         let unsigned = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let unsigned_range =
             logical_bucket_range(&unsigned, bucket_id(&unsigned, &u64::MAX.into()).unwrap())?;
         assert_eq!(unsigned_range.end(), &IndexValue::UInt64(u64::MAX));
         assert!(unsigned_range.end_inclusive());
 
-        let timestamp = timestamp_kind(TimeBucket::Days(u32::MAX));
+        let timestamp = timestamp_kind(TimeIndexGranularity::Days(u32::MAX));
         let timestamp_range = logical_bucket_range(
             &timestamp,
             bucket_id(&timestamp, &IndexValue::Timestamp(DateTime::<Utc>::MAX_UTC))?,
@@ -459,7 +469,7 @@ mod tests {
     #[test]
     fn logical_bucket_range_rejects_unreachable_bucket() {
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(2).unwrap(),
+            index_granularity: NonZeroU64::new(2).unwrap(),
         };
         assert!(matches!(
             logical_bucket_range(&kind, u64::MAX),
@@ -470,7 +480,7 @@ mod tests {
     #[test]
     fn half_open_integer_ranges_do_not_cross_end_boundary() {
         let signed = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let range = bucket_range(&signed, &0i64.into(), &20i64.into()).unwrap();
         assert_eq!(range, SIGN_BIT..=SIGN_BIT + 1);
@@ -480,7 +490,7 @@ mod tests {
         );
 
         let unsigned = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         assert_eq!(
             bucket_range(&unsigned, &0u64.into(), &20u64.into()).unwrap(),
@@ -494,7 +504,7 @@ mod tests {
 
     #[test]
     fn half_open_timestamp_range_preserves_nanoseconds() {
-        let kind = timestamp_kind(TimeBucket::Seconds(1));
+        let kind = timestamp_kind(TimeIndexGranularity::Seconds(1));
         let start = Utc.timestamp_opt(0, 0).single().unwrap();
         let boundary = Utc.timestamp_opt(2, 0).single().unwrap();
 
@@ -515,7 +525,7 @@ mod tests {
 
     #[test]
     fn invalid_domains_ranges_and_zero_time_buckets_are_errors() {
-        let kind = timestamp_kind(TimeBucket::Seconds(0));
+        let kind = timestamp_kind(TimeIndexGranularity::Seconds(0));
         let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
         assert_eq!(
             bucket_id(&kind, &epoch.into()),
@@ -523,7 +533,7 @@ mod tests {
         );
 
         let unsigned = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         assert!(matches!(
             bucket_range(&unsigned, &0i64.into(), &1i64.into()),

@@ -513,7 +513,7 @@ pub(crate) async fn segment_meta_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TimeBucket};
+    use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity};
     use crate::transaction_log::segments::{SegmentError, SegmentIoError};
     use arrow::array::{
         ArrayRef, BinaryBuilder, Int64Array, TimestampMillisecondArray, UInt64Array,
@@ -546,7 +546,7 @@ mod tests {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Seconds(1),
+                index_granularity: TimeIndexGranularity::Seconds(1),
                 timezone: None,
             },
         }
@@ -557,7 +557,7 @@ mod tests {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::MIN,
+                index_granularity: NonZeroU64::MIN,
             },
         }
     }
@@ -567,7 +567,7 @@ mod tests {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::UInt64 {
-                bucket_width: NonZeroU64::MIN,
+                index_granularity: NonZeroU64::MIN,
             },
         }
     }

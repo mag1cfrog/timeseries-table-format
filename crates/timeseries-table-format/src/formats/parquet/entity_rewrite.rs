@@ -621,7 +621,7 @@ mod tests {
         coverage::{
             EntityValue, io::write_coverage_sidecar_new_bytes, serde::entity_coverage_to_bytes,
         },
-        metadata::table_metadata::{IndexKind, TimeBucket},
+        metadata::table_metadata::{IndexKind, TimeIndexGranularity},
         table::test_util::{make_table_meta_with_unit, write_arrow_parquet_with_unit},
         transaction_log::TableKind,
     };
@@ -998,7 +998,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["region".to_string(), "symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };

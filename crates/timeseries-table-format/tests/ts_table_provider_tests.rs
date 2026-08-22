@@ -40,7 +40,9 @@ use timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError;
 use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::{TableError, TimeSeriesTable};
-use timeseries_table_format::transaction_log::{IndexKind, IndexSpec, TableMeta, TimeBucket};
+use timeseries_table_format::transaction_log::{
+    IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
+};
 use timeseries_table_format::{AppendRequest, IntoRecordBatchReader};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -167,7 +169,7 @@ fn make_index_spec_with_timezone(timezone: Option<&str>) -> IndexSpec {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Seconds(1),
+            index_granularity: TimeIndexGranularity::Seconds(1),
             timezone: timezone.map(str::to_string),
         },
     }
@@ -282,7 +284,7 @@ fn make_composite_table_meta() -> TableMeta {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string(), "venue".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     })
@@ -568,7 +570,7 @@ async fn append_uint64_segment(
 async fn create_int64_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
     let meta = make_numeric_table_meta(
         IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         },
         LogicalDataType::Int64,
     )?;
@@ -619,7 +621,7 @@ async fn create_int64_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
 async fn create_uint64_table(tmp: &TempDir) -> TestResult<TimeSeriesTable> {
     let meta = make_numeric_table_meta(
         IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         },
         LogicalDataType::UInt64,
     )?;
@@ -725,7 +727,7 @@ fn int32_entity_table_meta() -> TestResult<TableMeta> {
             column: "ts".to_string(),
             entity_columns: vec!["device_id".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         },
@@ -1515,7 +1517,7 @@ async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
         signed_location.clone(),
         make_numeric_table_meta(
             IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(1).expect("nonzero bucket"),
+                index_granularity: NonZeroU64::new(1).expect("nonzero bucket"),
             },
             LogicalDataType::Int64,
         )?,
@@ -1549,7 +1551,7 @@ async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
         unsigned_location.clone(),
         make_numeric_table_meta(
             IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(1).expect("nonzero bucket"),
+                index_granularity: NonZeroU64::new(1).expect("nonzero bucket"),
             },
             LogicalDataType::UInt64,
         )?,

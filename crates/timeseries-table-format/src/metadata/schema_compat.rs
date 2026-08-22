@@ -390,7 +390,7 @@ mod tests {
     use super::*;
     use crate::metadata::{
         logical_schema::{LogicalSchema, LogicalTimestampUnit},
-        table_metadata::TimeBucket,
+        table_metadata::TimeIndexGranularity,
     };
 
     fn schema(data_type: LogicalDataType) -> LogicalSchema {
@@ -436,7 +436,7 @@ mod tests {
                 .map(|position| format!("entity_{position}"))
                 .collect(),
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(1).unwrap(),
+                index_granularity: NonZeroU64::new(1).unwrap(),
             },
         }
     }
@@ -446,7 +446,7 @@ mod tests {
         let cases = [
             (
                 index(IndexKind::Timestamp {
-                    bucket: TimeBucket::Seconds(1),
+                    index_granularity: TimeIndexGranularity::Seconds(1),
                     timezone: None,
                 }),
                 schema(LogicalDataType::Timestamp {
@@ -456,13 +456,13 @@ mod tests {
             ),
             (
                 index(IndexKind::Int64 {
-                    bucket_width: NonZeroU64::new(1).unwrap(),
+                    index_granularity: NonZeroU64::new(1).unwrap(),
                 }),
                 schema(LogicalDataType::Int64),
             ),
             (
                 index(IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(1).unwrap(),
+                    index_granularity: NonZeroU64::new(1).unwrap(),
                 }),
                 schema(LogicalDataType::UInt64),
             ),
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn ordered_index_schema_validation_rejects_missing_and_wrong_domains() {
         let unsigned = index(IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let missing = LogicalSchema::new(vec![LogicalField {
             name: "other".to_string(),

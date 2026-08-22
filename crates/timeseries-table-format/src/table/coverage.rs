@@ -590,7 +590,7 @@ mod tests {
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
         metadata::schema_compat::SchemaCompatibilityError,
         metadata::table_metadata::{
-            IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeBucket,
+            IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeIndexGranularity,
         },
         storage::TableLocation,
         table::test_util::{
@@ -1227,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn signed_coverage_queries_handle_gaps_extremes_and_last_window() -> TestResult {
         let kind = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let coverage: Coverage = [-10i64, 0, 10]
             .into_iter()
@@ -1267,7 +1267,7 @@ mod tests {
     #[tokio::test]
     async fn unsigned_coverage_queries_preserve_large_values_and_boundaries() -> TestResult {
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let start = i64::MAX as u64 + 1;
         let coverage: Coverage = [start, start + 1, u64::MAX - 2, u64::MAX - 1]
@@ -1504,7 +1504,7 @@ mod tests {
             .clone()
             .expect("snapshot pointer present");
         ptr.index_kind = IndexKind::Timestamp {
-            bucket: TimeBucket::Hours(1),
+            index_granularity: TimeIndexGranularity::Hours(1),
             timezone: None,
         };
         table.state_mut().table_coverage = Some(ptr.clone());
@@ -1585,7 +1585,7 @@ mod tests {
     async fn coverage_queries_validate_before_reading_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let meta = TableMeta::new_time_series(IndexSpec {
             column: "offset".to_string(),

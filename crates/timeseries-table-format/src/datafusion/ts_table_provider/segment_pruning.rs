@@ -229,7 +229,7 @@ mod tests {
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as PhysicalColumn, Literal};
 
     use crate::coverage::EntityIdentity;
-    use crate::metadata::table_metadata::TimeBucket;
+    use crate::metadata::table_metadata::TimeIndexGranularity;
     use crate::transaction_log::{FileFormat, SegmentEntityLayout};
 
     use super::*;
@@ -345,7 +345,7 @@ mod tests {
             column: "idx".to_string(),
             entity_columns: vec!["region".to_string(), "device".to_string()],
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(1).unwrap(),
+                index_granularity: NonZeroU64::new(1).unwrap(),
             },
         };
         let mut single = segment(
@@ -413,7 +413,7 @@ mod tests {
             column: "idx".to_string(),
             entity_columns: vec!["device".to_string()],
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(1).unwrap(),
+                index_granularity: NonZeroU64::new(1).unwrap(),
             },
         };
         let mut segment = segment(
@@ -453,7 +453,7 @@ mod tests {
                 "unsigned_64".to_string(),
             ],
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::MIN,
+                index_granularity: NonZeroU64::MIN,
             },
         };
         let mut matching = segment(
@@ -529,7 +529,7 @@ mod tests {
             column: "idx".to_string(),
             entity_columns: vec!["region".to_string(), "device".to_string()],
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(1).unwrap(),
+                index_granularity: NonZeroU64::new(1).unwrap(),
             },
         };
         let west_a = single_entity_segment("west-a.parquet", 0, 9, &["west", "a"]);
@@ -607,7 +607,7 @@ mod tests {
     fn preserves_signed_bounds_and_leaves_other_statistics_unknown() {
         let schema = schema(DataType::Int64);
         let index = index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let segments = [
             segment(
@@ -652,7 +652,7 @@ mod tests {
     fn preserves_unsigned_bounds_above_signed_range() {
         let schema = schema(DataType::UInt64);
         let index = index(IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let segment = segment(
             "data/unsigned.parquet",
@@ -676,7 +676,7 @@ mod tests {
     fn native_pruning_retains_possible_segments_in_input_order() {
         let schema = schema(DataType::Int64);
         let index = index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let segments = [
             segment(
@@ -754,7 +754,7 @@ mod tests {
         for (unit, timezone, value, expected) in cases {
             let schema = schema(DataType::Timestamp(unit, timezone));
             let index = index(IndexKind::Timestamp {
-                bucket: TimeBucket::Seconds(1),
+                index_granularity: TimeIndexGranularity::Seconds(1),
                 timezone: None,
             });
             let segment = segment(
@@ -773,7 +773,7 @@ mod tests {
     #[test]
     fn rejects_lossy_or_out_of_range_timestamp_conversion() {
         let index = index(IndexKind::Timestamp {
-            bucket: TimeBucket::Seconds(1),
+            index_granularity: TimeIndexGranularity::Seconds(1),
             timezone: None,
         });
         let lossy = segment(
@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn rejects_schema_and_segment_domain_mismatches_with_context() {
         let signed_index = index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let schema_error =
             segment_pruning_statistics(&schema(DataType::UInt64), &signed_index, &[])

@@ -10,7 +10,7 @@ use arrow::{
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use tempfile::TempDir;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -57,14 +57,14 @@ async fn run_shell_with_input_and_filter(
 
 fn make_table_meta(
     index_column: &str,
-    bucket: TimeBucket,
+    index_granularity: TimeIndexGranularity,
     entity_columns: Vec<String>,
 ) -> TableMeta {
     let index = IndexSpec {
         column: index_column.to_string(),
         entity_columns,
         kind: IndexKind::Timestamp {
-            bucket,
+            index_granularity,
             timezone: None,
         },
     };
@@ -73,7 +73,7 @@ fn make_table_meta(
 
 async fn create_empty_table(path: &std::path::Path) -> TestResult<()> {
     let location = TableLocation::local(path);
-    let meta = make_table_meta("ts", TimeBucket::Seconds(1), Vec::new());
+    let meta = make_table_meta("ts", TimeIndexGranularity::Seconds(1), Vec::new());
     TimeSeriesTable::create(location, meta).await?;
     Ok(())
 }
@@ -156,7 +156,7 @@ async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
             DataType::Int64,
             Arc::new(Int64Array::from(vec![-4, 0, 4])),
             IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(4).unwrap(),
+                index_granularity: NonZeroU64::new(4).unwrap(),
             },
         ),
         (
@@ -168,7 +168,7 @@ async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
                 i64::MAX as u64 + 9,
             ])),
             IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(8).unwrap(),
+                index_granularity: NonZeroU64::new(8).unwrap(),
             },
         ),
     ];
@@ -231,7 +231,7 @@ async fn shell_interactive_reprompts_invalid_index_type_and_width() -> TestResul
     assert_eq!(
         table.index_spec().kind,
         IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(4).unwrap(),
+            index_granularity: NonZeroU64::new(4).unwrap(),
         }
     );
 

@@ -432,7 +432,7 @@ mod tests {
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::TempDir;
 
-    use crate::metadata::table_metadata::TimeBucket;
+    use crate::metadata::table_metadata::TimeIndexGranularity;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const EPOCH_BUCKET: u64 = 0x8000_0000_0000_0000;
@@ -442,7 +442,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         }
@@ -666,7 +666,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["region".to_string(), "symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         };
@@ -722,7 +722,7 @@ mod tests {
             column: "event.ts".to_string(),
             entity_columns: vec!["device.id".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         };
@@ -858,7 +858,7 @@ mod tests {
                 "unsigned_64".to_string(),
             ],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         };
@@ -1073,7 +1073,7 @@ mod tests {
             column: "value".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(10).expect("nonzero bucket width"),
+                index_granularity: NonZeroU64::new(10).expect("nonzero bucket width"),
             },
         };
 
@@ -1110,7 +1110,7 @@ mod tests {
             column: "value".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(10).expect("nonzero bucket width"),
+                index_granularity: NonZeroU64::new(10).expect("nonzero bucket width"),
             },
         };
 

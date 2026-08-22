@@ -19,7 +19,7 @@ use timeseries_table_format::{
     metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     },
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
     table::{TableError, TimeSeriesTable},
 };
@@ -261,7 +261,7 @@ fn make_basic_table_meta(
             Vec::new()
         },
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     };

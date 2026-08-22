@@ -22,7 +22,7 @@ use tempfile::TempDir;
 use timeseries_table_format::{
     metadata::{
         segments::SegmentEntityLayout,
-        table_metadata::{IndexKind, TimeBucket},
+        table_metadata::{IndexKind, TimeIndexGranularity},
     },
     storage::TableLocation,
     table::TimeSeriesTable,
@@ -362,7 +362,7 @@ fn cli_create_creates_table() -> StdResult<(), Box<dyn std::error::Error>> {
     assert_eq!(
         index.kind,
         IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(15),
+            index_granularity: TimeIndexGranularity::Minutes(15),
             timezone: Some("America/New_York".to_string())
         }
     );
@@ -381,14 +381,14 @@ fn cli_create_supports_integer_index_domains() -> StdResult<(), Box<dyn std::err
             "int64",
             "4",
             IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(4).unwrap(),
+                index_granularity: NonZeroU64::new(4).unwrap(),
             },
         ),
         (
             "uint64",
             "18446744073709551615",
             IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(u64::MAX).unwrap(),
+                index_granularity: NonZeroU64::new(u64::MAX).unwrap(),
             },
         ),
     ];
