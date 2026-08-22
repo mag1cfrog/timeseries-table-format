@@ -218,7 +218,7 @@ pub(super) fn timestamp_value(
         })
 }
 
-pub(super) fn insert_bucket(
+pub(super) fn map_and_insert_bucket(
     bitmap: &mut RoaringTreemap,
     path: &str,
     index: &IndexSpec,
@@ -263,14 +263,14 @@ where
 {
     if array.null_count() == 0 {
         for &raw in array.values() {
-            let (bucket, inserted) = insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            let (bucket, inserted) = map_and_insert_bucket(bitmap, path, index, to_value(raw)?)?;
             if !inserted {
                 return Err(duplicate_index_interval_error(path, index, None, bucket));
             }
         }
     } else {
         for raw in array.iter().flatten() {
-            let (bucket, inserted) = insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            let (bucket, inserted) = map_and_insert_bucket(bitmap, path, index, to_value(raw)?)?;
             if !inserted {
                 return Err(duplicate_index_interval_error(path, index, None, bucket));
             }
@@ -279,7 +279,7 @@ where
     Ok(())
 }
 
-async fn compute_bitmap_from_stream(
+async fn compute_coverage_bitmap_from_stream(
     mut reader: impl Stream<
         Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
     > + Unpin,
@@ -433,7 +433,7 @@ pub async fn compute_segment_coverage(
                     source,
                     backtrace: Backtrace::capture(),
                 })?;
-            compute_bitmap_from_stream(reader, &path, &index).await
+            compute_coverage_bitmap_from_stream(reader, &path, &index).await
         });
     }
 

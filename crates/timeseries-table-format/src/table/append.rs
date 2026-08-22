@@ -946,19 +946,19 @@ mod tests {
     }
 
     fn timestamp_only_batch(row_count: usize) -> Result<RecordBatch, ArrowError> {
-        timestamp_only_batch_from(0, row_count)
+        timestamp_only_batch_starting_at_bucket(0, row_count)
     }
 
-    fn timestamp_only_batch_from(
+    fn timestamp_only_batch_starting_at_bucket(
         start_bucket: usize,
         row_count: usize,
     ) -> Result<RecordBatch, ArrowError> {
-        timestamp_only_batch_from_values(
+        timestamp_only_batch_with_millis(
             (start_bucket..start_bucket + row_count).map(|bucket| bucket as i64 * 60_000),
         )
     }
 
-    fn timestamp_only_batch_from_values(
+    fn timestamp_only_batch_with_millis(
         values: impl IntoIterator<Item = i64>,
     ) -> Result<RecordBatch, ArrowError> {
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -1441,7 +1441,7 @@ mod tests {
             let request = AppendRequest::new(
                 AppendRequest::new(vec![
                     timestamp_only_batch(2)?,
-                    timestamp_only_batch_from(2, 5)?,
+                    timestamp_only_batch_starting_at_bucket(2, 5)?,
                 ])
                 .max_rows_per_row_group(inner_limit),
             );
@@ -2553,7 +2553,7 @@ mod tests {
         let state_before = table.state().clone();
 
         let error = table
-            .append(timestamp_only_batch_from_values([0, 30_000])?)
+            .append(timestamp_only_batch_with_millis([0, 30_000])?)
             .await
             .expect_err("duplicate implicit interval must fail");
 
@@ -2600,8 +2600,8 @@ mod tests {
 
         let error = table
             .append(vec![
-                timestamp_only_batch_from_values([0])?,
-                timestamp_only_batch_from_values([30_000])?,
+                timestamp_only_batch_with_millis([0])?,
+                timestamp_only_batch_with_millis([30_000])?,
             ])
             .await
             .expect_err("duplicate split across input batches must fail");

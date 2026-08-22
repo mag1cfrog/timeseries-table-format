@@ -32,8 +32,8 @@ use crate::{
 use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 use super::{
     coverage::{
-        SegmentCoverageError, arrow_index_error, duplicate_index_interval_error, insert_bucket,
-        timestamp_value,
+        SegmentCoverageError, arrow_index_error, duplicate_index_interval_error,
+        map_and_insert_bucket, timestamp_value,
     },
     schema::validate_parquet_index,
 };
@@ -212,7 +212,7 @@ fn ordered_index_array<'a>(
     typed.ok_or_else(|| arrow_index_error(path, index, format!("Arrow {}", array.data_type())))
 }
 
-async fn compute_from_stream(
+async fn compute_entity_coverage_from_stream(
     mut reader: impl Stream<
         Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
     > + Unpin,
@@ -236,7 +236,7 @@ async fn compute_from_stream(
                 match by_identity.entry(identity) {
                     Entry::Occupied(mut entry) => {
                         let (bucket, inserted) =
-                            insert_bucket(entry.get_mut(), path, index, value)?;
+                            map_and_insert_bucket(entry.get_mut(), path, index, value)?;
                         if !inserted {
                             return Err(duplicate_index_interval_error(
                                 path,
@@ -247,8 +247,12 @@ async fn compute_from_stream(
                         }
                     }
                     Entry::Vacant(entry) => {
-                        let (_, inserted) =
-                            insert_bucket(entry.insert(RoaringTreemap::new()), path, index, value)?;
+                        let (_, inserted) = map_and_insert_bucket(
+                            entry.insert(RoaringTreemap::new()),
+                            path,
+                            index,
+                            value,
+                        )?;
                         debug_assert!(inserted);
                     }
                 }
@@ -380,7 +384,7 @@ pub async fn compute_segment_entity_coverage(
                     source,
                     backtrace: Backtrace::capture(),
                 })?;
-            compute_from_stream(reader, &path, &index).await
+            compute_entity_coverage_from_stream(reader, &path, &index).await
         });
     }
 
