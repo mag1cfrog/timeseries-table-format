@@ -7,11 +7,11 @@ Parquet segment may contain rows for several identities. Ordered-index values an
 repeat across different identities; an append is rejected only when the same complete identity
 already covers the bucket.
 
-Supported entity column types are Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
+Registered entity column types are Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
 Actual values must be non-null. Composite identity components follow the configured
-`entity_columns` order. Signed and unsigned integers retain their exact types and are never
-stringified for comparison. Unsupported domains and type mismatches are rejected rather than
-cast.
+`entity_columns` order. Incoming integer columns may use the lossless widenings documented below,
+but signedness changes and unsupported domains are rejected. Persisted identities retain their
+registered types and are never stringified for comparison.
 
 Python exposes one `TimeSeriesTable`, not child tables per identity. After registration, entity
 columns remain ordinary SQL columns for filtering and grouping.
@@ -30,6 +30,12 @@ columns remain ordinary SQL columns for filtering and grouping.
 The method returns the newly committed table version as an `int`. It does not accept file paths,
 pandas or NumPy objects, mappings, row iterables, or arbitrary iterables of batches. Convert those
 inputs to one of the supported Arrow forms explicitly.
+
+After the table has a canonical schema, append matches top-level fields by name and writes them in
+canonical order. Nullability must match. Types must match except for these lossless widenings:
+`int8` to `int32` or `int64`, `int16` to `int32` or `int64`, `int32` to `int64`, `uint8`, `uint16`,
+or `uint32` to `uint64`, and `float32` to `float64`. Signedness changes, timestamp changes, and
+nested widening are rejected.
 
 For a materialized source, pass a table or record batch directly. This example assumes the target
 table expects the shown schema:

@@ -96,10 +96,10 @@ pub enum TableError {
         cleanup_errors: Vec<String>,
     },
 
-    /// A batch source failed while yielding rows for a streaming append.
+    /// An Arrow source or its batch normalization failed during append.
     #[snafu(display("Arrow batch source error while appending: {source}"))]
     AppendSource {
-        /// Arrow error returned by the source reader.
+        /// Arrow error returned while reading or normalizing a batch.
         source: ArrowError,
     },
 

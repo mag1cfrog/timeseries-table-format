@@ -6,12 +6,15 @@
 
 use std::collections::HashMap;
 
+use arrow::datatypes::DataType;
 use snafu::prelude::*;
 
 use crate::{
     coverage::{EntityIdentity, EntityValue},
     metadata::{
-        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
+        logical_schema::{
+            LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, SchemaConvertError,
+        },
         table_metadata::{IndexKind, IndexSpec, TableMeta},
     },
 };
@@ -88,6 +91,61 @@ pub enum SchemaCompatibilityError {
     ExtraColumn {
         /// The name of the extra column.
         column: String,
+    },
+
+    /// An incoming Arrow schema is missing a registered table column.
+    #[snafu(display("Incoming Arrow schema is missing registered column {column}"))]
+    MissingIncomingColumn {
+        /// The missing registered column name.
+        column: String,
+    },
+
+    /// An incoming Arrow schema contains an unregistered column.
+    #[snafu(display("Incoming Arrow schema has unregistered column {column}"))]
+    ExtraIncomingColumn {
+        /// The extra incoming column name.
+        column: String,
+    },
+
+    /// An incoming Arrow schema repeats one column name.
+    #[snafu(display("Incoming Arrow schema has duplicate column {column}"))]
+    DuplicateIncomingColumn {
+        /// The duplicated incoming column name.
+        column: String,
+    },
+
+    /// An incoming Arrow field changes the registered nullability.
+    #[snafu(display(
+        "Nullability mismatch for incoming column {column}: table has nullable={table_nullable}, incoming schema has nullable={incoming_nullable}"
+    ))]
+    IncomingNullabilityMismatch {
+        /// The column with mismatched nullability.
+        column: String,
+        /// Registered table nullability.
+        table_nullable: bool,
+        /// Incoming Arrow nullability.
+        incoming_nullable: bool,
+    },
+
+    /// An incoming Arrow type is neither exact nor an allowlisted widening.
+    #[snafu(display(
+        "Incompatible Arrow type for incoming column {column}: table has {table_type:?}, incoming schema has {incoming_type:?}"
+    ))]
+    IncomingTypeMismatch {
+        /// The column with the incompatible Arrow type.
+        column: String,
+        /// Arrow type required by the registered table schema.
+        table_type: DataType,
+        /// Arrow type declared by the incoming source.
+        incoming_type: DataType,
+    },
+
+    /// The registered logical schema cannot be represented as Arrow.
+    #[snafu(display("Registered table schema cannot be converted to Arrow: {source}"))]
+    RegisteredSchemaConversion {
+        /// The logical-to-Arrow conversion failure.
+        #[snafu(source)]
+        source: SchemaConvertError,
     },
 
     /// Column exists in both schemas, but the logical type / nullability differ.

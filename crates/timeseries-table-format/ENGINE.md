@@ -64,9 +64,10 @@ Log actions:
 
 ### Append (Arrow to Parquet)
 1. Validate the Arrow reader schema before consuming batches or creating output.
-2. Stream non-empty batches into one uniquely named table-owned Parquet segment.
-3. Inspect the finished segment and derive its `LogicalSchema`.
-4. On the first append, adopt that schema; otherwise match fields, types, and nullability by name.
+2. On the first append, preserve and adopt that schema. Otherwise, match fields by name and
+   normalize exact or explicitly allowlisted lossless scalar types into registered field order.
+3. Stream normalized non-empty batches into one uniquely named table-owned Parquet segment.
+4. Inspect the finished segment and verify its exact registered `LogicalSchema`.
 5. Compute coverage, reject overlaps, and write attempt-owned coverage sidecars.
 6. Commit `AddSegment` + optional `UpdateTableMeta` + `UpdateTableCoverage`.
 
@@ -93,7 +94,9 @@ Log actions:
    batches and rows have no ordering guarantee. Callers must sort when they require ordered results.
 
 ## Schema rules (v0.1)
-- No schema evolution: all segments must match the canonical schema exactly.
+- No schema evolution: the registered schema remains authoritative and every committed segment
+  matches it exactly. Incoming top-level scalar fields may use the append allowlist for lossless
+  widening before they are written.
 - Time column must exist and have a supported timestamp type.
 - If entity columns are configured, segments may contain multiple identities.
   Coverage overlap is checked independently for each `(identity, bucket)` pair.

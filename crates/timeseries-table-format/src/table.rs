@@ -10,6 +10,7 @@
 //! - range scans stream filtered record batches.
 
 pub mod append;
+mod append_schema;
 pub mod coverage;
 pub mod error;
 mod optimize;
