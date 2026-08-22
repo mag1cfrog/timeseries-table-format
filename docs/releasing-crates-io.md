@@ -53,9 +53,7 @@ After that bootstrap release:
 
 Do not create package-specific tags or releases. The retired
 `timeseries-table-core`, `timeseries-table-datafusion`, and
-`timeseries-table-cli` packages remain available for existing users, but
-receive no new releases. See the
-[source migration guide](../crates/timeseries-table-format/README.md#source-migration).
+`timeseries-table-cli` packages receive no new releases.
 
 ## TestPyPI
 
