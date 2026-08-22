@@ -55,6 +55,16 @@ where
         .await
 }
 
+async fn append_parquet_fixture(
+    table: &mut TimeSeriesTable,
+    root: &Path,
+    relative_path: &str,
+) -> TestResult<u64> {
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(root.join(relative_path))?)?.build()?;
+    Ok(table.append(reader).await?)
+}
+
 #[derive(Clone)]
 struct TestRow {
     ts_millis: i64,
@@ -1238,9 +1248,15 @@ async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestRe
     writer.write(&source_batch)?;
     writer.close()?;
 
-    table.append_parquet_segment(source_path).await?;
+    append_parquet_fixture(&mut table, tmp.path(), source_path).await?;
+    let committed_source_path = table
+        .state()
+        .segments
+        .keys()
+        .next()
+        .expect("committed source");
     assert!(matches!(
-        table.state().segments[source_path].entity_layout,
+        table.state().segments[committed_source_path].entity_layout,
         SegmentEntityLayout::Mixed
     ));
     let canonical_schema = table.state().table_meta.logical_schema().cloned();
@@ -1732,7 +1748,7 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     let rel_path = "data/seg-missing-size.parquet";
     write_segment(tmp.path(), rel_path, &rows, false)?;
 
-    table.append_parquet_segment(rel_path).await?;
+    append_parquet_fixture(&mut table, tmp.path(), rel_path).await?;
     drop(table);
 
     remove_committed_file_size(tmp.path(), 2).await?;
@@ -1756,7 +1772,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
     let mut writer = TimeSeriesTable::create(location.clone(), meta).await?;
     let rows_a = make_rows(minutes_to_millis(1), 5, "A", 10.0);
     write_segment(tmp.path(), "data/seg-a.parquet", &rows_a, false)?;
-    writer.append_parquet_segment("data/seg-a.parquet").await?;
+    append_parquet_fixture(&mut writer, tmp.path(), "data/seg-a.parquet").await?;
 
     let provider_table = Arc::new(TimeSeriesTable::open(location.clone()).await?);
     let ctx = SessionContext::new();
@@ -1768,7 +1784,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
 
     let rows_b = make_rows(minutes_to_millis(3), 5, "A", 20.0);
     write_segment(tmp.path(), "data/seg-b.parquet", &rows_b, false)?;
-    writer.append_parquet_segment("data/seg-b.parquet").await?;
+    append_parquet_fixture(&mut writer, tmp.path(), "data/seg-b.parquet").await?;
 
     let refreshed_batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
     let refreshed_count = scalar_u64(&refreshed_batches)?;
