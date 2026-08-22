@@ -47,6 +47,8 @@ jobs:
               - 'scripts/test_check_release_version.py'
               - 'scripts/scan_range_rss_regression.py'
               - 'scripts/test_scan_range_rss_regression.py'
+              - 'scripts/append_pipeline_benchmark.py'
+              - 'scripts/test_append_pipeline_benchmark.py'
       - name: Check for skip label
         id: skip
         env:
@@ -187,15 +189,22 @@ jobs:
         if: matrix.task == 'RSS regression checks'
         run: |
           uv sync --project crates/timeseries-table-python --locked --no-install-project
-          crates/timeseries-table-python/.venv/bin/ruff check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
-          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py scripts/append_pipeline_benchmark.py scripts/test_append_pipeline_benchmark.py
+          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py scripts/append_pipeline_benchmark.py scripts/test_append_pipeline_benchmark.py
           (
             cd crates/timeseries-table-python
             PYTHONPATH=../../scripts .venv/bin/ty check \
               ../../scripts/scan_range_rss_regression.py \
-              ../../scripts/test_scan_range_rss_regression.py
+              ../../scripts/test_scan_range_rss_regression.py \
+              ../../scripts/append_pipeline_benchmark.py \
+              ../../scripts/test_append_pipeline_benchmark.py
           )
           crates/timeseries-table-python/.venv/bin/python scripts/test_scan_range_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/python scripts/test_append_pipeline_benchmark.py
+          crates/timeseries-table-python/.venv/bin/python scripts/append_pipeline_benchmark.py \
+            --workload smoke \
+            --samples 1 \
+            --json-out /tmp/tstable-append-pipeline-smoke.json
 
       - name: fmt
         if: matrix.task == 'lints and docs'
