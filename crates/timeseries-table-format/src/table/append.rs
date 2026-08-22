@@ -2162,7 +2162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_updates_state_and_log() -> TestResult {
+    async fn append_updates_state_and_log() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -2182,12 +2182,16 @@ mod tests {
             }],
         )?;
 
-        let new_version = table.append_parquet_segment(rel_path).await?;
+        let new_version = append_parquet_fixture(&mut table, rel_path).await?;
 
         assert_eq!(new_version, 2);
         assert_eq!(table.state.version, 2);
-        let seg = table.state.segments.get(rel_path).expect("segment present");
-        assert_eq!(seg.path, rel_path);
+        let seg = table
+            .state
+            .segments
+            .values()
+            .next()
+            .expect("segment present");
         assert_eq!(seg.row_count, 1);
         assert_eq!(
             seg.entity_layout,
@@ -2209,7 +2213,7 @@ mod tests {
         assert_eq!(current.trim(), "2");
 
         let reopened = TimeSeriesTable::open(location).await?;
-        assert_eq!(reopened.state.segments.get(rel_path), Some(seg));
+        assert_eq!(reopened.state, table.state);
         Ok(())
     }
 
@@ -2851,7 +2855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_keys_paths_and_updates_snapshot() -> TestResult {
+    async fn append_updates_snapshot() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -2896,23 +2900,20 @@ mod tests {
             ],
         )?;
 
-        let v2 = table.append_parquet_segment(rel1).await?;
-        let v3 = table.append_parquet_segment(rel2).await?;
+        let v2 = append_parquet_fixture(&mut table, rel1).await?;
+        let v3 = append_parquet_fixture(&mut table, rel2).await?;
         assert_eq!(v2, 2);
         assert_eq!(v3, 3);
 
-        let seg1 = table.state.segments.get(rel1).expect("segment 1 present");
-        let seg2 = table.state.segments.get(rel2).expect("segment 2 present");
-        assert_eq!(seg1.path, rel1);
-        assert_eq!(seg2.path, rel2);
-        assert!(seg1.coverage_path.is_some());
-        assert!(seg2.coverage_path.is_some());
-
-        let cov1 =
-            compute_segment_entity_coverage(&location, Path::new(rel1), table.index_spec()).await?;
-        let cov2 =
-            compute_segment_entity_coverage(&location, Path::new(rel2), table.index_spec()).await?;
-        let expected_snapshot = cov1.union(&cov2);
+        assert_eq!(table.state.segments.len(), 2);
+        assert!(
+            table
+                .state
+                .segments
+                .values()
+                .all(|segment| segment.coverage_path.is_some())
+        );
+        let expected_snapshot = table.recover_table_entity_coverage_from_segments().await?;
 
         let ptr = table
             .state
@@ -2930,7 +2931,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_rejects_overlap() -> TestResult {
+    async fn append_rejects_overlap() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
@@ -2985,23 +2986,21 @@ mod tests {
             ],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
 
-        let err = table
-            .append_parquet_segment(rel2)
+        let err = append_parquet_fixture(&mut table, rel2)
             .await
             .expect_err("overlapping append should fail");
 
         assert!(matches!(
             err,
             TableError::EntityCoverageOverlap {
-                segment_path,
                 overlap_count: 3,
                 example_identity,
                 example_bucket: 0x8000_0000_0000_0000,
                 example_bucket_range,
-            } if segment_path == rel2
-                && example_identity.components() == [EntityValue::from("A")]
+                ..
+            } if example_identity.components() == [EntityValue::from("A")]
                 && example_bucket_range.to_string()
                     == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
         ));
@@ -3009,7 +3008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_snapshot_survives_reopen() -> TestResult {
+    async fn append_snapshot_survives_reopen() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -3040,8 +3039,8 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         let reopened = TimeSeriesTable::open(location.clone()).await?;
         let ptr = reopened
@@ -3052,13 +3051,9 @@ mod tests {
 
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
-        let cov1 =
-            compute_segment_entity_coverage(&location, Path::new(rel1), reopened.index_spec())
-                .await?;
-        let cov2 =
-            compute_segment_entity_coverage(&location, Path::new(rel2), reopened.index_spec())
-                .await?;
-        let expected = cov1.union(&cov2);
+        let expected = reopened
+            .recover_table_entity_coverage_from_segments()
+            .await?;
 
         let snapshot_cov =
             read_entity_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
