@@ -8,7 +8,7 @@
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
-use std::{marker::PhantomData, path::Path, time::Instant};
+use std::{marker::PhantomData, path::Path};
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
@@ -47,7 +47,6 @@ use crate::{
 
 use super::{
     TimeSeriesTable,
-    append_report::{AppendReport, AppendReportBuilder},
     error::{
         AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
         DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
@@ -318,7 +317,6 @@ impl TimeSeriesTable {
     async fn append_parquet_path_file(
         &mut self,
         parquet_path: &Path,
-        mut report: Option<&mut AppendReportBuilder>,
     ) -> Result<(u64, String), TableError> {
         let prepared = self
             .location()
@@ -341,13 +339,9 @@ impl TimeSeriesTable {
         let append_result = async {
             let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            if let Some(r) = report.as_mut() {
-                r.set_context("relative_path", &relative_path);
-            }
             let version = self
                 .append_parquet_segment_file(
                     &relative_path,
-                    report,
                     "external_path",
                     prepared_guard.as_mut(),
                 )
@@ -385,22 +379,17 @@ impl TimeSeriesTable {
     async fn append_parquet_segment_file(
         &mut self,
         relative_path: &str,
-        mut report: Option<&mut AppendReportBuilder>,
         source_mode: &'static str,
         mut owned_data_guard: Option<&mut storage::FileCleanupGuard>,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
-        if let Some(r) = report.as_mut() {
-            r.set_context("index_column", self.index.column.as_str());
-        }
 
         // 0) Coverage readiness checks.
         ensure_existing_segments_have_coverage(&self.state)?;
 
         // 1) Segment meta + schema.
-        let step_start = Instant::now();
-        let (mut segment_meta, meta_report) =
+        let (mut segment_meta, _) =
             segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
                 .context(SegmentMetaSnafu)?;
@@ -410,23 +399,7 @@ impl TimeSeriesTable {
         if let Some(file_size) = segment_meta.file_size {
             span.record("file_size_bytes", file_size);
         }
-        if let Some(r) = report.as_mut() {
-            if let Some(file_size) = segment_meta.file_size {
-                r.set_context("file_size_bytes", file_size.to_string());
-            }
-            let fields = vec![
-                ("row_groups".to_string(), meta_report.row_groups.to_string()),
-                ("row_count".to_string(), meta_report.row_count.to_string()),
-                ("used_stats".to_string(), meta_report.used_stats.to_string()),
-                (
-                    "scanned_rows".to_string(),
-                    meta_report.scanned_rows.to_string(),
-                ),
-            ];
-            r.push_step("segment_meta", step_start.elapsed(), fields);
-        }
 
-        let step_start = Instant::now();
         let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
             .context(SegmentMetaSnafu)?;
@@ -435,9 +408,6 @@ impl TimeSeriesTable {
                 path: relative_path.to_string(),
             },
         )?;
-        if let Some(r) = report.as_mut() {
-            r.push_step("logical_schema", step_start.elapsed(), Vec::new());
-        }
 
         // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
@@ -475,23 +445,14 @@ impl TimeSeriesTable {
 
         // 3-5) Load, compute, and compare coverage using the entity-column mode.
         let (seg_cov_bytes, new_snap_cov_bytes, entity_layout) = if has_entity_columns {
-            let step_start = Instant::now();
             let table_cov = self.load_table_entity_snapshot_coverage_readonly().await?;
-            if let Some(r) = report.as_mut() {
-                r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
-            }
 
-            let step_start = Instant::now();
             let segment_cov =
                 compute_segment_entity_coverage(self.location(), rel_path, &self.index)
                     .await
                     .context(SegmentCoverageSnafu)?;
             let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
-            if let Some(r) = report.as_mut() {
-                r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
-            }
 
-            let step_start = Instant::now();
             if let Some((identity, bucket)) = segment_cov.overlap_example(&table_cov) {
                 let example_bucket_range =
                     logical_bucket_range(&self.index.kind, bucket).context(CoverageBucketSnafu)?;
@@ -503,9 +464,6 @@ impl TimeSeriesTable {
                     example_bucket_range,
                 }
                 .fail();
-            }
-            if let Some(r) = report.as_mut() {
-                r.push_step("overlap_check", step_start.elapsed(), Vec::new());
             }
 
             let seg_bytes = entity_coverage_to_bytes(&segment_cov).map_err(|source| {
@@ -521,21 +479,12 @@ impl TimeSeriesTable {
                 })?;
             (seg_bytes, snapshot_bytes, entity_layout)
         } else {
-            let step_start = Instant::now();
             let table_cov = self.load_table_snapshot_coverage_readonly().await?;
-            if let Some(r) = report.as_mut() {
-                r.push_step("load_table_snapshot", step_start.elapsed(), Vec::new());
-            }
 
-            let step_start = Instant::now();
             let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
                 .await
                 .context(SegmentCoverageSnafu)?;
-            if let Some(r) = report.as_mut() {
-                r.push_step("segment_coverage", step_start.elapsed(), Vec::new());
-            }
 
-            let step_start = Instant::now();
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
             if let Some(example_bucket) = overlap.present().iter().next() {
@@ -548,9 +497,6 @@ impl TimeSeriesTable {
                     example_bucket_range,
                 }
                 .fail();
-            }
-            if let Some(r) = report.as_mut() {
-                r.push_step("overlap_check", step_start.elapsed(), Vec::new());
             }
 
             let seg_bytes =
@@ -604,7 +550,6 @@ impl TimeSeriesTable {
                 }
             })?;
 
-        let step_start = Instant::now();
         let mut created_sidecars = Vec::new();
         let mut segment_sidecar_guard =
             storage::prepare_file_cleanup_guard(self.location().as_ref(), Path::new(&seg_cov_path))
@@ -614,11 +559,7 @@ impl TimeSeriesTable {
             .map_err(|source| TableError::CoverageSidecar { source })?;
         segment_sidecar_guard.arm();
         created_sidecars.push(seg_cov_path.clone());
-        if let Some(r) = report.as_mut() {
-            r.push_step("write_segment_sidecar", step_start.elapsed(), Vec::new());
-        }
 
-        let step_start = Instant::now();
         let mut snapshot_sidecar_guard = storage::prepare_file_cleanup_guard(
             self.location().as_ref(),
             Path::new(&snapshot_path),
@@ -640,9 +581,6 @@ impl TimeSeriesTable {
         }
         snapshot_sidecar_guard.arm();
         created_sidecars.push(snapshot_path.clone());
-        if let Some(r) = report.as_mut() {
-            r.push_step("write_snapshot_sidecar", step_start.elapsed(), Vec::new());
-        }
 
         // 7) Build actions and atomically publish the commit.
         segment_meta.coverage_path = Some(seg_cov_path);
@@ -659,7 +597,6 @@ impl TimeSeriesTable {
             coverage_path: snapshot_path.clone(),
         });
 
-        let step_start = Instant::now();
         let new_version = match self
             .log
             .commit_with_path_preservation(expected_version, actions, || {
@@ -685,9 +622,6 @@ impl TimeSeriesTable {
                 return Err(error);
             }
         };
-        if let Some(r) = report.as_mut() {
-            r.push_step("commit_log", step_start.elapsed(), Vec::new());
-        }
 
         // OCC invariant: a successful commit_with_expected_version must return
         // the same "next" version we predicted when constructing `snapshot_path`.
@@ -701,7 +635,6 @@ impl TimeSeriesTable {
         );
 
         // 8) Update in-memory state.
-        let step_start = Instant::now();
         self.state.version = new_version;
 
         if let Some(updated_meta) = maybe_updated_meta {
@@ -718,9 +651,6 @@ impl TimeSeriesTable {
             coverage_path: snapshot_path,
             version: new_version,
         });
-        if let Some(r) = report.as_mut() {
-            r.push_step("state_update", step_start.elapsed(), Vec::new());
-        }
 
         span.record("committed_version", new_version);
         span.record("outcome", "succeeded");
@@ -833,12 +763,7 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .append_parquet_segment_file(
-                    &relative_path,
-                    None,
-                    "arrow_stream",
-                    Some(&mut data_guard),
-                )
+                .append_parquet_segment_file(&relative_path, "arrow_stream", Some(&mut data_guard))
                 .await
             {
                 Ok(version) => Ok(version),
@@ -884,7 +809,7 @@ impl TimeSeriesTable {
         let result = async {
             let relative_path = self.normalize_new_segment_path(relative_path).await?;
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            self.append_parquet_segment_file(&relative_path, None, "table_relative", None)
+            self.append_parquet_segment_file(&relative_path, "table_relative", None)
                 .await
         }
         .await;
@@ -919,80 +844,7 @@ impl TimeSeriesTable {
         &mut self,
         parquet_path: &Path,
     ) -> Result<(u64, String), TableError> {
-        let result = self.append_parquet_path_file(parquet_path, None).await;
-        record_append_failure(&result);
-        result
-    }
-
-    /// Copy and append a Parquet file while collecting a profiling report.
-    /// Returns the committed version, normalized table-relative path, and report.
-    #[tracing::instrument(
-        name = "table.append",
-        level = "debug",
-        skip_all,
-        fields(
-            source_mode = "external_path",
-            expected_version = self.state.version,
-            segment_path = tracing::field::Empty,
-            row_count = tracing::field::Empty,
-            file_size_bytes = tracing::field::Empty,
-            committed_version = tracing::field::Empty,
-            entity_layout = tracing::field::Empty,
-            outcome = tracing::field::Empty
-        )
-    )]
-    pub async fn append_parquet_from_path_with_report(
-        &mut self,
-        parquet_path: &Path,
-    ) -> Result<(u64, String, AppendReport), TableError> {
-        let result = async {
-            let mut report = AppendReportBuilder::new();
-            let (version, relative_path) = self
-                .append_parquet_path_file(parquet_path, Some(&mut report))
-                .await?;
-            Ok((version, relative_path, report.finish()))
-        }
-        .await;
-        record_append_failure(&result);
-        result
-    }
-
-    /// Append a Parquet segment and return a profiling report.
-    #[tracing::instrument(
-        name = "table.append",
-        level = "debug",
-        skip_all,
-        fields(
-            source_mode = "table_relative",
-            expected_version = self.state.version,
-            segment_path = tracing::field::Empty,
-            row_count = tracing::field::Empty,
-            file_size_bytes = tracing::field::Empty,
-            committed_version = tracing::field::Empty,
-            entity_layout = tracing::field::Empty,
-            outcome = tracing::field::Empty
-        )
-    )]
-    pub async fn append_parquet_segment_with_report(
-        &mut self,
-        relative_path: &str,
-    ) -> Result<(u64, AppendReport), TableError> {
-        let result = async {
-            let relative_path = self.normalize_new_segment_path(relative_path).await?;
-            tracing::Span::current().record("segment_path", relative_path.as_str());
-            let mut report = AppendReportBuilder::new();
-            report.set_context("relative_path", &relative_path);
-            let version = self
-                .append_parquet_segment_file(
-                    &relative_path,
-                    Some(&mut report),
-                    "table_relative",
-                    None,
-                )
-                .await?;
-            Ok((version, report.finish()))
-        }
-        .await;
+        let result = self.append_parquet_path_file(parquet_path).await;
         record_append_failure(&result);
         result
     }
@@ -2538,15 +2390,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_public_append_variant_emits_one_logical_operation() -> TestResult {
+    async fn every_path_append_variant_emits_one_logical_operation() -> TestResult {
         let tmp = TempDir::new()?;
 
-        for (case, external, with_report) in [
-            ("segment", false, false),
-            ("external", true, false),
-            ("segment-report", false, true),
-            ("external-report", true, true),
-        ] {
+        for (case, external) in [("segment", false), ("external", true)] {
             let table_root = tmp.path().join(format!("table-{case}"));
             let location = TableLocation::local(&table_root);
             let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
@@ -2570,48 +2417,18 @@ mod tests {
             let file_size = source.metadata()?.len();
             let capture = TraceCapture::default();
 
-            let report = match (external, with_report) {
-                (false, false) => {
-                    assert_eq!(
-                        capture
-                            .run(table.append_parquet_segment(&segment_path))
-                            .await?,
-                        2
-                    );
-                    None
-                }
-                (true, false) => {
-                    let (version, actual_path) =
-                        capture.run(table.append_parquet_from_path(&source)).await?;
-                    assert_eq!(version, 2);
-                    assert_eq!(actual_path, segment_path);
-                    None
-                }
-                (false, true) => {
-                    let (version, report) = capture
-                        .run(table.append_parquet_segment_with_report(&segment_path))
-                        .await?;
-                    assert_eq!(version, 2);
-                    Some(report)
-                }
-                (true, true) => {
-                    let (version, actual_path, report) = capture
-                        .run(table.append_parquet_from_path_with_report(&source))
-                        .await?;
-                    assert_eq!(version, 2);
-                    assert_eq!(actual_path, segment_path);
-                    Some(report)
-                }
-            };
-
-            if let Some(report) = report {
-                assert!(
-                    report
-                        .context
-                        .iter()
-                        .any(|(key, value)| { key == "relative_path" && value == &segment_path })
+            if external {
+                let (version, actual_path) =
+                    capture.run(table.append_parquet_from_path(&source)).await?;
+                assert_eq!(version, 2);
+                assert_eq!(actual_path, segment_path);
+            } else {
+                assert_eq!(
+                    capture
+                        .run(table.append_parquet_segment(&segment_path))
+                        .await?,
+                    2
                 );
-                assert!(!report.steps.is_empty());
             }
             assert_eq!(table.state.version, 2);
             assert_append_diagnostics(
@@ -3053,45 +2870,7 @@ mod tests {
         file.flush()?;
         drop(file);
 
-        let file_size = std::fs::metadata(&abs_path)?.len().to_string();
-        let (version, report) = table.append_parquet_segment_with_report(rel_path).await?;
-
-        assert_eq!(version, 2);
-        assert_eq!(
-            report.context,
-            vec![
-                ("relative_path".to_string(), rel_path.to_string()),
-                ("index_column".to_string(), "ts".to_string()),
-                ("file_size_bytes".to_string(), file_size),
-            ]
-        );
-        assert_eq!(
-            report
-                .steps
-                .iter()
-                .map(|step| step.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "segment_meta",
-                "logical_schema",
-                "load_table_snapshot",
-                "segment_coverage",
-                "overlap_check",
-                "write_segment_sidecar",
-                "write_snapshot_sidecar",
-                "commit_log",
-                "state_update",
-            ]
-        );
-        assert_eq!(
-            report.steps[0]
-                .fields
-                .iter()
-                .map(|(key, _)| key.as_str())
-                .collect::<Vec<_>>(),
-            vec!["row_groups", "row_count", "used_stats", "scanned_rows"]
-        );
-        assert!(report.steps[1..].iter().all(|step| step.fields.is_empty()));
+        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
         Ok(())
     }
 
@@ -3557,7 +3336,7 @@ mod tests {
         ));
 
         let err = table
-            .append_parquet_segment_with_report(r"data\dup.parquet")
+            .append_parquet_segment(r"data\dup.parquet")
             .await
             .expect_err("normalized live path must be rejected");
         assert!(matches!(

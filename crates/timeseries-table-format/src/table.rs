@@ -10,8 +10,6 @@
 //! - range scans stream filtered record batches.
 
 pub mod append;
-/// Append profiling report types used by CLI benchmarks.
-pub mod append_report;
 pub mod coverage;
 pub mod error;
 mod optimize;

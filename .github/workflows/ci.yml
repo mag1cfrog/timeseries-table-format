@@ -83,7 +83,6 @@ jobs:
               - '!crates/timeseries-table-format/tests/cli_workflows.rs'
               - '!crates/timeseries-table-format/tests/shell_interactive.rs'
               - '!crates/timeseries-table-format/tests/common/**'
-              - '!crates/timeseries-table-format/examples/append_profile.rs'
               - '!crates/timeseries-table-format/examples/segment_meta_bench.rs'
               - '!crates/timeseries-table-format/CLI.md'
               - '!crates/timeseries-table-format/CHANGELOG.cli.md'

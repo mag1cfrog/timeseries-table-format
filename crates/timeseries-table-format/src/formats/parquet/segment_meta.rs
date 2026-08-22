@@ -393,6 +393,7 @@ fn ts_from_i64(
 
 /// Profiling details collected while building `SegmentMeta`.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SegmentMetaReport {
     /// Number of row groups reported by Parquet metadata.
     pub(crate) row_groups: usize,
