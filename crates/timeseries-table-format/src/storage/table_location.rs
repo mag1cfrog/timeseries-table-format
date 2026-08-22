@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "datafusion")]
 use object_store::path::Path as ObjectStorePath;
-use snafu::{IntoError, ResultExt};
+use snafu::IntoError;
+#[cfg(feature = "datafusion")]
+use snafu::ResultExt;
 
 use crate::storage::{BackendError, OtherIoSnafu, StorageLocation, StorageResult};
 

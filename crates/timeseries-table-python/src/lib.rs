@@ -1418,7 +1418,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
     /// Local filesystem time-series table rooted at `table_root`.
     ///
-    /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Parquet). For SQL
+    /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Arrow data). For SQL
     /// querying across one or more registered tables, use `Session`.
     ///
     /// Appends are overlap-checked according to the table's persisted ordered-index bucket.

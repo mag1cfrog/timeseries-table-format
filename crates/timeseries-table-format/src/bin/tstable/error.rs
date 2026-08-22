@@ -27,15 +27,6 @@ pub enum CliError {
         reason: String,
     },
 
-    #[snafu(display("Parquet path has no filename: {path}"))]
-    ParquetNoFilename { path: String },
-
-    #[snafu(display(
-        "Refusing to overwrite existing file: {path}. \
-         Remove it or rename the input parquet."
-    ))]
-    DestAlreadyExists { path: String },
-
     #[snafu(display(
         "Failed to create timeseries table at {table}. \
          Ensure the directory is writable."
