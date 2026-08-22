@@ -38,11 +38,13 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
+        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_fields_match_by_name},
         segments::SegmentEntityLayout,
     },
     storage,
-    transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
+    transaction_log::{
+        CommitError, LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
+    },
 };
 
 use super::{
@@ -292,7 +294,7 @@ impl TimeSeriesTable {
             }
             .fail(),
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
                     .context(SchemaCompatibilitySnafu)
             }
         }?;
@@ -303,6 +305,7 @@ impl TimeSeriesTable {
     async fn publish_generated_parquet_segment(
         &mut self,
         relative_path: &str,
+        next_version: u64,
         owned_data_guard: &mut storage::FileCleanupGuard,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
@@ -335,11 +338,10 @@ impl TimeSeriesTable {
         // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
         // - logical_schema == None && version == 1:
-        //     first append after create() — adopt this segment’s schema.
+        //     first append after create(): adopt this segment's schema.
         // - logical_schema == None && version != 1:
-        //     table is in a bad state for v0.1 → error.
-        // - logical_schema == Some(..):
-        //     enforce “no schema evolution” via ensure_schema_exact_match.
+        //     table is in a bad state for v0.1: return an error.
+        // - logical_schema == Some(..): enforce no schema evolution by field name.
         let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
 
         let maybe_updated_meta = match maybe_table_schema {
@@ -355,11 +357,10 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index).context(
-                    SegmentSchemaCompatibilitySnafu {
+                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
+                    .context(SegmentSchemaCompatibilitySnafu {
                         path: relative_path.to_string(),
-                    },
-                )?;
+                    })?;
                 None
             }
         };
@@ -459,7 +460,6 @@ impl TimeSeriesTable {
             }
         })?;
 
-        let new_version_guess = expected_version + 1;
         let snapshot_content_id = if has_entity_columns {
             table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
         } else {
@@ -467,7 +467,7 @@ impl TimeSeriesTable {
         };
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
         let snapshot_path =
-            table_snapshot_key(new_version_guess, &snapshot_file_id).map_err(|source| {
+            table_snapshot_key(next_version, &snapshot_file_id).map_err(|source| {
                 TableError::CoverageSidecar {
                     source: CoverageError::Layout { source },
                 }
@@ -479,9 +479,24 @@ impl TimeSeriesTable {
             Path::new(&seg_cov_path),
         )
         .context(StorageSnafu)?;
-        write_coverage_sidecar_new_bytes(self.location(), Path::new(&seg_cov_path), &seg_cov_bytes)
-            .await
-            .map_err(|source| TableError::CoverageSidecar { source })?;
+        if let Err(source) = write_coverage_sidecar_new_bytes(
+            self.location(),
+            Path::new(&seg_cov_path),
+            &seg_cov_bytes,
+        )
+        .await
+        {
+            if source.storage_cleanup_failed() {
+                created_sidecars.push(seg_cov_path.clone());
+            }
+            let error = self
+                .rollback_created_artifacts(
+                    &created_sidecars,
+                    TableError::CoverageSidecar { source },
+                )
+                .await;
+            return Err(error);
+        }
         segment_sidecar_guard.arm();
         created_sidecars.push(seg_cov_path.clone());
 
@@ -497,6 +512,9 @@ impl TimeSeriesTable {
         )
         .await
         {
+            if source.storage_cleanup_failed() {
+                created_sidecars.push(snapshot_path.clone());
+            }
             let error = TableError::CoverageSidecar { source };
             let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
@@ -552,9 +570,9 @@ impl TimeSeriesTable {
         // construction and the transaction log implementation, so we panic rather
         // than continuing with an inconsistent in-memory state.
         assert_eq!(
-            new_version, new_version_guess,
+            new_version, next_version,
             "transaction log returned unexpected version: expected {}, got {}",
-            new_version_guess, new_version
+            next_version, new_version
         );
 
         // 8) Update in-memory state.
@@ -621,6 +639,8 @@ impl TimeSeriesTable {
                     max_rows_per_row_group: 0,
                 });
             }
+            let next_version = checked_next_version(self.state.version)
+                .map_err(|source| TableError::TransactionLog { source })?;
             let mut reader = source.into_record_batch_reader()?;
             let schema = reader.schema();
             self.validate_append_source_schema(schema.as_ref())?;
@@ -684,7 +704,7 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .publish_generated_parquet_segment(&relative_path, &mut data_guard)
+                .publish_generated_parquet_segment(&relative_path, next_version, &mut data_guard)
                 .await
             {
                 Ok(version) => Ok(version),
@@ -1143,6 +1163,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_rejects_version_overflow_before_inspecting_source() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                .await?;
+        table.state.version = u64::MAX;
+        let batch = timestamp_only_batch(1)?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+
+        let error = table
+            .append(reader)
+            .await
+            .expect_err("version overflow must fail");
+
+        assert!(matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::CorruptState { ref msg, .. }
+            } if msg == "version counter overflow"
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, u64::MAX);
+        assert!(table.state().segments.is_empty());
+        assert!(!temp.path().join("data").exists());
+        assert!(!temp.path().join("_coverage").exists());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        assert_eq!(table.log.load_current_version().await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_writes_one_segment_and_returns_versions() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
@@ -1595,6 +1647,37 @@ mod tests {
         assert!(table.state().segments.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
         assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_retries_cleanup_after_sidecar_write_cleanup_failure() -> TestResult {
+        for sidecar_dir in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                    .await?;
+            crate::storage::inject_write_new_failure(temp.path().join(sidecar_dir), true);
+
+            let error = table
+                .append(timestamp_only_batch(1)?)
+                .await
+                .expect_err("sidecar write and its first cleanup must fail");
+
+            assert!(matches!(
+                error,
+                TableError::CoverageSidecar {
+                    source: CoverageError::Storage {
+                        source: StorageError::CleanupFailed { .. }
+                    }
+                }
+            ));
+            assert_eq!(table.state().version, 1, "{sidecar_dir}");
+            assert!(table.state().segments.is_empty(), "{sidecar_dir}");
+            assert!(data_files(temp.path())?.is_empty(), "{sidecar_dir}");
+            assert!(coverage_files(temp.path())?.is_empty(), "{sidecar_dir}");
+            assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        }
         Ok(())
     }
 

@@ -204,10 +204,17 @@ pub(crate) fn inject_cleanup_failure(path: PathBuf) {
 
 #[cfg(test)]
 fn take_write_new_failure(path: &Path) -> bool {
-    WRITE_NEW_FAILURES
+    let mut failures = WRITE_NEW_FAILURES
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(path)
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(target) = failures
+        .iter()
+        .find(|target| path.starts_with(target))
+        .cloned()
+    else {
+        return false;
+    };
+    failures.remove(&target)
 }
 
 #[cfg(test)]
