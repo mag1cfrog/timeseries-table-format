@@ -2894,15 +2894,15 @@ mod tests {
                     price: 10.0,
                 }],
             )?;
-            table.append_parquet_segment(path).await?;
-            assert_eq!(
+            append_parquet_fixture(&mut table, path).await?;
+            let expected_layout =
+                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.into()])?);
+            assert!(
                 table
                     .state
                     .segments
-                    .get(path)
-                    .expect("segment present")
-                    .entity_layout,
-                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![symbol.into()])?)
+                    .values()
+                    .any(|segment| segment.entity_layout == expected_layout)
             );
         }
 
@@ -2943,9 +2943,14 @@ mod tests {
             ],
         )?;
 
-        table.append_parquet_segment(path).await?;
+        append_parquet_fixture(&mut table, path).await?;
 
-        let segment = table.state.segments.get(path).expect("segment present");
+        let segment = table
+            .state
+            .segments
+            .values()
+            .next()
+            .expect("segment present");
         assert_eq!(segment.entity_layout, SegmentEntityLayout::Mixed);
         let coverage = read_entity_coverage_sidecar(
             &location,
@@ -2971,11 +2976,15 @@ mod tests {
             &[-1, -1],
             &[10.0, 11.0],
         )?;
-        table.append_parquet_segment(negative_path).await?;
+        append_parquet_fixture(&mut table, negative_path).await?;
         let negative_identity = EntityIdentity::try_new(vec![EntityValue::Int32(-1)])?;
-        assert_eq!(
-            table.state.segments[negative_path].entity_layout,
-            SegmentEntityLayout::Single(negative_identity.clone())
+        let negative_layout = SegmentEntityLayout::Single(negative_identity.clone());
+        assert!(
+            table
+                .state
+                .segments
+                .values()
+                .any(|segment| segment.entity_layout == negative_layout)
         );
 
         let maximum_path = "data/maximum-device.parquet";
@@ -2985,18 +2994,22 @@ mod tests {
             &[i32::MAX],
             &[20.0],
         )?;
-        table.append_parquet_segment(maximum_path).await?;
-        assert_eq!(
-            table.state.segments[maximum_path].entity_layout,
+        append_parquet_fixture(&mut table, maximum_path).await?;
+        let maximum_layout =
             SegmentEntityLayout::Single(EntityIdentity::try_new(vec![EntityValue::Int32(
                 i32::MAX,
-            )])?)
+            )])?);
+        assert!(
+            table
+                .state
+                .segments
+                .values()
+                .any(|segment| segment.entity_layout == maximum_layout)
         );
 
         let overlap_path = "data/negative-overlap.parquet";
         write_int32_entity_parquet(&tmp.path().join(overlap_path), &[1_500], &[-1], &[12.0])?;
-        let error = table
-            .append_parquet_segment(overlap_path)
+        let error = append_parquet_fixture(&mut table, overlap_path)
             .await
             .expect_err("same typed identity and bucket must overlap");
         assert!(matches!(
@@ -3068,25 +3081,23 @@ mod tests {
             ("data/composite-y.parquet", "Y"),
         ] {
             write_composite_entity_parquet(&tmp.path().join(path), &[(1_000, "A", venue, 10.0)])?;
-            table.append_parquet_segment(path).await?;
-            assert_eq!(
+            append_parquet_fixture(&mut table, path).await?;
+            let expected_layout = SegmentEntityLayout::Single(EntityIdentity::try_new(vec![
+                "A".into(),
+                venue.into(),
+            ])?);
+            assert!(
                 table
                     .state
                     .segments
-                    .get(path)
-                    .expect("segment present")
-                    .entity_layout,
-                SegmentEntityLayout::Single(EntityIdentity::try_new(vec![
-                    "A".into(),
-                    venue.into(),
-                ])?)
+                    .values()
+                    .any(|segment| segment.entity_layout == expected_layout)
             );
         }
 
         let overlap_path = "data/composite-x-overlap.parquet";
         write_composite_entity_parquet(&tmp.path().join(overlap_path), &[(1_500, "A", "X", 20.0)])?;
-        let error = table
-            .append_parquet_segment(overlap_path)
+        let error = append_parquet_fixture(&mut table, overlap_path)
             .await
             .expect_err("matching composite identity and bucket must overlap");
         assert!(matches!(
@@ -3120,17 +3131,12 @@ mod tests {
             &[10.0, 20.0],
         )?;
 
-        let error = table
-            .append_parquet_segment(path)
+        let error = append_parquet_fixture(&mut table, path)
             .await
             .expect_err("identity without index coverage must be rejected");
 
         match error {
-            TableError::EntityWithoutIndexCoverage {
-                segment_path,
-                identity,
-            } => {
-                assert_eq!(segment_path, path);
+            TableError::EntityWithoutIndexCoverage { identity, .. } => {
                 assert_eq!(identity.components(), [EntityValue::from("B")]);
             }
             other => panic!("unexpected error: {other:?}"),
