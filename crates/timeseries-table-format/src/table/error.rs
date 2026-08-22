@@ -103,6 +103,13 @@ pub enum TableError {
         source: ArrowError,
     },
 
+    /// An incoming batch could not be normalized into the registered schema.
+    #[snafu(display("Arrow batch normalization failed while appending: {source}"))]
+    AppendNormalization {
+        /// Arrow cast or record-batch construction failure.
+        source: ArrowError,
+    },
+
     /// Parquet schema conversion or streaming output failed during append.
     #[snafu(display("Parquet write error while appending: {source}"))]
     AppendParquet {

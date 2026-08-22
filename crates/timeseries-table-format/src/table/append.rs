@@ -3,16 +3,16 @@
 //! This module contains the core append implementation plus the public
 //! wrappers. It is responsible for:
 //! - loading/deriving segment metadata and logical schema,
-//! - enforcing v0.1 schema rules (adopt on first append, otherwise exact match),
+//! - adopting the first schema or normalizing into the registered schema,
 //! - computing segment coverage, detecting overlaps, and writing coverage sidecars,
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
-use std::{marker::PhantomData, path::Path};
+use std::{marker::PhantomData, path::Path, sync::Arc};
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
-    datatypes::{Schema, SchemaRef},
+    datatypes::SchemaRef,
     error::ArrowError,
 };
 use parquet::arrow::ArrowWriter as ParquetArrowWriter;
@@ -49,9 +49,10 @@ use crate::{
 
 use super::{
     TimeSeriesTable,
+    append_schema::AppendSchemaNormalizer,
     error::{
-        AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
-        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
+        AppendNormalizationSnafu, AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu,
+        CoverageOverlapSnafu, EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
         EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
         MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
         SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
@@ -277,29 +278,38 @@ impl TimeSeriesTable {
         }
     }
 
-    fn validate_append_source_schema(&self, schema: &Schema) -> Result<(), TableError> {
+    fn build_append_schema_normalizer(
+        &self,
+        incoming_schema: SchemaRef,
+    ) -> Result<AppendSchemaNormalizer, TableError> {
         ensure_existing_segments_have_coverage(&self.state)?;
-        let segment_schema = LogicalSchema::try_from_arrow_schema(schema).map_err(|source| {
-            TableError::AppendSource {
-                source: ArrowError::SchemaError(source.to_string()),
-            }
-        })?;
-        ensure_index_spec_matches_schema(&segment_schema, &self.index)
-            .context(SchemaCompatibilitySnafu)?;
 
         match self.state.table_meta.logical_schema.as_ref() {
-            None if self.state.version == 1 => Ok(()),
+            None if self.state.version == 1 => {
+                let incoming_logical_schema = LogicalSchema::try_from_arrow_schema(
+                    incoming_schema.as_ref(),
+                )
+                .map_err(|source| TableError::AppendSource {
+                    source: ArrowError::SchemaError(source.to_string()),
+                })?;
+                ensure_index_spec_matches_schema(&incoming_logical_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)?;
+                Ok(AppendSchemaNormalizer::without_conversion(incoming_schema))
+            }
             None => MissingCanonicalSchemaSnafu {
                 version: self.state.version,
             }
             .fail(),
             Some(table_schema) => {
-                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)
+                ensure_index_spec_matches_schema(table_schema, &self.index)
+                    .context(SchemaCompatibilitySnafu)?;
+                AppendSchemaNormalizer::for_registered_schema(
+                    incoming_schema.as_ref(),
+                    table_schema,
+                )
+                .context(SchemaCompatibilitySnafu)
             }
-        }?;
-
-        Ok(())
+        }
     }
 
     async fn publish_generated_parquet_segment(
@@ -642,16 +652,20 @@ impl TimeSeriesTable {
             let next_version = checked_next_version(self.state.version)
                 .map_err(|source| TableError::TransactionLog { source })?;
             let mut reader = source.into_record_batch_reader()?;
-            let schema = reader.schema();
-            self.validate_append_source_schema(schema.as_ref())?;
+            let incoming_schema = reader.schema();
+            let schema_normalizer =
+                self.build_append_schema_normalizer(Arc::clone(&incoming_schema))?;
+            let output_schema = Arc::clone(schema_normalizer.output_schema());
 
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
                     return Err(TableError::EmptyAppendSource);
                 };
-                ensure_batch_matches_reader_schema(&schema, &batch)?;
+                ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                 if batch.num_rows() != 0 {
-                    break batch;
+                    break schema_normalizer
+                        .normalize_batch(&batch)
+                        .context(AppendNormalizationSnafu)?;
                 }
                 tokio::task::yield_now().await;
             };
@@ -674,7 +688,7 @@ impl TimeSeriesTable {
                         .build()
                 });
                 let mut writer =
-                    ParquetArrowWriter::try_new(sink, schema.clone(), writer_properties)
+                    ParquetArrowWriter::try_new(sink, output_schema, writer_properties)
                         .context(AppendParquetSnafu)?;
                 writer.write(&first_batch).context(AppendParquetSnafu)?;
                 drop(first_batch);
@@ -682,8 +696,11 @@ impl TimeSeriesTable {
 
                 for batch in reader {
                     let batch = batch.context(AppendSourceSnafu)?;
-                    ensure_batch_matches_reader_schema(&schema, &batch)?;
+                    ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                     if batch.num_rows() != 0 {
+                        let batch = schema_normalizer
+                            .normalize_batch(&batch)
+                            .context(AppendNormalizationSnafu)?;
                         writer.write(&batch).context(AppendParquetSnafu)?;
                     }
                     drop(batch);
