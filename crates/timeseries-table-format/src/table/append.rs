@@ -1294,8 +1294,8 @@ mod tests {
 
     #[tokio::test]
     async fn append_request_nested_settings_inherit_and_override() -> TestResult {
-        for (outer_limit, expected_row_groups) in
-            [(None, vec![3, 3, 1]), (Some(2), vec![2, 2, 2, 1])]
+        for (inner_limit, outer_limit, expected_row_groups) in
+            [(3, None, vec![3, 3, 1]), (0, Some(2), vec![2, 2, 2, 1])]
         {
             let temp = TempDir::new()?;
             let location = TableLocation::local(temp.path());
@@ -1303,7 +1303,7 @@ mod tests {
                 TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
             let request = AppendRequest::new(
                 AppendRequest::new(vec![timestamp_only_batch(2)?, timestamp_only_batch(5)?])
-                    .max_rows_per_row_group(3),
+                    .max_rows_per_row_group(inner_limit),
             );
             let request = match outer_limit {
                 Some(limit) => request.max_rows_per_row_group(limit),
@@ -1335,6 +1335,32 @@ mod tests {
             assert_eq!(reopened.state().version, 2);
             assert_eq!(reopened.state().segments.len(), 1);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_request_nested_zero_is_rejected_before_inspecting_source() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+        let request = AppendRequest::new(AppendRequest::new(reader).max_rows_per_row_group(0));
+
+        assert!(matches!(
+            table.append(request).await,
+            Err(TableError::InvalidMaxRowsPerRowGroup {
+                max_rows_per_row_group: 0
+            })
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 

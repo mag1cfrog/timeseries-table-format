@@ -1150,10 +1150,36 @@ async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
         7
     );
 
+    let configured_paths = table.state().segments.keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        table
+            .append(make_append_batch(&[
+                (480_000, "A", 18.0),
+                (540_000, "B", 19.0),
+            ])?)
+            .await?,
+        8
+    );
+    let unconfigured_path = table
+        .state()
+        .segments
+        .keys()
+        .find(|path| !configured_paths.contains(path))
+        .ok_or("missing unconfigured append segment")?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(tmp.path().join(unconfigured_path))?)?;
+    let row_group_rows = builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|row_group| row_group.num_rows())
+        .collect::<Vec<_>>();
+    assert_eq!(row_group_rows, vec![2]);
+
     drop(table);
     let reopened = Arc::new(TimeSeriesTable::open(location).await?);
-    assert_eq!(reopened.state().version, 7);
-    assert_eq!(reopened.state().segments.len(), 6);
+    assert_eq!(reopened.state().version, 8);
+    assert_eq!(reopened.state().segments.len(), 7);
 
     let ctx = SessionContext::new();
     let _provider = register_provider(&ctx, reopened)?;
@@ -1171,6 +1197,8 @@ async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
             (300_000, "B", 15.0),
             (360_000, "A", 16.0),
             (420_000, "B", 17.0),
+            (480_000, "A", 18.0),
+            (540_000, "B", 19.0),
         ])?
     );
     Ok(())
