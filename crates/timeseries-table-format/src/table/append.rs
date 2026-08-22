@@ -54,8 +54,8 @@ use super::{
         AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
         EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
         EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
-        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
-        SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
+        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentMetaSnafu,
+        SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
     },
 };
 
@@ -384,7 +384,7 @@ impl TimeSeriesTable {
             let segment_cov =
                 compute_segment_entity_coverage(self.location(), rel_path, &self.index)
                     .await
-                    .context(SegmentCoverageSnafu)?;
+                    .map_err(TableError::from)?;
             let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
 
             if let Some((identity, bucket)) = segment_cov.overlap_example(&table_cov) {
@@ -417,7 +417,7 @@ impl TimeSeriesTable {
 
             let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
                 .await
-                .context(SegmentCoverageSnafu)?;
+                .map_err(TableError::from)?;
 
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
@@ -919,16 +919,20 @@ mod tests {
         )
     }
 
+    fn timestamp_only_index() -> IndexSpec {
+        IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Timestamp {
+                bucket: TimeBucket::Minutes(1),
+                timezone: None,
+            },
+        }
+    }
+
     fn timestamp_only_meta() -> TableMeta {
         TableMeta::new_time_series_with_schema(
-            IndexSpec {
-                column: "ts".to_string(),
-                entity_columns: Vec::new(),
-                kind: IndexKind::Timestamp {
-                    bucket: TimeBucket::Minutes(1),
-                    timezone: None,
-                },
-            },
+            timestamp_only_index(),
             LogicalSchema::new(vec![LogicalField {
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
@@ -942,6 +946,21 @@ mod tests {
     }
 
     fn timestamp_only_batch(row_count: usize) -> Result<RecordBatch, ArrowError> {
+        timestamp_only_batch_from(0, row_count)
+    }
+
+    fn timestamp_only_batch_from(
+        start_bucket: usize,
+        row_count: usize,
+    ) -> Result<RecordBatch, ArrowError> {
+        timestamp_only_batch_from_values(
+            (start_bucket..start_bucket + row_count).map(|bucket| bucket as i64 * 60_000),
+        )
+    }
+
+    fn timestamp_only_batch_from_values(
+        values: impl IntoIterator<Item = i64>,
+    ) -> Result<RecordBatch, ArrowError> {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "ts",
             DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
@@ -950,7 +969,7 @@ mod tests {
         RecordBatch::try_new(
             schema,
             vec![Arc::new(TimestampMillisecondArray::from_iter_values(
-                (0..row_count).map(|value| value as i64),
+                values,
             ))],
         )
     }
@@ -1420,8 +1439,11 @@ mod tests {
             let mut table =
                 TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
             let request = AppendRequest::new(
-                AppendRequest::new(vec![timestamp_only_batch(2)?, timestamp_only_batch(5)?])
-                    .max_rows_per_row_group(inner_limit),
+                AppendRequest::new(vec![
+                    timestamp_only_batch(2)?,
+                    timestamp_only_batch_from(2, 5)?,
+                ])
+                .max_rows_per_row_group(inner_limit),
             );
             let request = match outer_limit {
                 Some(limit) => request.max_rows_per_row_group(limit),
@@ -2515,6 +2537,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_implicit_interval_rolls_back_first_append() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(
+            location.clone(),
+            TableMeta::new_time_series(timestamp_only_index()),
+        )
+        .await?;
+        let state_before = table.state().clone();
+
+        let error = table
+            .append(timestamp_only_batch_from_values([0, 30_000])?)
+            .await
+            .expect_err("duplicate implicit interval must fail");
+
+        assert!(matches!(
+            error,
+            TableError::DuplicateIndexInterval {
+                example_identity: None,
+                example_index_interval,
+                ..
+            } if example_index_interval.to_string()
+                == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        assert_eq!(
+            TimeSeriesTable::open(location).await?.state(),
+            &state_before
+        );
+
+        assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+        assert!(table.state().table_meta.logical_schema.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_entity_interval_leaves_nonempty_table_unchanged() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        assert_eq!(
+            table
+                .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+                .await?,
+            2
+        );
+        let state_before = table.state().clone();
+        let data_before = data_files(temp.path())?;
+        let coverage_before = coverage_files(temp.path())?;
+
+        let error = table
+            .append(time_series_batch(
+                vec![60_000, 90_000],
+                vec!["A", "A"],
+                vec![2.0, 3.0],
+            )?)
+            .await
+            .expect_err("duplicate entity interval must fail");
+        let expected_identity = EntityIdentity::try_new(vec!["A".into()])?;
+
+        assert!(matches!(
+            error,
+            TableError::DuplicateIndexInterval {
+                example_identity: Some(example_identity),
+                example_index_interval,
+                ..
+            } if example_identity == expected_identity
+                && example_index_interval.to_string()
+                    == "[1970-01-01T00:01:00Z, 1970-01-01T00:02:00Z)"
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.log.load_current_version().await?, 2);
+        assert_eq!(data_files(temp.path())?, data_before);
+        assert_eq!(coverage_files(temp.path())?, coverage_before);
+        assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
+        assert_eq!(
+            TimeSeriesTable::open(location).await?.state(),
+            &state_before
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_updates_state_and_log() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -3136,7 +3245,7 @@ mod tests {
                     price: 10.0,
                 },
                 TestRow {
-                    ts_millis: 2_000,
+                    ts_millis: 61_000,
                     symbol: "A",
                     price: 20.0,
                 },
@@ -3153,7 +3262,7 @@ mod tests {
                     price: 30.0,
                 },
                 TestRow {
-                    ts_millis: 121_000,
+                    ts_millis: 180_000,
                     symbol: "A",
                     price: 40.0,
                 },
