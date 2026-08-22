@@ -331,6 +331,19 @@ pub enum TableError {
         source: SegmentCoverageError,
     },
 
+    /// Two incoming rows for one complete entity identity occupy the same interval.
+    #[snafu(display(
+        "Duplicate ordered-index interval {example_index_interval} while appending {segment_path}"
+    ))]
+    DuplicateIndexInterval {
+        /// Relative path of the generated segment being appended.
+        segment_path: String,
+        /// Complete entity identity, or `None` for a table without entity columns.
+        example_identity: Option<EntityIdentity>,
+        /// Logical ordered-index interval occupied by both rows.
+        example_index_interval: LogicalBucketRange,
+    },
+
     /// Table coverage pointer uses a different ordered-index descriptor.
     #[snafu(display(
         "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
@@ -430,4 +443,21 @@ pub enum TableError {
         "Cannot append because table has segments but no table coverage snapshot pointer in state"
     ))]
     MissingTableCoveragePointer,
+}
+
+impl From<SegmentCoverageError> for TableError {
+    fn from(source: SegmentCoverageError) -> Self {
+        match source {
+            SegmentCoverageError::DuplicateIndexInterval {
+                path,
+                example_identity,
+                example_index_interval,
+            } => Self::DuplicateIndexInterval {
+                segment_path: path,
+                example_identity,
+                example_index_interval,
+            },
+            source => Self::SegmentCoverage { source },
+        }
+    }
 }

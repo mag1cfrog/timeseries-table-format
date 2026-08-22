@@ -85,7 +85,7 @@ def test_create_append_register_sql_roundtrip(tmp_path):
 
 def test_uint64_create_append_session_roundtrip_and_signed_rollback(tmp_path):
     table_root = tmp_path / "counters_tbl"
-    bucket_width = 2**64 - 1
+    bucket_width = 1
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
         index_column="idx",

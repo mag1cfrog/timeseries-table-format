@@ -51,15 +51,15 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
     write_parquet_rows(
         &tmp.path().join(rel1),
-        &[(1_000, "A", 10.0), (2_000, "A", 20.0)],
+        &[(1_000, "A", 10.0), (2_000, "B", 20.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join(rel2),
-        &[(120_000, "A", 30.0), (121_000, "A", 40.0)],
+        &[(120_000, "A", 30.0), (121_000, "B", 40.0)],
     )?;
     write_parquet_rows(
         &tmp.path().join(rel3),
-        &[(240_000, "A", 50.0), (241_000, "A", 60.0)],
+        &[(240_000, "A", 50.0), (241_000, "B", 60.0)],
     )?;
 
     let v2 = table

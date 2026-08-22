@@ -476,14 +476,14 @@ fn cli_int64_create_append_query_and_wrong_domain_rollback()
     write_indexed_parquet(
         &negative,
         DataType::Int64,
-        Arc::new(Int64Array::from(vec![-20, -11])),
+        Arc::new(Int64Array::from(vec![-21, -11])),
         &["negative", "negative"],
     )?;
     let nonnegative = tmp.path().join("nonnegative.parquet");
     write_indexed_parquet(
         &nonnegative,
         DataType::Int64,
-        Arc::new(Int64Array::from(vec![0, 9, 20])),
+        Arc::new(Int64Array::from(vec![0, 10, 20])),
         &["nonnegative", "nonnegative", "nonnegative"],
     )?;
     for source in [&negative, &nonnegative] {
@@ -512,7 +512,7 @@ fn cli_int64_create_append_query_and_wrong_domain_rollback()
     assert_cli_success(&output);
     assert_eq!(
         std::fs::read_to_string(query_output)?,
-        "idx,tag\n-11,negative\n0,nonnegative\n9,nonnegative\n"
+        "idx,tag\n-11,negative\n0,nonnegative\n"
     );
 
     let table = open_table_blocking(&table_root)?;

@@ -89,7 +89,8 @@ fn generated_batch(
         .checked_mul(payload_bytes)
         .ok_or_else(|| ArrowError::ComputeError("row-group payload size overflow".to_string()))?;
 
-    let timestamps = TimestampMillisecondArray::from_iter_values(first..end);
+    let timestamps =
+        TimestampMillisecondArray::from_iter_values((first..end).map(|value| value * 1_000));
     let mut payloads = BinaryBuilder::with_capacity(rows_per_group, payload_capacity);
     let mut payload = vec![0xA5; payload_bytes];
     for row in first..end {
@@ -119,7 +120,10 @@ async fn prepare(
     let total_rows = row_groups
         .checked_mul(rows_per_group)
         .ok_or_else(|| invalid_data("total row count overflow"))?;
-    i64::try_from(total_rows).map_err(|_| invalid_data("timestamps exceed i64"))?;
+    total_rows
+        .checked_mul(1_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| invalid_data("timestamps exceed i64"))?;
     let expected_rows_per_group = i64::try_from(rows_per_group)?;
 
     let index = IndexSpec {

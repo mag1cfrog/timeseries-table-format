@@ -426,8 +426,7 @@ fn write_external_normalized_parquet(
 }
 
 fn table_definition() -> Result<TableMeta, Box<dyn std::error::Error>> {
-    let bucket_width = NonZeroU64::new(u64::from(u32::MAX) + 1)
-        .ok_or_else(|| invalid_data("benchmark bucket width must be nonzero"))?;
+    let bucket_width = NonZeroU64::MIN;
     Ok(TableMeta::new_time_series_with_schema(
         IndexSpec {
             column: INDEX_COLUMN.to_string(),
@@ -443,9 +442,13 @@ fn benchmark_table_definition_report() -> TableDefinitionReport {
         index_column: INDEX_COLUMN.to_string(),
         incoming_index_type: "uint32".to_string(),
         registered_index_type: "uint64".to_string(),
-        bucket_width: u64::from(u32::MAX) + 1,
+        bucket_width: 1,
         entity_columns: Vec::new(),
     }
+}
+
+fn expected_coverage_ratio(workload: Workload) -> f64 {
+    workload.row_count as f64 / (u64::from(u32::MAX) as f64 + 1.0)
 }
 
 fn writer_properties_report(row_group_rows: usize) -> Result<WriterPropertiesReport, io::Error> {
@@ -535,11 +538,8 @@ async fn validate_table(
 
     let scan_end = expected_max + 1;
     let coverage_ratio = table.coverage_ratio_for_range(0_u64, scan_end).await?;
-    if coverage_ratio != 1.0 {
-        return Err(invalid_data(format!(
-            "expected complete coverage, found ratio {coverage_ratio}"
-        ))
-        .into());
+    if coverage_ratio != expected_coverage_ratio(workload) {
+        return Err(invalid_data(format!("unexpected coverage ratio {coverage_ratio}")).into());
     }
 
     let mut stream = table.scan_range(0_u64, scan_end).await?;
