@@ -7,6 +7,11 @@ Rust library, CLI, and Python releases.
 ## 0.4.0
 
 
+### Breaking Changes
+
+- Remove the path-first Rust methods `append_parquet_segment`, `append_parquet_from_path`, `append_parquet_segment_with_report`, and `append_parquet_from_path_with_report`, and the Python `append_parquet` method. Rust callers should pass record batches or a schema-bearing reader to `TimeSeriesTable::append`; Python callers should pass a supported Arrow source to `TimeSeriesTable.append`. To ingest a Parquet file lazily, open it as a batch reader first. A successful append returns the committed table version, not the generated segment path.
+
+
 ### Bug Fixes
 
 - Upgrade PyO3 to 0.29 ([#301](https://github.com/mag1cfrog/timeseries-table-format/pull/301)) ([888fd9a](https://github.com/mag1cfrog/timeseries-table-format/commit/888fd9a1ee7d881a892f75b6ea36b52b203bc772))

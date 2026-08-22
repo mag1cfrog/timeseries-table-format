@@ -48,6 +48,8 @@ Assuming `prices.parquet` contains a Timestamp column named `ts` and a string
 column named `symbol`:
 
 ```python
+import pyarrow as pa
+import pyarrow.parquet as pq
 import timeseries_table_format as ttf
 
 table = ttf.TimeSeriesTable.create(
@@ -57,7 +59,13 @@ table = ttf.TimeSeriesTable.create(
     bucket="1h",
     entity_columns=["symbol"],
 )
-table.append_parquet("prices.parquet")
+parquet_file = pq.ParquetFile("prices.parquet")
+version = table.append(
+    pa.RecordBatchReader.from_batches(
+        parquet_file.schema_arrow,
+        parquet_file.iter_batches(),
+    )
+)
 
 session = ttf.Session()
 session.register_tstable("prices", "prices")

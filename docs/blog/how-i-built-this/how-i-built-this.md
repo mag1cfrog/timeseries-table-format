@@ -86,14 +86,19 @@ with tempfile.TemporaryDirectory() as d:
         str(incoming),
     )
 
-    print("new version:", tbl.append_parquet(str(incoming)))
+    parquet_file = pq.ParquetFile(incoming)
+    reader = pa.RecordBatchReader.from_batches(
+        parquet_file.schema_arrow,
+        parquet_file.iter_batches(),
+    )
+    print("new version:", tbl.append(reader))
 ```
 
 > What landed on disk (conceptually):
 >
 > - prices_tbl/_timeseries_log/CURRENT
 > - prices_tbl/_timeseries_log/0000000001.json (table metadata commit)
-> - prices_tbl/data/incoming.parquet (if the input file was outside the table root and had to be copied in)
+> - `prices_tbl/data/<generated UUID>.parquet`
 > - prices_tbl/_timeseries_log/0000000002.json (append commit)
 > - prices_tbl/_timeseries_log/CURRENT now points to version 2
 
@@ -146,6 +151,14 @@ import pyarrow.parquet as pq
 import timeseries_table_format as ttf
 
 
+def parquet_reader(path: Path) -> pa.RecordBatchReader:
+    parquet_file = pq.ParquetFile(path)
+    return pa.RecordBatchReader.from_batches(
+        parquet_file.schema_arrow,
+        parquet_file.iter_batches(),
+    )
+
+
 with tempfile.TemporaryDirectory() as d:
     base = Path(d)
 
@@ -175,7 +188,7 @@ with tempfile.TemporaryDirectory() as d:
         ),
         str(prices_seg),
     )
-    prices.append_parquet(str(prices_seg))
+    prices.append(parquet_reader(prices_seg))
 
     volumes_root = base / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
@@ -200,7 +213,7 @@ with tempfile.TemporaryDirectory() as d:
         ),
         str(volumes_seg),
     )
-    volumes.append_parquet(str(volumes_seg))
+    volumes.append(parquet_reader(volumes_seg))
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(prices_root))
