@@ -10,7 +10,7 @@ TimeseriesTableError
 |-- StorageError          - filesystem or I/O problem (e.g. missing path, permission denied)
 |-- ConflictError         - concurrent modification conflict on table metadata
 |-- CoverageOverlapError  - append rejected because its coverage overlaps existing data
-|-- SchemaMismatchError   - Parquet schema does not match the table's established schema
+|-- SchemaMismatchError   - incoming Arrow schema does not match the table's established schema
 `-- DataFusionError       - SQL query failed inside the DataFusion engine
 ```
 

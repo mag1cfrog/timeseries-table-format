@@ -56,25 +56,25 @@ where
         .await
 }
 
-static PARQUET_FIXTURE_NAMES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static FIXTURE_NAME_MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
-fn parquet_fixture_names() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
-    PARQUET_FIXTURE_NAMES
+fn lock_fixture_name_map() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    FIXTURE_NAME_MAP
         .get_or_init(Default::default)
         .lock()
         .expect("fixture name registry")
 }
 
-fn logical_parquet_fixture_name(name: &str) -> String {
-    parquet_fixture_names()
+fn original_fixture_name(name: &str) -> String {
+    lock_fixture_name_map()
         .get(name)
         .cloned()
         .unwrap_or_else(|| name.to_string())
 }
 
-fn parquet_fixture_position(plan: &str, fixture_name: &str) -> Option<usize> {
+fn find_fixture_position_in_plan(plan: &str, fixture_name: &str) -> Option<usize> {
     plan.find(fixture_name).or_else(|| {
-        parquet_fixture_names()
+        lock_fixture_name_map()
             .iter()
             .find_map(|(actual, fixture)| {
                 if fixture == fixture_name {
@@ -112,11 +112,11 @@ async fn append_parquet_fixture(
         .expect("fixture filename")
         .to_string_lossy()
         .into_owned();
-    parquet_fixture_names().insert(committed_name, fixture_name);
+    lock_fixture_name_map().insert(committed_name, fixture_name);
     Ok((version, committed_path))
 }
 
-async fn append_parquet_layout_fixture(
+async fn append_fixture_preserving_parquet_layout(
     table: &mut TimeSeriesTable,
     root: &Path,
     relative_path: &str,
@@ -887,7 +887,7 @@ async fn create_single_segment_table_with_props(
 
     let abs = tmp.path().join(rel_path);
     write_parquet_with_props(&abs, rows, false, Some(props))?;
-    append_parquet_layout_fixture(&mut table, tmp.path(), rel_path).await?;
+    append_fixture_preserving_parquet_layout(&mut table, tmp.path(), rel_path).await?;
 
     Ok(table)
 }
@@ -957,7 +957,7 @@ async fn run_numeric_query(
 fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str]) {
     for file in all_files {
         assert_eq!(
-            parquet_fixture_position(plan, file).is_some(),
+            find_fixture_position_in_plan(plan, file).is_some(),
             expected_files.contains(file),
             "unexpected selection for {file}; plan:\n{plan}"
         );
@@ -966,7 +966,7 @@ fn assert_planned_files(plan: &str, all_files: &[&str], expected_files: &[&str])
     let positions = expected_files
         .iter()
         .map(|file| {
-            parquet_fixture_position(plan, file)
+            find_fixture_position_in_plan(plan, file)
                 .unwrap_or_else(|| panic!("expected plan to contain {file}; plan:\n{plan}"))
         })
         .collect::<Vec<_>>();
@@ -990,7 +990,7 @@ fn planned_file_names(plan: &dyn ExecutionPlan) -> TestResult<Vec<String>> {
             file.object_meta
                 .location
                 .filename()
-                .map(logical_parquet_fixture_name)
+                .map(original_fixture_name)
                 .ok_or_else(|| "planned file path has no filename".into())
         })
         .collect()
