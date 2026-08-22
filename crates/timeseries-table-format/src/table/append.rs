@@ -1810,7 +1810,7 @@ mod tests {
             .expect_err("stale streaming append must conflict");
 
         assert!(matches!(
-            error,
+            &error,
             TableError::TransactionLog {
                 source: CommitError::Conflict {
                     expected: 1,
@@ -2651,9 +2651,14 @@ mod tests {
             &[1.0, 2.0, 3.0, 4.0],
         )?;
 
-        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
+        assert_eq!(append_parquet_fixture(&mut table, rel_path).await?, 2);
 
-        let segment = table.state.segments.get(rel_path).expect("segment present");
+        let segment = table
+            .state
+            .segments
+            .values()
+            .next()
+            .expect("segment present");
         assert_eq!(segment.entity_layout, SegmentEntityLayout::NotApplicable);
         assert_eq!(segment.index_min, IndexValue::Int64(i64::MIN));
         assert_eq!(segment.index_max, IndexValue::Int64(i64::MAX));
@@ -2661,7 +2666,8 @@ mod tests {
         assert_eq!(pointer.index_kind, index.kind);
         let persisted = read_coverage_sidecar(&location, Path::new(&pointer.coverage_path)).await?;
         let expected =
-            compute_segment_coverage(&location, Path::new(rel_path), table.index_spec()).await?;
+            compute_segment_coverage(&location, Path::new(&segment.path), table.index_spec())
+                .await?;
         assert_eq!(persisted, expected);
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state, table.state);
@@ -2683,7 +2689,7 @@ mod tests {
             ("data/positive.parquet", &[5, 15][..]),
         ] {
             write_arrow_parquet_int_time(&tmp.path().join(path), values, &["A", "A"], &[1.0, 2.0])?;
-            table.append_parquet_segment(path).await?;
+            append_parquet_fixture(&mut table, path).await?;
         }
         assert_eq!(table.state.version, 3);
 
@@ -2691,8 +2697,7 @@ mod tests {
         let coverage_before = coverage_files(tmp.path())?;
         let overlap_path = "data/negative-overlap.parquet";
         write_arrow_parquet_int_time(&tmp.path().join(overlap_path), &[-19], &["A"], &[3.0])?;
-        let overlap_error = table
-            .append_parquet_segment(overlap_path)
+        let overlap_error = append_parquet_fixture(&mut table, overlap_path)
             .await
             .expect_err("negative bucket overlap must fail");
         assert!(matches!(
@@ -2715,11 +2720,10 @@ mod tests {
             Arc::new(Int64Array::from(vec![100])),
         )?;
         assert!(matches!(
-            table
-                .append_parquet_segment(mismatch_path)
+            append_parquet_fixture(&mut table, mismatch_path)
                 .await
                 .expect_err("later schema mismatch must fail"),
-            TableError::SegmentSchemaCompatibility { .. }
+            TableError::SchemaCompatibility { .. }
         ));
         assert_eq!(table.state, state_before);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -2727,7 +2731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_supports_registered_uint64_index() -> TestResult {
+    async fn append_supports_registered_uint64_index() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::UInt64 {
@@ -2743,9 +2747,14 @@ mod tests {
             Arc::new(UInt64Array::from(vec![0, i64::MAX as u64 + 1, u64::MAX])),
         )?;
 
-        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
+        assert_eq!(append_parquet_fixture(&mut table, rel_path).await?, 2);
 
-        let segment = table.state.segments.get(rel_path).expect("segment present");
+        let segment = table
+            .state
+            .segments
+            .values()
+            .next()
+            .expect("segment present");
         assert_eq!(segment.index_min, IndexValue::UInt64(0));
         assert_eq!(segment.index_max, IndexValue::UInt64(u64::MAX));
         assert_eq!(
@@ -2775,7 +2784,10 @@ mod tests {
             DataType::UInt64,
             Arc::new(UInt64Array::from(vec![u64::MAX - 20])),
         )?;
-        assert_eq!(table.append_parquet_segment(non_overlap_path).await?, 3);
+        assert_eq!(
+            append_parquet_fixture(&mut table, non_overlap_path).await?,
+            3
+        );
 
         let state_before = table.state.clone();
         let coverage_before = coverage_files(tmp.path())?;
@@ -2785,8 +2797,7 @@ mod tests {
             DataType::UInt64,
             Arc::new(UInt64Array::from(vec![u64::MAX - 1])),
         )?;
-        let overlap_error = table
-            .append_parquet_segment(overlap_path)
+        let overlap_error = append_parquet_fixture(&mut table, overlap_path)
             .await
             .expect_err("large uint64 bucket overlap must fail");
         assert!(matches!(
@@ -2818,25 +2829,24 @@ mod tests {
         let rel_path = "data/signed.parquet";
         write_arrow_parquet_int_time(&tmp.path().join(rel_path), &[1], &["A"], &[1.0])?;
 
-        let error = table
-            .append_parquet_segment(rel_path)
+        let error = append_parquet_fixture(&mut table, rel_path)
             .await
             .expect_err("signed data must not append to a uint64 index");
 
-        assert!(matches!(
+        assert!(
+            matches!(
             error,
-            TableError::SegmentMeta {
-                source: SegmentError::Meta {
-                    source: SegmentMetaError::OrderedIndexColumn {
-                        source: ParquetIndexColumnError {
-                            expected_domain: "uint64",
-                            observed_type,
-                            ..
-                        }
+            TableError::SchemaCompatibility {
+                source:
+                    crate::metadata::schema_compat::SchemaCompatibilityError::IndexKindMismatch {
+                        expected: "uint64",
+                        actual: LogicalDataType::Int64,
+                        ..
                     }
-                }
-            } if observed_type.contains("logical=None")
-        ));
+            }
+        ),
+            "unexpected error: {error:?}"
+        );
         assert_eq!(table.state, state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
