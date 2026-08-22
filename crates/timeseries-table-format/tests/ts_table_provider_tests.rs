@@ -1149,7 +1149,7 @@ fn scalar_i64_from_array(array: &dyn Array) -> Result<i64, Box<dyn std::error::E
 }
 
 #[tokio::test]
-async fn streaming_append_public_sources_round_trip_exact_rows() -> TestResult {
+async fn append_public_sources_round_trip_exact_rows() -> TestResult {
     let tmp = TempDir::new()?;
     let location = TableLocation::local(tmp.path());
     let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
@@ -1377,7 +1377,7 @@ async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestRe
 }
 
 #[tokio::test]
-async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult {
+async fn append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult {
     let union = DataType::Union(
         UnionFields::try_new([0], [Field::new("member", DataType::Int64, true)])?,
         UnionMode::Sparse,
@@ -1458,7 +1458,7 @@ async fn streaming_append_rejects_panic_inducing_schemas_without_artifacts() -> 
 }
 
 #[tokio::test]
-async fn streaming_append_rejects_adversarial_source_boundaries_without_artifacts() -> TestResult {
+async fn append_rejects_adversarial_source_boundaries_without_artifacts() -> TestResult {
     let schema = make_append_batch(&[])?.schema();
     let wrong_zero = RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
         "wrong",
@@ -1512,7 +1512,7 @@ async fn streaming_append_rejects_adversarial_source_boundaries_without_artifact
 }
 
 #[tokio::test]
-async fn streaming_append_round_trips_signed_and_unsigned_indexes() -> TestResult {
+async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
     let signed_tmp = TempDir::new()?;
     let signed_location = TableLocation::local(signed_tmp.path());
     let mut signed = TimeSeriesTable::create(
@@ -1582,7 +1582,7 @@ async fn streaming_append_round_trips_signed_and_unsigned_indexes() -> TestResul
 }
 
 #[tokio::test]
-async fn streaming_append_round_trips_composite_entity_identity_order() -> TestResult {
+async fn append_round_trips_composite_entity_identity_order() -> TestResult {
     let tmp = TempDir::new()?;
     let location = TableLocation::local(tmp.path());
     let mut table = TimeSeriesTable::create(location.clone(), make_composite_table_meta()).await?;
@@ -1621,7 +1621,7 @@ async fn streaming_append_round_trips_composite_entity_identity_order() -> TestR
 }
 
 #[tokio::test]
-async fn streaming_append_randomized_partitions_preserve_exact_rows() -> TestResult {
+async fn append_randomized_partitions_preserve_exact_rows() -> TestResult {
     for case_seed in [1_u64, 0x1234_5678, 0xdead_beef, u64::MAX] {
         let mut random = case_seed;
         let mut rows = (0..128)

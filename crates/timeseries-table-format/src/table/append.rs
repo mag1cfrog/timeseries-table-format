@@ -235,8 +235,11 @@ impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     }
 }
 
-fn ensure_batch_schema(schema: &SchemaRef, batch: &ArrowRecordBatch) -> Result<(), TableError> {
-    if batch.schema() == *schema {
+fn ensure_batch_matches_reader_schema(
+    reader_schema: &SchemaRef,
+    batch: &ArrowRecordBatch,
+) -> Result<(), TableError> {
+    if batch.schema() == *reader_schema {
         Ok(())
     } else {
         Err(TableError::AppendSource {
@@ -272,7 +275,7 @@ impl TimeSeriesTable {
         }
     }
 
-    fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
+    fn validate_append_source_schema(&self, schema: &Schema) -> Result<(), TableError> {
         ensure_existing_segments_have_coverage(&self.state)?;
         let segment_schema = LogicalSchema::try_from_arrow_schema(schema).map_err(|source| {
             TableError::AppendSource {
@@ -297,7 +300,7 @@ impl TimeSeriesTable {
         Ok(())
     }
 
-    async fn finalize_generated_parquet_segment(
+    async fn publish_generated_parquet_segment(
         &mut self,
         relative_path: &str,
         owned_data_guard: &mut storage::FileCleanupGuard,
@@ -541,7 +544,7 @@ impl TimeSeriesTable {
             }
         };
 
-        // OCC invariant: a successful commit_with_expected_version must return
+        // OCC invariant: a successful transaction commit must return
         // the same "next" version we predicted when constructing `snapshot_path`.
         // If this ever diverges, it indicates a severe bug between snapshot path
         // construction and the transaction log implementation, so we panic rather
@@ -574,7 +577,6 @@ impl TimeSeriesTable {
         span.record("outcome", "succeeded");
         tracing::info!(
             name: "table.append",
-            source_mode = "arrow_stream",
             expected_version,
             committed_version = new_version,
             row_count,
@@ -597,7 +599,6 @@ impl TimeSeriesTable {
         level = "debug",
         skip_all,
         fields(
-            source_mode = "arrow_stream",
             expected_version = self.state.version,
             segment_path = tracing::field::Empty,
             row_count = tracing::field::Empty,
@@ -620,13 +621,13 @@ impl TimeSeriesTable {
             }
             let mut reader = source.into_record_batch_reader()?;
             let schema = reader.schema();
-            self.validate_stream_schema(schema.as_ref())?;
+            self.validate_append_source_schema(schema.as_ref())?;
 
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
                     return Err(TableError::EmptyAppendSource);
                 };
-                ensure_batch_schema(&schema, &batch)?;
+                ensure_batch_matches_reader_schema(&schema, &batch)?;
                 if batch.num_rows() != 0 {
                     break batch;
                 }
@@ -659,7 +660,7 @@ impl TimeSeriesTable {
 
                 for batch in reader {
                     let batch = batch.context(AppendSourceSnafu)?;
-                    ensure_batch_schema(&schema, &batch)?;
+                    ensure_batch_matches_reader_schema(&schema, &batch)?;
                     if batch.num_rows() != 0 {
                         writer.write(&batch).context(AppendParquetSnafu)?;
                     }
@@ -681,7 +682,7 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .finalize_generated_parquet_segment(&relative_path, &mut data_guard)
+                .publish_generated_parquet_segment(&relative_path, &mut data_guard)
                 .await
             {
                 Ok(version) => Ok(version),
@@ -1140,7 +1141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_writes_one_segment_and_returns_versions() -> TestResult {
+    async fn append_writes_one_segment_and_returns_versions() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1174,7 +1175,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
+    async fn append_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1193,7 +1194,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn append_stream_yields_while_skipping_zero_row_batches() -> TestResult {
+    async fn append_yields_while_skipping_zero_row_batches() -> TestResult {
         const BATCH_COUNT: usize = 64;
 
         let temp = TempDir::new()?;
@@ -1225,7 +1226,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelling_streaming_append_during_batch_reads_removes_output() -> TestResult {
+    async fn cancelling_append_during_batch_reads_removes_output() -> TestResult {
         const BATCH_COUNT: usize = 64;
 
         let temp = TempDir::new()?;
@@ -1261,7 +1262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_rejects_empty_sources_before_creating_data() -> TestResult {
+    async fn append_rejects_empty_sources_before_creating_data() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1291,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_cleans_up_after_later_schema_or_source_error() -> TestResult {
+    async fn append_cleans_up_after_later_schema_or_source_error() -> TestResult {
         for (configured, source_error) in
             [(false, false), (false, true), (true, false), (true, true)]
         {
@@ -1349,7 +1350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_cleans_up_writer_lifecycle_failures() -> TestResult {
+    async fn append_cleans_up_writer_lifecycle_failures() -> TestResult {
         #[derive(Clone, Copy, Debug)]
         enum Stage {
             Write,
@@ -1399,8 +1400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_streaming_append_before_publication_removes_owned_artifacts() -> TestResult
-    {
+    async fn cancelling_append_before_publication_removes_owned_artifacts() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simultaneous_streaming_appends_publish_one_and_clean_loser() -> TestResult {
+    async fn simultaneous_appends_publish_one_and_clean_loser() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1555,7 +1555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_preserves_writer_error_and_failed_cleanup_path() -> TestResult {
+    async fn append_preserves_writer_error_and_failed_cleanup_path() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
@@ -1597,7 +1597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
+    async fn append_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1649,7 +1649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
+    async fn append_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1704,7 +1704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_conflict_reports_every_failed_cleanup_path() -> TestResult {
+    async fn append_conflict_reports_every_failed_cleanup_path() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1764,7 +1764,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_validates_schema_before_creating_data() -> TestResult {
+    async fn append_validates_schema_before_creating_data() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1780,7 +1780,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_removes_owned_data_after_overlap() -> TestResult {
+    async fn append_removes_owned_data_after_overlap() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1805,7 +1805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_adopts_schema_on_first_append() -> TestResult {
+    async fn append_adopts_schema_on_first_append() -> TestResult {
         let temp = TempDir::new()?;
         let mut meta = make_basic_table_meta();
         meta.logical_schema = None;
@@ -1818,7 +1818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_preserves_exact_schema_across_append_and_optimize() -> TestResult {
+    async fn append_preserves_exact_schema_through_optimize() -> TestResult {
         let timezone = "America/Phoenix";
         let schema = Arc::new(Schema::new(vec![
             Field::new(
