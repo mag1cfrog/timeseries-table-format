@@ -781,7 +781,6 @@ mod tests {
     };
     use futures::FutureExt;
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
-    use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fs::File;
