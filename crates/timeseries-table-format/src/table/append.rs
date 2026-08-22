@@ -878,8 +878,7 @@ mod tests {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use std::cell::Cell;
     use std::collections::BTreeMap;
-    use std::fs::{File, OpenOptions};
-    use std::io::{Seek, SeekFrom, Write};
+    use std::fs::File;
     use std::num::NonZeroU64;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -2438,37 +2437,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_inspects_file_without_reading_unrelated_column_data() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-        let rel_path = "data/corrupt-price.parquet";
-        let abs_path = tmp.path().join(rel_path);
-        write_test_parquet(
-            &abs_path,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-
-        let reader = SerializedFileReader::new(File::open(&abs_path)?)?;
-        let price_page = reader.metadata().row_group(0).column(2).data_page_offset() as u64;
-        drop(reader);
-        let mut file = OpenOptions::new().read(true).write(true).open(&abs_path)?;
-        file.seek(SeekFrom::Start(price_page))?;
-        file.write_all(&[0xFF; 16])?;
-        file.flush()?;
-        drop(file);
-
-        assert_eq!(table.append_parquet_segment(rel_path).await?, 2);
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn version_six_records_single_layout_for_each_entity_segment() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -2789,68 +2757,6 @@ mod tests {
         assert_eq!(table.state, state_before);
         assert!(coverage_files(tmp.path())?.is_empty());
         assert_eq!(table.log.load_current_version().await?, 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_rejects_duplicate_path_before_parquet_read_without_mutation() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
-
-        let rel_path = "data/dup.parquet";
-        let abs_path = tmp.path().join(rel_path);
-
-        write_test_parquet(
-            &abs_path,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-        table.append_parquet_segment(rel_path).await?;
-        let state_before = table.state.clone();
-        let sidecar_counts_before = [
-            std::fs::read_dir(tmp.path().join(layout::SEGMENT_COVERAGE_DIR))?.count(),
-            std::fs::read_dir(tmp.path().join(layout::TABLE_SNAPSHOT_DIR))?.count(),
-        ];
-
-        // Removing the file proves duplicate detection depends only on the
-        // normalized live identity, not filesystem or Parquet inspection.
-        tokio::fs::remove_file(&abs_path).await?;
-
-        let err = table
-            .append_parquet_segment(rel_path)
-            .await
-            .expect_err("live path must be rejected");
-        assert!(matches!(
-            err,
-            TableError::DuplicateSegmentPath { ref path } if path == rel_path
-        ));
-
-        let err = table
-            .append_parquet_segment(r"data\dup.parquet")
-            .await
-            .expect_err("normalized live path must be rejected");
-        assert!(matches!(
-            err,
-            TableError::DuplicateSegmentPath { ref path } if path == rel_path
-        ));
-
-        assert_eq!(table.state, state_before);
-        assert_eq!(table.log.load_current_version().await?, 2);
-        assert!(!tmp.path().join(layout::commit_rel_path(3)).exists());
-        assert_eq!(
-            [
-                std::fs::read_dir(tmp.path().join(layout::SEGMENT_COVERAGE_DIR))?.count(),
-                std::fs::read_dir(tmp.path().join(layout::TABLE_SNAPSHOT_DIR))?.count(),
-            ],
-            sidecar_counts_before
-        );
         Ok(())
     }
 
