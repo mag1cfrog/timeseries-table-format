@@ -1277,7 +1277,7 @@ mod tests {
 
         let rel = "data/segment.parquet";
         test_common::write_parquet_rows(&tmp.path().join(rel), rows)?;
-        table.append_parquet_segment(rel).await?;
+        append_parquet_file(&mut table, tmp.path(), &tmp.path().join(rel)).await?;
 
         Ok(tmp)
     }
@@ -1313,7 +1313,7 @@ mod tests {
         test_common::write_parquet_rows_with_base(&tmp.path().join(rel), 3, 1_700_000_100_000)?;
         let location = TableLocation::local(tmp.path());
         let mut other = TimeSeriesTable::open(location).await?;
-        other.append_parquet_segment(rel).await?;
+        append_parquet_file(&mut other, tmp.path(), &tmp.path().join(rel)).await?;
 
         let res = process_command(&mut ctx, &query_sql(&table_name))
             .await?
@@ -1358,7 +1358,7 @@ mod tests {
         test_common::write_parquet_rows_with_base(&tmp.path().join(rel), 3, 1_700_000_100_000)?;
         let location = TableLocation::local(tmp.path());
         let mut other = TimeSeriesTable::open(location.clone()).await?;
-        other.append_parquet_segment(rel).await?;
+        append_parquet_file(&mut other, tmp.path(), &tmp.path().join(rel)).await?;
 
         let current_version = other.current_version().await?;
         assert!(current_version > ctx.table.state().version);
