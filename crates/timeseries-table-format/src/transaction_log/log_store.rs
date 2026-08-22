@@ -288,7 +288,7 @@ impl TransactionLogStore {
         //    changes if the operations don't actually conflict, like Delta Lake).
         let commit_rel = Self::commit_rel_path(version);
         let mut commit_guard =
-            storage::prepare_file_cleanup_guard(self.location.as_ref(), &commit_rel)
+            storage::FileCleanupGuard::new_disarmed(self.location.as_ref(), &commit_rel)
                 .map_err(|source| CommitError::Storage { source })?;
         match storage::write_new(self.location.as_ref(), &commit_rel, &json).await {
             Ok(()) => commit_guard.arm(),

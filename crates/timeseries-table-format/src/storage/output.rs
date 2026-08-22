@@ -104,7 +104,7 @@ impl LocalSink {
             })?;
 
         let writer = io::BufWriter::new(file);
-        let guard = FileCleanupGuard::new(tmp_path.clone());
+        let guard = FileCleanupGuard::new_armed(tmp_path.clone());
 
         Ok(Self {
             path: tmp_path,
@@ -118,7 +118,7 @@ impl LocalSink {
         let path = join_local(location, rel_path)?;
         let file = create_new_file(&path).await?;
         let writer = io::BufWriter::new(file);
-        let guard = FileCleanupGuard::new(path.clone());
+        let guard = FileCleanupGuard::new_armed(path.clone());
         Ok(Self {
             path,
             finish: LocalFinish::Keep,

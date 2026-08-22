@@ -25,12 +25,17 @@ pub(crate) struct FileCleanupGuard {
 }
 
 impl FileCleanupGuard {
-    pub(super) fn new(path: PathBuf) -> Self {
+    pub(super) fn new_armed(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
 
-    fn prepared(path: PathBuf) -> Self {
-        Self { path, armed: false }
+    /// Resolve a path for a file that has not been created yet.
+    /// Arm the guard immediately after exclusive creation succeeds.
+    pub(crate) fn new_disarmed(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
+        Ok(Self {
+            path: join_local(location, rel_path)?,
+            armed: false,
+        })
     }
 
     pub(crate) fn arm(&mut self) {
@@ -250,7 +255,7 @@ async fn cleanup_created_file(
 }
 
 async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
-    let mut guard = FileCleanupGuard::new(path.to_owned());
+    let mut guard = FileCleanupGuard::new_armed(path.to_owned());
     #[cfg(test)]
     let injected_write_failure = take_write_new_failure(path);
     let result = async {
@@ -326,15 +331,6 @@ pub(super) fn join_local(location: &StorageLocation, rel: &Path) -> StorageResul
     }
 }
 
-/// Prepare a disarmed cleanup guard for a path this operation will create.
-/// Arm it immediately after exclusive creation succeeds.
-pub(crate) fn prepare_file_cleanup_guard(
-    location: &StorageLocation,
-    rel_path: &Path,
-) -> StorageResult<FileCleanupGuard> {
-    Ok(FileCleanupGuard::prepared(join_local(location, rel_path)?))
-}
-
 /// Open a stored Parquet file for asynchronous range reads.
 pub(crate) async fn open_parquet_reader(
     location: &StorageLocation,
@@ -395,7 +391,7 @@ pub async fn write_atomic(
             create_parent_dir(&abs).await?;
 
             let tmp_path = abs.with_extension("tmp");
-            let mut guard = FileCleanupGuard::new(tmp_path.clone());
+            let mut guard = FileCleanupGuard::new_armed(tmp_path.clone());
 
             #[cfg(test)]
             wait_at_atomic_write_pause(&ATOMIC_WRITE_OPEN_PAUSES, &abs).await;

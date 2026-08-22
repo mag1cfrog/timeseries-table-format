@@ -474,16 +474,18 @@ impl TimeSeriesTable {
             })?;
 
         let mut created_sidecars = Vec::new();
-        let mut segment_sidecar_guard =
-            storage::prepare_file_cleanup_guard(self.location().as_ref(), Path::new(&seg_cov_path))
-                .context(StorageSnafu)?;
+        let mut segment_sidecar_guard = storage::FileCleanupGuard::new_disarmed(
+            self.location().as_ref(),
+            Path::new(&seg_cov_path),
+        )
+        .context(StorageSnafu)?;
         write_coverage_sidecar_new_bytes(self.location(), Path::new(&seg_cov_path), &seg_cov_bytes)
             .await
             .map_err(|source| TableError::CoverageSidecar { source })?;
         segment_sidecar_guard.arm();
         created_sidecars.push(seg_cov_path.clone());
 
-        let mut snapshot_sidecar_guard = storage::prepare_file_cleanup_guard(
+        let mut snapshot_sidecar_guard = storage::FileCleanupGuard::new_disarmed(
             self.location().as_ref(),
             Path::new(&snapshot_path),
         )
@@ -636,7 +638,7 @@ impl TimeSeriesTable {
 
             let relative_path = format!("data/{}.parquet", Uuid::new_v4());
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            let mut data_guard = storage::prepare_file_cleanup_guard(
+            let mut data_guard = storage::FileCleanupGuard::new_disarmed(
                 self.location().as_ref(),
                 Path::new(&relative_path),
             )
