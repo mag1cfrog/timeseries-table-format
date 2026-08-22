@@ -1,0 +1,631 @@
+{
+  "artifacts_directory": null,
+  "benchmark": {
+    "binary": "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench",
+    "build_command": "cargo build --locked --release -p timeseries-table-format --features cli --example append_pipeline_bench",
+    "build_profile": "release",
+    "provenance": "repository_release_build"
+  },
+  "environment": {
+    "architecture": "x86_64",
+    "available_memory_bytes": 24566239232,
+    "benchmark_process_environment": {
+      "LC_ALL": "C"
+    },
+    "cpu_count": 16,
+    "kernel": "6.19.14-200.fc43.x86_64",
+    "operating_system": "Linux-6.19.14-200.fc43.x86_64-x86_64-with-glibc2.42",
+    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "measured_samples": [
+    {
+      "command": "/usr/bin/time -v -o /tmp/tstable-append-pipeline-5hm82x0u/measured/1/path-first/gnu-time.txt /home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode path-first --table /tmp/tstable-append-pipeline-5hm82x0u/measured/1/path-first/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821 --external-parquet /tmp/tstable-append-pipeline-5hm82x0u/measured/1/path-first/external/source.parquet",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": 3622108947,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 7244217894
+        },
+        "committed_version": 2,
+        "external_parquet_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/1/path-first/external/source.parquet",
+        "mode": "path-first",
+        "process_id": 1834084,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/1/path-first/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 7200663138,
+          "external_parquet_generation_ns": 3075946652,
+          "path_append_copy_commit_ns": 4124716145,
+          "streaming_append_ns": null
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/source.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "path-first",
+      "peak_rss_bytes": 2078322688,
+      "repetition": 1
+    },
+    {
+      "command": "/usr/bin/time -v -o /tmp/tstable-append-pipeline-5hm82x0u/measured/1/streaming/gnu-time.txt /home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode streaming --table /tmp/tstable-append-pipeline-5hm82x0u/measured/1/streaming/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": null,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 3622108947
+        },
+        "committed_version": 2,
+        "external_parquet_path": null,
+        "mode": "streaming",
+        "process_id": 1834214,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/1/streaming/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 3018737455,
+          "external_parquet_generation_ns": null,
+          "path_append_copy_commit_ns": null,
+          "streaming_append_ns": 3018737305
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/0558bc0e-565c-4742-a0f7-b12fb4878daf.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "streaming",
+      "peak_rss_bytes": 2045456384,
+      "repetition": 1
+    },
+    {
+      "command": "/usr/bin/time -v -o /tmp/tstable-append-pipeline-5hm82x0u/measured/2/streaming/gnu-time.txt /home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode streaming --table /tmp/tstable-append-pipeline-5hm82x0u/measured/2/streaming/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": null,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 3622108947
+        },
+        "committed_version": 2,
+        "external_parquet_path": null,
+        "mode": "streaming",
+        "process_id": 1834491,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/2/streaming/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 3008608601,
+          "external_parquet_generation_ns": null,
+          "path_append_copy_commit_ns": null,
+          "streaming_append_ns": 3008608450
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/5898e838-9479-44aa-a4e0-ec865b4b6f47.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "streaming",
+      "peak_rss_bytes": 2043043840,
+      "repetition": 2
+    },
+    {
+      "command": "/usr/bin/time -v -o /tmp/tstable-append-pipeline-5hm82x0u/measured/2/path-first/gnu-time.txt /home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode path-first --table /tmp/tstable-append-pipeline-5hm82x0u/measured/2/path-first/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821 --external-parquet /tmp/tstable-append-pipeline-5hm82x0u/measured/2/path-first/external/source.parquet",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": 3622108947,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 7244217894
+        },
+        "committed_version": 2,
+        "external_parquet_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/2/path-first/external/source.parquet",
+        "mode": "path-first",
+        "process_id": 1835011,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/2/path-first/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 7164048887,
+          "external_parquet_generation_ns": 3003721994,
+          "path_append_copy_commit_ns": 4160326593,
+          "streaming_append_ns": null
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/source.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "path-first",
+      "peak_rss_bytes": 2080399360,
+      "repetition": 2
+    },
+    {
+      "command": "/usr/bin/time -v -o /tmp/tstable-append-pipeline-5hm82x0u/measured/3/path-first/gnu-time.txt /home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode path-first --table /tmp/tstable-append-pipeline-5hm82x0u/measured/3/path-first/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821 --external-parquet /tmp/tstable-append-pipeline-5hm82x0u/measured/3/path-first/external/source.parquet",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": 3622108947,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 7244217894
+        },
+        "committed_version": 2,
+        "external_parquet_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/3/path-first/external/source.parquet",
+        "mode": "path-first",
+        "process_id": 1835113,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/3/path-first/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 7027585364,
+          "external_parquet_generation_ns": 2919882541,
+          "path_append_copy_commit_ns": 4107702252,
+          "streaming_append_ns": null
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/source.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "path-first",
+      "peak_rss_bytes": 2078629888,
+      "repetition": 3
+    },
+    {
+      "command": "/usr/bin/time -v -o /tmp/tstable-append-pipeline-5hm82x0u/measured/3/streaming/gnu-time.txt /home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode streaming --table /tmp/tstable-append-pipeline-5hm82x0u/measured/3/streaming/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": null,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 3622108947
+        },
+        "committed_version": 2,
+        "external_parquet_path": null,
+        "mode": "streaming",
+        "process_id": 1835162,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/measured/3/streaming/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 2973657007,
+          "external_parquet_generation_ns": null,
+          "path_append_copy_commit_ns": null,
+          "streaming_append_ns": 2973656787
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/bef9aa9a-ba1a-4d87-953d-1817556f2c1d.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "streaming",
+      "peak_rss_bytes": 2035843072,
+      "repetition": 3
+    }
+  ],
+  "medians": {
+    "path-first": {
+      "end_to_end_pipeline_ns": 7164048887,
+      "external_parquet_generation_ns": 3003721994,
+      "external_source_parquet_bytes": 3622108947,
+      "path_append_copy_commit_ns": 4124716145,
+      "peak_rss_bytes": 2078629888,
+      "table_owned_segment_bytes": 3622108947,
+      "total_retained_ingestion_bytes": 7244217894
+    },
+    "streaming": {
+      "end_to_end_pipeline_ns": 3008608601,
+      "peak_rss_bytes": 2043043840,
+      "streaming_append_ns": 3008608450,
+      "table_owned_segment_bytes": 3622108947,
+      "total_retained_ingestion_bytes": 3622108947
+    }
+  },
+  "repository": {
+    "commit_sha": "6efd03e859065db1e26766283a01840150618e82",
+    "worktree_dirty": false
+  },
+  "sampling": {
+    "execution_order": {
+      "measured": [
+        [
+          "path-first",
+          "streaming"
+        ],
+        [
+          "streaming",
+          "path-first"
+        ],
+        [
+          "path-first",
+          "streaming"
+        ]
+      ],
+      "warmups": [
+        "path-first",
+        "streaming"
+      ]
+    },
+    "measured_sample_count_per_mode": 3,
+    "warmup_count_per_mode": 1
+  },
+  "schema_version": 1,
+  "validation": {
+    "all_mode_pairs_equivalent": true,
+    "logical_result": {
+      "committed_version": 2,
+      "table_definition": {
+        "bucket_width": 1,
+        "entity_columns": [],
+        "index_column": "ts",
+        "index_type": "int64"
+      },
+      "validation": {
+        "column_checksums": {
+          "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+          "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+          "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+        },
+        "coverage_ratio": 1.0,
+        "index_max": 3466796,
+        "index_min": 0,
+        "ordered_full_scan_matches_generated": true,
+        "row_count": 3466797,
+        "schema_matches_generated": true,
+        "segment_row_group_count": 4
+      },
+      "workload": {
+        "batch_rows": 8192,
+        "payload_bytes_per_row": 1024,
+        "row_count": 3466797,
+        "seed": 20260821
+      },
+      "writer_properties": {
+        "compression": "UNCOMPRESSED",
+        "data_page_size_bytes": 1048576,
+        "dictionary_enabled": true,
+        "max_row_group_rows": 1048576,
+        "statistics": "Page",
+        "write_batch_rows": 1024,
+        "writer_version": "PARQUET_1_0"
+      }
+    }
+  },
+  "warmups": [
+    {
+      "command": "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode path-first --table /tmp/tstable-append-pipeline-5hm82x0u/warmups/path-first/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821 --external-parquet /tmp/tstable-append-pipeline-5hm82x0u/warmups/path-first/external/source.parquet",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": 3622108947,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 7244217894
+        },
+        "committed_version": 2,
+        "external_parquet_path": "/tmp/tstable-append-pipeline-5hm82x0u/warmups/path-first/external/source.parquet",
+        "mode": "path-first",
+        "process_id": 1834019,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/warmups/path-first/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 7049200515,
+          "external_parquet_generation_ns": 2941339107,
+          "path_append_copy_commit_ns": 4107861087,
+          "streaming_append_ns": null
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/source.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "path-first",
+      "peak_rss_bytes": null
+    },
+    {
+      "command": "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_pipeline_bench --mode streaming --table /tmp/tstable-append-pipeline-5hm82x0u/warmups/streaming/table --row-count 3466797 --batch-rows 8192 --payload-bytes 1024 --seed 20260821",
+      "driver": {
+        "artifacts": {
+          "external_source_parquet_bytes": null,
+          "table_owned_segment_bytes": 3622108947,
+          "total_retained_ingestion_bytes": 3622108947
+        },
+        "committed_version": 2,
+        "external_parquet_path": null,
+        "mode": "streaming",
+        "process_id": 1834070,
+        "schema_version": 1,
+        "table_definition": {
+          "bucket_width": 1,
+          "entity_columns": [],
+          "index_column": "ts",
+          "index_type": "int64"
+        },
+        "table_path": "/tmp/tstable-append-pipeline-5hm82x0u/warmups/streaming/table",
+        "timing": {
+          "end_to_end_pipeline_ns": 2977763275,
+          "external_parquet_generation_ns": null,
+          "path_append_copy_commit_ns": null,
+          "streaming_append_ns": 2977763125
+        },
+        "validation": {
+          "column_checksums": {
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "ts": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 3466796,
+          "index_min": 0,
+          "ordered_full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_generated": true,
+          "segment_file_bytes": 3622108947,
+          "segment_path": "data/23837116-8ea1-4b0c-acab-272e5f549251.parquet",
+          "segment_row_group_count": 4
+        },
+        "workload": {
+          "batch_rows": 8192,
+          "payload_bytes_per_row": 1024,
+          "row_count": 3466797,
+          "seed": 20260821
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        }
+      },
+      "mode": "streaming",
+      "peak_rss_bytes": null
+    }
+  ],
+  "workload": {
+    "generated_payload_bytes": 3550000128,
+    "generation": {
+      "batch_rows": 8192,
+      "payload_bytes_per_row": 1024,
+      "row_count": 3466797,
+      "seed": 20260821
+    },
+    "name": "large-scale",
+    "table_definition": {
+      "bucket_width": 1,
+      "entity_columns": [],
+      "index_column": "ts",
+      "index_type": "int64"
+    },
+    "writer_properties": {
+      "compression": "UNCOMPRESSED",
+      "data_page_size_bytes": 1048576,
+      "dictionary_enabled": true,
+      "max_row_group_rows": 1048576,
+      "statistics": "Page",
+      "write_batch_rows": 1024,
+      "writer_version": "PARQUET_1_0"
+    }
+  }
+}

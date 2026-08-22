@@ -66,6 +66,10 @@ data after collecting its metrics and validation result. Add `--keep-data` to
 retain every source Parquet file, table, and GNU time output. The JSON field
 `artifacts_directory` gives the retained root path.
 
+See the
+[2026-08-21 large-scale result](../../docs/benchmarks/append-pipeline-large-scale-2026-08-21.md)
+for one recorded run and its raw report.
+
 To use a release binary that was built separately:
 
 ```bash
@@ -102,7 +106,7 @@ The Rust driver uses a monotonic clock for pipeline and phase durations.
 The fixed table definition uses the non-null `ts` Int64 column as its index,
 bucket width 1, and no entity columns. Generated columns are non-null `ts`
 Int64, `sequence` UInt64, and `payload` Binary. The current Parquet defaults
-reported by the driver are Snappy compression, dictionary encoding enabled,
+reported by the driver are uncompressed encoding, dictionary encoding enabled,
 1,048,576 maximum rows per row group, a 1,048,576-byte data-page limit,
 1,024 write-batch rows, page-level statistics, and Parquet writer version 1.0.
 The report records these settings for every run instead of assuming they remain
