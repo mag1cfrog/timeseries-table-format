@@ -81,10 +81,6 @@ path = "src/bin/tstable/main.rs"
 required-features = ["cli"]
 
 [[example]]
-name = "append_pipeline_bench"
-required-features = ["cli"]
-
-[[example]]
 name = "coverage_bench"
 
 [[example]]
