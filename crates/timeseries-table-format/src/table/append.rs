@@ -3469,14 +3469,18 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
 
         // Simulate legacy/bad state: drop coverage_path on the existing segment.
-        let seg = table.state.segments.get_mut(rel1).expect("segment present");
+        let seg = table
+            .state
+            .segments
+            .values_mut()
+            .next()
+            .expect("segment present");
         seg.coverage_path = None;
 
-        let err = table
-            .append_parquet_segment(rel2)
+        let err = append_parquet_fixture(&mut table, rel2)
             .await
             .expect_err("append should fail when existing segment lacks coverage");
 
@@ -3523,12 +3527,12 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
 
         // Simulate missing snapshot pointer while segments exist.
         table.state.table_coverage = None;
 
-        table.append_parquet_segment(rel2).await?;
+        append_parquet_fixture(&mut table, rel2).await?;
 
         // Snapshot pointer should be restored after a successful append.
         let ptr = table
@@ -3582,7 +3586,7 @@ mod tests {
             }],
         )?;
 
-        table.append_parquet_segment(rel1).await?;
+        append_parquet_fixture(&mut table, rel1).await?;
 
         // Tamper snapshot pointer to a mismatching bucket spec.
         let bad_bucket = TimeBucket::Hours(1);
@@ -3601,8 +3605,7 @@ mod tests {
             version: ptr.version,
         });
 
-        let err = table
-            .append_parquet_segment(rel2)
+        let err = append_parquet_fixture(&mut table, rel2)
             .await
             .expect_err("append should fail when snapshot bucket mismatches index");
 
