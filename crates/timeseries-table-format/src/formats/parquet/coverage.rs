@@ -116,16 +116,16 @@ pub enum SegmentCoverageError {
     },
 
     /// Two rows for the same entity occupy one ordered-index interval.
-    #[snafu(display("Duplicate ordered-index interval {example_bucket_range} in segment {path}"))]
+    #[snafu(display(
+        "Duplicate ordered-index interval {example_index_interval} in segment {path}"
+    ))]
     DuplicateIndexInterval {
         /// Path to the segment file.
         path: String,
         /// Complete entity identity, or `None` for a table without entity columns.
         example_identity: Option<EntityIdentity>,
-        /// Internal coverage bucket identity for the conflicting interval.
-        example_bucket: Bucket,
         /// Logical ordered-index interval occupied by both rows.
-        example_bucket_range: LogicalBucketRange,
+        example_index_interval: LogicalBucketRange,
     },
 
     /// A configured entity column is missing from the segment.
@@ -238,11 +238,10 @@ pub(super) fn duplicate_index_interval_error(
     bucket: Bucket,
 ) -> SegmentCoverageError {
     match logical_bucket_range(&index.kind, bucket) {
-        Ok(example_bucket_range) => SegmentCoverageError::DuplicateIndexInterval {
+        Ok(example_index_interval) => SegmentCoverageError::DuplicateIndexInterval {
             path: path.to_string(),
             example_identity: identity.cloned(),
-            example_bucket: bucket,
-            example_bucket_range,
+            example_index_interval,
         },
         Err(source) => SegmentCoverageError::Bucket {
             path: path.to_string(),
@@ -639,14 +638,12 @@ mod tests {
             SegmentCoverageError::DuplicateIndexInterval {
                 path,
                 example_identity,
-                example_bucket,
-                example_bucket_range,
+                example_index_interval,
             } => {
                 assert_eq!(path, expected_path);
                 assert_eq!(example_identity, None);
-                assert_eq!(example_bucket, EPOCH_BUCKET);
                 assert_eq!(
-                    example_bucket_range.to_string(),
+                    example_index_interval.to_string(),
                     "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
                 );
             }
@@ -861,9 +858,9 @@ mod tests {
                 error,
                 SegmentCoverageError::DuplicateIndexInterval {
                     example_identity: None,
-                    example_bucket_range,
+                    example_index_interval,
                     ..
-                } if example_bucket_range.to_string() == expected_range
+                } if example_index_interval.to_string() == expected_range
             ));
         }
 
@@ -889,9 +886,9 @@ mod tests {
                 error,
                 SegmentCoverageError::DuplicateIndexInterval {
                     example_identity: None,
-                    example_bucket_range,
+                    example_index_interval,
                     ..
-                } if example_bucket_range.to_string() == expected_range
+                } if example_index_interval.to_string() == expected_range
             ));
         }
         Ok(())

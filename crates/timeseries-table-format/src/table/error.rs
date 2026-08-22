@@ -451,12 +451,11 @@ impl From<SegmentCoverageError> for TableError {
             SegmentCoverageError::DuplicateIndexInterval {
                 path,
                 example_identity,
-                example_bucket_range,
-                ..
+                example_index_interval,
             } => Self::DuplicateIndexInterval {
                 segment_path: path,
                 example_identity,
-                example_index_interval: example_bucket_range,
+                example_index_interval,
             },
             source => Self::SegmentCoverage { source },
         }

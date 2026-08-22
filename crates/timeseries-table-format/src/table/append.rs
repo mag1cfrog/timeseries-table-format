@@ -2557,15 +2557,25 @@ mod tests {
             .await
             .expect_err("duplicate implicit interval must fail");
 
-        assert!(matches!(
-            error,
+        let message = error.to_string();
+        match error {
             TableError::DuplicateIndexInterval {
+                segment_path,
                 example_identity: None,
                 example_index_interval,
-                ..
-            } if example_index_interval.to_string()
-                == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
-        ));
+            } => {
+                assert!(segment_path.starts_with("data/"));
+                assert!(segment_path.ends_with(".parquet"));
+                assert!(message.contains(&segment_path));
+                assert!(message.contains("Duplicate ordered-index interval"));
+                assert!(!message.contains("bucket"));
+                assert_eq!(
+                    example_index_interval.to_string(),
+                    "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+                );
+            }
+            other => panic!("expected duplicate interval error, got {other:?}"),
+        }
         assert_eq!(table.state(), &state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
         assert!(data_files(temp.path())?.is_empty());

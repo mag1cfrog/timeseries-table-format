@@ -1137,11 +1137,10 @@ mod tests {
             SegmentCoverageError::DuplicateIndexInterval {
                 path,
                 example_identity: Some(example_identity),
-                example_bucket: EPOCH_BUCKET,
-                example_bucket_range,
+                example_index_interval,
             } if path == "segment.parquet"
                 && example_identity == identity("A")
-                && example_bucket_range.to_string()
+                && example_index_interval.to_string()
                     == "[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)"
         ));
         Ok(())
@@ -1171,7 +1170,6 @@ mod tests {
             error,
             SegmentCoverageError::DuplicateIndexInterval {
                 example_identity: Some(example_identity),
-                example_bucket: EPOCH_BUCKET,
                 ..
             } if example_identity == identity("A")
         ));
