@@ -190,7 +190,7 @@ mod _native {
         py_err
     }
 
-    fn record_batch_reader_from_python(
+    fn import_arrow_stream_from_python(
         source: &Bound<'_, PyAny>,
     ) -> PyResult<ArrowArrayStreamReader> {
         let py = source.py();
@@ -398,7 +398,7 @@ mod _native {
         ))
     }
 
-    fn record_batch_reader_from_c_stream(
+    fn pyarrow_reader_from_c_stream(
         py: Python<'_>,
         stream: FFI_ArrowArrayStream,
         api_name: &str,
@@ -465,7 +465,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
     }
 
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
-        let reader = record_batch_reader_from_c_stream(py, stream, "sql")?;
+        let reader = pyarrow_reader_from_c_stream(py, stream, "sql")?;
         let reader = reader.bind(py);
 
         let table_res = reader.call_method0("read_all");
@@ -1127,7 +1127,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 },
             )?;
 
-            record_batch_reader_from_c_stream(py, stream, "sql_reader")
+            pyarrow_reader_from_c_stream(py, stream, "sql_reader")
         }
 
         /// Return the list of currently registered table names (sorted).
@@ -1643,13 +1643,13 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             )
         }
 
-        /// Append Arrow batches to the table and return the committed version.
+        /// Append Arrow data to the table and return the committed version.
         ///
         /// `source` must be a `pyarrow.RecordBatch`, `pyarrow.Table`,
         /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
         /// The stream is consumed lazily while the GIL is released.
         fn append(&mut self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<u64> {
-            let reader = record_batch_reader_from_python(source)?;
+            let reader = import_arrow_stream_from_python(source)?;
             let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
@@ -1861,7 +1861,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         let rt = tokio_runner::global_runtime()?;
         let stream = export_stream_to_c_stream(rt.as_ref(), stream)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        record_batch_reader_from_c_stream(py, stream, "_test_sql_reader")
+        pyarrow_reader_from_c_stream(py, stream, "_test_sql_reader")
     }
 
     #[cfg(feature = "test-utils")]
@@ -1896,7 +1896,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     #[cfg(feature = "test-utils")]
     #[pyfunction]
     #[pyo3(signature = (*, fail_after_first))]
-    fn _test_append_release_counted_stream(
+    fn _test_append_stream_with_release_counter(
         py: Python<'_>,
         fail_after_first: bool,
     ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
@@ -1963,25 +1963,27 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     /// Test-only helper: return a stream that fails schema import and counts its release.
     #[cfg(feature = "test-utils")]
     #[pyfunction]
-    fn _test_append_schema_failure_stream(
+    fn _test_append_stream_with_schema_import_error(
         py: Python<'_>,
     ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
         use arrow_array::ffi::FFI_ArrowArray;
         use std::ffi::{c_char, c_void};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        const C_STREAM_ERROR_CODE: i32 = 22;
+
         unsafe extern "C" fn fail_schema(
             _stream: *mut FFI_ArrowArrayStream,
             _out: *mut FFI_ArrowSchema,
         ) -> i32 {
-            22
+            C_STREAM_ERROR_CODE
         }
 
         unsafe extern "C" fn fail_next(
             _stream: *mut FFI_ArrowArrayStream,
             _out: *mut FFI_ArrowArray,
         ) -> i32 {
-            22
+            C_STREAM_ERROR_CODE
         }
 
         unsafe extern "C" fn last_error(_stream: *mut FFI_ArrowArrayStream) -> *const c_char {
@@ -2459,11 +2461,11 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             )?)?;
             testing.add_class::<AppendStreamReleaseCounter>()?;
             testing.add_function(pyo3::wrap_pyfunction!(
-                _test_append_release_counted_stream,
+                _test_append_stream_with_release_counter,
                 py
             )?)?;
             testing.add_function(pyo3::wrap_pyfunction!(
-                _test_append_schema_failure_stream,
+                _test_append_stream_with_schema_import_error,
                 py
             )?)?;
             testing.add_function(pyo3::wrap_pyfunction!(

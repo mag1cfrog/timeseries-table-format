@@ -1,4 +1,5 @@
 import gc
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -32,7 +33,7 @@ def _batch(start: int = 0) -> pa.RecordBatch:
     )
 
 
-def _assert_rows(root: str) -> None:
+def _assert_default_rows(root: str) -> None:
     session = ttf.Session()
     session.register_tstable("series", root)
     result = session.sql("SELECT ts, symbol, value FROM series ORDER BY ts")
@@ -43,7 +44,7 @@ def _assert_rows(root: str) -> None:
     }
 
 
-def _append_artifacts(root: str) -> list[Path]:
+def _data_and_coverage_files(root: str) -> list[Path]:
     root_path = Path(root)
     return sorted(
         path
@@ -60,13 +61,20 @@ def _testing_module():
     return testing
 
 
+def test_append_runtime_signature_uses_source_parameter():
+    assert list(inspect.signature(ttf.TimeSeriesTable.append).parameters) == [
+        "self",
+        "source",
+    ]
+
+
 def test_append_record_batch_returns_version_and_preserves_source(tmp_path):
     table, root = _create_table(tmp_path)
     source = _batch()
 
     assert table.append(source) == 2
     assert source.column("value").to_pylist() == [1.0, 2.0]
-    _assert_rows(root)
+    _assert_default_rows(root)
 
 
 def test_append_multichunk_table_preserves_chunks_and_source(tmp_path):
@@ -77,7 +85,7 @@ def test_append_multichunk_table_preserves_chunks_and_source(tmp_path):
     assert table.append(source) == 2
     assert [column.num_chunks for column in source.columns] == chunk_counts
     assert source.column("value").to_pylist() == [1.0, 2.0]
-    _assert_rows(root)
+    _assert_default_rows(root)
 
 
 def test_append_record_batch_reader_consumes_all_batches(tmp_path):
@@ -88,7 +96,7 @@ def test_append_record_batch_reader_consumes_all_batches(tmp_path):
     )
 
     assert table.append(source) == 2
-    _assert_rows(root)
+    _assert_default_rows(root)
     with pytest.raises(StopIteration):
         source.read_next_batch()
 
@@ -108,7 +116,7 @@ def test_append_arrow_stream_protocol_object_calls_exporter_once(tmp_path):
 
     assert table.append(source) == 2
     assert source.calls == 1
-    _assert_rows(root)
+    _assert_default_rows(root)
 
 
 @pytest.mark.parametrize("source", ["input.parquet", {}, [], object()])
@@ -119,7 +127,7 @@ def test_append_rejects_unsupported_sources_before_mutation(tmp_path, source):
         table.append(source)
 
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_preserves_protocol_failure_as_cause(tmp_path):
@@ -135,7 +143,7 @@ def test_append_preserves_protocol_failure_as_cause(tmp_path):
     assert isinstance(excinfo.value.__cause__, RuntimeError)
     assert "producer failed" in str(excinfo.value.__cause__)
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_rejects_non_capsule_protocol_result_before_mutation(tmp_path):
@@ -149,7 +157,7 @@ def test_append_rejects_non_capsule_protocol_result_before_mutation(tmp_path):
         table.append(BrokenSource())
 
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_rejects_wrong_capsule_name_before_mutation(tmp_path):
@@ -164,7 +172,7 @@ def test_append_rejects_wrong_capsule_name_before_mutation(tmp_path):
 
     assert isinstance(excinfo.value.__cause__, ValueError)
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_rejects_consumed_stream_capsule_before_mutation(tmp_path):
@@ -185,7 +193,7 @@ def test_append_rejects_consumed_stream_capsule_before_mutation(tmp_path):
         table.append(source)
 
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_empty_reader_does_not_commit_or_create_data(tmp_path):
@@ -200,7 +208,7 @@ def test_append_empty_reader_does_not_commit_or_create_data(tmp_path):
 
     assert getattr(excinfo.value, "table_root", None) == root
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_midstream_error_rolls_back_data_and_version(tmp_path):
@@ -219,13 +227,13 @@ def test_append_midstream_error_rolls_back_data_and_version(tmp_path):
 
     assert getattr(excinfo.value, "table_root", None) == str(root)
     assert table.version() == 1
-    assert _append_artifacts(str(root)) == []
+    assert _data_and_coverage_files(str(root)) == []
 
 
 def test_append_schema_error_preserves_exception_type_and_table_root(tmp_path):
     table, root = _create_table(tmp_path)
     assert table.append(_batch()) == 2
-    append_artifacts = _append_artifacts(root)
+    files_before = _data_and_coverage_files(root)
     mismatched = pa.record_batch(
         {
             "ts": pa.array([20], type=pa.int64()),
@@ -239,27 +247,27 @@ def test_append_schema_error_preserves_exception_type_and_table_root(tmp_path):
 
     assert getattr(excinfo.value, "table_root", None) == root
     assert table.version() == 2
-    assert _append_artifacts(root) == append_artifacts
+    assert _data_and_coverage_files(root) == files_before
 
 
 def test_append_overlap_preserves_exception_type_and_table_root(tmp_path):
     table, root = _create_table(tmp_path)
     assert table.append(_batch()) == 2
-    append_artifacts = _append_artifacts(root)
+    files_before = _data_and_coverage_files(root)
 
     with pytest.raises(ttf.CoverageOverlapError) as excinfo:
         table.append(_batch())
 
     assert getattr(excinfo.value, "table_root", None) == root
     assert table.version() == 2
-    assert _append_artifacts(root) == append_artifacts
+    assert _data_and_coverage_files(root) == files_before
 
 
 def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
     winner, root = _create_table(tmp_path)
     stale = ttf.TimeSeriesTable.open(root)
     assert winner.append(_batch()) == 2
-    append_artifacts = _append_artifacts(root)
+    files_before = _data_and_coverage_files(root)
 
     with pytest.raises(ttf.ConflictError) as excinfo:
         stale.append(_batch(20))
@@ -269,8 +277,8 @@ def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
     assert getattr(excinfo.value, "table_root", None) == root
     assert stale.version() == 1
     assert ttf.TimeSeriesTable.open(root).version() == 2
-    assert _append_artifacts(root) == append_artifacts
-    _assert_rows(root)
+    assert _data_and_coverage_files(root) == files_before
+    _assert_default_rows(root)
 
 
 @pytest.mark.parametrize("fail_after_first", [False, True])
@@ -283,7 +291,7 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
         index_type="int64",
         bucket_width=1,
     )
-    source, counter = testing._test_append_release_counted_stream(
+    source, counter = testing._test_append_stream_with_release_counter(
         fail_after_first=fail_after_first
     )
 
@@ -293,7 +301,7 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
         ):
             table.append(source)
         assert table.version() == 1
-        assert _append_artifacts(str(root)) == []
+        assert _data_and_coverage_files(str(root)) == []
     else:
         assert table.append(source) == 2
 
@@ -306,13 +314,13 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
 def test_append_releases_native_stream_once_when_schema_import_fails(tmp_path):
     testing = _testing_module()
     table, root = _create_table(tmp_path)
-    source, counter = testing._test_append_schema_failure_stream()
+    source, counter = testing._test_append_stream_with_schema_import_error()
 
     with pytest.raises(ValueError, match="failed to import Arrow C Stream"):
         table.append(source)
 
     assert table.version() == 1
-    assert _append_artifacts(root) == []
+    assert _data_and_coverage_files(root) == []
     assert counter.count == 1
     del source
     gc.collect()
