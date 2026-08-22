@@ -144,7 +144,8 @@ pub trait IntoBatchStream<Kind = RecordBatchReaderKind> {
 ///
 /// Pass the source directly to [`TimeSeriesTable::append`] to use the current
 /// Parquet writer defaults. Wrap it in `AppendRequest` only when one append
-/// needs an explicit output row-group limit.
+/// needs an explicit output row-group limit. A nested request inherits its
+/// source's limit unless the outer request replaces it.
 #[derive(Debug)]
 #[must_use = "an append request has no effect until passed to TimeSeriesTable::append"]
 pub struct AppendRequest<S> {
@@ -153,7 +154,12 @@ pub struct AppendRequest<S> {
 }
 
 impl<S> AppendRequest<S> {
-    /// Create a request that uses the current Parquet writer defaults.
+    /// Create a request without adding a row-group override.
+    ///
+    /// Ordinary Arrow sources therefore use the current Parquet writer
+    /// defaults. If `source` already carries a limit, this request inherits it
+    /// until [`max_rows_per_row_group`](Self::max_rows_per_row_group) replaces
+    /// it.
     pub fn new(source: S) -> Self {
         Self {
             source,
@@ -164,8 +170,9 @@ impl<S> AppendRequest<S> {
     /// Limit output Parquet row groups to this many rows for this append.
     ///
     /// This controls rows, not bytes, input batches, or source-file row-group
-    /// boundaries. Zero is rejected by [`TimeSeriesTable::append`] before the
-    /// source is inspected or consumed.
+    /// boundaries, and replaces any limit already carried by the source. Zero
+    /// is rejected by [`TimeSeriesTable::append`] before the source is inspected
+    /// or consumed.
     pub fn max_rows_per_row_group(mut self, max_rows_per_row_group: usize) -> Self {
         self.max_rows_per_row_group = Some(max_rows_per_row_group);
         self
@@ -174,6 +181,7 @@ impl<S> AppendRequest<S> {
 
 // Wrapping `Kind` in `PhantomData` keeps this impl disjoint from direct source
 // implementations while preserving inference without another public marker type.
+#[doc(hidden)]
 impl<S, Kind> IntoBatchStream<PhantomData<Kind>> for AppendRequest<S>
 where
     S: IntoBatchStream<Kind>,
