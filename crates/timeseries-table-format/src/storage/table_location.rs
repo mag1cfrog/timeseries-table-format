@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "datafusion")]
 use object_store::path::Path as ObjectStorePath;
 use snafu::{IntoError, ResultExt};
-use tokio::fs;
 
-use crate::storage::{BackendError, NotFoundSnafu, OtherIoSnafu, StorageLocation, StorageResult};
+use crate::storage::{BackendError, OtherIoSnafu, StorageLocation, StorageResult};
 
 /// Table root location with table-scoped semantics.
 ///
@@ -70,62 +69,6 @@ impl TableLocation {
             }
         }
     }
-
-    /// Validate and normalize a segment path for storage in table metadata.
-    ///
-    /// The returned path is table-relative and always uses `/` separators.
-    /// The path must resolve to a file under the table root.
-    pub async fn normalize_segment_path(&self, segment_path: &Path) -> StorageResult<String> {
-        let (normalized, native_path) = normalize_relative_storage_path(segment_path)?;
-        self.validate_segment_file(segment_path, &native_path)
-            .await?;
-        Ok(normalized)
-    }
-
-    pub(crate) async fn validate_segment_file(
-        &self,
-        supplied_path: &Path,
-        native_path: &Path,
-    ) -> StorageResult<()> {
-        match self.as_ref() {
-            StorageLocation::Local(table_root) => {
-                let root = fs::canonicalize(table_root)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(NotFoundSnafu {
-                        path: table_root.display().to_string(),
-                    })?;
-                let resolved = fs::canonicalize(root.join(native_path))
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(NotFoundSnafu {
-                        path: supplied_path.display().to_string(),
-                    })?;
-
-                if resolved.strip_prefix(&root).is_err() {
-                    return Err(invalid_relative_storage_path(
-                        supplied_path,
-                        "path resolves outside the table root",
-                    ));
-                }
-                if !fs::metadata(&resolved)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(OtherIoSnafu {
-                        path: resolved.display().to_string(),
-                    })?
-                    .is_file()
-                {
-                    return Err(invalid_relative_storage_path(
-                        supplied_path,
-                        "path does not resolve to a file",
-                    ));
-                }
-
-                Ok(())
-            }
-        }
-    }
 }
 
 pub(crate) fn normalize_relative_storage_path(path: &Path) -> StorageResult<(String, PathBuf)> {
@@ -187,34 +130,25 @@ fn invalid_relative_storage_path(path: &Path, reason: &str) -> crate::storage::S
 
 #[cfg(test)]
 mod tests {
-
     use crate::storage::StorageError;
 
     use super::*;
-    use tempfile::TempDir;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    #[tokio::test]
-    async fn normalize_segment_path_enforces_canonical_table_relative_file_path() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        let segment = table_root.join("data/seg.parquet");
-        tokio::fs::create_dir_all(segment.parent().unwrap()).await?;
-        tokio::fs::write(&segment, b"parquet").await?;
-        let location = TableLocation::local(&table_root);
-
+    #[test]
+    fn normalize_relative_storage_path_enforces_portable_relative_paths() {
         assert_eq!(
-            location
-                .normalize_segment_path(Path::new("data/seg.parquet"))
-                .await?,
-            "data/seg.parquet"
+            normalize_relative_storage_path(Path::new("data/seg.parquet")).unwrap(),
+            (
+                "data/seg.parquet".to_string(),
+                PathBuf::from("data").join("seg.parquet")
+            )
         );
         assert_eq!(
-            location
-                .normalize_segment_path(Path::new(r"data\seg.parquet"))
-                .await?,
-            "data/seg.parquet"
+            normalize_relative_storage_path(Path::new(r"data\seg.parquet")).unwrap(),
+            (
+                "data/seg.parquet".to_string(),
+                PathBuf::from("data").join("seg.parquet")
+            )
         );
 
         for invalid in [
@@ -226,32 +160,9 @@ mod tests {
             "data/./seg.parquet",
             "data/../seg.parquet",
         ] {
-            let err = location
-                .normalize_segment_path(Path::new(invalid))
-                .await
+            let err = normalize_relative_storage_path(Path::new(invalid))
                 .expect_err("path must be rejected");
             assert!(matches!(err, StorageError::OtherIo { .. }), "{invalid}");
         }
-
-        let err = location
-            .normalize_segment_path(Path::new("data"))
-            .await
-            .expect_err("directory must be rejected");
-        assert!(err.to_string().contains("does not resolve to a file"));
-
-        #[cfg(unix)]
-        {
-            let outside = tmp.path().join("outside.parquet");
-            tokio::fs::write(&outside, b"parquet").await?;
-            std::os::unix::fs::symlink(&outside, table_root.join("data/link.parquet"))?;
-
-            let err = location
-                .normalize_segment_path(Path::new("data/link.parquet"))
-                .await
-                .expect_err("symlink escape must be rejected");
-            assert!(err.to_string().contains("outside the table root"));
-        }
-
-        Ok(())
     }
 }

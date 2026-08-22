@@ -102,18 +102,17 @@ with tempfile.TemporaryDirectory() as d:
 > - prices_tbl/_timeseries_log/0000000002.json (append commit)
 > - prices_tbl/_timeseries_log/CURRENT now points to version 2
 
-![On-disk layout after one append](./directory-tree.png)
-
-### Step 2) The artifact: a real `AddSegment` action
+### Step 2) The artifact: an `AddSegment` action
 
 A new data file becomes part of the table only after it's logged.
 
-An actual `AddSegment` action from this repo (from examples/nvda_table/_timeseries_log/0000000002.json):
+An `AddSegment` action produced by the streaming append has this shape. Generated
+identifiers are abbreviated for readability:
 
 ```json
 {
   "AddSegment": {
-    "path": "data/nvda_1h.parquet",
+    "path": "data/<generated UUID>.parquet",
     "format": "parquet",
     "entity_layout": {"Single": ["NVDA"]},
     "index_min": {"type": "timestamp", "value": "2024-06-01T00:00:00Z"},
