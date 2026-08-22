@@ -520,7 +520,7 @@ fn parquet_type_to_logical_field(
     })
 }
 
-fn logical_schema_from_physical_parquet(
+fn logical_schema_from_parquet_fields(
     meta: &FileMetaData,
 ) -> Result<LogicalSchema, LogicalSchemaError> {
     let fields = meta
@@ -534,7 +534,7 @@ fn logical_schema_from_physical_parquet(
     LogicalSchema::new(fields)
 }
 
-fn logical_schema_from_file_metadata(
+fn logical_schema_from_parquet_metadata(
     meta: &FileMetaData,
     path: &str,
 ) -> Result<LogicalSchema, SegmentMetaError> {
@@ -544,7 +544,7 @@ fn logical_schema_from_file_metadata(
             .any(|entry| entry.key == ARROW_SCHEMA_META_KEY)
     });
     if !has_arrow_schema {
-        return logical_schema_from_physical_parquet(meta).map_err(|source| {
+        return logical_schema_from_parquet_fields(meta).map_err(|source| {
             SegmentMetaError::LogicalSchemaInvalid {
                 path: path.to_string(),
                 source,
@@ -588,7 +588,8 @@ pub async fn logical_schema_from_parquet(
                 backtrace: Backtrace::capture(),
             })?;
 
-    logical_schema_from_file_metadata(metadata.file_metadata(), &path).map_err(SegmentError::from)
+    logical_schema_from_parquet_metadata(metadata.file_metadata(), &path)
+        .map_err(SegmentError::from)
 }
 
 #[cfg(test)]
@@ -617,7 +618,7 @@ mod tests {
 
     fn logical_schema_from_test_file(path: &Path) -> TestResult<LogicalSchema> {
         let reader = SerializedFileReader::new(File::open(path)?)?;
-        Ok(logical_schema_from_physical_parquet(
+        Ok(logical_schema_from_parquet_fields(
             reader.metadata().file_metadata(),
         )?)
     }
@@ -1062,7 +1063,7 @@ mod tests {
         write_schema_only_parquet(&abs, schema)?;
 
         let reader = SerializedFileReader::new(File::open(abs)?)?;
-        match logical_schema_from_physical_parquet(reader.metadata().file_metadata()) {
+        match logical_schema_from_parquet_fields(reader.metadata().file_metadata()) {
             Err(source) => {
                 assert_eq!(source, expected);
                 Ok(())

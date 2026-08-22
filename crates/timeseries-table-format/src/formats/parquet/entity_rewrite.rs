@@ -33,7 +33,7 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
+        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_fields_match_by_name},
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta},
         table_metadata::IndexSpec,
     },
@@ -349,7 +349,7 @@ async fn validate_source(
     let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
         .await
         .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
-    ensure_schema_exact_match(table_schema, &source_schema, index).map_err(|error| {
+    ensure_schema_fields_match_by_name(table_schema, &source_schema, index).map_err(|error| {
         invalid_input(format!(
             "source schema is incompatible with the committed table schema: {error}"
         ))
@@ -444,11 +444,13 @@ async fn rewrite_inner(
         let output_schema = logical_schema_from_parquet(location, Path::new(&data_path))
             .await
             .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
-        ensure_schema_exact_match(table_schema, &output_schema, index).map_err(|error| {
-            invalid_output(format!(
-                "replacement {data_path} changed the committed schema: {error}"
-            ))
-        })?;
+        ensure_schema_fields_match_by_name(table_schema, &output_schema, index).map_err(
+            |error| {
+                invalid_output(format!(
+                    "replacement {data_path} changed the committed schema: {error}"
+                ))
+            },
+        )?;
         let (mut meta, _) = segment_meta_from_parquet(location, Path::new(&data_path), index)
             .await
             .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
@@ -487,12 +489,7 @@ async fn rewrite_inner(
             write_coverage_sidecar_new_bytes(location, Path::new(&coverage_path), &coverage_bytes)
                 .await;
         if let Err(source) = sidecar_write {
-            if matches!(
-                &source,
-                CoverageError::Storage {
-                    source: StorageError::CleanupFailed { .. }
-                }
-            ) {
+            if source.storage_cleanup_failed() {
                 created_paths.push(coverage_path);
             }
             return Err(EntityRewriteError::CoverageSidecar { source });

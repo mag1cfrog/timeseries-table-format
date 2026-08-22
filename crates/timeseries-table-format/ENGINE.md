@@ -60,14 +60,14 @@ Log actions:
 
 ### Open
 `TimeSeriesTable::open` rebuilds `TableState` from the log and extracts
-`TimeIndexSpec`. Empty logs return `TableError::EmptyTable`.
+`IndexSpec`. Empty logs return `TableError::EmptyTable`.
 
-### Append (Parquet)
-1. Read Parquet bytes from storage.
-2. Extract metadata and derive a `LogicalSchema`.
-3. If this is the first segment, adopt its schema; otherwise enforce exact match.
-4. Validate entity identity (if `TimeIndexSpec.entity_columns` is set).
-5. Compute coverage, reject overlaps, and write coverage sidecars.
+### Append (Arrow to Parquet)
+1. Validate the Arrow reader schema before consuming batches or creating output.
+2. Stream non-empty batches into one uniquely named table-owned Parquet segment.
+3. Inspect the finished segment and derive its `LogicalSchema`.
+4. On the first append, adopt that schema; otherwise match fields, types, and nullability by name.
+5. Compute coverage, reject overlaps, and write attempt-owned coverage sidecars.
 6. Commit `AddSegment` + optional `UpdateTableMeta` + `UpdateTableCoverage`.
 
 ## Coverage and gaps

@@ -38,11 +38,13 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_exact_match},
+        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_fields_match_by_name},
         segments::SegmentEntityLayout,
     },
     storage,
-    transaction_log::{CommitError, LogAction, TableState, table_state::TableCoveragePointer},
+    transaction_log::{
+        CommitError, LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
+    },
 };
 
 use super::{
@@ -118,25 +120,25 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
 /// This type exists only to keep the blanket [`RecordBatchReader`]
 /// implementation disjoint from the direct batch implementations.
 #[doc(hidden)]
-pub struct RecordBatchReaderKind;
+pub struct RecordBatchReaderSourceKind;
 
 /// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
 ///
-/// Implementations preserve non-`Send` readers. The `Kind` parameter is an
+/// Implementations preserve non-`Send` readers. The `SourceKind` parameter is an
 /// inference-only coherence marker and should not normally be specified by
 /// callers.
-pub trait IntoBatchStream<Kind = RecordBatchReaderKind> {
+pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
     /// Reader produced from this source.
     type Reader: RecordBatchReader;
 
     /// Return a per-append Parquet row-group limit, when configured.
     #[doc(hidden)]
-    fn configured_max_rows_per_row_group(&self) -> Option<usize> {
+    fn effective_max_rows_per_row_group(&self) -> Option<usize> {
         None
     }
 
     /// Convert this source without collecting its batches.
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError>;
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError>;
 }
 
 /// One Arrow source plus physical settings for a single append.
@@ -178,40 +180,40 @@ impl<S> AppendRequest<S> {
     }
 }
 
-// Wrapping `Kind` in `PhantomData` keeps this impl disjoint from direct source
+// Wrapping `SourceKind` in `PhantomData` keeps this impl disjoint from direct source
 // implementations while preserving inference without another public marker type.
 #[doc(hidden)]
-impl<S, Kind> IntoBatchStream<PhantomData<Kind>> for AppendRequest<S>
+impl<S, SourceKind> IntoRecordBatchReader<PhantomData<SourceKind>> for AppendRequest<S>
 where
-    S: IntoBatchStream<Kind>,
+    S: IntoRecordBatchReader<SourceKind>,
 {
     type Reader = S::Reader;
 
-    fn configured_max_rows_per_row_group(&self) -> Option<usize> {
+    fn effective_max_rows_per_row_group(&self) -> Option<usize> {
         self.max_rows_per_row_group
-            .or_else(|| self.source.configured_max_rows_per_row_group())
+            .or_else(|| self.source.effective_max_rows_per_row_group())
     }
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
-        self.source.into_batch_stream()
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+        self.source.into_record_batch_reader()
     }
 }
 
-impl<R> IntoBatchStream<RecordBatchReaderKind> for R
+impl<R> IntoRecordBatchReader<RecordBatchReaderSourceKind> for R
 where
     R: RecordBatchReader,
 {
     type Reader = R;
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
         Ok(self)
     }
 }
 
-impl IntoBatchStream<ArrowRecordBatch> for ArrowRecordBatch {
+impl IntoRecordBatchReader<ArrowRecordBatch> for ArrowRecordBatch {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
         let schema = self.schema();
         Ok(Box::new(RecordBatchIterator::new(
             std::iter::once(Ok(self)),
@@ -220,10 +222,10 @@ impl IntoBatchStream<ArrowRecordBatch> for ArrowRecordBatch {
     }
 }
 
-impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
+impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_batch_stream(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
         let schema = self
             .first()
             .map(ArrowRecordBatch::schema)
@@ -235,8 +237,11 @@ impl IntoBatchStream<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     }
 }
 
-fn ensure_batch_schema(schema: &SchemaRef, batch: &ArrowRecordBatch) -> Result<(), TableError> {
-    if batch.schema() == *schema {
+fn ensure_batch_matches_reader_schema(
+    reader_schema: &SchemaRef,
+    batch: &ArrowRecordBatch,
+) -> Result<(), TableError> {
+    if batch.schema() == *reader_schema {
         Ok(())
     } else {
         Err(TableError::AppendSource {
@@ -272,7 +277,7 @@ impl TimeSeriesTable {
         }
     }
 
-    fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
+    fn validate_append_source_schema(&self, schema: &Schema) -> Result<(), TableError> {
         ensure_existing_segments_have_coverage(&self.state)?;
         let segment_schema = LogicalSchema::try_from_arrow_schema(schema).map_err(|source| {
             TableError::AppendSource {
@@ -289,7 +294,7 @@ impl TimeSeriesTable {
             }
             .fail(),
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index)
+                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
                     .context(SchemaCompatibilitySnafu)
             }
         }?;
@@ -297,9 +302,10 @@ impl TimeSeriesTable {
         Ok(())
     }
 
-    async fn finalize_generated_parquet_segment(
+    async fn publish_generated_parquet_segment(
         &mut self,
         relative_path: &str,
+        next_version: u64,
         owned_data_guard: &mut storage::FileCleanupGuard,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
@@ -332,11 +338,10 @@ impl TimeSeriesTable {
         // 2) Schema behavior (return maybe_updated_meta, but do NOT build actions yet).
         //
         // - logical_schema == None && version == 1:
-        //     first append after create() — adopt this segment’s schema.
+        //     first append after create(): adopt this segment's schema.
         // - logical_schema == None && version != 1:
-        //     table is in a bad state for v0.1 → error.
-        // - logical_schema == Some(..):
-        //     enforce “no schema evolution” via ensure_schema_exact_match.
+        //     table is in a bad state for v0.1: return an error.
+        // - logical_schema == Some(..): enforce no schema evolution by field name.
         let maybe_table_schema = self.state.table_meta.logical_schema.as_ref();
 
         let maybe_updated_meta = match maybe_table_schema {
@@ -352,11 +357,10 @@ impl TimeSeriesTable {
                 .fail();
             }
             Some(table_schema) => {
-                ensure_schema_exact_match(table_schema, &segment_schema, &self.index).context(
-                    SegmentSchemaCompatibilitySnafu {
+                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
+                    .context(SegmentSchemaCompatibilitySnafu {
                         path: relative_path.to_string(),
-                    },
-                )?;
+                    })?;
                 None
             }
         };
@@ -456,7 +460,6 @@ impl TimeSeriesTable {
             }
         })?;
 
-        let new_version_guess = expected_version + 1;
         let snapshot_content_id = if has_entity_columns {
             table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
         } else {
@@ -464,23 +467,40 @@ impl TimeSeriesTable {
         };
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
         let snapshot_path =
-            table_snapshot_key(new_version_guess, &snapshot_file_id).map_err(|source| {
+            table_snapshot_key(next_version, &snapshot_file_id).map_err(|source| {
                 TableError::CoverageSidecar {
                     source: CoverageError::Layout { source },
                 }
             })?;
 
         let mut created_sidecars = Vec::new();
-        let mut segment_sidecar_guard =
-            storage::prepare_file_cleanup_guard(self.location().as_ref(), Path::new(&seg_cov_path))
-                .context(StorageSnafu)?;
-        write_coverage_sidecar_new_bytes(self.location(), Path::new(&seg_cov_path), &seg_cov_bytes)
-            .await
-            .map_err(|source| TableError::CoverageSidecar { source })?;
+        let mut segment_sidecar_guard = storage::FileCleanupGuard::new_disarmed(
+            self.location().as_ref(),
+            Path::new(&seg_cov_path),
+        )
+        .context(StorageSnafu)?;
+        if let Err(source) = write_coverage_sidecar_new_bytes(
+            self.location(),
+            Path::new(&seg_cov_path),
+            &seg_cov_bytes,
+        )
+        .await
+        {
+            if source.storage_cleanup_failed() {
+                created_sidecars.push(seg_cov_path.clone());
+            }
+            let error = self
+                .rollback_created_artifacts(
+                    &created_sidecars,
+                    TableError::CoverageSidecar { source },
+                )
+                .await;
+            return Err(error);
+        }
         segment_sidecar_guard.arm();
         created_sidecars.push(seg_cov_path.clone());
 
-        let mut snapshot_sidecar_guard = storage::prepare_file_cleanup_guard(
+        let mut snapshot_sidecar_guard = storage::FileCleanupGuard::new_disarmed(
             self.location().as_ref(),
             Path::new(&snapshot_path),
         )
@@ -492,6 +512,9 @@ impl TimeSeriesTable {
         )
         .await
         {
+            if source.storage_cleanup_failed() {
+                created_sidecars.push(snapshot_path.clone());
+            }
             let error = TableError::CoverageSidecar { source };
             let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
@@ -541,15 +564,15 @@ impl TimeSeriesTable {
             }
         };
 
-        // OCC invariant: a successful commit_with_expected_version must return
+        // OCC invariant: a successful transaction commit must return
         // the same "next" version we predicted when constructing `snapshot_path`.
         // If this ever diverges, it indicates a severe bug between snapshot path
         // construction and the transaction log implementation, so we panic rather
         // than continuing with an inconsistent in-memory state.
         assert_eq!(
-            new_version, new_version_guess,
+            new_version, next_version,
             "transaction log returned unexpected version: expected {}, got {}",
-            new_version_guess, new_version
+            next_version, new_version
         );
 
         // 8) Update in-memory state.
@@ -574,7 +597,6 @@ impl TimeSeriesTable {
         span.record("outcome", "succeeded");
         tracing::info!(
             name: "table.append",
-            source_mode = "arrow_stream",
             expected_version,
             committed_version = new_version,
             row_count,
@@ -597,7 +619,6 @@ impl TimeSeriesTable {
         level = "debug",
         skip_all,
         fields(
-            source_mode = "arrow_stream",
             expected_version = self.state.version,
             segment_path = tracing::field::Empty,
             row_count = tracing::field::Empty,
@@ -607,26 +628,28 @@ impl TimeSeriesTable {
             outcome = tracing::field::Empty
         )
     )]
-    pub async fn append<S, Kind>(&mut self, source: S) -> Result<u64, TableError>
+    pub async fn append<S, SourceKind>(&mut self, source: S) -> Result<u64, TableError>
     where
-        S: IntoBatchStream<Kind>,
+        S: IntoRecordBatchReader<SourceKind>,
     {
         let result = async {
-            let max_rows_per_row_group = source.configured_max_rows_per_row_group();
+            let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
                 return Err(TableError::InvalidMaxRowsPerRowGroup {
                     max_rows_per_row_group: 0,
                 });
             }
-            let mut reader = source.into_batch_stream()?;
+            let next_version = checked_next_version(self.state.version)
+                .map_err(|source| TableError::TransactionLog { source })?;
+            let mut reader = source.into_record_batch_reader()?;
             let schema = reader.schema();
-            self.validate_stream_schema(schema.as_ref())?;
+            self.validate_append_source_schema(schema.as_ref())?;
 
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
                     return Err(TableError::EmptyAppendSource);
                 };
-                ensure_batch_schema(&schema, &batch)?;
+                ensure_batch_matches_reader_schema(&schema, &batch)?;
                 if batch.num_rows() != 0 {
                     break batch;
                 }
@@ -635,7 +658,7 @@ impl TimeSeriesTable {
 
             let relative_path = format!("data/{}.parquet", Uuid::new_v4());
             tracing::Span::current().record("segment_path", relative_path.as_str());
-            let mut data_guard = storage::prepare_file_cleanup_guard(
+            let mut data_guard = storage::FileCleanupGuard::new_disarmed(
                 self.location().as_ref(),
                 Path::new(&relative_path),
             )
@@ -659,7 +682,7 @@ impl TimeSeriesTable {
 
                 for batch in reader {
                     let batch = batch.context(AppendSourceSnafu)?;
-                    ensure_batch_schema(&schema, &batch)?;
+                    ensure_batch_matches_reader_schema(&schema, &batch)?;
                     if batch.num_rows() != 0 {
                         writer.write(&batch).context(AppendParquetSnafu)?;
                     }
@@ -681,7 +704,7 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .finalize_generated_parquet_segment(&relative_path, &mut data_guard)
+                .publish_generated_parquet_segment(&relative_path, next_version, &mut data_guard)
                 .await
             {
                 Ok(version) => Ok(version),
@@ -948,23 +971,26 @@ mod tests {
     }
 
     #[test]
-    fn into_batch_stream_accepts_all_required_input_forms() -> TestResult {
+    fn into_record_batch_reader_accepts_all_required_input_forms() -> TestResult {
         let first = input_batch(vec![1, 2])?;
         let second = input_batch(vec![3])?;
 
         assert_batches(
-            first.clone().into_batch_stream()?,
+            first.clone().into_record_batch_reader()?,
             std::slice::from_ref(&first),
         )?;
         assert_batches(
-            vec![first.clone(), second.clone()].into_batch_stream()?,
+            vec![first.clone(), second.clone()].into_record_batch_reader()?,
             &[first.clone(), second.clone()],
         )?;
 
         let iterator = RecordBatchIterator::new(vec![Ok(first.clone())], first.schema());
-        assert_batches(iterator.into_batch_stream()?, std::slice::from_ref(&first))?;
         assert_batches(
-            InstrumentedReader::one(first.clone()).into_batch_stream()?,
+            iterator.into_record_batch_reader()?,
+            std::slice::from_ref(&first),
+        )?;
+        assert_batches(
+            InstrumentedReader::one(first.clone()).into_record_batch_reader()?,
             std::slice::from_ref(&first),
         )?;
 
@@ -972,19 +998,25 @@ mod tests {
             vec![Ok(first.clone())],
             first.schema(),
         ));
-        assert_batches(boxed.into_batch_stream()?, std::slice::from_ref(&first))?;
+        assert_batches(
+            boxed.into_record_batch_reader()?,
+            std::slice::from_ref(&first),
+        )?;
 
         let sendable: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
             vec![Ok(second.clone())],
             second.schema(),
         ));
-        assert_batches(sendable.into_batch_stream()?, std::slice::from_ref(&second))?;
+        assert_batches(
+            sendable.into_record_batch_reader()?,
+            std::slice::from_ref(&second),
+        )?;
         Ok(())
     }
 
     #[test]
-    fn into_batch_stream_rejects_schema_less_vec() {
-        let result = Vec::<RecordBatch>::new().into_batch_stream();
+    fn into_record_batch_reader_rejects_schema_less_vec() {
+        let result = Vec::<RecordBatch>::new().into_record_batch_reader();
         assert!(matches!(result, Err(TableError::EmptyAppendSource)));
     }
 
@@ -1131,7 +1163,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_writes_one_segment_and_returns_versions() -> TestResult {
+    async fn append_rejects_version_overflow_before_inspecting_source() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                .await?;
+        table.state.version = u64::MAX;
+        let batch = timestamp_only_batch(1)?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+
+        let error = table
+            .append(reader)
+            .await
+            .expect_err("version overflow must fail");
+
+        assert!(matches!(
+            error,
+            TableError::TransactionLog {
+                source: CommitError::CorruptState { ref msg, .. }
+            } if msg == "version counter overflow"
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, u64::MAX);
+        assert!(table.state().segments.is_empty());
+        assert!(!temp.path().join("data").exists());
+        assert!(!temp.path().join("_coverage").exists());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        assert_eq!(table.log.load_current_version().await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_writes_one_segment_and_returns_versions() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1165,7 +1229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
+    async fn append_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1184,7 +1248,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn append_stream_yields_while_skipping_zero_row_batches() -> TestResult {
+    async fn append_yields_while_skipping_zero_row_batches() -> TestResult {
         const BATCH_COUNT: usize = 64;
 
         let temp = TempDir::new()?;
@@ -1216,7 +1280,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelling_streaming_append_during_batch_reads_removes_output() -> TestResult {
+    async fn cancelling_append_during_batch_reads_removes_output() -> TestResult {
         const BATCH_COUNT: usize = 64;
 
         let temp = TempDir::new()?;
@@ -1252,7 +1316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_rejects_empty_sources_before_creating_data() -> TestResult {
+    async fn append_rejects_empty_sources_before_creating_data() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1282,7 +1346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_cleans_up_after_later_schema_or_source_error() -> TestResult {
+    async fn append_cleans_up_after_later_schema_or_source_error() -> TestResult {
         for (configured, source_error) in
             [(false, false), (false, true), (true, false), (true, true)]
         {
@@ -1340,7 +1404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_cleans_up_writer_lifecycle_failures() -> TestResult {
+    async fn append_cleans_up_writer_lifecycle_failures() -> TestResult {
         #[derive(Clone, Copy, Debug)]
         enum Stage {
             Write,
@@ -1390,8 +1454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_streaming_append_before_publication_removes_owned_artifacts() -> TestResult
-    {
+    async fn cancelling_append_before_publication_removes_owned_artifacts() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1460,7 +1523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simultaneous_streaming_appends_publish_one_and_clean_loser() -> TestResult {
+    async fn simultaneous_appends_publish_one_and_clean_loser() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1546,7 +1609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_preserves_writer_error_and_failed_cleanup_path() -> TestResult {
+    async fn append_preserves_writer_error_and_failed_cleanup_path() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
@@ -1588,7 +1651,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
+    async fn append_retries_cleanup_after_sidecar_write_cleanup_failure() -> TestResult {
+        for sidecar_dir in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                    .await?;
+            crate::storage::inject_write_new_failure(temp.path().join(sidecar_dir), true);
+
+            let error = table
+                .append(timestamp_only_batch(1)?)
+                .await
+                .expect_err("sidecar write and its first cleanup must fail");
+
+            assert!(matches!(
+                error,
+                TableError::CoverageSidecar {
+                    source: CoverageError::Storage {
+                        source: StorageError::CleanupFailed { .. }
+                    }
+                }
+            ));
+            assert_eq!(table.state().version, 1, "{sidecar_dir}");
+            assert!(table.state().segments.is_empty(), "{sidecar_dir}");
+            assert!(data_files(temp.path())?.is_empty(), "{sidecar_dir}");
+            assert!(coverage_files(temp.path())?.is_empty(), "{sidecar_dir}");
+            assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1640,7 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
+    async fn append_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1695,7 +1789,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_conflict_reports_every_failed_cleanup_path() -> TestResult {
+    async fn append_conflict_reports_every_failed_cleanup_path() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -1755,7 +1849,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_validates_schema_before_creating_data() -> TestResult {
+    async fn append_validates_schema_before_creating_data() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1771,7 +1865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_removes_owned_data_after_overlap() -> TestResult {
+    async fn append_removes_owned_data_after_overlap() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
@@ -1796,7 +1890,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_adopts_schema_on_first_append() -> TestResult {
+    async fn append_adopts_schema_on_first_append() -> TestResult {
         let temp = TempDir::new()?;
         let mut meta = make_basic_table_meta();
         meta.logical_schema = None;
@@ -1809,7 +1903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_stream_preserves_exact_schema_across_append_and_optimize() -> TestResult {
+    async fn append_preserves_exact_schema_through_optimize() -> TestResult {
         let timezone = "America/Phoenix";
         let schema = Arc::new(Schema::new(vec![
             Field::new(

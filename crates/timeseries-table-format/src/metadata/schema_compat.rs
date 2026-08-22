@@ -269,13 +269,14 @@ pub fn ensure_entity_identity_matches_schema(
     Ok(())
 }
 
-/// Enforce the v0.1 "no schema evolution" rule.
+/// Enforce the v0.1 "no schema evolution" rule by field name.
 ///
 /// - Every table column must appear in the segment schema.
 /// - No extra columns may appear in the segment schema.
 /// - For every column, logical type and nullability must match exactly.
+/// - Top-level column order may differ.
 /// - If the mismatch is on the ordered index column, use a specific error.
-pub fn ensure_schema_exact_match(
+pub fn ensure_schema_fields_match_by_name(
     table_schema: &LogicalSchema,
     segment_schema: &LogicalSchema,
     index: &IndexSpec,

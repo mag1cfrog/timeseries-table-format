@@ -141,6 +141,15 @@ pub enum CommitError {
     },
 }
 
+pub(crate) fn checked_next_version(expected: u64) -> Result<u64, CommitError> {
+    expected
+        .checked_add(1)
+        .ok_or_else(|| CommitError::CorruptState {
+            msg: "version counter overflow".to_string(),
+            backtrace: Backtrace::capture(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::coverage::EntityIdentity;

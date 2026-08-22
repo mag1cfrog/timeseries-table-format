@@ -88,6 +88,17 @@ pub enum CoverageError {
     },
 }
 
+impl CoverageError {
+    pub(crate) fn storage_cleanup_failed(&self) -> bool {
+        matches!(
+            self,
+            Self::Storage {
+                source: StorageError::CleanupFailed { .. }
+            }
+        )
+    }
+}
+
 /// Write a coverage bitmap to a sidecar file using atomic semantics.
 ///
 /// Atomically writes the given [`Coverage`] to a file at `rel_path` within the

@@ -248,15 +248,12 @@ impl TransactionLogStore {
         }
 
         // 2) Compute next version with overflow guard
-        let version = match expected.checked_add(1) {
-            Some(version) => version,
-            None => {
+        let version = match checked_next_version(expected) {
+            Ok(version) => version,
+            Err(error) => {
                 span.record("failure_stage", "version_calculation");
                 span.record("outcome", "failed");
-                return CorruptStateSnafu {
-                    msg: "version counter overflow".to_string(),
-                }
-                .fail();
+                return Err(error);
             }
         };
         span.record("proposed_version", version);
@@ -288,7 +285,7 @@ impl TransactionLogStore {
         //    changes if the operations don't actually conflict, like Delta Lake).
         let commit_rel = Self::commit_rel_path(version);
         let mut commit_guard =
-            storage::prepare_file_cleanup_guard(self.location.as_ref(), &commit_rel)
+            storage::FileCleanupGuard::new_disarmed(self.location.as_ref(), &commit_rel)
                 .map_err(|source| CommitError::Storage { source })?;
         match storage::write_new(self.location.as_ref(), &commit_rel, &json).await {
             Ok(()) => commit_guard.arm(),
