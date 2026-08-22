@@ -848,6 +848,22 @@ mod tests {
     }
 
     #[test]
+    fn cleans_completed_invocations_unless_data_is_kept() {
+        let cleanup_root = tempfile::tempdir().unwrap();
+        let cleanup_directory = cleanup_root.path().join("invocation");
+        fs::create_dir(&cleanup_directory).unwrap();
+        let cleanup_guard = Some(cleanup_root);
+        remove_completed_invocation(&cleanup_guard, &cleanup_directory).unwrap();
+        assert!(!cleanup_directory.exists());
+
+        let keep_root = tempfile::tempdir().unwrap();
+        let keep_directory = keep_root.path().join("invocation");
+        fs::create_dir(&keep_directory).unwrap();
+        remove_completed_invocation(&None, &keep_directory).unwrap();
+        assert!(keep_directory.exists());
+    }
+
+    #[test]
     fn propagates_subprocess_failures() {
         let command = vec![
             "rustc".to_string(),
