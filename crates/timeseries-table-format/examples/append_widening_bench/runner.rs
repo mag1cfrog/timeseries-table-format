@@ -62,7 +62,7 @@ pub(super) struct CompareArgs {
         long,
         default_value_t = 3,
         value_parser = parse_sample_count,
-        help = "Measured samples per mode; use 1 only for CI smoke coverage"
+        help = "Measured samples per mode; use 1 only for a quick smoke check"
     )]
     samples: usize,
 
@@ -261,7 +261,7 @@ fn parse_sample_count(raw: &str) -> Result<usize, String> {
         .map_err(|error| format!("invalid sample count: {error}"))?;
     match count {
         0 => Err("sample count must be positive".to_string()),
-        2 => Err("use one sample for CI smoke coverage, or at least three samples".to_string()),
+        2 => Err("use one sample for a quick smoke check, or at least three samples".to_string()),
         _ => Ok(count),
     }
 }

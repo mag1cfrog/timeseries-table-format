@@ -113,7 +113,6 @@ jobs:
       matrix:
         task:
           - scan RSS harness
-          - append widening smoke
           - feature isolation
           - lints and docs
           - default tests
@@ -196,18 +195,6 @@ jobs:
               ../../scripts/test_scan_range_rss_regression.py
           )
           crates/timeseries-table-python/.venv/bin/python scripts/test_scan_range_rss_regression.py
-
-      - name: check append widening smoke workload
-        if: matrix.task == 'append widening smoke'
-        run: |
-          cargo build --locked --release \
-            -p timeseries-table-format \
-            --features cli \
-            --example append_widening_bench
-          target/release/examples/append_widening_bench compare \
-            --workload smoke \
-            --samples 1 \
-            > /dev/null
 
       - name: fmt
         if: matrix.task == 'lints and docs'

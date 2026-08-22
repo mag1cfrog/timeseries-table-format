@@ -107,13 +107,6 @@ jobs:
       - name: Warm all-features test cache
         run: cargo test --locked --workspace --all-targets --all-features --no-run
 
-      - name: Warm append widening benchmark cache
-        run: >-
-          cargo build --locked --release
-          -p timeseries-table-format
-          --features cli
-          --example append_widening_bench
-
       - name: Check sccache writes
         id: sccache-writes
         continue-on-error: true
@@ -128,10 +121,6 @@ jobs:
           cargo clean
           cargo test --locked --workspace --no-run
           cargo test --locked --workspace --all-targets --all-features --no-run
-          cargo build --locked --release \
-            -p timeseries-table-format \
-            --features cli \
-            --example append_widening_bench
 
       - name: Verify retried sccache writes
         if: steps.sccache-writes.outcome == 'failure'
