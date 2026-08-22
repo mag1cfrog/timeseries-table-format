@@ -1,7 +1,12 @@
 from types import ModuleType
-from typing import Literal
+from typing import Literal, Protocol
 
 import pyarrow
+
+class _ArrowStreamExportable(Protocol):
+    def __arrow_c_stream__(
+        self, requested_schema: object | None = None, /
+    ) -> object: ...
 
 __version__: str
 
@@ -251,6 +256,49 @@ class TimeSeriesTable:
         """
         ...
 
+    def append(
+        self,
+        source: pyarrow.RecordBatch
+        | pyarrow.Table
+        | pyarrow.RecordBatchReader
+        | _ArrowStreamExportable,
+    ) -> int:
+        """Append Arrow data and return the committed table version.
+
+        Parameters
+        ----------
+        source:
+            A `pyarrow.RecordBatch`, `pyarrow.Table`, `pyarrow.RecordBatchReader`, or another
+            object implementing `__arrow_c_stream__`. File paths, pandas objects, NumPy arrays,
+            mappings, row iterables, and arbitrary batch iterables are not converted implicitly.
+
+        Returns
+        -------
+        int
+            The newly committed table version.
+
+        Notes
+        -----
+        Arrow streams are consumed lazily without staging or collecting the complete input in
+        Python. `RecordBatch` and `Table` sources remain usable after append; readers and other
+        single-use streams are consumed. After importing the stream, append releases the GIL.
+
+        Raises
+        ------
+        TypeError
+            If `source` is not one of the supported Arrow forms.
+        ValueError
+            If the Arrow C Stream exporter or capsule is invalid.
+        CoverageOverlapError
+            If incoming coverage overlaps committed coverage for the same entity.
+        SchemaMismatchError
+            If the Arrow schema does not match the table's established schema.
+        TimeseriesTableError
+            For other table, storage, transaction, or stream failures. The exception includes a
+            `table_root` attribute.
+        """
+        ...
+
     def optimize(self) -> OptimizeReport:
         """Rewrite every mixed-entity segment into single-entity segments.
 
@@ -310,6 +358,10 @@ class TimeSeriesTable:
         ...
 
 class _TestingModule(ModuleType):
+    class _AppendStreamReleaseCounter:
+        @property
+        def count(self) -> int: ...
+
     def _test_trigger_overlap(
         self, table_root: str, first_parquet_path: str, second_parquet_path: str
     ) -> None: ...
@@ -317,6 +369,12 @@ class _TestingModule(ModuleType):
     def _test_session_table_exists(self, session: Session, name: str) -> bool: ...
     def _test_sql_reader_unsupported_schema(self) -> None: ...
     def _test_sql_reader_midstream_error(self) -> pyarrow.RecordBatchReader: ...
+    def _test_append_stream_with_release_counter(
+        self, *, fail_after_first: bool, with_error_details: bool = True
+    ) -> tuple[object, _AppendStreamReleaseCounter]: ...
+    def _test_append_stream_with_schema_import_error(
+        self,
+    ) -> tuple[object, _AppendStreamReleaseCounter]: ...
     def _test_sql_reader_pending_after_first_batch(
         self,
     ) -> pyarrow.RecordBatchReader: ...
