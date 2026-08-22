@@ -51,8 +51,8 @@ use super::{
     TimeSeriesTable,
     append_schema::AppendSchemaNormalizer,
     error::{
-        AppendNormalizationSnafu, AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu,
-        CoverageOverlapSnafu, EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
+        AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
+        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
         EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
         MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
         SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
@@ -621,6 +621,11 @@ impl TimeSeriesTable {
     ///
     /// Rows need not be ordered by the table's ordered index. The source is
     /// consumed incrementally and is never collected by this method.
+    /// When a registered schema exists, incoming fields are matched by name
+    /// and written in registered order. Exact types and these lossless scalar
+    /// widenings are accepted: `Int8 -> Int32/Int64`, `Int16 -> Int32/Int64`,
+    /// `Int32 -> Int64`, `UInt8/UInt16/UInt32 -> UInt64`, and
+    /// `Float32 -> Float64`.
     /// Wrap the source in [`AppendRequest`] and call
     /// [`AppendRequest::max_rows_per_row_group`] to limit output Parquet row
     /// groups for only this append.
@@ -665,7 +670,7 @@ impl TimeSeriesTable {
                 if batch.num_rows() != 0 {
                     break schema_normalizer
                         .normalize_batch(&batch)
-                        .context(AppendNormalizationSnafu)?;
+                        .context(AppendSourceSnafu)?;
                 }
                 tokio::task::yield_now().await;
             };
@@ -700,7 +705,7 @@ impl TimeSeriesTable {
                     if batch.num_rows() != 0 {
                         let batch = schema_normalizer
                             .normalize_batch(&batch)
-                            .context(AppendNormalizationSnafu)?;
+                            .context(AppendSourceSnafu)?;
                         writer.write(&batch).context(AppendParquetSnafu)?;
                     }
                     drop(batch);
@@ -763,16 +768,17 @@ mod tests {
     use crate::transaction_log::{CommitError, IndexKind, IndexSpec, TableMeta, TimeBucket};
     use arrow::{
         array::{
-            ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
-            TimestampMillisecondArray, UInt64Array, new_null_array,
+            Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+            Int64Array, StringArray, TimestampMillisecondArray, UInt32Array, UInt64Array,
+            new_null_array,
         },
         datatypes::{DataType, Field, Fields, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
     };
-    use futures::FutureExt;
+    use futures::{FutureExt, StreamExt};
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
     use std::cell::Cell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs::File;
     use std::num::NonZeroU64;
     use std::path::PathBuf;
@@ -949,6 +955,127 @@ mod tests {
         )
     }
 
+    fn widening_table_meta() -> TableMeta {
+        TableMeta::new_time_series_with_schema(
+            IndexSpec {
+                column: "seq".to_string(),
+                entity_columns: vec!["device_id".to_string()],
+                kind: IndexKind::UInt64 {
+                    bucket_width: NonZeroU64::new(u64::from(u32::MAX) + 1).unwrap(),
+                },
+            },
+            LogicalSchema::new(vec![
+                LogicalField {
+                    name: "seq".to_string(),
+                    data_type: LogicalDataType::UInt64,
+                    nullable: false,
+                },
+                LogicalField {
+                    name: "device_id".to_string(),
+                    data_type: LogicalDataType::Int32,
+                    nullable: false,
+                },
+                LogicalField {
+                    name: "reading".to_string(),
+                    data_type: LogicalDataType::Float64,
+                    nullable: true,
+                },
+                LogicalField {
+                    name: "label".to_string(),
+                    data_type: LogicalDataType::Utf8,
+                    nullable: false,
+                },
+            ])
+            .expect("valid widening target schema"),
+        )
+    }
+
+    fn widening_batch(
+        seq: Vec<u32>,
+        device_ids: Vec<i16>,
+        readings: Vec<Option<f32>>,
+        labels: Vec<&str>,
+    ) -> Result<RecordBatch, ArrowError> {
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("label", DataType::Utf8, false),
+                Field::new("reading", DataType::Float32, true).with_metadata(HashMap::from([(
+                    "source_metadata".to_string(),
+                    "ignored".to_string(),
+                )])),
+                Field::new("seq", DataType::UInt32, false),
+                Field::new("device_id", DataType::Int16, false),
+            ],
+            HashMap::from([("source_schema_metadata".to_string(), "ignored".to_string())]),
+        ));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(labels)),
+                Arc::new(Float32Array::from(readings)),
+                Arc::new(UInt32Array::from(seq)),
+                Arc::new(Int16Array::from(device_ids)),
+            ],
+        )
+    }
+
+    fn declared_schema_test_meta(value_type: LogicalDataType, nullable: bool) -> TableMeta {
+        TableMeta::new_time_series_with_schema(
+            IndexSpec {
+                column: "ts".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::Timestamp {
+                    bucket: TimeBucket::Minutes(1),
+                    timezone: None,
+                },
+            },
+            LogicalSchema::new(vec![
+                LogicalField {
+                    name: "ts".to_string(),
+                    data_type: LogicalDataType::Timestamp {
+                        unit: LogicalTimestampUnit::Millis,
+                        timezone: None,
+                    },
+                    nullable: false,
+                },
+                LogicalField {
+                    name: "value".to_string(),
+                    data_type: value_type,
+                    nullable,
+                },
+            ])
+            .expect("valid compatibility target schema"),
+        )
+    }
+
+    async fn assert_declared_schema_rejected_before_reading(
+        meta: TableMeta,
+        schema: SchemaRef,
+        batches: Vec<Result<RecordBatch, ArrowError>>,
+        expected_column: &str,
+    ) -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+        let state_before = table.state().clone();
+        let (reader, observations) = InstrumentedReader::new(schema, batches);
+
+        let error = table
+            .append(reader)
+            .await
+            .expect_err("incompatible declared schema must fail");
+
+        assert!(matches!(error, TableError::SchemaCompatibility { .. }));
+        assert!(error.to_string().contains(expected_column));
+        assert!(observations.schema_calls.get() > 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn lossy_schema_is_rejected_before_reading_or_creating_artifacts() -> TestResult {
         let temp = TempDir::new()?;
@@ -974,6 +1101,252 @@ mod tests {
         assert_eq!(observations.next_calls.get(), 0);
         assert_eq!(table.state().version, 1);
         assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_widens_reordered_index_entity_and_data_fields_incrementally() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), widening_table_meta()).await?;
+        let first = widening_batch(vec![0], vec![i16::MIN], vec![Some(f32::MIN)], vec!["first"])?;
+        let second = widening_batch(vec![u32::MAX], vec![i16::MAX], vec![None], vec!["second"])?;
+        let (reader, observations) =
+            InstrumentedReader::new(first.schema(), vec![Ok(first), Ok(second)]);
+
+        assert_eq!(table.append(reader).await?, 2);
+        assert!(!observations.previous_batch_alive.get());
+        assert_eq!(table.state().segments.len(), 1);
+        let segment = table
+            .state()
+            .segments
+            .values()
+            .next()
+            .expect("committed widened segment");
+        assert_eq!(segment.row_count, 2);
+        assert_eq!(segment.index_min, IndexValue::UInt64(0));
+        assert_eq!(segment.index_max, IndexValue::UInt64(u64::from(u32::MAX)));
+        assert_eq!(segment.entity_layout, SegmentEntityLayout::Mixed);
+
+        let expected_schema = table.state().table_meta.arrow_schema_ref()?;
+        let parquet_reader =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(temp.path().join(&segment.path))?)?
+                .build()?;
+        assert_eq!(parquet_reader.schema(), expected_schema);
+        for batch in parquet_reader {
+            assert_eq!(batch?.schema(), expected_schema);
+        }
+
+        let state_before_overlap = table.state().clone();
+        let data_before_overlap = data_files(temp.path())?;
+        let coverage_before_overlap = coverage_files(temp.path())?;
+        let overlap = table
+            .append(widening_batch(
+                vec![1],
+                vec![i16::MIN],
+                vec![Some(1.0)],
+                vec!["overlap"],
+            )?)
+            .await
+            .expect_err("widened entity and index coverage must still reject overlap");
+        assert!(matches!(overlap, TableError::EntityCoverageOverlap { .. }));
+        assert_eq!(table.state(), &state_before_overlap);
+        assert_eq!(data_files(temp.path())?, data_before_overlap);
+        assert_eq!(coverage_files(temp.path())?, coverage_before_overlap);
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        let mut stream = reopened.scan_range(0_u64, u64::from(u32::MAX) + 1).await?;
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            assert_eq!(batch.schema(), expected_schema);
+            let seq = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("seq as UInt64");
+            let device_id = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("device_id as Int32");
+            let reading = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("reading as Float64");
+            let label = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("label as Utf8");
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    seq.value(row),
+                    device_id.value(row),
+                    (!reading.is_null(row)).then(|| reading.value(row)),
+                    label.value(row).to_string(),
+                ));
+            }
+        }
+        rows.sort_by_key(|row| row.0);
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    0,
+                    i32::from(i16::MIN),
+                    Some(f64::from(f32::MIN)),
+                    "first".to_string(),
+                ),
+                (
+                    u64::from(u32::MAX),
+                    i32::from(i16::MAX),
+                    None,
+                    "second".to_string(),
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_incompatible_declared_schemas_without_artifacts() -> TestResult {
+        let timestamp = || {
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            )
+        };
+        let cases = vec![
+            (
+                declared_schema_test_meta(LogicalDataType::Int32, false),
+                Arc::new(Schema::new(vec![
+                    timestamp(),
+                    Field::new("value", DataType::Int64, false),
+                ])),
+                "value",
+            ),
+            (
+                declared_schema_test_meta(LogicalDataType::Float64, false),
+                Arc::new(Schema::new(vec![
+                    timestamp(),
+                    Field::new("value", DataType::Int32, false),
+                ])),
+                "value",
+            ),
+            (
+                declared_schema_test_meta(LogicalDataType::Int32, false),
+                Arc::new(Schema::new(vec![
+                    Field::new(
+                        "ts",
+                        DataType::Timestamp(ArrowTimeUnit::Microsecond, None),
+                        false,
+                    ),
+                    Field::new("value", DataType::Int32, false),
+                ])),
+                "ts",
+            ),
+            (
+                declared_schema_test_meta(LogicalDataType::Int32, false),
+                Arc::new(Schema::new(vec![
+                    timestamp(),
+                    Field::new("value", DataType::Int32, true),
+                ])),
+                "value",
+            ),
+            (
+                declared_schema_test_meta(LogicalDataType::Int32, false),
+                Arc::new(Schema::new(vec![timestamp()])),
+                "value",
+            ),
+            (
+                declared_schema_test_meta(LogicalDataType::Int32, false),
+                Arc::new(Schema::new(vec![
+                    timestamp(),
+                    Field::new("value", DataType::Int32, false),
+                    Field::new("extra", DataType::Int32, false),
+                ])),
+                "extra",
+            ),
+            (
+                declared_schema_test_meta(LogicalDataType::Int32, false),
+                Arc::new(Schema::new(vec![
+                    timestamp(),
+                    Field::new("value", DataType::Int32, false),
+                    Field::new("value", DataType::Int32, false),
+                ])),
+                "value",
+            ),
+        ];
+
+        for (meta, schema, expected_column) in cases {
+            assert_declared_schema_rejected_before_reading(
+                meta,
+                schema,
+                Vec::new(),
+                expected_column,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_positive_signed_index_without_inspecting_values() -> TestResult {
+        let meta = TableMeta::new_time_series_with_schema(
+            IndexSpec {
+                column: "seq".to_string(),
+                entity_columns: Vec::new(),
+                kind: IndexKind::UInt64 {
+                    bucket_width: NonZeroU64::new(1).unwrap(),
+                },
+            },
+            LogicalSchema::new(vec![LogicalField {
+                name: "seq".to_string(),
+                data_type: LogicalDataType::UInt64,
+                nullable: false,
+            }])?,
+        );
+        let schema = Arc::new(Schema::new(vec![Field::new("seq", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )?;
+
+        assert_declared_schema_rejected_before_reading(meta, schema, vec![Ok(batch)], "seq").await
+    }
+
+    #[tokio::test]
+    async fn widened_batch_source_failure_rolls_back_partial_output() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), widening_table_meta())
+                .await?;
+        let first = widening_batch(vec![0], vec![1], vec![Some(1.0)], vec!["first"])?;
+        let (reader, observations) = InstrumentedReader::new(
+            first.schema(),
+            vec![
+                Ok(first),
+                Err(ArrowError::ComputeError(
+                    "injected widened source failure".to_string(),
+                )),
+            ],
+        );
+
+        let error = table
+            .append(reader)
+            .await
+            .expect_err("source failure must abort widened append");
+
+        assert!(matches!(error, TableError::AppendSource { .. }));
+        assert!(!observations.previous_batch_alive.get());
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 
@@ -1702,20 +2075,30 @@ mod tests {
     async fn append_conflict_cleans_attempt_and_stays_invisible() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
-        let mut winner = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut winner = TimeSeriesTable::create(location.clone(), widening_table_meta()).await?;
         let mut loser = TimeSeriesTable::open(location.clone()).await?;
         let loser_state_before = loser.state().clone();
 
         winner
-            .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
+            .append(widening_batch(
+                vec![0],
+                vec![1],
+                vec![Some(1.0)],
+                vec!["winner"],
+            )?)
             .await?;
         let data_before = data_files(temp.path())?;
         let coverage_before = coverage_files(temp.path())?;
 
         let error = loser
             .append(
-                AppendRequest::new(time_series_batch(vec![120_000], vec!["A"], vec![2.0])?)
-                    .max_rows_per_row_group(1),
+                AppendRequest::new(widening_batch(
+                    vec![u32::MAX],
+                    vec![2],
+                    vec![Some(2.0)],
+                    vec!["loser"],
+                )?)
+                .max_rows_per_row_group(1),
             )
             .await
             .expect_err("stale streaming append must conflict");
@@ -1754,7 +2137,7 @@ mod tests {
     async fn append_ambiguous_commit_reports_and_preserves_generated_path() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
-        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let mut table = TimeSeriesTable::create(location.clone(), widening_table_meta()).await?;
         let commit_path = temp.path().join(layout::commit_rel_path(2));
         crate::storage::inject_write_new_failure(commit_path.clone(), true);
         let capture = TraceCapture::default();
@@ -1762,8 +2145,13 @@ mod tests {
         let error = capture
             .run(
                 table.append(
-                    AppendRequest::new(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
-                        .max_rows_per_row_group(1),
+                    AppendRequest::new(widening_batch(
+                        vec![0],
+                        vec![1],
+                        vec![Some(1.0)],
+                        vec!["ambiguous"],
+                    )?)
+                    .max_rows_per_row_group(1),
                 ),
             )
             .await

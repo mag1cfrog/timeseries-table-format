@@ -36,6 +36,7 @@ use timeseries_table_format::datafusion::TsTableProvider;
 use timeseries_table_format::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
+use timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError;
 use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
 use timeseries_table_format::table::{TableError, TimeSeriesTable};
@@ -1377,28 +1378,19 @@ async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestRe
 }
 
 #[tokio::test]
-async fn append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult {
+async fn append_rejects_hostile_arrow_types_without_artifacts() -> TestResult {
     let union = DataType::Union(
         UnionFields::try_new([0], [Field::new("member", DataType::Int64, true)])?,
         UnionMode::Sparse,
     );
     let cases = [
-        ("union", union.clone(), "cannot be represented exactly"),
+        ("union", union.clone()),
         (
             "nested union",
             DataType::List(Arc::new(Field::new("item", union, true))),
-            "cannot be represented exactly",
         ),
-        (
-            "invalid Time32",
-            DataType::Time32(TimeUnit::Microsecond),
-            "Time32",
-        ),
-        (
-            "invalid Time64",
-            DataType::Time64(TimeUnit::Millisecond),
-            "Time64",
-        ),
+        ("invalid Time32", DataType::Time32(TimeUnit::Microsecond)),
+        ("invalid Time64", DataType::Time64(TimeUnit::Millisecond)),
         (
             "malformed map",
             DataType::Map(
@@ -1409,11 +1401,10 @@ async fn append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult
                 )),
                 false,
             ),
-            "cannot be represented exactly",
         ),
     ];
 
-    for (case, hostile_type, expected_message) in cases {
+    for (case, hostile_type) in cases {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
@@ -1424,8 +1415,7 @@ async fn append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult
                 false,
             ),
             Field::new("symbol", DataType::Utf8, false),
-            Field::new("price", DataType::Float64, false),
-            Field::new("hostile", hostile_type, true),
+            Field::new("price", hostile_type.clone(), false),
         ]));
         let reader =
             RecordBatchIterator::new(Vec::<Result<RecordBatch, ArrowError>>::new(), schema);
@@ -1434,14 +1424,20 @@ async fn append_rejects_panic_inducing_schemas_without_artifacts() -> TestResult
             .append(reader)
             .await
             .expect_err("hostile schema must be rejected");
-        let TableError::AppendSource {
-            source: ArrowError::SchemaError(message),
-        } = error
-        else {
-            panic!("unexpected {case} error: {error}");
-        };
-        assert!(message.contains("hostile"), "{case}: {message}");
-        assert!(message.contains(expected_message), "{case}: {message}");
+        assert!(
+            matches!(
+                &error,
+                TableError::SchemaCompatibility {
+                    source:
+                        SchemaCompatibilityError::IncomingTypeMismatch {
+                            column,
+                            incoming_type,
+                            ..
+                        }
+                } if column == "price" && incoming_type == &hostile_type
+            ),
+            "unexpected {case} error: {error}"
+        );
         assert_eq!(table.state().version, 1, "{case}");
         assert!(table.state().segments.is_empty(), "{case}");
         assert!(!tmp.path().join("data").exists(), "{case}");
