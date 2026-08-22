@@ -205,7 +205,7 @@ mod _native {
     const ARROW_STREAM_ERROR_WITHOUT_DETAILS: &std::ffi::CStr =
         c"Arrow C Stream operation failed without error details";
 
-    unsafe extern "C" fn adapted_arrow_stream_get_schema(
+    unsafe extern "C" fn error_message_adapter_get_schema(
         stream: *mut FFI_ArrowArrayStream,
         out: *mut FFI_ArrowSchema,
     ) -> i32 {
@@ -227,7 +227,7 @@ mod _native {
         unsafe { get_schema(&mut adapter.source, out) }
     }
 
-    unsafe extern "C" fn adapted_arrow_stream_get_next(
+    unsafe extern "C" fn error_message_adapter_get_next(
         stream: *mut FFI_ArrowArrayStream,
         out: *mut FFI_ArrowArray,
     ) -> i32 {
@@ -249,7 +249,7 @@ mod _native {
         unsafe { get_next(&mut adapter.source, out) }
     }
 
-    unsafe extern "C" fn adapted_arrow_stream_get_last_error(
+    unsafe extern "C" fn error_message_adapter_get_last_error(
         stream: *mut FFI_ArrowArrayStream,
     ) -> *const c_char {
         let Some(stream) = (unsafe { stream.as_mut() }) else {
@@ -274,7 +274,7 @@ mod _native {
         }
     }
 
-    unsafe extern "C" fn release_adapted_arrow_stream(stream: *mut FFI_ArrowArrayStream) {
+    unsafe extern "C" fn release_error_message_adapter(stream: *mut FFI_ArrowArrayStream) {
         let Some(stream) = (unsafe { stream.as_mut() }) else {
             return;
         };
@@ -292,7 +292,7 @@ mod _native {
         }
     }
 
-    fn arrow_stream_with_error_message_fallback(
+    fn ensure_arrow_stream_error_messages(
         source: FFI_ArrowArrayStream,
     ) -> Result<FFI_ArrowArrayStream, &'static str> {
         if source.release.is_none() {
@@ -306,16 +306,16 @@ mod _native {
         }
 
         Ok(FFI_ArrowArrayStream {
-            get_schema: Some(adapted_arrow_stream_get_schema),
-            get_next: Some(adapted_arrow_stream_get_next),
-            get_last_error: Some(adapted_arrow_stream_get_last_error),
-            release: Some(release_adapted_arrow_stream),
+            get_schema: Some(error_message_adapter_get_schema),
+            get_next: Some(error_message_adapter_get_next),
+            get_last_error: Some(error_message_adapter_get_last_error),
+            release: Some(release_error_message_adapter),
             private_data: Box::into_raw(Box::new(ArrowStreamErrorMessageAdapter { source }))
                 .cast::<c_void>(),
         })
     }
 
-    fn import_arrow_stream_from_python(
+    fn record_batch_reader_from_python(
         source: &Bound<'_, PyAny>,
     ) -> PyResult<ArrowArrayStreamReader> {
         let py = source.py();
@@ -355,7 +355,7 @@ mod _native {
         // to a valid, aligned, initialized FFI_ArrowArrayStream. `from_raw` moves the stream and
         // replaces the capsule's value with a released stream.
         let stream = unsafe { FFI_ArrowArrayStream::from_raw(stream_pointer.as_ptr()) };
-        let stream = arrow_stream_with_error_message_fallback(stream).map_err(|error| {
+        let stream = ensure_arrow_stream_error_messages(stream).map_err(|error| {
             PyValueError::new_err(format!("failed to import Arrow C Stream: {error}"))
         })?;
 
@@ -531,20 +531,20 @@ mod _native {
         ))
     }
 
-    fn pyarrow_reader_from_c_stream(
+    fn pyarrow_record_batch_reader_from_c_stream(
         py: Python<'_>,
         stream: FFI_ArrowArrayStream,
         api_name: &str,
     ) -> PyResult<Py<PyAny>> {
         let capsule = PyCapsule::new_with_value(py, stream, c"arrow_array_stream")?;
 
-        let pa_mod = PyModule::import(py, "pyarrow").map_err(|e| {
+        let pyarrow = PyModule::import(py, "pyarrow").map_err(|error| {
             PyImportError::new_err(format!(
-                "pyarrow is required for Session.{api_name}(...): {e}"
+                "pyarrow is required for Session.{api_name}(...): {error}"
             ))
         })?;
 
-        let rbr = pa_mod.getattr("RecordBatchReader")?;
+        let record_batch_reader = pyarrow.getattr("RecordBatchReader")?;
         let wrapper = Py::new(
             py,
             ArrowCStreamWrapper {
@@ -552,23 +552,23 @@ mod _native {
             },
         )?;
 
-        let from_stream = match rbr.getattr("from_stream") {
-            Ok(v) => v,
-            Err(e) => {
-                if e.is_instance_of::<PyAttributeError>(py) {
-                    let mut msg = format!(
+        let from_stream = match record_batch_reader.getattr("from_stream") {
+            Ok(from_stream) => from_stream,
+            Err(error) => {
+                if error.is_instance_of::<PyAttributeError>(py) {
+                    let mut message = format!(
                         "pyarrow.RecordBatchReader.from_stream is required for Session.{api_name}(...). \
 This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installation."
                     );
 
-                    if let Ok(v) = pa_mod.getattr("__version__")
-                        && let Ok(s) = v.extract::<String>()
+                    if let Ok(version) = pyarrow.getattr("__version__")
+                        && let Ok(version) = version.extract::<String>()
                     {
-                        msg = format!("{msg} (detected pyarrow=={s})");
+                        message = format!("{message} (detected pyarrow=={version})");
                     }
-                    return Err(PyImportError::new_err(msg));
+                    return Err(PyImportError::new_err(message));
                 }
-                return Err(e);
+                return Err(error);
             }
         };
 
@@ -598,7 +598,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
     }
 
     fn table_from_c_stream(py: Python<'_>, stream: FFI_ArrowArrayStream) -> PyResult<Py<PyAny>> {
-        let reader = pyarrow_reader_from_c_stream(py, stream, "sql")?;
+        let reader = pyarrow_record_batch_reader_from_c_stream(py, stream, "sql")?;
         let reader = reader.bind(py);
 
         let table_res = reader.call_method0("read_all");
@@ -1260,7 +1260,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 },
             )?;
 
-            pyarrow_reader_from_c_stream(py, stream, "sql_reader")
+            pyarrow_record_batch_reader_from_c_stream(py, stream, "sql_reader")
         }
 
         /// Return the list of currently registered table names (sorted).
@@ -1713,7 +1713,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
         /// The stream is consumed lazily while the GIL is released.
         fn append(&mut self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<u64> {
-            let reader = import_arrow_stream_from_python(source)?;
+            let reader = record_batch_reader_from_python(source)?;
             let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
@@ -1863,7 +1863,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         let rt = tokio_runner::global_runtime()?;
         let stream = export_stream_to_c_stream(rt.as_ref(), stream)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        pyarrow_reader_from_c_stream(py, stream, "_test_sql_reader")
+        pyarrow_record_batch_reader_from_c_stream(py, stream, "_test_sql_reader")
     }
 
     #[cfg(feature = "test-utils")]
