@@ -10,8 +10,9 @@ the ordered index.
 | Int64 | Signed `int64` | A positive width in index-value units |
 | UInt64 | Unsigned `uint64` | A positive width in index-value units |
 
-The Parquet column must match the configured Arrow type exactly. The library does not infer
-timestamps from integers or convert between signed and unsigned values.
+The incoming column must match the configured Arrow type or use a supported
+[lossless widening](../reference/timeseries_table.md#append-arrow-data). The library does not
+infer timestamps from integers or convert between signed and unsigned values.
 
 Parquet rows do not need to be sorted by the ordered index before append. The term "ordered
 index" describes the chronological domain used for coverage, not the physical order of input

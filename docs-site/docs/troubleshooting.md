@@ -40,25 +40,22 @@ model.
 
 ## Append rejects the ordered-index column
 
-The Parquet ordered-index column must exactly match the type stored in the
-table metadata:
-
-- Timestamp indexes must preserve their Arrow timestamp unit and timezone.
-- Int64 indexes require Arrow `int64`.
-- UInt64 indexes require Arrow `uint64`.
-
-The package does not infer timestamps from integers or convert between signed
-and unsigned indexes. Inspect the table with `index_spec()` and write the
-incoming Parquet column with the same Arrow type.
+The ordered-index type stored in table metadata is authoritative. The incoming
+column must either match it or use a supported
+[lossless widening](reference/timeseries_table.md#append-arrow-data). Timestamp
+units and timezones must match exactly, and signed and unsigned indexes are
+never converted into each other.
 
 See [Ordered indexes, buckets, and overlap](concepts/bucketing_and_overlap.md)
 for the complete index rules.
 
 ## `SchemaMismatchError` during append
 
-The first successful append adopts the table's canonical Parquet schema. Every
-later segment must use the same column names and Arrow types. Compare the new
-file with an accepted segment and correct the producer schema before retrying.
+The first successful append adopts the table's canonical schema when one is not
+already registered. Later appends must match its field names and nullability;
+types must match except for the documented
+[lossless widenings](reference/timeseries_table.md#append-arrow-data). Compare
+the new source with an accepted segment and correct its schema before retrying.
 
 The rejected append is not committed. Avoid casting data automatically unless
 the conversion is part of the intended table schema.
