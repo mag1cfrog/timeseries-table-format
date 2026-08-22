@@ -5,8 +5,6 @@ use std::{fs::File, path::PathBuf, sync::Arc};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow_csv::ReaderBuilder;
 use arrow_csv::reader::Format;
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use timeseries_table_format::{
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
     storage::TableLocation,
@@ -23,18 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csv_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/assets/nvda_1h_sample.csv");
     let table_root = workspace_root.join("examples/nvda_table");
-    let parquet_path = table_root.join("data/nvda_1h.parquet");
 
     // Start clean so the example is repeatable.
     if tokio::fs::try_exists(&table_root).await? {
         tokio::fs::remove_dir_all(&table_root).await?;
     }
-    let data_dir = parquet_path
-        .parent()
-        .ok_or("parquet path missing parent directory")?;
-    tokio::fs::create_dir_all(data_dir).await?;
 
-    // 1) Load CSV into Arrow batches.
+    // 1) Open the CSV as an Arrow batch reader.
     let schema = Schema::new(vec![
         Field::new(
             "ts",
@@ -50,25 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]);
 
     let format = Format::default().with_header(true);
-    let reader = ReaderBuilder::new(Arc::new(schema.clone()))
+    let reader = ReaderBuilder::new(Arc::new(schema))
         .with_format(format)
         .build(File::open(&csv_path)?)?;
-    let schema = reader.schema();
-    let mut batches = Vec::new();
-    for batch in reader {
-        batches.push(batch?);
-    }
 
-    // 2) Write a single Parquet segment.
-    let props = WriterProperties::builder().build();
-    let parquet_file = File::create(&parquet_path)?;
-    let mut writer = ArrowWriter::try_new(parquet_file, schema.clone(), Some(props))?;
-    for batch in &batches {
-        writer.write(batch)?;
-    }
-    writer.close()?;
-
-    // 3) Create a time-series table.
+    // 2) Create a time-series table.
     let index = IndexSpec {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
@@ -81,13 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let location = TableLocation::local(&table_root);
     let mut table = TimeSeriesTable::create(location, meta).await?;
 
-    // 4) Append the segment via the transaction log (OCC).
-    let (version, _) = table.append_parquet_from_path(&parquet_path).await?;
+    // 3) Stream the CSV batches into a table-managed Parquet segment.
+    let version = table.append(reader).await?;
 
-    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!("Table root     : {}", table_root.display());
     println!("Committed ver. : {}", version);
-    println!("Rows ingested  : {}", rows);
 
     Ok(())
 }

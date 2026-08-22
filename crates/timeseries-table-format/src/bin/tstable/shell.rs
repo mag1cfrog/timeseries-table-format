@@ -17,7 +17,7 @@ use timeseries_table_format::{
 use tokio::runtime::Handle;
 
 use crate::{
-    BackendArg, IndexTypeArg,
+    BackendArg, IndexTypeArg, append_parquet_file,
     engine::{Engine, QuerySession},
     error::{CliError, CliResult, CreateTableSnafu, OpenTableSnafu, StorageSnafu},
     make_engine, open_table, parse_bucket_width, parse_time_bucket,
@@ -327,21 +327,12 @@ async fn append_first_segment(table_root: &Path, table: &mut TimeSeriesTable) ->
             continue;
         }
 
-        match table.append_parquet_from_path(&parquet_path).await {
-            Ok((s, rel_str)) => {
-                println!("appended: {rel_str}, size: {s}.");
+        match append_parquet_file(table, table_root, &parquet_path).await {
+            Ok(version) => {
+                println!("appended table version: {version}");
                 break;
             }
-            Err(e) => {
-                println!(
-                    "{}",
-                    CliError::AppendSegment {
-                        table: table_root.display().to_string(),
-                        parquet: parquet_path.display().to_string(),
-                        source: Box::new(e),
-                    }
-                );
-            }
+            Err(error) => println!("{error}"),
         }
     }
 
@@ -849,30 +840,21 @@ async fn process_command(ctx: &mut ShellContext, trimmed: &str) -> CliResult<Com
         }
 
         let parquet_path = PathBuf::from(rest.trim());
-        match ctx.table.append_parquet_from_path(&parquet_path).await {
-            Ok((s, rel_str)) => {
+        match append_parquet_file(&mut ctx.table, &ctx.table_root, &parquet_path).await {
+            Ok(version) => {
                 if ctx.timing {
                     println!(
-                        "appended: {rel_str}, size: {s}. (elapsed_ms: {})",
+                        "appended table version: {version} (elapsed_ms: {})",
                         start.elapsed().as_millis()
                     );
                 } else {
-                    println!("appended: {rel_str}, size: {s}.");
+                    println!("appended table version: {version}");
                 }
                 // Rebuild query session from the refreshed in-memory table snapshot.
                 ctx.session = ctx.engine.prepare_session_from_table(&ctx.table).await?;
             }
 
-            Err(e) => {
-                println!(
-                    "{}",
-                    CliError::AppendSegment {
-                        table: ctx.table_root.display().to_string(),
-                        parquet: parquet_path.display().to_string(),
-                        source: Box::new(e),
-                    }
-                );
-            }
+            Err(error) => println!("{error}"),
         }
 
         set_status(ctx, "append", Some(start.elapsed()));
