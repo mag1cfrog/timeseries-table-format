@@ -1,0 +1,862 @@
+{
+  "schema_version": 1,
+  "repository": {
+    "commit_sha": "d038eee9cca20ea32c621c0b50df7bc0da32ab09",
+    "worktree_dirty": false
+  },
+  "benchmark": {
+    "binary": "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+    "build_profile": "release",
+    "runner_command": [
+      "target/release/examples/append_widening_bench",
+      "compare",
+      "--workload",
+      "large-scale",
+      "--samples",
+      "3",
+      "--json-out",
+      "/tmp/append-widening-large-scale.json"
+    ]
+  },
+  "environment": {
+    "operating_system": "linux",
+    "kernel": "6.19.14-200.fc43.x86_64",
+    "architecture": "x86_64",
+    "cpu_count": 16,
+    "available_memory_bytes": 24139522048,
+    "benchmark_process_environment": {
+      "LC_ALL": "C"
+    },
+    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "workload": {
+    "name": "large-scale",
+    "generated_payload_bytes": 3550000128,
+    "generation": {
+      "row_count": 3466797,
+      "batch_rows": 8192,
+      "row_group_rows": 1048576,
+      "payload_bytes_per_row": 1024,
+      "seed": 20260821
+    },
+    "table_definition": {
+      "index_column": "ordered_index",
+      "incoming_index_type": "uint32",
+      "registered_index_type": "uint64",
+      "bucket_width": 4294967296,
+      "entity_columns": []
+    },
+    "writer_properties": {
+      "compression": "UNCOMPRESSED",
+      "data_page_size_bytes": 1048576,
+      "dictionary_enabled": true,
+      "max_row_group_rows": 1048576,
+      "statistics": "Page",
+      "write_batch_rows": 1024,
+      "writer_version": "PARQUET_1_0"
+    }
+  },
+  "sampling": {
+    "warmup_count_per_mode": 1,
+    "measured_sample_count_per_mode": 3,
+    "execution_order": {
+      "warmups": [
+        "external-normalization",
+        "direct-widening"
+      ],
+      "measured": [
+        [
+          "external-normalization",
+          "direct-widening"
+        ],
+        [
+          "direct-widening",
+          "external-normalization"
+        ],
+        [
+          "external-normalization",
+          "direct-widening"
+        ]
+      ]
+    }
+  },
+  "warmups": [
+    {
+      "mode": "external-normalization",
+      "command": [
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "external-normalization",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/warmups/external-normalization/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821",
+        "--external-normalized-parquet",
+        "/tmp/tstable-append-widening-A1hDyJ/warmups/external-normalization/external/normalized.parquet"
+      ],
+      "peak_rss_bytes": null,
+      "driver": {
+        "schema_version": 1,
+        "mode": "external-normalization",
+        "process_id": 2456083,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/warmups/external-normalization/table",
+        "external_normalized_parquet_path": "/tmp/tstable-append-widening-A1hDyJ/warmups/external-normalization/external/normalized.parquet",
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": 2939641411,
+          "append_and_commit_wall_time_ns": 2523375308,
+          "end_to_end_pipeline_wall_time_ns": 5463017070
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": 3622108931,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 7244217862
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": false,
+          "external_normalized_parquet_schema_matches_registered": true,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/0925adac-1354-498c-85db-5c68a2722fb6.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    },
+    {
+      "mode": "direct-widening",
+      "command": [
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "direct-widening",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/warmups/direct-widening/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821"
+      ],
+      "peak_rss_bytes": null,
+      "driver": {
+        "schema_version": 1,
+        "mode": "direct-widening",
+        "process_id": 2456109,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/warmups/direct-widening/table",
+        "external_normalized_parquet_path": null,
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": null,
+          "append_and_commit_wall_time_ns": 3057432969,
+          "end_to_end_pipeline_wall_time_ns": 3057433039
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": null,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 3622108931
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": true,
+          "external_normalized_parquet_schema_matches_registered": null,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/7be03e72-ca6f-42fe-b258-7421e3080a96.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    }
+  ],
+  "measured_samples": [
+    {
+      "mode": "external-normalization",
+      "command": [
+        "/usr/bin/time",
+        "-v",
+        "-o",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/1/external-normalization/gnu-time.txt",
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "external-normalization",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/1/external-normalization/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821",
+        "--external-normalized-parquet",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/1/external-normalization/external/normalized.parquet"
+      ],
+      "peak_rss_bytes": 2097123328,
+      "repetition": 1,
+      "driver": {
+        "schema_version": 1,
+        "mode": "external-normalization",
+        "process_id": 2456126,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/measured/1/external-normalization/table",
+        "external_normalized_parquet_path": "/tmp/tstable-append-widening-A1hDyJ/measured/1/external-normalization/external/normalized.parquet",
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": 3213761285,
+          "append_and_commit_wall_time_ns": 2499510836,
+          "end_to_end_pipeline_wall_time_ns": 5713272732
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": 3622108931,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 7244217862
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": false,
+          "external_normalized_parquet_schema_matches_registered": true,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/2e2f6ba4-cc9a-462f-a56b-91589156aebc.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    },
+    {
+      "mode": "direct-widening",
+      "command": [
+        "/usr/bin/time",
+        "-v",
+        "-o",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/1/direct-widening/gnu-time.txt",
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "direct-widening",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/1/direct-widening/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821"
+      ],
+      "peak_rss_bytes": 2096807936,
+      "repetition": 1,
+      "driver": {
+        "schema_version": 1,
+        "mode": "direct-widening",
+        "process_id": 2456154,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/measured/1/direct-widening/table",
+        "external_normalized_parquet_path": null,
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": null,
+          "append_and_commit_wall_time_ns": 3207504582,
+          "end_to_end_pipeline_wall_time_ns": 3207504842
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": null,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 3622108931
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": true,
+          "external_normalized_parquet_schema_matches_registered": null,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/f72b5585-1f37-4ac9-91e7-1ac40da97bf3.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    },
+    {
+      "mode": "direct-widening",
+      "command": [
+        "/usr/bin/time",
+        "-v",
+        "-o",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/2/direct-widening/gnu-time.txt",
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "direct-widening",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/2/direct-widening/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821"
+      ],
+      "peak_rss_bytes": 2097098752,
+      "repetition": 2,
+      "driver": {
+        "schema_version": 1,
+        "mode": "direct-widening",
+        "process_id": 2456703,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/measured/2/direct-widening/table",
+        "external_normalized_parquet_path": null,
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": null,
+          "append_and_commit_wall_time_ns": 3180438953,
+          "end_to_end_pipeline_wall_time_ns": 3180439133
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": null,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 3622108931
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": true,
+          "external_normalized_parquet_schema_matches_registered": null,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/c6c2b35e-12e0-4084-a616-c218560aa350.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    },
+    {
+      "mode": "external-normalization",
+      "command": [
+        "/usr/bin/time",
+        "-v",
+        "-o",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/2/external-normalization/gnu-time.txt",
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "external-normalization",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/2/external-normalization/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821",
+        "--external-normalized-parquet",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/2/external-normalization/external/normalized.parquet"
+      ],
+      "peak_rss_bytes": 2099367936,
+      "repetition": 2,
+      "driver": {
+        "schema_version": 1,
+        "mode": "external-normalization",
+        "process_id": 2456730,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/measured/2/external-normalization/table",
+        "external_normalized_parquet_path": "/tmp/tstable-append-widening-A1hDyJ/measured/2/external-normalization/external/normalized.parquet",
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": 3098464272,
+          "append_and_commit_wall_time_ns": 2462131788,
+          "end_to_end_pipeline_wall_time_ns": 5560596631
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": 3622108931,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 7244217862
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": false,
+          "external_normalized_parquet_schema_matches_registered": true,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/ae047e5c-1312-46b0-abb6-cbb60e4cfa0c.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    },
+    {
+      "mode": "external-normalization",
+      "command": [
+        "/usr/bin/time",
+        "-v",
+        "-o",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/3/external-normalization/gnu-time.txt",
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "external-normalization",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/3/external-normalization/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821",
+        "--external-normalized-parquet",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/3/external-normalization/external/normalized.parquet"
+      ],
+      "peak_rss_bytes": 2117754880,
+      "repetition": 3,
+      "driver": {
+        "schema_version": 1,
+        "mode": "external-normalization",
+        "process_id": 2456761,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/measured/3/external-normalization/table",
+        "external_normalized_parquet_path": "/tmp/tstable-append-widening-A1hDyJ/measured/3/external-normalization/external/normalized.parquet",
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": 3061833333,
+          "append_and_commit_wall_time_ns": 2490578743,
+          "end_to_end_pipeline_wall_time_ns": 5552412707
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": 3622108931,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 7244217862
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": false,
+          "external_normalized_parquet_schema_matches_registered": true,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/3116d440-aeed-4486-ba14-d0e37b9d3564.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    },
+    {
+      "mode": "direct-widening",
+      "command": [
+        "/usr/bin/time",
+        "-v",
+        "-o",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/3/direct-widening/gnu-time.txt",
+        "/home/hanbo/repo/timeseries-table-format/target/release/examples/append_widening_bench",
+        "run",
+        "--mode",
+        "direct-widening",
+        "--table",
+        "/tmp/tstable-append-widening-A1hDyJ/measured/3/direct-widening/table",
+        "--row-count",
+        "3466797",
+        "--batch-rows",
+        "8192",
+        "--row-group-rows",
+        "1048576",
+        "--payload-bytes",
+        "1024",
+        "--seed",
+        "20260821"
+      ],
+      "peak_rss_bytes": 2098651136,
+      "repetition": 3,
+      "driver": {
+        "schema_version": 1,
+        "mode": "direct-widening",
+        "process_id": 2456788,
+        "table_path": "/tmp/tstable-append-widening-A1hDyJ/measured/3/direct-widening/table",
+        "external_normalized_parquet_path": null,
+        "workload": {
+          "row_count": 3466797,
+          "batch_rows": 8192,
+          "row_group_rows": 1048576,
+          "payload_bytes_per_row": 1024,
+          "seed": 20260821
+        },
+        "table_definition": {
+          "index_column": "ordered_index",
+          "incoming_index_type": "uint32",
+          "registered_index_type": "uint64",
+          "bucket_width": 4294967296,
+          "entity_columns": []
+        },
+        "writer_properties": {
+          "compression": "UNCOMPRESSED",
+          "data_page_size_bytes": 1048576,
+          "dictionary_enabled": true,
+          "max_row_group_rows": 1048576,
+          "statistics": "Page",
+          "write_batch_rows": 1024,
+          "writer_version": "PARQUET_1_0"
+        },
+        "timing": {
+          "external_normalization_wall_time_ns": null,
+          "append_and_commit_wall_time_ns": 3174892157,
+          "end_to_end_pipeline_wall_time_ns": 3174892348
+        },
+        "artifacts": {
+          "external_normalized_parquet_bytes": null,
+          "table_managed_committed_parquet_bytes": 3622108931,
+          "total_retained_ingestion_parquet_bytes": 3622108931
+        },
+        "committed_version": 2,
+        "validation": {
+          "column_checksums": {
+            "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+            "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+            "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+          },
+          "coverage_ratio": 1.0,
+          "index_max": 4294967295,
+          "index_min": 0,
+          "boundary_index_values_round_trip_as_uint64": true,
+          "committed_parquet_schema_matches_registered": true,
+          "direct_pipeline_has_no_external_normalized_parquet": true,
+          "external_normalized_parquet_schema_matches_registered": null,
+          "full_scan_matches_generated": true,
+          "row_count": 3466797,
+          "schema_matches_registered": true,
+          "segment_file_bytes": 3622108931,
+          "segment_path": "data/a2d3db44-8102-4206-a402-0edb93f6e96e.parquet",
+          "segment_row_group_count": 4,
+          "table_managed_parquet_file_count": 1
+        }
+      }
+    }
+  ],
+  "medians": {
+    "direct-widening": {
+      "append_and_commit_wall_time_ns": 3180438953.0,
+      "end_to_end_pipeline_wall_time_ns": 3180439133.0,
+      "peak_rss_bytes": 2097098752.0,
+      "table_managed_committed_parquet_bytes": 3622108931.0,
+      "total_retained_ingestion_parquet_bytes": 3622108931.0
+    },
+    "external-normalization": {
+      "append_and_commit_wall_time_ns": 2490578743.0,
+      "end_to_end_pipeline_wall_time_ns": 5560596631.0,
+      "peak_rss_bytes": 2099367936.0,
+      "table_managed_committed_parquet_bytes": 3622108931.0,
+      "total_retained_ingestion_parquet_bytes": 7244217862.0,
+      "external_normalization_wall_time_ns": 3098464272.0,
+      "external_normalized_parquet_bytes": 3622108931.0
+    }
+  },
+  "validation": {
+    "all_invocations_have_same_logical_result": true,
+    "logical_result": {
+      "committed_version": 2,
+      "workload": {
+        "row_count": 3466797,
+        "batch_rows": 8192,
+        "row_group_rows": 1048576,
+        "payload_bytes_per_row": 1024,
+        "seed": 20260821
+      },
+      "table_definition": {
+        "index_column": "ordered_index",
+        "incoming_index_type": "uint32",
+        "registered_index_type": "uint64",
+        "bucket_width": 4294967296,
+        "entity_columns": []
+      },
+      "writer_properties": {
+        "compression": "UNCOMPRESSED",
+        "data_page_size_bytes": 1048576,
+        "dictionary_enabled": true,
+        "max_row_group_rows": 1048576,
+        "statistics": "Page",
+        "write_batch_rows": 1024,
+        "writer_version": "PARQUET_1_0"
+      },
+      "validation": {
+        "boundary_index_values_round_trip_as_uint64": true,
+        "column_checksums": {
+          "ordered_index": "bf20f53396ef4822cff21c815c33ba690b2b51bbbda5e03747737eb7837dd442",
+          "sequence": "ea51955bc68982b51906eb45646172cd4e575f625af700fa017730ee1d7fea7f",
+          "payload": "850e5e168ad6e25d4468a8bb89e41bb2b7ae263341e1bbc6edf227973609a201"
+        },
+        "committed_parquet_schema_matches_registered": true,
+        "coverage_ratio": 1.0,
+        "full_scan_matches_generated": true,
+        "index_max": 4294967295,
+        "index_min": 0,
+        "row_count": 3466797,
+        "schema_matches_registered": true,
+        "segment_row_group_count": 4,
+        "table_managed_parquet_file_count": 1
+      }
+    }
+  },
+  "artifacts_directory": null
+}
