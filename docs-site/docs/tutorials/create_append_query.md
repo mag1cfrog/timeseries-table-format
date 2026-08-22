@@ -74,7 +74,7 @@ Both entity columns remain normal SQL columns. You can use
 `WHERE exchange_id = 1 AND symbol = 'NVDA'` to select one identity or group by
 both columns to calculate independent aggregates.
 
-You now have a self-contained table root that can accept more non-overlapping
+You now have a locally queryable table root that can accept more non-overlapping
 Parquet segments.
 
 Next, learn how to [append files incrementally](real_world_workflow.md).

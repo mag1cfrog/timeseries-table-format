@@ -29,8 +29,8 @@
 
 ## Built for time-series data
 
-`timeseries-table-format` turns local Parquet segments into self-contained,
-append-only tables. It tracks which chronological windows exist for each
+`timeseries-table-format` turns Arrow data into managed, append-only tables.
+It tracks which chronological windows exist for each
 entity, rejects overlapping appends, and exposes the result through DataFusion
 SQL.
 
