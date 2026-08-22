@@ -123,20 +123,6 @@ pub enum TableError {
         source: CommitError,
     },
 
-    /// Append failed and its provisional external Parquet copy could not be removed.
-    #[snafu(display(
-        "Append failed: {source}; failed to remove provisional Parquet copy at {path}: {cleanup_error}"
-    ))]
-    ExternalParquetRollback {
-        /// Table-relative path of the provisional copy that may remain.
-        path: String,
-        /// Original append failure that triggered rollback.
-        #[snafu(source)]
-        source: Box<TableError>,
-        /// Storage failure encountered while removing the provisional copy.
-        cleanup_error: StorageError,
-    },
-
     /// An append source contained no rows.
     #[snafu(display("Cannot append an empty Arrow batch source"))]
     EmptyAppendSource,

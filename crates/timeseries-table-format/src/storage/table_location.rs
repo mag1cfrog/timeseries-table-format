@@ -5,10 +5,7 @@ use object_store::path::Path as ObjectStorePath;
 use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
-use crate::storage::layout;
-use crate::storage::{
-    BackendError, NotFoundSnafu, OtherIoSnafu, StorageLocation, StorageResult, copy_new_from_local,
-};
+use crate::storage::{BackendError, NotFoundSnafu, OtherIoSnafu, StorageLocation, StorageResult};
 
 /// Table root location with table-scoped semantics.
 ///
@@ -16,12 +13,6 @@ use crate::storage::{
 /// location as a table root (e.g. log layout and segment paths).
 #[derive(Debug, Clone)]
 pub struct TableLocation(StorageLocation);
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct PreparedParquet {
-    pub(crate) relative_path: PathBuf,
-    pub(crate) created: bool,
-}
 
 impl From<TableLocation> for StorageLocation {
     fn from(t: TableLocation) -> Self {
@@ -135,56 +126,6 @@ impl TableLocation {
             }
         }
     }
-
-    pub(crate) async fn prepare_parquet_under_root(
-        &self,
-        parquet_path: &Path,
-    ) -> StorageResult<PreparedParquet> {
-        match self.as_ref() {
-            StorageLocation::Local(table_root) => {
-                let root = fs::canonicalize(table_root)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(NotFoundSnafu {
-                        path: table_root.display().to_string(),
-                    })?;
-
-                let src = fs::canonicalize(parquet_path)
-                    .await
-                    .map_err(BackendError::Local)
-                    .context(NotFoundSnafu {
-                        path: parquet_path.display().to_string(),
-                    })?;
-
-                if let Ok(rel) = src.strip_prefix(&root) {
-                    return Ok(PreparedParquet {
-                        relative_path: rel.to_path_buf(),
-                        created: false,
-                    });
-                }
-
-                let file_name = src
-                    .file_name()
-                    .ok_or_else(|| {
-                        OtherIoSnafu {
-                            path: src.display().to_string(),
-                        }
-                        .into_error(BackendError::Local(
-                            std::io::Error::other("parquet path has no filename"),
-                        ))
-                    })?
-                    .to_owned();
-
-                let relative_path = PathBuf::from(layout::DATA_DIR_NAME).join(file_name);
-                copy_new_from_local(self.as_ref(), &src, &relative_path).await?;
-
-                Ok(PreparedParquet {
-                    relative_path,
-                    created: true,
-                })
-            }
-        }
-    }
 }
 
 pub(crate) fn normalize_relative_storage_path(path: &Path) -> StorageResult<(String, PathBuf)> {
@@ -253,69 +194,6 @@ mod tests {
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    #[tokio::test]
-    async fn prepare_parquet_under_root_marks_in_root_file_unowned() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-
-        let rel_path = Path::new("data/seg.parquet");
-        let abs_path = tmp.path().join(rel_path);
-        tokio::fs::create_dir_all(abs_path.parent().unwrap()).await?;
-        tokio::fs::write(&abs_path, b"parquet").await?;
-
-        let prepared = location.prepare_parquet_under_root(&abs_path).await?;
-        assert_eq!(prepared.relative_path, rel_path);
-        assert!(!prepared.created);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn prepare_parquet_under_root_marks_external_copy_owned() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        tokio::fs::create_dir_all(&table_root).await?;
-        let location = TableLocation::local(&table_root);
-
-        let src_path = tmp.path().join("outside.parquet");
-        tokio::fs::write(&src_path, b"parquet").await?;
-
-        let prepared = location.prepare_parquet_under_root(&src_path).await?;
-        let expected_rel = PathBuf::from("data/outside.parquet");
-        assert_eq!(prepared.relative_path, expected_rel);
-        assert!(prepared.created);
-
-        let dst = table_root.join(&expected_rel);
-        assert_eq!(tokio::fs::read(&dst).await?, b"parquet");
-        assert_eq!(tokio::fs::read(&src_path).await?, b"parquet");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn prepare_parquet_under_root_refuses_overwrite() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        tokio::fs::create_dir_all(&table_root).await?;
-        let location = TableLocation::local(&table_root);
-
-        let data_dir = table_root.join("data");
-        tokio::fs::create_dir_all(&data_dir).await?;
-        let existing_dst = data_dir.join("seg.parquet");
-        tokio::fs::write(&existing_dst, b"existing").await?;
-
-        let src_path = tmp.path().join("seg.parquet");
-        tokio::fs::write(&src_path, b"new").await?;
-
-        let err = location
-            .prepare_parquet_under_root(&src_path)
-            .await
-            .expect_err("expected AlreadyExists");
-
-        assert!(matches!(err, StorageError::AlreadyExists { .. }));
-        assert_eq!(tokio::fs::read(existing_dst).await?, b"existing");
-        assert_eq!(tokio::fs::read(src_path).await?, b"new");
-        Ok(())
-    }
 
     #[tokio::test]
     async fn normalize_segment_path_enforces_canonical_table_relative_file_path() -> TestResult {

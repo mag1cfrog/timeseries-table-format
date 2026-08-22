@@ -314,68 +314,6 @@ impl TimeSeriesTable {
         Ok(())
     }
 
-    async fn append_parquet_path_file(
-        &mut self,
-        parquet_path: &Path,
-    ) -> Result<(u64, String), TableError> {
-        let prepared = self
-            .location()
-            .prepare_parquet_under_root(parquet_path)
-            .await
-            .context(StorageSnafu)?;
-        let prepared_path = prepared.relative_path.to_string_lossy().into_owned();
-        let mut prepared_guard = if prepared.created {
-            let mut guard = storage::prepare_file_cleanup_guard(
-                self.location().as_ref(),
-                &prepared.relative_path,
-            )
-            .context(StorageSnafu)?;
-            guard.arm();
-            Some(guard)
-        } else {
-            None
-        };
-
-        let append_result = async {
-            let relative_path = self.normalize_new_segment_path(&prepared_path).await?;
-            tracing::Span::current().record("segment_path", relative_path.as_str());
-            let version = self
-                .append_parquet_segment_file(
-                    &relative_path,
-                    "external_path",
-                    prepared_guard.as_mut(),
-                )
-                .await?;
-            Ok((version, relative_path))
-        }
-        .await;
-
-        match append_result {
-            Ok(result) => Ok(result),
-            Err(
-                error @ TableError::TransactionLog {
-                    source: CommitError::AmbiguousOutcome { .. },
-                },
-            ) => Err(error),
-            Err(source) if prepared.created => {
-                let cleanup =
-                    storage::remove_file(self.location().as_ref(), &prepared.relative_path).await;
-                if let Some(guard) = prepared_guard.as_mut() {
-                    guard.disarm();
-                }
-                match cleanup {
-                    Ok(()) => Err(source),
-                    Err(cleanup_error) => Err(TableError::ExternalParquetRollback {
-                        path: prepared.relative_path.display().to_string(),
-                        source: Box::new(source),
-                        cleanup_error,
-                    }),
-                }
-            }
-            Err(source) => Err(source),
-        }
-    }
-
     async fn append_parquet_segment_file(
         &mut self,
         relative_path: &str,
@@ -813,38 +751,6 @@ impl TimeSeriesTable {
                 .await
         }
         .await;
-        record_append_failure(&result);
-        result
-    }
-
-    /// Copy an external Parquet file into the table when needed and append it.
-    ///
-    /// Rows need not be ordered by the table's ordered index.
-    ///
-    /// A copy created by this operation is removed when append fails before
-    /// publication. Files already under the table root and copies involved in
-    /// an ambiguous commit outcome are preserved.
-    /// Returns the committed version and normalized table-relative segment path.
-    #[tracing::instrument(
-        name = "table.append",
-        level = "debug",
-        skip_all,
-        fields(
-            source_mode = "external_path",
-            expected_version = self.state.version,
-            segment_path = tracing::field::Empty,
-            row_count = tracing::field::Empty,
-            file_size_bytes = tracing::field::Empty,
-            committed_version = tracing::field::Empty,
-            entity_layout = tracing::field::Empty,
-            outcome = tracing::field::Empty
-        )
-    )]
-    pub async fn append_parquet_from_path(
-        &mut self,
-        parquet_path: &Path,
-    ) -> Result<(u64, String), TableError> {
-        let result = self.append_parquet_path_file(parquet_path).await;
         record_append_failure(&result);
         result
     }
