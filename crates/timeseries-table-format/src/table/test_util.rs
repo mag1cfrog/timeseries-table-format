@@ -5,6 +5,7 @@ use crate::metadata::logical_schema::{
 use crate::metadata::table_metadata::{
     IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket,
 };
+use crate::storage::StorageLocation;
 use arrow::array::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
     TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
@@ -16,7 +17,7 @@ use arrow_array::{
 };
 use chrono::{DateTime, TimeZone, Utc};
 use futures::StreamExt;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
 use parquet::column::writer::ColumnWriter;
 use parquet::data_type::ByteArray;
@@ -42,6 +43,17 @@ use tracing_subscriber::{
 };
 
 pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+pub(crate) async fn append_parquet_fixture(
+    table: &mut TimeSeriesTable,
+    relative_path: impl AsRef<Path>,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let path = match table.location().storage() {
+        StorageLocation::Local(root) => root.join(relative_path),
+    };
+    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?.build()?;
+    Ok(table.append(reader).await?)
+}
 
 #[derive(Clone)]
 pub(crate) struct TestRow {
@@ -304,7 +316,7 @@ pub(crate) fn write_test_parquet(
 
     let ts_field = Type::primitive_type_builder("ts", PhysicalType::INT64)
         .with_repetition(Repetition::REQUIRED)
-        .with_logical_type(Some(LogicalType::timestamp(true, TimeUnit::MILLIS)))
+        .with_logical_type(Some(LogicalType::timestamp(false, TimeUnit::MILLIS)))
         .build()?;
     fields.push(Arc::new(ts_field));
 

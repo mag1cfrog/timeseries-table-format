@@ -102,7 +102,7 @@ async fn scan_records_safe_segment_planning_counts() -> crate::table::test_util:
         storage::TableLocation,
         table::{
             TimeSeriesTable,
-            test_util::{TestRow, TraceCapture, write_test_parquet},
+            test_util::{TestRow, TraceCapture, append_parquet_fixture, write_test_parquet},
         },
     };
 
@@ -120,7 +120,7 @@ async fn scan_records_safe_segment_planning_counts() -> crate::table::test_util:
                 price: 1.0,
             }],
         )?;
-        table.append_parquet_segment(path).await?;
+        append_parquet_fixture(&mut table, path).await?;
     }
 
     let snapshot_version = table.state().version;
