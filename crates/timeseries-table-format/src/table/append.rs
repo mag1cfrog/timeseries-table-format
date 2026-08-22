@@ -861,13 +861,11 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
     use crate::metadata::segments::{ParquetIndexColumnError, SegmentEntityLayout};
-    use crate::metadata::table_metadata::{IndexValue, TABLE_FORMAT_VERSION};
+    use crate::metadata::table_metadata::IndexValue;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
-    use crate::transaction_log::{
-        CommitError, IndexKind, IndexSpec, TableKind, TableMeta, TimeBucket,
-    };
+    use crate::transaction_log::{CommitError, IndexKind, IndexSpec, TableMeta, TimeBucket};
     use arrow::{
         array::{
             ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
@@ -2075,7 +2073,6 @@ mod tests {
                 Some(&expected)
             );
 
-            let later_path = "data/same-arrow-schema.parquet";
             let later_batch = RecordBatch::try_new(
                 Arc::clone(&schema),
                 vec![
@@ -2088,14 +2085,7 @@ mod tests {
                     new_null_array(schema.field(3).data_type(), 2),
                 ],
             )?;
-            let mut writer = ArrowWriter::try_new(
-                File::create(temp.path().join(later_path))?,
-                Arc::clone(&schema),
-                None,
-            )?;
-            writer.write(&later_batch)?;
-            writer.close()?;
-            assert_eq!(table.append_parquet_segment(later_path).await?, 3);
+            assert_eq!(table.append(later_batch).await?, 3);
 
             let report = table.optimize().await?;
             assert_eq!(report.committed_version, 4);
@@ -3151,102 +3141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_parquet_segment_adopts_schema_when_missing() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-
-        let index = IndexSpec {
-            column: "ts".to_string(),
-            entity_columns: vec![],
-            kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
-                timezone: None,
-            },
-        };
-        let meta = TableMeta {
-            kind: TableKind::TimeSeries(index),
-            logical_schema: None,
-            created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-            format_version: TABLE_FORMAT_VERSION,
-        };
-
-        let mut table = TimeSeriesTable::create(location, meta).await?;
-
-        let rel_path = "data/seg-adopt.parquet";
-        let abs_path = tmp.path().join(rel_path);
-        write_test_parquet(
-            &abs_path,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 5_000,
-                symbol: "B",
-                price: 20.0,
-            }],
-        )?;
-
-        let new_version = table.append_parquet_segment(rel_path).await?;
-
-        assert_eq!(new_version, 2);
-        let schema = table
-            .state
-            .table_meta
-            .logical_schema
-            .as_ref()
-            .expect("schema adopted");
-        let names: Vec<_> = schema.columns().iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["ts", "symbol", "price"]);
-        let ts_col = &schema.columns()[0];
-        assert_eq!(
-            ts_col.data_type,
-            LogicalDataType::Timestamp {
-                unit: LogicalTimestampUnit::Millis,
-                timezone: None,
-            }
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_parquet_segment_rejects_schema_mismatch() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location, meta).await?;
-
-        let rel_path = "data/seg-missing-symbol.parquet";
-        let abs_path = tmp.path().join(rel_path);
-        write_test_parquet(
-            &abs_path,
-            false,
-            false,
-            &[TestRow {
-                ts_millis: 10_000,
-                symbol: "C",
-                price: 30.0,
-            }],
-        )?;
-
-        let err = table
-            .append_parquet_segment(rel_path)
-            .await
-            .expect_err("expected schema mismatch");
-
-        match err {
-            TableError::SegmentSchemaCompatibility { path, source } => {
-                assert_eq!(path, rel_path);
-                assert!(matches!(
-                    source,
-                    crate::metadata::schema_compat::SchemaCompatibilityError::MissingEntityColumn { .. }
-                ));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn first_append_rejects_unsupported_entity_type_without_publication() -> TestResult {
+    async fn append_rejects_unsupported_entity_type_without_publication() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = IndexSpec {
@@ -3259,9 +3154,6 @@ mod tests {
         };
         let mut table =
             TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
-        let rel_path = "data/unsupported-entity.parquet";
-        let abs_path = tmp.path().join(rel_path);
-        std::fs::create_dir_all(abs_path.parent().expect("data parent"))?;
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
@@ -3277,27 +3169,22 @@ mod tests {
                 Arc::new(BooleanArray::from(vec![true])),
             ],
         )?;
-        let mut writer = ArrowWriter::try_new(File::create(abs_path)?, schema, None)?;
-        writer.write(&batch)?;
-        writer.close()?;
         let state_before = table.state.clone();
 
         let error = table
-            .append_parquet_segment(rel_path)
+            .append(batch)
             .await
             .expect_err("Boolean entity columns must be rejected");
 
         assert!(matches!(
             error,
-            TableError::SegmentSchemaCompatibility { path, source }
-                if path == rel_path
-                    && matches!(
-                        &source,
-                        crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
-                            column,
-                            actual: LogicalDataType::Bool,
-                        } if column == "device_id"
-                    )
+            TableError::SchemaCompatibility {
+                source:
+                    crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
+                        column,
+                        actual: LogicalDataType::Bool,
+                    }
+            } if column == "device_id"
         ));
         assert_eq!(table.state, state_before);
         assert!(coverage_files(tmp.path())?.is_empty());
