@@ -99,6 +99,17 @@ def argument(name):
 
 mode = argument("--mode")
 table = pathlib.Path(argument("--table"))
+if os.environ.get("EXPECT_INCREMENTAL_CLEANUP") == "1":
+    if "warmups" in table.parts and mode == "streaming":
+        root = table.parents[2]
+        if (root / "warmups" / "path-first").exists():
+            raise SystemExit("completed path-first warm-up was not removed")
+    if "measured" in table.parts:
+        root = table.parents[3]
+        if any((root / "warmups" / name).exists() for name in ("path-first", "streaming")):
+            raise SystemExit("completed warm-ups were not removed")
+        if mode == "streaming" and (table.parent.parent / "path-first").exists():
+            raise SystemExit("completed path-first sample was not removed")
 table.mkdir(parents=True)
 (table / "segment.parquet").write_bytes(b"x" * 100)
 external = None
@@ -268,6 +279,7 @@ class AppendPipelineRunnerTests(unittest.TestCase):
             command.append("--keep-data")
         env = os.environ.copy()
         env["TMPDIR"] = str(scratch)
+        env["EXPECT_INCREMENTAL_CLEANUP"] = "0" if keep_data else "1"
         return subprocess.run(
             command,
             cwd=REPO_ROOT,

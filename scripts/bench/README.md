@@ -44,9 +44,9 @@ performance assertion. Recorded local comparisons should use the default of
 three samples or a larger count. A sample count of two is rejected because it
 is neither the CI exception nor a sufficient recorded comparison.
 
-### Run the CS2-scale workload
+### Run the large-scale workload
 
-The CS2-scale workload is manual and does not run in CI. It generates
+The large-scale workload is manual and does not run in CI. It generates
 3,466,797 rows with 8,192-row batches and a 1,024-byte payload per row. This is
 3,550,000,128 bytes of logical payload, approximately 3.55 GB in decimal units.
 It uses seed 20,260,821.
@@ -56,13 +56,14 @@ run:
 
 ```bash
 python3 scripts/append_pipeline_benchmark.py \
-  --workload cs2-scale \
+  --workload large-scale \
   --samples 3 \
-  --json-out /tmp/tstable-append-pipeline-cs2.json
+  --json-out /tmp/tstable-append-pipeline-large.json
 ```
 
-The runner removes generated data after writing the report. Add `--keep-data`
-to retain every source Parquet file, table, and GNU time output. The JSON field
+Unless `--keep-data` is set, the runner removes each invocation's generated
+data after collecting its metrics and validation result. Add `--keep-data` to
+retain every source Parquet file, table, and GNU time output. The JSON field
 `artifacts_directory` gives the retained root path.
 
 To use a release binary that was built separately:

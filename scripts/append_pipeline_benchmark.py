@@ -38,7 +38,7 @@ WORKLOADS: dict[str, dict[str, int]] = {
         "payload_bytes_per_row": 1,
         "seed": 20_260_821,
     },
-    "cs2-scale": {
+    "large-scale": {
         "row_count": 3_466_797,
         "batch_rows": 8_192,
         "payload_bytes_per_row": 1_024,
@@ -513,15 +513,18 @@ def run_benchmark(args: argparse.Namespace) -> None:
         warmups: list[dict[str, object]] = []
         print("Running one untimed warm-up per mode", file=sys.stderr)
         for mode in MODES:
+            directory = work_dir / "warmups" / mode
             warmups.append(
                 run_invocation(
                     binary,
                     mode,
-                    work_dir / "warmups" / mode,
+                    directory,
                     workload,
                     measured=False,
                 )
             )
+            if not args.keep_data:
+                shutil.rmtree(directory)
         require_equivalent_results(
             required_mapping(warmups[0], "driver"),
             required_mapping(warmups[1], "driver"),
@@ -535,13 +538,16 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 print(
                     f"Running measured repetition {repetition}: {mode}", file=sys.stderr
                 )
+                directory = work_dir / "measured" / str(repetition) / mode
                 sample = run_invocation(
                     binary,
                     mode,
-                    work_dir / "measured" / str(repetition) / mode,
+                    directory,
                     workload,
                     measured=True,
                 )
+                if not args.keep_data:
+                    shutil.rmtree(directory)
                 sample["repetition"] = repetition
                 measured_samples.append(sample)
                 pair[mode] = required_mapping(sample, "driver")
