@@ -89,6 +89,8 @@ def test_append_record_batch_reader_consumes_all_batches(tmp_path):
 
     assert table.append(source) == 2
     _assert_rows(root)
+    with pytest.raises(StopIteration):
+        source.read_next_batch()
 
 
 def test_append_arrow_stream_protocol_object_calls_exporter_once(tmp_path):
@@ -146,6 +148,21 @@ def test_append_rejects_non_capsule_protocol_result_before_mutation(tmp_path):
     with pytest.raises(ValueError, match="must return an Arrow C Stream capsule"):
         table.append(BrokenSource())
 
+    assert table.version() == 1
+    assert _append_artifacts(root) == []
+
+
+def test_append_rejects_wrong_capsule_name_before_mutation(tmp_path):
+    class WrongCapsuleSource:
+        def __arrow_c_stream__(self):
+            return pa.array([1]).__arrow_c_array__()[1]
+
+    table, root = _create_table(tmp_path)
+
+    with pytest.raises(ValueError, match="invalid Arrow C Stream capsule") as excinfo:
+        table.append(WrongCapsuleSource())
+
+    assert isinstance(excinfo.value.__cause__, ValueError)
     assert table.version() == 1
     assert _append_artifacts(root) == []
 
@@ -238,6 +255,24 @@ def test_append_overlap_preserves_exception_type_and_table_root(tmp_path):
     assert _append_artifacts(root) == append_artifacts
 
 
+def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
+    winner, root = _create_table(tmp_path)
+    stale = ttf.TimeSeriesTable.open(root)
+    assert winner.append(_batch()) == 2
+    append_artifacts = _append_artifacts(root)
+
+    with pytest.raises(ttf.ConflictError) as excinfo:
+        stale.append(_batch(20))
+
+    assert getattr(excinfo.value, "expected", None) == 1
+    assert getattr(excinfo.value, "found", None) == 2
+    assert getattr(excinfo.value, "table_root", None) == root
+    assert stale.version() == 1
+    assert ttf.TimeSeriesTable.open(root).version() == 2
+    assert _append_artifacts(root) == append_artifacts
+    _assert_rows(root)
+
+
 @pytest.mark.parametrize("fail_after_first", [False, True])
 def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
     testing = _testing_module()
@@ -266,6 +301,80 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
     del source
     gc.collect()
     assert counter.count == 1
+
+
+def test_append_releases_native_stream_once_when_schema_import_fails(tmp_path):
+    testing = _testing_module()
+    table, root = _create_table(tmp_path)
+    source, counter = testing._test_append_schema_failure_stream()
+
+    with pytest.raises(ValueError, match="failed to import Arrow C Stream"):
+        table.append(source)
+
+    assert table.version() == 1
+    assert _append_artifacts(root) == []
+    assert counter.count == 1
+    del source
+    gc.collect()
+    assert counter.count == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "create_options", "batch"),
+    [
+        (
+            "negative-int64",
+            {"index_column": "idx", "index_type": "int64", "bucket_width": 10},
+            pa.record_batch(
+                {
+                    "idx": pa.array([-20, -10], type=pa.int64()),
+                    "value": pa.array([1.0, 2.0]),
+                }
+            ),
+        ),
+        (
+            "high-uint64",
+            {"index_column": "idx", "index_type": "uint64", "bucket_width": 10},
+            pa.record_batch(
+                {
+                    "idx": pa.array([2**64 - 20, 2**64 - 11], type=pa.uint64()),
+                    "value": pa.array([1.0, 2.0]),
+                }
+            ),
+        ),
+        (
+            "timestamp-timezone",
+            {
+                "index_column": "ts",
+                "index_type": "timestamp",
+                "bucket": "1h",
+                "timezone": "America/Phoenix",
+            },
+            pa.record_batch(
+                {
+                    "ts": pa.array(
+                        [0, 3_600_000_000],
+                        type=pa.timestamp("us", tz="America/Phoenix"),
+                    ),
+                    "value": pa.array([1.0, 2.0]),
+                }
+            ),
+        ),
+    ],
+)
+def test_append_round_trips_index_domains_through_c_stream(
+    tmp_path, name, create_options, batch
+):
+    root = tmp_path / name
+    table = ttf.TimeSeriesTable.create(table_root=str(root), **create_options)
+
+    assert table.append(batch) == 2
+
+    session = ttf.Session()
+    session.register_tstable("series", str(root))
+    index_column = create_options["index_column"]
+    result = session.sql(f'SELECT * FROM series ORDER BY "{index_column}"')
+    assert result.to_pydict() == pa.Table.from_batches([batch]).to_pydict()
 
 
 def test_append_releases_gil_while_consuming_slow_native_stream(tmp_path):

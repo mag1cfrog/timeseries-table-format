@@ -372,6 +372,9 @@ class _TestingModule(ModuleType):
     def _test_append_release_counted_stream(
         self, *, fail_after_first: bool
     ) -> tuple[object, _AppendStreamReleaseCounter]: ...
+    def _test_append_schema_failure_stream(
+        self,
+    ) -> tuple[object, _AppendStreamReleaseCounter]: ...
     def _test_sql_reader_pending_after_first_batch(
         self,
     ) -> pyarrow.RecordBatchReader: ...

@@ -223,8 +223,9 @@ mod _native {
             })?
             .cast::<FFI_ArrowArrayStream>();
 
-        // SAFETY: the capsule name and pointer were validated above. Arrow's capsule protocol
-        // transfers ownership by moving the stream and nulling the capsule's release callback.
+        // SAFETY: the Arrow PyCapsule protocol requires a capsule with this checked name to point
+        // to a valid, aligned, initialized FFI_ArrowArrayStream. `from_raw` moves that stream and
+        // nulls the capsule's release callback.
         unsafe { ArrowArrayStreamReader::from_raw(stream.as_ptr()) }.map_err(|error| {
             PyValueError::new_err(format!("failed to import Arrow C Stream: {error}"))
         })
@@ -1649,7 +1650,6 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// The stream is consumed lazily while the GIL is released.
         fn append(&mut self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<u64> {
             let reader = record_batch_reader_from_python(source)?;
-            let reader = Box::new(reader) as Box<dyn RecordBatchReader + Send>;
             let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
@@ -1948,6 +1948,76 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             fail_after_first,
             count: Arc::clone(&count),
         }));
+        let capsule = PyCapsule::new_with_value(py, stream, c"arrow_array_stream")?;
+        let source = Py::new(
+            py,
+            ArrowCStreamWrapper {
+                capsule: Some(capsule.into_any().unbind()),
+            },
+        )?;
+        let counter = Py::new(py, AppendStreamReleaseCounter { count })?;
+
+        Ok((source, counter))
+    }
+
+    /// Test-only helper: return a stream that fails schema import and counts its release.
+    #[cfg(feature = "test-utils")]
+    #[pyfunction]
+    fn _test_append_schema_failure_stream(
+        py: Python<'_>,
+    ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
+        use arrow_array::ffi::FFI_ArrowArray;
+        use std::ffi::{c_char, c_void};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn fail_schema(
+            _stream: *mut FFI_ArrowArrayStream,
+            _out: *mut FFI_ArrowSchema,
+        ) -> i32 {
+            22
+        }
+
+        unsafe extern "C" fn fail_next(
+            _stream: *mut FFI_ArrowArrayStream,
+            _out: *mut FFI_ArrowArray,
+        ) -> i32 {
+            22
+        }
+
+        unsafe extern "C" fn last_error(_stream: *mut FFI_ArrowArrayStream) -> *const c_char {
+            c"test schema import failure".as_ptr()
+        }
+
+        unsafe extern "C" fn release(stream: *mut FFI_ArrowArrayStream) {
+            if stream.is_null() {
+                return;
+            }
+            // SAFETY: the callback receives the stream and private pointer created below.
+            let stream = unsafe { &mut *stream };
+            if stream.release.is_none() {
+                return;
+            }
+            if !stream.private_data.is_null() {
+                // SAFETY: `private_data` came from `Box::into_raw` below and is reclaimed once.
+                let count =
+                    unsafe { Box::from_raw(stream.private_data.cast::<Arc<AtomicUsize>>()) };
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            stream.get_schema = None;
+            stream.get_next = None;
+            stream.get_last_error = None;
+            stream.release = None;
+            stream.private_data = std::ptr::null_mut();
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let stream = FFI_ArrowArrayStream {
+            get_schema: Some(fail_schema),
+            get_next: Some(fail_next),
+            get_last_error: Some(last_error),
+            release: Some(release),
+            private_data: Box::into_raw(Box::new(Arc::clone(&count))).cast::<c_void>(),
+        };
         let capsule = PyCapsule::new_with_value(py, stream, c"arrow_array_stream")?;
         let source = Py::new(
             py,
@@ -2390,6 +2460,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             testing.add_class::<AppendStreamReleaseCounter>()?;
             testing.add_function(pyo3::wrap_pyfunction!(
                 _test_append_release_counted_stream,
+                py
+            )?)?;
+            testing.add_function(pyo3::wrap_pyfunction!(
+                _test_append_schema_failure_stream,
                 py
             )?)?;
             testing.add_function(pyo3::wrap_pyfunction!(
