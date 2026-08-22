@@ -920,6 +920,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compute_coverage_rejects_duplicate_across_decoder_batches() -> TestResult {
+        let tmp = TempDir::new()?;
+        let rel_path = Path::new("data/decoder-batch-duplicate.parquet");
+        let mut values = (0..INSPECTION_BATCH_SIZE)
+            .map(|value| Some(value as i64 * 60_000))
+            .collect::<Vec<_>>();
+        values[INSPECTION_BATCH_SIZE / 2] = None;
+        values.push(Some(30_000));
+        write_parquet_with_timestamps(&tmp.path().join(rel_path), &values)?;
+
+        let error = compute_segment_coverage(
+            &TableLocation::local(tmp.path()),
+            rel_path,
+            &timestamp_index("ts", TimeBucket::Minutes(1)),
+        )
+        .await
+        .expect_err("duplicate split across decoder batches must be rejected");
+
+        assert_implicit_duplicate(error, "data/decoder-batch-duplicate.parquet");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn compute_coverage_supports_every_parquet_timestamp_unit() -> TestResult {
         let tmp = TempDir::new()?;
         let cases: Vec<(&str, DataType, Arc<dyn Array>)> = vec![

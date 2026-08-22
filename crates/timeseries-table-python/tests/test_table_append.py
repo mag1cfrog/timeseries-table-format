@@ -280,6 +280,31 @@ def test_append_overlap_preserves_exception_type_and_table_root(tmp_path):
     assert _data_and_coverage_files(root) == files_before
 
 
+def test_append_duplicate_interval_rolls_back_and_allows_retry(tmp_path):
+    table, root = _create_table(tmp_path)
+    duplicate = pa.record_batch(
+        {
+            "ts": pa.array([0, 9], type=pa.int64()),
+            "symbol": pa.array(["A", "A"]),
+            "value": pa.array([1.0, 2.0]),
+        }
+    )
+
+    with pytest.raises(
+        ttf.TimeseriesTableError, match="Duplicate ordered-index interval"
+    ) as excinfo:
+        table.append(duplicate)
+
+    assert type(excinfo.value) is ttf.TimeseriesTableError
+    assert getattr(excinfo.value, "table_root", None) == root
+    assert table.version() == 1
+    assert ttf.TimeSeriesTable.open(root).version() == 1
+    assert _data_and_coverage_files(root) == []
+
+    assert table.append(_batch()) == 2
+    _assert_default_rows(root)
+
+
 def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
     winner, root = _create_table(tmp_path)
     stale = ttf.TimeSeriesTable.open(root)

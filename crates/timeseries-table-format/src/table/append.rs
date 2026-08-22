@@ -2594,17 +2594,20 @@ mod tests {
     #[tokio::test]
     async fn duplicate_interval_across_input_batches_is_rejected() -> TestResult {
         let temp = TempDir::new()?;
-        let mut table =
-            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
-                .await?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+        let state_before = table.state().clone();
 
         let error = table
-            .append(vec![
-                timestamp_only_batch_with_millis([0])?,
-                timestamp_only_batch_with_millis([30_000])?,
-            ])
+            .append(
+                AppendRequest::new(vec![
+                    timestamp_only_batch_with_millis([0])?,
+                    timestamp_only_batch_with_millis([30_000])?,
+                ])
+                .max_rows_per_row_group(1),
+            )
             .await
-            .expect_err("duplicate split across input batches must fail");
+            .expect_err("duplicate split across input batches and row groups must fail");
 
         assert!(matches!(
             error,
@@ -2615,6 +2618,13 @@ mod tests {
             } if example_index_interval.to_string()
                 == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
         ));
+        assert_eq!(table.state(), &state_before);
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert_eq!(
+            TimeSeriesTable::open(location).await?.state(),
+            &state_before
+        );
         Ok(())
     }
 
@@ -2682,11 +2692,14 @@ mod tests {
         let coverage_before = coverage_files(temp.path())?;
 
         let error = table
-            .append(time_series_batch(
-                vec![60_000, 90_000],
-                vec!["A", "A"],
-                vec![2.0, 3.0],
-            )?)
+            .append(
+                AppendRequest::new(time_series_batch(
+                    vec![60_000, 90_000],
+                    vec!["A", "A"],
+                    vec![2.0, 3.0],
+                )?)
+                .max_rows_per_row_group(1),
+            )
             .await
             .expect_err("duplicate entity interval must fail");
         let expected_identity = EntityIdentity::try_new(vec!["A".into()])?;

@@ -585,6 +585,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_for_one_entity_across_decoder_batches_is_rejected() -> TestResult {
+        let temp = TempDir::new()?;
+        let rel_path = Path::new("segment.parquet");
+        let entities = vec!["A"; INSPECTION_BATCH_SIZE + 1];
+        let mut timestamps = (0..INSPECTION_BATCH_SIZE)
+            .map(|bucket| Some(bucket as i64 * 3_600_000))
+            .collect::<Vec<_>>();
+        timestamps[INSPECTION_BATCH_SIZE / 2] = None;
+        timestamps.push(Some(30_000));
+        write_timestamp_segment(&temp.path().join(rel_path), entities, timestamps, None)?;
+
+        let error = compute_segment_entity_coverage(
+            &TableLocation::local(temp.path()),
+            rel_path,
+            &timestamp_index(),
+        )
+        .await
+        .expect_err("entity duplicate split across decoder batches must be rejected");
+
+        assert!(matches!(
+            error,
+            SegmentCoverageError::DuplicateIndexInterval {
+                example_identity: Some(example_identity),
+                example_index_interval,
+                ..
+            } if example_identity == identity("A")
+                && example_index_interval.to_string()
+                    == "[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn same_bucket_for_different_identities_across_row_groups() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
