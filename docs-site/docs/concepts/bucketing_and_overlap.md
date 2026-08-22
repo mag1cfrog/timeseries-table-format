@@ -38,10 +38,12 @@ is distinct from `("NYSE", "NVDA")`. The configured column order defines the com
 Each entity column name must be unique, and the ordered-index column cannot also be an entity
 column.
 
-Entity columns support Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
-String and large-string values share one canonical string representation. Integer identities keep
-their exact scalar type and value, so signed and unsigned values are not compared through strings.
-Every observed entity value must be non-null. Other scalar domains and implicit casts are rejected.
+Registered entity columns support Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
+Incoming integer columns may use a supported
+[lossless widening](../reference/timeseries_table.md#append-arrow-data). String and large-string
+values share one canonical representation. Persisted integer identities keep their registered
+scalar type and exact value, and every observed entity value must be non-null. Other scalar domains
+and signedness conversions are rejected.
 
 One Parquet segment may contain rows for several identities. The table remains one
 `TimeSeriesTable`, and a registered DataFusion provider exposes every row. Entity columns remain
@@ -86,5 +88,5 @@ Use a finer bucket when independent segments may contain values in the same wide
 Indexes cannot currently use floats, decimals, strings, multiple columns, descending order, or
 implicit signedness conversion.
 
-Entity columns cannot currently use booleans, floats, decimals, timestamps, binary, dictionary,
-or nested values. Null entity values and implicit conversions are not supported.
+Registered entity columns cannot currently use booleans, floats, decimals, timestamps, binary,
+dictionary, or nested values. Null entity values are not supported.

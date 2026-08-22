@@ -1445,8 +1445,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// entity_columns:
         ///     Column names that define ordered entity identities for this table. Segments may
         ///     contain multiple identities; coverage is tracked independently for each identity.
-        ///     Supported Arrow types are string, large_string, int32, int64, and uint64. Actual
-        ///     entity values must be non-null and are not implicitly cast.
+        ///     Supported canonical Arrow types are string, large_string, int32, int64, and uint64.
+        ///     Actual entity values must be non-null. After schema adoption, append may losslessly
+        ///     widen narrower integers but never converts between signed and unsigned values.
         /// bucket:
         ///     Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
         /// bucket_width:
