@@ -3290,11 +3290,10 @@ mod tests {
             }],
         )?;
 
-        assert_eq!(winner.append_parquet_segment(winner_path).await?, 2);
+        assert_eq!(append_parquet_fixture(&mut winner, winner_path).await?, 2);
         let coverage_before = coverage_files(tmp.path())?;
 
-        let err = loser
-            .append_parquet_segment(loser_path)
+        let err = append_parquet_fixture(&mut loser, loser_path)
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -3315,8 +3314,7 @@ mod tests {
         assert_eq!(loser.state, loser_state_before);
         assert_eq!(loser.log.load_current_version().await?, 2);
         let committed = loser.load_latest_state().await?;
-        assert!(committed.segments.contains_key(winner_path));
-        assert!(!committed.segments.contains_key(loser_path));
+        assert_eq!(committed, winner.state);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
         for bytes in coverage_before.values() {
             entity_coverage_from_bytes(bytes)?;
@@ -3341,11 +3339,10 @@ mod tests {
         write_arrow_parquet_int_time(&tmp.path().join(winner_path), &[0], &["X"], &[100.0])?;
         write_arrow_parquet_int_time(&tmp.path().join(loser_path), &[100], &["X"], &[200.0])?;
 
-        winner.append_parquet_segment(winner_path).await?;
+        append_parquet_fixture(&mut winner, winner_path).await?;
         let coverage_before = coverage_files(tmp.path())?;
 
-        let err = loser
-            .append_parquet_segment(loser_path)
+        let err = append_parquet_fixture(&mut loser, loser_path)
             .await
             .expect_err("stale append should conflict");
 
@@ -3377,17 +3374,20 @@ mod tests {
         let commit_path = tmp.path().join(layout::commit_rel_path(2));
         crate::storage::inject_write_new_failure(commit_path.clone(), true);
 
-        let err = table
-            .append_parquet_segment(segment_path)
+        let err = append_parquet_fixture(&mut table, segment_path)
             .await
             .expect_err("failed commit cleanup should make the outcome ambiguous");
 
-        assert!(matches!(
-            err,
-            TableError::TransactionLog {
-                source: CommitError::AmbiguousOutcome { .. }
-            }
-        ));
+        assert!(
+            matches!(
+                &err,
+                TableError::AppendCommitAmbiguous {
+                    source: CommitError::AmbiguousOutcome { .. },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
         assert_eq!(table.state, state_before);
         assert_eq!(table.log.load_current_version().await?, 1);
         assert!(commit_path.exists());
