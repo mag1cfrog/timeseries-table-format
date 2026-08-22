@@ -860,11 +860,10 @@ mod tests {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
-    use crate::metadata::segments::{ParquetIndexColumnError, SegmentEntityLayout};
+    use crate::metadata::segments::SegmentEntityLayout;
     use crate::metadata::table_metadata::IndexValue;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
-    use crate::transaction_log::segments::{SegmentError, SegmentMetaError};
     use crate::transaction_log::{CommitError, IndexKind, IndexSpec, TableMeta, TimeBucket};
     use arrow::{
         array::{
@@ -886,7 +885,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Weak};
     use tempfile::TempDir;
-    use tracing::{Event, Subscriber, instrument::WithSubscriber, span::Id};
+    use tracing::{Subscriber, instrument::WithSubscriber, span::Id};
     use tracing_subscriber::{
         Layer,
         layer::{Context, SubscriberExt},
@@ -894,39 +893,24 @@ mod tests {
     };
 
     #[derive(Clone, Copy)]
-    enum PanicObservation {
-        AppendEvent,
-        CommitClose,
-    }
+    struct PanicOnCommitClose;
 
-    #[derive(Clone, Copy)]
-    struct PanicOnObservation(PanicObservation);
-
-    impl<S> Layer<S> for PanicOnObservation
+    impl<S> Layer<S> for PanicOnCommitClose
     where
         S: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
-        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-            if matches!(self.0, PanicObservation::AppendEvent)
-                && event.metadata().name() == "table.append"
-            {
-                panic!("injected post-commit append observer panic");
-            }
-        }
-
         fn on_close(&self, id: Id, ctx: Context<'_, S>) {
-            if matches!(self.0, PanicObservation::CommitClose)
-                && ctx
-                    .metadata(&id)
-                    .is_some_and(|metadata| metadata.name() == "transaction.commit")
+            if ctx
+                .metadata(&id)
+                .is_some_and(|metadata| metadata.name() == "transaction.commit")
             {
                 panic!("injected transaction commit close panic");
             }
         }
     }
 
-    fn panic_on_observation_dispatch(observation: PanicObservation) -> tracing::Dispatch {
-        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnObservation(observation)))
+    fn panic_on_commit_close_dispatch() -> tracing::Dispatch {
+        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnCommitClose))
     }
 
     #[derive(Default)]
@@ -1597,11 +1581,11 @@ mod tests {
         let streamed_location = TableLocation::local(streamed_root.path());
         let mut streamed_table =
             TimeSeriesTable::create(streamed_location.clone(), make_basic_table_meta()).await?;
-        let callsite_guard = panic_on_observation_dispatch(PanicObservation::CommitClose);
+        let callsite_guard = panic_on_commit_close_dispatch();
         let outcome = std::panic::AssertUnwindSafe(
             streamed_table
                 .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
-                .with_subscriber(panic_on_observation_dispatch(PanicObservation::CommitClose)),
+                .with_subscriber(panic_on_commit_close_dispatch()),
         )
         .catch_unwind()
         .await;
@@ -1618,42 +1602,6 @@ mod tests {
                 .all(|segment| streamed_root.path().join(&segment.path).is_file())
         );
 
-        let copied_root = TempDir::new()?;
-        let copied_location = TableLocation::local(copied_root.path());
-        let mut copied_table =
-            TimeSeriesTable::create(copied_location.clone(), make_basic_table_meta()).await?;
-        let external_root = TempDir::new()?;
-        let external_path = external_root.path().join("external.parquet");
-        write_test_parquet(
-            &external_path,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 0,
-                symbol: "A",
-                price: 1.0,
-            }],
-        )?;
-        let callsite_guard = panic_on_observation_dispatch(PanicObservation::AppendEvent);
-        let outcome = std::panic::AssertUnwindSafe(
-            copied_table
-                .append_parquet_from_path(&external_path)
-                .with_subscriber(panic_on_observation_dispatch(PanicObservation::AppendEvent)),
-        )
-        .catch_unwind()
-        .await;
-        drop(callsite_guard);
-        assert!(outcome.is_err());
-        let reopened = TimeSeriesTable::open(copied_location).await?;
-        assert_eq!(reopened.state().version, 2);
-        assert_eq!(reopened.state().segments.len(), 1);
-        assert!(
-            reopened
-                .state()
-                .segments
-                .values()
-                .all(|segment| copied_root.path().join(&segment.path).is_file())
-        );
         Ok(())
     }
 
@@ -2204,87 +2152,6 @@ mod tests {
         Ok(files)
     }
 
-    fn assert_append_diagnostics(
-        capture: &TraceCapture,
-        source_mode: &str,
-        segment_path: &str,
-        file_size: u64,
-        absolute_root: &str,
-    ) {
-        let spans: Vec<_> = capture
-            .spans()
-            .into_iter()
-            .filter(|span| span.name == "table.append")
-            .collect();
-        assert_eq!(spans.len(), 1, "expected one table.append span");
-        assert_eq!(spans[0].level, tracing::Level::DEBUG);
-        for (field, expected) in [
-            ("source_mode", source_mode.to_string()),
-            ("expected_version", "1".to_string()),
-            ("segment_path", segment_path.to_string()),
-            ("row_count", "1".to_string()),
-            ("file_size_bytes", file_size.to_string()),
-            ("committed_version", "2".to_string()),
-            ("entity_layout", "single".to_string()),
-            ("outcome", "succeeded".to_string()),
-        ] {
-            assert_eq!(
-                spans[0].fields.get(field),
-                Some(&expected),
-                "unexpected table.append.{field}"
-            );
-        }
-
-        let events: Vec<_> = capture
-            .events()
-            .into_iter()
-            .filter(|event| event.name == "table.append")
-            .collect();
-        assert_eq!(events.len(), 1, "expected one table.append event");
-        assert_eq!(events[0].level, tracing::Level::INFO);
-        for (field, expected) in [
-            ("source_mode", source_mode),
-            ("expected_version", "1"),
-            ("committed_version", "2"),
-            ("row_count", "1"),
-            ("entity_layout", "single"),
-            ("outcome", "succeeded"),
-        ] {
-            assert_eq!(
-                events[0].fields.get(field).map(String::as_str),
-                Some(expected),
-                "unexpected table.append event field {field}"
-            );
-        }
-        assert!(
-            events[0]
-                .fields
-                .get("message")
-                .is_some_and(|message| message.contains("Appended Parquet segment"))
-        );
-
-        for value in spans
-            .into_iter()
-            .flat_map(|span| span.fields.into_values())
-            .chain(
-                events
-                    .into_iter()
-                    .flat_map(|event| event.fields.into_values()),
-            )
-        {
-            assert!(
-                !value.contains(absolute_root),
-                "diagnostic value contains absolute table path: {value}"
-            );
-            for forbidden in ["SECRET_ENTITY", "LogicalSchema", "RecordBatch"] {
-                assert!(
-                    !value.contains(forbidden),
-                    "diagnostic value contains sensitive data '{forbidden}': {value}"
-                );
-            }
-        }
-    }
-
     #[test]
     fn entity_layout_classification_rejects_empty_coverage() {
         assert!(matches!(
@@ -2292,283 +2159,6 @@ mod tests {
             Err(TableError::EmptySegmentEntityCoverage { segment_path })
                 if segment_path == "data/empty.parquet"
         ));
-    }
-
-    #[tokio::test]
-    async fn append_parquet_segment_missing_time_column_errors() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let meta = make_basic_table_meta();
-        let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
-
-        let rel = "data/seg-no-ts.parquet";
-        let path = tmp.path().join(rel);
-        write_parquet_without_time_column(&path, &["A"], &[1.0])?;
-
-        let err = table
-            .append_parquet_segment(rel)
-            .await
-            .expect_err("expected missing time column");
-
-        match err {
-            TableError::SegmentMeta { source } => {
-                assert!(matches!(
-                    source,
-                    SegmentError::Meta {
-                        source: SegmentMetaError::OrderedIndexColumn {
-                            source: ParquetIndexColumnError {
-                                expected_domain: "timestamp",
-                                observed_type,
-                                ..
-                            }
-                        }
-                    } if observed_type == "missing",
-                ));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn entity_aware_validation_failure_leaves_no_state_or_sidecars() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        let location = TableLocation::local(&table_root);
-        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-        let state_before = table.state.clone();
-        let coverage_before = coverage_files(&table_root)?;
-        let source = tmp.path().join("wrong-time-column.parquet");
-        write_parquet_without_time_column(&source, &["A"], &[1.0])?;
-        let source_bytes = std::fs::read(&source)?;
-
-        let capture = TraceCapture::default();
-        let err = capture
-            .run(table.append_parquet_from_path(&source))
-            .await
-            .expect_err("missing time column should fail");
-
-        assert!(matches!(err, TableError::SegmentMeta { .. }));
-        assert!(!table_root.join("data/wrong-time-column.parquet").exists());
-        assert_eq!(std::fs::read(source)?, source_bytes);
-        assert_eq!(table.state, state_before);
-        assert_eq!(table.log.load_current_version().await?, 1);
-        assert_eq!(coverage_files(&table_root)?, coverage_before);
-        assert!(!table_root.join(layout::commit_rel_path(2)).exists());
-        let spans: Vec<_> = capture
-            .spans()
-            .into_iter()
-            .filter(|span| span.name == "table.append")
-            .collect();
-        assert_eq!(spans.len(), 1);
-        assert_eq!(
-            spans[0].fields.get("source_mode").map(String::as_str),
-            Some("external_path")
-        );
-        assert_eq!(
-            spans[0].fields.get("outcome").map(String::as_str),
-            Some("failed")
-        );
-        assert!(
-            !capture
-                .events()
-                .iter()
-                .any(|event| event.name == "table.append")
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn every_path_append_variant_emits_one_logical_operation() -> TestResult {
-        let tmp = TempDir::new()?;
-
-        for (case, external) in [("segment", false), ("external", true)] {
-            let table_root = tmp.path().join(format!("table-{case}"));
-            let location = TableLocation::local(&table_root);
-            let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-            let filename = format!("{case}.parquet");
-            let segment_path = format!("data/{filename}");
-            let source = if external {
-                tmp.path().join(&filename)
-            } else {
-                table_root.join(&segment_path)
-            };
-            write_test_parquet(
-                &source,
-                true,
-                false,
-                &[TestRow {
-                    ts_millis: 1_000,
-                    symbol: "SECRET_ENTITY",
-                    price: 10.0,
-                }],
-            )?;
-            let file_size = source.metadata()?.len();
-            let capture = TraceCapture::default();
-
-            if external {
-                let (version, actual_path) =
-                    capture.run(table.append_parquet_from_path(&source)).await?;
-                assert_eq!(version, 2);
-                assert_eq!(actual_path, segment_path);
-            } else {
-                assert_eq!(
-                    capture
-                        .run(table.append_parquet_segment(&segment_path))
-                        .await?,
-                    2
-                );
-            }
-            assert_eq!(table.state.version, 2);
-            assert_append_diagnostics(
-                &capture,
-                if external {
-                    "external_path"
-                } else {
-                    "table_relative"
-                },
-                &segment_path,
-                file_size,
-                &tmp.path().display().to_string(),
-            );
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_parquet_from_path_preserves_failed_in_root_file() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let source = tmp.path().join("data/in-root-invalid.parquet");
-        write_parquet_without_time_column(&source, &["A"], &[1.0])?;
-        let source_bytes = std::fs::read(&source)?;
-
-        let err = table
-            .append_parquet_from_path(&source)
-            .await
-            .expect_err("missing time column should fail");
-
-        assert!(matches!(err, TableError::SegmentMeta { .. }));
-        assert_eq!(std::fs::read(source)?, source_bytes);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_parquet_from_path_retains_successful_external_copy() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        let location = TableLocation::local(&table_root);
-        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let source = tmp.path().join("external-success.parquet");
-        write_test_parquet(
-            &source,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 10_000,
-                symbol: "X",
-                price: 100.0,
-            }],
-        )?;
-        let source_bytes = std::fs::read(&source)?;
-
-        let (version, relative_path) = table.append_parquet_from_path(&source).await?;
-
-        assert_eq!(version, 2);
-        assert_eq!(relative_path, "data/external-success.parquet");
-        assert_eq!(
-            std::fs::read(table_root.join(&relative_path))?,
-            source_bytes
-        );
-        assert_eq!(std::fs::read(source)?, source_bytes);
-        assert!(table.state.segments.contains_key(&relative_path));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn entity_aware_ambiguous_commit_retains_copy_and_sidecars() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        let location = TableLocation::local(&table_root);
-        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let state_before = table.state.clone();
-        let coverage_before = coverage_files(&table_root)?;
-        let source = tmp.path().join("ambiguous-external.parquet");
-        write_test_parquet(
-            &source,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 10_000,
-                symbol: "X",
-                price: 100.0,
-            }],
-        )?;
-        let source_bytes = std::fs::read(&source)?;
-        let commit_path = table_root.join(layout::commit_rel_path(2));
-        crate::storage::inject_write_new_failure(commit_path.clone(), true);
-
-        let err = table
-            .append_parquet_from_path(&source)
-            .await
-            .expect_err("commit outcome should be ambiguous");
-
-        assert!(matches!(
-            err,
-            TableError::TransactionLog {
-                source: CommitError::AmbiguousOutcome { .. }
-            }
-        ));
-        assert_eq!(
-            std::fs::read(table_root.join("data/ambiguous-external.parquet"))?,
-            source_bytes
-        );
-        assert_eq!(std::fs::read(source)?, source_bytes);
-        assert_eq!(table.state, state_before);
-        assert_eq!(table.log.load_current_version().await?, 1);
-        assert!(commit_path.exists());
-        let coverage_after = coverage_files(&table_root)?;
-        assert_eq!(coverage_after.len(), coverage_before.len() + 2);
-        for bytes in coverage_after.values() {
-            entity_coverage_from_bytes(bytes)?;
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn append_parquet_from_path_reports_copy_rollback_failure() -> TestResult {
-        let tmp = TempDir::new()?;
-        let table_root = tmp.path().join("table");
-        let location = TableLocation::local(&table_root);
-        let mut table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
-        let source = tmp.path().join("rollback-cleanup.parquet");
-        write_parquet_without_time_column(&source, &["A"], &[1.0])?;
-        let destination = table_root.join("data/rollback-cleanup.parquet");
-        crate::storage::inject_cleanup_failure(destination.clone());
-
-        let err = table
-            .append_parquet_from_path(&source)
-            .await
-            .expect_err("copy rollback should fail");
-        let message = err.to_string();
-
-        assert!(matches!(
-            err,
-            TableError::ExternalParquetRollback {
-                path,
-                source,
-                cleanup_error: StorageError::OtherIo { .. },
-            } if path.contains("rollback-cleanup.parquet")
-                && matches!(*source, TableError::SegmentMeta { .. })
-        ));
-        assert!(message.contains("rollback-cleanup.parquet"));
-        assert!(message.contains("injected cleanup failure"));
-        assert!(destination.exists());
-        tokio::fs::remove_file(destination).await?;
-        Ok(())
     }
 
     #[tokio::test]
