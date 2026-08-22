@@ -14,12 +14,12 @@ use arrow::array::{
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
-use clap::{Parser, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use futures::StreamExt;
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use timeseries_table_format::{
     metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
     metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta},
@@ -31,7 +31,25 @@ const INDEX_COLUMN: &str = "ordered_index";
 const SEQUENCE_COLUMN: &str = "sequence";
 const PAYLOAD_COLUMN: &str = "payload";
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[path = "append_widening_bench/runner.rs"]
+mod runner;
+
+#[derive(Debug, Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the isolated comparison and aggregate its measurements.
+    Compare(runner::CompareArgs),
+    /// Run exactly one append mode and emit its report.
+    Run(RunArgs),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 enum Mode {
     ExternalNormalization,
     DirectWidening,
@@ -46,8 +64,8 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Parser)]
-struct Args {
+#[derive(Debug, ClapArgs)]
+struct RunArgs {
     #[arg(long, value_enum)]
     mode: Mode,
 
@@ -74,13 +92,130 @@ struct Args {
     seed: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Workload {
     row_count: u64,
     batch_rows: usize,
     row_group_rows: usize,
+    #[serde(rename = "payload_bytes_per_row")]
     payload_bytes: usize,
     seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+enum RequiredNullable<T> {
+    Value(T),
+    Null,
+}
+
+impl<T> RequiredNullable<T> {
+    fn from_option(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Value(value),
+            None => Self::Null,
+        }
+    }
+
+    fn as_ref(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Null => None,
+        }
+    }
+}
+
+impl<T: Copy> RequiredNullable<T> {
+    fn copied(self) -> Option<T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Null => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TableDefinitionReport {
+    index_column: String,
+    incoming_index_type: String,
+    registered_index_type: String,
+    bucket_width: u64,
+    entity_columns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WriterPropertiesReport {
+    compression: String,
+    data_page_size_bytes: usize,
+    dictionary_enabled: bool,
+    max_row_group_rows: usize,
+    statistics: String,
+    write_batch_rows: usize,
+    writer_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TimingReport {
+    external_normalization_wall_time_ns: RequiredNullable<u64>,
+    append_and_commit_wall_time_ns: u64,
+    end_to_end_pipeline_wall_time_ns: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactReport {
+    external_normalized_parquet_bytes: RequiredNullable<u64>,
+    table_managed_committed_parquet_bytes: u64,
+    total_retained_ingestion_parquet_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ColumnChecksums {
+    ordered_index: String,
+    sequence: String,
+    payload: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ValidationReport {
+    column_checksums: ColumnChecksums,
+    coverage_ratio: f64,
+    index_max: u64,
+    index_min: u64,
+    boundary_index_values_round_trip_as_uint64: bool,
+    committed_parquet_schema_matches_registered: bool,
+    direct_pipeline_has_no_external_normalized_parquet: bool,
+    external_normalized_parquet_schema_matches_registered: RequiredNullable<bool>,
+    full_scan_matches_generated: bool,
+    row_count: u64,
+    schema_matches_registered: bool,
+    segment_file_bytes: u64,
+    segment_path: String,
+    segment_row_group_count: usize,
+    table_managed_parquet_file_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BenchmarkReport {
+    schema_version: u32,
+    mode: Mode,
+    process_id: u32,
+    table_path: PathBuf,
+    external_normalized_parquet_path: RequiredNullable<PathBuf>,
+    workload: Workload,
+    table_definition: TableDefinitionReport,
+    writer_properties: WriterPropertiesReport,
+    timing: TimingReport,
+    artifacts: ArtifactReport,
+    committed_version: u64,
+    validation: ValidationReport,
 }
 
 struct DeterministicBatchReader {
@@ -303,17 +438,29 @@ fn table_definition() -> Result<TableMeta, Box<dyn std::error::Error>> {
     ))
 }
 
-fn writer_properties_json(row_group_rows: usize) -> Value {
+fn benchmark_table_definition_report() -> TableDefinitionReport {
+    TableDefinitionReport {
+        index_column: INDEX_COLUMN.to_string(),
+        incoming_index_type: "uint32".to_string(),
+        registered_index_type: "uint64".to_string(),
+        bucket_width: u64::from(u32::MAX) + 1,
+        entity_columns: Vec::new(),
+    }
+}
+
+fn writer_properties_report(row_group_rows: usize) -> Result<WriterPropertiesReport, io::Error> {
     let properties = writer_properties(row_group_rows);
     let payload = ColumnPath::from(PAYLOAD_COLUMN);
-    json!({
-        "compression": format!("{:?}", properties.compression(&payload)),
-        "data_page_size_bytes": properties.data_page_size_limit(),
-        "dictionary_enabled": properties.dictionary_enabled(&payload),
-        "max_row_group_rows": properties.max_row_group_row_count(),
-        "statistics": format!("{:?}", properties.statistics_enabled(&payload)),
-        "write_batch_rows": properties.write_batch_size(),
-        "writer_version": format!("{:?}", properties.writer_version()),
+    Ok(WriterPropertiesReport {
+        compression: format!("{:?}", properties.compression(&payload)),
+        data_page_size_bytes: properties.data_page_size_limit(),
+        dictionary_enabled: properties.dictionary_enabled(&payload),
+        max_row_group_rows: properties
+            .max_row_group_row_count()
+            .ok_or_else(|| invalid_data("benchmark writer omitted its row-group limit"))?,
+        statistics: format!("{:?}", properties.statistics_enabled(&payload)),
+        write_batch_rows: properties.write_batch_size(),
+        writer_version: format!("{:?}", properties.writer_version()),
     })
 }
 
@@ -321,7 +468,7 @@ async fn validate_table(
     table: &TimeSeriesTable,
     table_root: &Path,
     workload: Workload,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<ValidationReport, Box<dyn std::error::Error>> {
     if table.state().version != 2 {
         return Err(invalid_data(format!(
             "expected committed version 2, found {}",
@@ -451,28 +598,30 @@ async fn validate_table(
         .into());
     }
 
-    Ok(json!({
-        "column_checksums": {
-            INDEX_COLUMN: index_checksum.finalize().to_hex().to_string(),
-            SEQUENCE_COLUMN: sequence_checksum.finalize().to_hex().to_string(),
-            PAYLOAD_COLUMN: payload_checksum.finalize().to_hex().to_string(),
+    Ok(ValidationReport {
+        column_checksums: ColumnChecksums {
+            ordered_index: index_checksum.finalize().to_hex().to_string(),
+            sequence: sequence_checksum.finalize().to_hex().to_string(),
+            payload: payload_checksum.finalize().to_hex().to_string(),
         },
-        "coverage_ratio": coverage_ratio,
-        "index_max": expected_max,
-        "index_min": 0,
-        "boundary_index_values_round_trip_as_uint64": true,
-        "committed_parquet_schema_matches_registered": true,
-        "full_scan_matches_generated": true,
-        "row_count": expected_row,
-        "schema_matches_registered": true,
-        "segment_file_bytes": segment_file_bytes,
-        "segment_path": segment_path,
-        "segment_row_group_count": row_group_count,
-        "table_managed_parquet_file_count": table.state().segments.len(),
-    }))
+        coverage_ratio,
+        index_max: expected_max,
+        index_min: 0,
+        boundary_index_values_round_trip_as_uint64: true,
+        committed_parquet_schema_matches_registered: true,
+        direct_pipeline_has_no_external_normalized_parquet: false,
+        external_normalized_parquet_schema_matches_registered: RequiredNullable::Null,
+        full_scan_matches_generated: true,
+        row_count: expected_row,
+        schema_matches_registered: true,
+        segment_file_bytes,
+        segment_path,
+        segment_row_group_count: row_group_count,
+        table_managed_parquet_file_count: table.state().segments.len(),
+    })
 }
 
-async fn run_benchmark(args: &Args) -> Result<Value, Box<dyn std::error::Error>> {
+async fn run_append_mode(args: &RunArgs) -> Result<BenchmarkReport, Box<dyn std::error::Error>> {
     if args.table.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -484,13 +633,16 @@ async fn run_benchmark(args: &Args) -> Result<Value, Box<dyn std::error::Error>>
     {
         (Mode::ExternalNormalization, Some(path)) => Some(path),
         (Mode::ExternalNormalization, None) => {
-            return Err(
-                invalid_data("external-normalization mode requires --external-parquet").into(),
-            );
+            return Err(invalid_data(
+                "external-normalization mode requires --external-normalized-parquet",
+            )
+            .into());
         }
         (Mode::DirectWidening, None) => None,
         (Mode::DirectWidening, Some(_)) => {
-            return Err(invalid_data("direct-widening mode rejects --external-parquet").into());
+            return Err(
+                invalid_data("direct-widening mode rejects --external-normalized-parquet").into(),
+            );
         }
     };
     if external_normalized_parquet.is_some_and(|path| path.starts_with(&args.table)) {
@@ -518,7 +670,7 @@ async fn run_benchmark(args: &Args) -> Result<Value, Box<dyn std::error::Error>>
     ) = match args.mode {
         Mode::ExternalNormalization => {
             let path = external_normalized_parquet.ok_or_else(|| {
-                invalid_data("external-normalization mode requires --external-parquet")
+                invalid_data("external-normalization mode requires --external-normalized-parquet")
             })?;
             let normalization_started = Instant::now();
             write_external_normalized_parquet(path, workload)?;
@@ -569,20 +721,11 @@ async fn run_benchmark(args: &Args) -> Result<Value, Box<dyn std::error::Error>>
 
     eprintln!("Validating committed {} table", args.mode.name());
     let mut validation = validate_table(&table, &args.table, workload).await?;
-    let validation_fields = validation
-        .as_object_mut()
-        .ok_or_else(|| invalid_data("validation report must be an object"))?;
-    validation_fields.insert(
-        "direct_pipeline_has_no_external_normalized_parquet".to_string(),
-        json!(external_normalized_parquet.is_none()),
-    );
-    validation_fields.insert(
-        "external_normalized_parquet_schema_matches_registered".to_string(),
-        json!(external_normalized_schema_matches_registered),
-    );
-    let segment_file_bytes = validation["segment_file_bytes"]
-        .as_u64()
-        .ok_or_else(|| invalid_data("validation omitted segment_file_bytes"))?;
+    validation.direct_pipeline_has_no_external_normalized_parquet =
+        external_normalized_parquet.is_none();
+    validation.external_normalized_parquet_schema_matches_registered =
+        RequiredNullable::from_option(external_normalized_schema_matches_registered);
+    let segment_file_bytes = validation.segment_file_bytes;
     let external_normalized_parquet_bytes = external_normalized_parquet
         .map(std::fs::metadata)
         .transpose()?
@@ -591,45 +734,42 @@ async fn run_benchmark(args: &Args) -> Result<Value, Box<dyn std::error::Error>>
         .checked_add(external_normalized_parquet_bytes.unwrap_or(0))
         .ok_or_else(|| invalid_data("retained byte count overflow"))?;
 
-    Ok(json!({
-        "schema_version": 1,
-        "mode": args.mode.name(),
-        "process_id": std::process::id(),
-        "table_path": args.table,
-        "external_normalized_parquet_path": external_normalized_parquet,
-        "workload": {
-            "row_count": workload.row_count,
-            "batch_rows": workload.batch_rows,
-            "row_group_rows": workload.row_group_rows,
-            "payload_bytes_per_row": workload.payload_bytes,
-            "seed": workload.seed,
+    Ok(BenchmarkReport {
+        schema_version: 1,
+        mode: args.mode,
+        process_id: std::process::id(),
+        table_path: args.table.clone(),
+        external_normalized_parquet_path: RequiredNullable::from_option(
+            external_normalized_parquet.map(Path::to_path_buf),
+        ),
+        workload,
+        table_definition: benchmark_table_definition_report(),
+        writer_properties: writer_properties_report(workload.row_group_rows)?,
+        timing: TimingReport {
+            external_normalization_wall_time_ns: RequiredNullable::from_option(
+                external_normalization_ns,
+            ),
+            append_and_commit_wall_time_ns: append_and_commit_ns,
+            end_to_end_pipeline_wall_time_ns: pipeline_ns,
         },
-        "table_definition": {
-            "index_column": INDEX_COLUMN,
-            "incoming_index_type": "uint32",
-            "registered_index_type": "uint64",
-            "bucket_width": u64::from(u32::MAX) + 1,
-            "entity_columns": [],
+        artifacts: ArtifactReport {
+            external_normalized_parquet_bytes: RequiredNullable::from_option(
+                external_normalized_parquet_bytes,
+            ),
+            table_managed_committed_parquet_bytes: segment_file_bytes,
+            total_retained_ingestion_parquet_bytes: retained_ingestion_bytes,
         },
-        "writer_properties": writer_properties_json(workload.row_group_rows),
-        "timing": {
-            "external_normalization_wall_time_ns": external_normalization_ns,
-            "append_and_commit_wall_time_ns": append_and_commit_ns,
-            "end_to_end_pipeline_wall_time_ns": pipeline_ns,
-        },
-        "artifacts": {
-            "external_normalized_parquet_bytes": external_normalized_parquet_bytes,
-            "table_managed_committed_parquet_bytes": segment_file_bytes,
-            "total_retained_ingestion_parquet_bytes": retained_ingestion_bytes,
-        },
-        "committed_version": committed_version,
-        "validation": validation,
-    }))
+        committed_version,
+        validation,
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let report = run_benchmark(&Args::parse()).await?;
+    let report = match Cli::parse().command {
+        Command::Compare(args) => runner::run_comparison(&args)?,
+        Command::Run(args) => serde_json::to_value(run_append_mode(&args).await?)?,
+    };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
@@ -641,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn external_normalization_and_direct_widening_commit_identical_results() {
         let temp = tempfile::tempdir().expect("create temp directory");
-        let external = Args {
+        let external = RunArgs {
             mode: Mode::ExternalNormalization,
             table: temp.path().join("external-table"),
             external_normalized_parquet: Some(temp.path().join("normalized.parquet")),
@@ -651,7 +791,7 @@ mod tests {
             payload_bytes: NonZeroUsize::new(7).unwrap(),
             seed: 42,
         };
-        let direct = Args {
+        let direct = RunArgs {
             mode: Mode::DirectWidening,
             table: temp.path().join("direct-table"),
             external_normalized_parquet: None,
@@ -662,56 +802,98 @@ mod tests {
             seed: external.seed,
         };
 
-        let external_report = run_benchmark(&external)
+        let external_report = run_append_mode(&external)
             .await
             .expect("external-normalization report");
-        let direct_report = run_benchmark(&direct)
+        let direct_report = run_append_mode(&direct)
             .await
             .expect("direct-widening report");
 
-        assert_eq!(external_report["committed_version"], 2);
-        assert_eq!(direct_report["committed_version"], 2);
-        assert_eq!(external_report["workload"], direct_report["workload"]);
+        runner::validate_benchmark_report(
+            &external_report,
+            external.mode,
+            external_report.workload,
+            &external.table,
+            external.external_normalized_parquet.as_deref(),
+        )
+        .expect("validate external-normalization report contract");
+        runner::validate_benchmark_report(
+            &direct_report,
+            direct.mode,
+            direct_report.workload,
+            &direct.table,
+            None,
+        )
+        .expect("validate direct-widening report contract");
+        runner::require_same_logical_result(&external_report, &direct_report)
+            .expect("modes commit the same logical result");
+
+        assert_eq!(external_report.committed_version, 2);
+        assert_eq!(direct_report.committed_version, 2);
+        assert_eq!(external_report.workload, direct_report.workload);
         assert_eq!(
-            external_report["table_definition"],
-            direct_report["table_definition"]
+            external_report.table_definition,
+            direct_report.table_definition
         );
         assert_eq!(
-            external_report["writer_properties"],
-            direct_report["writer_properties"]
+            external_report.writer_properties,
+            direct_report.writer_properties
         );
         assert_eq!(
-            external_report["validation"]["column_checksums"],
-            direct_report["validation"]["column_checksums"]
+            external_report.validation.column_checksums,
+            direct_report.validation.column_checksums
         );
         assert_eq!(
-            external_report["validation"]["row_count"],
-            direct_report["validation"]["row_count"]
+            external_report.validation.row_count,
+            direct_report.validation.row_count
         );
         assert_eq!(
-            external_report["validation"]["segment_row_group_count"],
-            direct_report["validation"]["segment_row_group_count"]
+            external_report.validation.segment_row_group_count,
+            direct_report.validation.segment_row_group_count
         );
-        assert_eq!(direct_report["validation"]["index_min"], 0);
-        assert_eq!(direct_report["validation"]["index_max"], u32::MAX);
-        assert_eq!(direct_report["validation"]["segment_row_group_count"], 3);
+        assert_eq!(direct_report.validation.index_min, 0);
+        assert_eq!(direct_report.validation.index_max, u64::from(u32::MAX));
+        assert_eq!(direct_report.validation.segment_row_group_count, 3);
         assert_eq!(
-            external_report["validation"]["external_normalized_parquet_schema_matches_registered"],
-            true
+            external_report
+                .validation
+                .external_normalized_parquet_schema_matches_registered,
+            RequiredNullable::Value(true)
         );
-        assert_eq!(
-            direct_report["validation"]["direct_pipeline_has_no_external_normalized_parquet"],
-            true
-        );
-        assert!(external_report["artifacts"]["external_normalized_parquet_bytes"].is_u64());
-        assert!(direct_report["artifacts"]["external_normalized_parquet_bytes"].is_null());
         assert!(
-            external_report["artifacts"]["total_retained_ingestion_parquet_bytes"]
-                .as_u64()
-                .unwrap()
-                > external_report["artifacts"]["table_managed_committed_parquet_bytes"]
-                    .as_u64()
-                    .unwrap()
+            direct_report
+                .validation
+                .direct_pipeline_has_no_external_normalized_parquet
+        );
+        assert!(
+            external_report
+                .artifacts
+                .external_normalized_parquet_bytes
+                .as_ref()
+                .is_some()
+        );
+        assert_eq!(
+            direct_report.artifacts.external_normalized_parquet_bytes,
+            RequiredNullable::Null
+        );
+        assert!(
+            external_report
+                .artifacts
+                .total_retained_ingestion_parquet_bytes
+                > external_report
+                    .artifacts
+                    .table_managed_committed_parquet_bytes
+        );
+
+        let mut mismatched_parameters = direct_report.clone();
+        mismatched_parameters.workload.seed += 1;
+        assert!(
+            runner::require_same_logical_result(&external_report, &mismatched_parameters).is_err()
+        );
+        let mut mismatched_validation = direct_report;
+        mismatched_validation.validation.column_checksums.payload = "0".repeat(64);
+        assert!(
+            runner::require_same_logical_result(&external_report, &mismatched_validation).is_err()
         );
     }
 
