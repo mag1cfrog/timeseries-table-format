@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 from append_pipeline_benchmark import (
     GNU_TIME,
@@ -225,7 +226,9 @@ class AppendPipelineHelperTests(unittest.TestCase):
             require_equivalent_results(path_first, mismatched_parameters)
 
         mismatched_validation = copy.deepcopy(streaming)
-        mismatched_validation["validation"]["column_checksums"]["payload"] = "d" * 64
+        validation = cast(dict[str, object], mismatched_validation["validation"])
+        checksums = cast(dict[str, object], validation["column_checksums"])
+        checksums["payload"] = "d" * 64
         with self.assertRaisesRegex(RuntimeError, "logical results differ"):
             require_equivalent_results(path_first, mismatched_validation)
 

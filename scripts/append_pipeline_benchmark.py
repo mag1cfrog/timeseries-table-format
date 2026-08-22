@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 from statistics import median as stdlib_median
+from typing import cast
 
 from scan_range_rss_regression import (
     GNU_TIME,
@@ -74,7 +75,7 @@ def required_mapping(report: dict[str, object], key: str) -> dict[str, object]:
     value = report.get(key)
     if not isinstance(value, dict):
         raise ValueError(f"missing or invalid {key}")
-    return value
+    return cast(dict[str, object], value)
 
 
 def required_integer(
