@@ -287,7 +287,13 @@ def test_native_records_exclude_sensitive_operation_inputs():
                 ),
                 segment,
             )
-            table.append_parquet(str(segment))
+            parquet = pq.ParquetFile(segment)
+            table.append(
+                pa.RecordBatchReader.from_batches(
+                    parquet.schema_arrow,
+                    parquet.iter_batches(),
+                )
+            )
 
             session = ttf.Session()
             session.register_tstable("private_table_348", str(table_root))
@@ -343,7 +349,13 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
 
             first = root / "first.parquet"
             pq.write_table(pa.table({"ts": pa.array([1], type=pa.int64())}), first)
-            assert table.append_parquet(str(first)) == 2
+            first_parquet = pq.ParquetFile(first)
+            assert table.append(
+                pa.RecordBatchReader.from_batches(
+                    first_parquet.schema_arrow,
+                    first_parquet.iter_batches(),
+                )
+            ) == 2
 
             snapshots = list((table_root / "_coverage" / "table").glob("*.roar"))
             assert len(snapshots) == 1
@@ -354,7 +366,13 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
 
             second = root / "second.parquet"
             pq.write_table(pa.table({"ts": pa.array([11], type=pa.int64())}), second)
-            assert table.append_parquet(str(second)) == 3
+            second_parquet = pq.ParquetFile(second)
+            assert table.append(
+                pa.RecordBatchReader.from_batches(
+                    second_parquet.schema_arrow,
+                    second_parquet.iter_batches(),
+                )
+            ) == 3
 
         warnings = [
             record
@@ -419,7 +437,13 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
                 ),
                 segment,
             )
-            assert table.append_parquet(str(segment)) == 2
+            parquet = pq.ParquetFile(segment)
+            assert table.append(
+                pa.RecordBatchReader.from_batches(
+                    parquet.schema_arrow,
+                    parquet.iter_batches(),
+                )
+            ) == 2
             assert table.optimize().no_op is False
 
             session = ttf.Session()

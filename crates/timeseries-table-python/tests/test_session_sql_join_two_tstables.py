@@ -1,6 +1,8 @@
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -38,7 +40,7 @@ def test_session_sql_join_two_tstables(tmp_path):
     )
     prices_seg = tmp_path / "prices.parquet"
     _write_prices_parquet(str(prices_seg))
-    prices.append_parquet(str(prices_seg))
+    prices.append(parquet_reader(prices_seg))
 
     volumes_root = tmp_path / "volumes_tbl"
     volumes = ttf.TimeSeriesTable.create(
@@ -51,7 +53,7 @@ def test_session_sql_join_two_tstables(tmp_path):
     )
     volumes_seg = tmp_path / "volumes.parquet"
     _write_volumes_parquet(str(volumes_seg))
-    volumes.append_parquet(str(volumes_seg))
+    volumes.append(parquet_reader(volumes_seg))
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(prices_root))

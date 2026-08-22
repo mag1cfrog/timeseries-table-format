@@ -2,6 +2,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -80,7 +82,7 @@ def test_session_sql_join_tstable_and_parquet(tmp_path):
     # 2) Append one NVDA segment (consistent entity identity)
     prices_seg = tmp_path / "prices.parquet"
     _write_prices_parquet(str(prices_seg))
-    tstable.append_parquet(str(prices_seg))
+    tstable.append(parquet_reader(prices_seg))
 
     # 3) Create dim parquet
     symbols_path = tmp_path / "symbols.parquet"
@@ -135,7 +137,7 @@ def test_session_sql_left_join_dim_missing_keys_preserves_fact_rows(tmp_path):
 
     prices_seg = tmp_path / "prices.parquet"
     _write_prices_parquet(str(prices_seg))
-    tstable.append_parquet(str(prices_seg))
+    tstable.append(parquet_reader(prices_seg))
 
     symbols_path = tmp_path / "symbols.parquet"
     _write_symbols_parquet_missing_nvda(str(symbols_path))
@@ -172,7 +174,7 @@ def test_session_sql_join_duplicate_dim_keys_multiplies_rows(tmp_path):
 
     prices_seg = tmp_path / "prices.parquet"
     _write_prices_parquet(str(prices_seg))
-    tstable.append_parquet(str(prices_seg))
+    tstable.append(parquet_reader(prices_seg))
 
     symbols_path = tmp_path / "symbols.parquet"
     _write_symbols_parquet_duplicate_nvda(str(symbols_path))
@@ -209,7 +211,7 @@ def test_session_sql_join_key_type_mismatch_is_visible_and_raises(tmp_path):
 
     prices_seg = tmp_path / "prices.parquet"
     _write_prices_parquet(str(prices_seg))
-    tstable.append_parquet(str(prices_seg))
+    tstable.append(parquet_reader(prices_seg))
 
     symbols_path = tmp_path / "symbols.parquet"
     _write_symbols_parquet_symbol_int(str(symbols_path))

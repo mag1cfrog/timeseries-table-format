@@ -2,6 +2,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -33,7 +35,7 @@ def test_optimize_returns_read_only_report_and_updates_table(tmp_path):
     table = _create_entity_table(root)
     source = tmp_path / "mixed.parquet"
     _write_mixed_segment(source)
-    assert table.append_parquet(str(source)) == 2
+    assert table.append(parquet_reader(source)) == 2
 
     report = table.optimize()
 
@@ -87,10 +89,11 @@ def test_optimize_preserves_failed_source_context(tmp_path):
     table = _create_entity_table(root)
     source = tmp_path / "mixed.parquet"
     _write_mixed_segment(source)
-    table.append_parquet(str(source))
-    (root / "data" / "mixed.parquet").unlink()
+    table.append(parquet_reader(source))
+    managed_path = next((root / "data").glob("*.parquet"))
+    managed_path.unlink()
 
-    with pytest.raises(ttf.TimeseriesTableError, match="mixed.parquet") as excinfo:
+    with pytest.raises(ttf.TimeseriesTableError, match=managed_path.name) as excinfo:
         table.optimize()
 
     assert getattr(excinfo.value, "table_root") == str(root)

@@ -2,6 +2,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from parquet_helpers import parquet_reader
+
 import timeseries_table_format as ttf
 
 
@@ -62,17 +64,18 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
         [(5, -1, "A", 9), (15, 7, "B", 10), (0, 99, "C", 11)],
     )
 
-    table.append_parquet(str(device_a))
-    table.append_parquet(str(device_b))
-    table.append_parquet(str(mixed))
+    table.append(parquet_reader(device_a))
+    table.append(parquet_reader(device_b))
+    table.append(parquet_reader(mixed))
     version = table.version()
     assert table.index_spec()["entity_columns"] == ["fleet_id", "device_id"]
 
     with pytest.raises(ttf.CoverageOverlapError) as excinfo:
-        table.append_parquet(str(duplicate))
+        table.append(parquet_reader(duplicate))
 
     error = excinfo.value
-    assert error.segment_path == "data/duplicate.parquet"
+    assert error.segment_path.startswith("data/")
+    assert error.segment_path.endswith(".parquet")
     assert error.overlap_count == 2
     assert error.example_entity_identity == {"fleet_id": -1, "device_id": "A"}
     assert error.example_bucket == 0
