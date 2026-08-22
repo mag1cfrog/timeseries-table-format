@@ -49,7 +49,7 @@ use super::{
     TimeSeriesTable,
     error::{
         AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
-        DuplicateSegmentPathSnafu, EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
+        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
         EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
         MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentCoverageSnafu,
         SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
@@ -272,23 +272,6 @@ impl TimeSeriesTable {
         }
     }
 
-    async fn normalize_new_segment_path(&self, relative_path: &str) -> Result<String, TableError> {
-        let supplied_path = Path::new(relative_path);
-        let (normalized, native_path) =
-            storage::normalize_relative_storage_path(supplied_path).context(StorageSnafu)?;
-
-        if self.state.segments.contains_key(&normalized) {
-            return DuplicateSegmentPathSnafu { path: normalized }.fail();
-        }
-
-        self.location()
-            .validate_segment_file(supplied_path, &native_path)
-            .await
-            .context(StorageSnafu)?;
-
-        Ok(normalized)
-    }
-
     fn validate_stream_schema(&self, schema: &Schema) -> Result<(), TableError> {
         ensure_existing_segments_have_coverage(&self.state)?;
         let segment_schema = LogicalSchema::try_from_arrow_schema(schema).map_err(|source| {
@@ -314,11 +297,10 @@ impl TimeSeriesTable {
         Ok(())
     }
 
-    async fn append_parquet_segment_file(
+    async fn finalize_generated_parquet_segment(
         &mut self,
         relative_path: &str,
-        source_mode: &'static str,
-        mut owned_data_guard: Option<&mut storage::FileCleanupGuard>,
+        owned_data_guard: &mut storage::FileCleanupGuard,
     ) -> Result<u64, TableError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -538,9 +520,7 @@ impl TimeSeriesTable {
         let new_version = match self
             .log
             .commit_with_path_preservation(expected_version, actions, || {
-                if let Some(guard) = owned_data_guard.as_mut() {
-                    guard.disarm();
-                }
+                owned_data_guard.disarm();
                 segment_sidecar_guard.disarm();
                 snapshot_sidecar_guard.disarm();
             })
@@ -594,7 +574,7 @@ impl TimeSeriesTable {
         span.record("outcome", "succeeded");
         tracing::info!(
             name: "table.append",
-            source_mode,
+            source_mode = "arrow_stream",
             expected_version,
             committed_version = new_version,
             row_count,
@@ -701,7 +681,7 @@ impl TimeSeriesTable {
             data_guard.arm();
 
             match self
-                .append_parquet_segment_file(&relative_path, "arrow_stream", Some(&mut data_guard))
+                .finalize_generated_parquet_segment(&relative_path, &mut data_guard)
                 .await
             {
                 Ok(version) => Ok(version),
@@ -719,36 +699,6 @@ impl TimeSeriesTable {
                     Err(error)
                 }
             }
-        }
-        .await;
-        record_append_failure(&result);
-        result
-    }
-
-    /// Append a Parquet segment using its canonical relative path as identity.
-    ///
-    /// Rows need not be ordered by the table's ordered index.
-    #[tracing::instrument(
-        name = "table.append",
-        level = "debug",
-        skip_all,
-        fields(
-            source_mode = "table_relative",
-            expected_version = self.state.version,
-            segment_path = tracing::field::Empty,
-            row_count = tracing::field::Empty,
-            file_size_bytes = tracing::field::Empty,
-            committed_version = tracing::field::Empty,
-            entity_layout = tracing::field::Empty,
-            outcome = tracing::field::Empty
-        )
-    )]
-    pub async fn append_parquet_segment(&mut self, relative_path: &str) -> Result<u64, TableError> {
-        let result = async {
-            let relative_path = self.normalize_new_segment_path(relative_path).await?;
-            tracing::Span::current().record("segment_path", relative_path.as_str());
-            self.append_parquet_segment_file(&relative_path, "table_relative", None)
-                .await
         }
         .await;
         record_append_failure(&result);

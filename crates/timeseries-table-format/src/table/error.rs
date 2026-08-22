@@ -402,13 +402,6 @@ pub enum TableError {
         identity: EntityIdentity,
     },
 
-    /// A live segment already uses the normalized path supplied for append.
-    #[snafu(display("Segment path is already live: {path}"))]
-    DuplicateSegmentPath {
-        /// Canonical table-relative path that is already registered.
-        path: String,
-    },
-
     /// Existing segment lacks a coverage_path when coverage is required.
     #[snafu(display(
         "Cannot append because existing segment {path} is missing coverage_path (required for coverage tracking)"
