@@ -135,6 +135,12 @@ struct ComparableLogicalResult<'a> {
 }
 
 pub(super) fn run_comparison(args: &CompareArgs) -> Result<Value, Box<dyn std::error::Error>> {
+    if matches!(args.workload, WorkloadName::LargeScale) && args.samples == 1 {
+        return Err(invalid_data(
+            "large-scale workload requires at least three measured samples per mode",
+        )
+        .into());
+    }
     require_supported_environment()?;
     let binary = env::current_exe()?;
     let initial_repository = repository_snapshot()?;
@@ -845,6 +851,23 @@ mod tests {
         assert_eq!(parse_sample_count("1").unwrap(), 1);
         assert_eq!(parse_sample_count("3").unwrap(), 3);
         assert!(parse_sample_count("2").is_err());
+    }
+
+    #[test]
+    fn rejects_one_sample_large_scale_comparisons() {
+        let args = CompareArgs {
+            workload: WorkloadName::LargeScale,
+            samples: 1,
+            json_out: None,
+            keep_data: false,
+        };
+
+        assert!(
+            run_comparison(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("requires at least three")
+        );
     }
 
     #[test]
