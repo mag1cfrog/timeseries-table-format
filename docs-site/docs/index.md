@@ -23,10 +23,10 @@ Follow these pages in order:
 
 ## The basic workflow
 
-1. Create a table root with an ordered index, bucket size, and optional entity
+1. Create a table root with an ordered index, index granularity, and optional entity
    columns.
-2. Append Parquet files as new segments. The table rejects time windows that
-   overlap existing coverage for the same entity.
+2. Append Parquet files as new segments. The table rejects duplicate or already
+   committed identity and index interval pairs.
 3. Register the table in a `Session` and query it with SQL. Results are returned
    as `pyarrow.Table` objects.
 

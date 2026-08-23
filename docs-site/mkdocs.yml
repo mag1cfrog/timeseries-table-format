@@ -73,7 +73,7 @@ nav:
       - Configure notebook display: guides/notebook_display.md
   - Advanced:
       - Integer ordered indexes: guides/integer_indexes.md
-      - Buckets and overlap: concepts/bucketing_and_overlap.md
+      - Index granularity and conflicts: concepts/index_granularity_and_conflicts.md
       - Table root layout: concepts/table_root.md
       - Streaming performance: performance.md
       - SQL result export: guides/sql_result_export.md

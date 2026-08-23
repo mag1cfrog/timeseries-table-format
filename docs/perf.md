@@ -69,7 +69,7 @@ Example:
 cargo run --release -p timeseries-table-format --example coverage_bench -- \
   --file ./data/fhvhv_2024-04.parquet \
   --time-column pickup_datetime \
-  --bucket 1s \
+  --index-granularity 1s \
   --engine all \
   --iters 5 --warmup 1 \
   --csv ./coverage_bench.csv

@@ -15,7 +15,9 @@ class _TestingModule(Protocol):
 def test_public_index_interval_exceptions_are_exact():
     for module in (ttf, native):
         assert issubclass(module.IndexIntervalOverlapError, module.TimeseriesTableError)
-        assert issubclass(module.DuplicateIndexIntervalError, module.TimeseriesTableError)
+        assert issubclass(
+            module.DuplicateIndexIntervalError, module.TimeseriesTableError
+        )
         assert not hasattr(module, "CoverageOverlapError")
 
     assert "IndexIntervalOverlapError" in ttf.__all__

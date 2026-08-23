@@ -7,11 +7,12 @@ error with a single `except ttf.TimeseriesTableError`.
 
 ```
 TimeseriesTableError
-|-- StorageError          - filesystem or I/O problem (e.g. missing path, permission denied)
-|-- ConflictError         - concurrent modification conflict on table metadata
-|-- CoverageOverlapError  - append rejected because its coverage overlaps existing data
-|-- SchemaMismatchError   - incoming Arrow schema does not match the table's established schema
-`-- DataFusionError       - SQL query failed inside the DataFusion engine
+|-- StorageError                - filesystem or I/O problem
+|-- ConflictError               - concurrent table metadata modification
+|-- IndexIntervalOverlapError   - incoming interval conflicts with committed data
+|-- DuplicateIndexIntervalError - incoming rows duplicate an identity and interval
+|-- SchemaMismatchError         - incoming Arrow schema does not match the table schema
+`-- DataFusionError             - SQL query failed inside DataFusion
 ```
 
 ## When you'll see each error
@@ -20,25 +21,24 @@ TimeseriesTableError
 directory doesn't exist, a file is missing, or a permissions problem. The error message includes
 the path that caused the problem.
 
-**`CoverageOverlapError`** - raised by `append(...)` when the incoming source covers a
-bucket that is already occupied for the same entity. This is intentional - it protects you from
-double-ingesting data. The exception carries:
+**`IndexIntervalOverlapError`** - raised by `append(...)` when an incoming row uses an identity
+and logical index interval already present in committed data. The exception carries:
 
 - `segment_path` - the generated table-relative path for the rejected segment
-- `overlap_count` - how many entity/bucket pairs overlap on an entity-aware table, or how many
-  buckets overlap on a table without entity columns
-- `example_entity_identity` - one overlapping identity as a dictionary in configured
-  entity-column order, or `None` for a table without entity columns. String components are Python
-  `str` values and integer components are Python `int` values.
-- `example_bucket` - the internal overlapping bucket identifier, retained for compatibility
-- `example_bucket_range` - the same bucket in logical ordered-index units, such as
+- `conflict_count` - the number of conflicting intervals, or identity and interval pairs
+- `example_identity` - one complete identity as a dictionary, or `None` for a table without
+  entity columns
+- `example_index_interval` - one conflicting logical interval, such as
   `[-20, -10)`, `[50460, 50470)`, or
   `[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)`
 
-These attributes are stable diagnostics. Inspect them directly instead of parsing the exception
-message.
+**`DuplicateIndexIntervalError`** - raised when two rows in one incoming append use the same
+complete identity and logical index interval. It carries `segment_path`, `example_identity`, and
+`example_index_interval`. It does not expose `conflict_count`.
 
-See [Buckets + overlap](../concepts/bucketing_and_overlap.md) for background.
+These attributes are stable diagnostics. Inspect them directly instead of parsing exception
+messages. See [Index granularity and conflicts](../concepts/index_granularity_and_conflicts.md)
+for the uniqueness rule.
 
 **`SchemaMismatchError`** - raised when an Arrow source you try to append has a schema that
 conflicts with the table's established schema (set on the first successful append).
@@ -66,7 +66,11 @@ SQL error (syntax error, type error, unknown column, etc.).
     options:
       show_source: false
 
-::: timeseries_table_format.CoverageOverlapError
+::: timeseries_table_format.IndexIntervalOverlapError
+    options:
+      show_source: false
+
+::: timeseries_table_format.DuplicateIndexIntervalError
     options:
       show_source: false
 

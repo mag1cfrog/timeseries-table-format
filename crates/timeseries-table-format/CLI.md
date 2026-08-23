@@ -42,7 +42,7 @@ tstable create \
   --table ./my_stocks \
   --index-column timestamp \
   --index-type timestamp \
-  --bucket 1h \
+  --index-granularity 1h \
   --entity symbol
 
 # 2. Add data with a matching Arrow timestamp column
@@ -72,7 +72,7 @@ tstable create \
   --table ./data/my_table \
   --index-column timestamp \
   --index-type timestamp \
-  --bucket 1h \
+  --index-granularity 1h \
   --timezone America/New_York \
   --entity symbol
 ```
@@ -82,22 +82,21 @@ tstable create \
 | `--table` | Yes | Path where the table will be created |
 | `--index-column` | Yes | Name of the ascending index column |
 | `--index-type` | Yes | Exact domain: `timestamp`, `int64`, or `uint64` |
-| `--bucket` | Timestamp | Coverage bucket such as `1s`, `15m`, `1h`, or `1d` |
+| `--index-granularity` | Yes | Timestamp interval such as `1h`, or a positive integer for Int64/UInt64 |
 | `--timezone` | | Timestamp IANA timezone such as `America/New_York` or `UTC` |
-| `--bucket-width` | Int64/UInt64 | Positive integer width in index-value units |
 | `--entity` | | Entity identity column, repeatable |
 
-| Index type | Required type-specific option | Optional | Rejected |
-|------------|-------------------------------|----------|----------|
-| `timestamp` | `--bucket` | `--timezone` | `--bucket-width` |
-| `int64` | `--bucket-width` | None | `--bucket`, `--timezone` |
-| `uint64` | `--bucket-width` | None | `--bucket`, `--timezone` |
+| Index type | `--index-granularity` value | Optional |
+|------------|-------------------------------|----------|
+| `timestamp` | Time interval using `s`, `m`, `h`, or `d` units | `--timezone` |
+| `int64` | Positive integer in index-value units | None |
+| `uint64` | Positive integer in index-value units | None |
 
-Integer bucket widths must be decimal integers from 1 through `18446744073709551615` (`u64::MAX`).
+Integer granularities must be decimal integers from 1 through `18446744073709551615` (`u64::MAX`).
 
 ```bash
-tstable create --table ./signed_ticks --index-column tick --index-type int64 --bucket-width 10
-tstable create --table ./unsigned_counters --index-column counter --index-type uint64 --bucket-width 100
+tstable create --table ./signed_ticks --index-column tick --index-type int64 --index-granularity 10
+tstable create --table ./unsigned_counters --index-column counter --index-type uint64 --index-granularity 100
 ```
 
 **What are entity columns?**  
@@ -136,8 +135,10 @@ tstable append \
   same line
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
 - Parquet rows need not be sorted by the index column
-- Overlapping index buckets cause an error only for the same complete entity identity; tables
-  without entity columns use global bucket overlap
+- Each complete entity identity may have at most one row in a logical index interval, both within
+  one append and across separate appends
+- Different complete identities may use the same interval; a table without entity columns has one
+  table-wide implicit identity
 - Schema must be compatible with existing data (if any)
 
 ---
@@ -253,7 +254,8 @@ Opens an interactive shell that keeps the table loaded in memory.
 tstable shell --table ./data/my_table
 ```
 
-If you omit `--table`, the shell prompts for a path. For a missing table, it then prompts for the index column and type, followed by only the relevant bucket options and entity columns.
+If you omit `--table`, the shell prompts for a path. For a missing table, it then prompts for the
+index column, index type, index granularity, optional timestamp timezone, and entity columns.
 
 | Flag | Description |
 |------|-------------|
@@ -297,7 +299,7 @@ tstable create \
   --table ./market_data/daily_bars \
   --index-column date \
   --index-type timestamp \
-  --bucket 1d \
+  --index-granularity 1d \
   --entity symbol \
   --timezone America/New_York
 
@@ -389,4 +391,3 @@ initializer is not a library API.
 
 - [timeseries-table-format](README.md) - Rust library for building on this format
 - [DataFusion integration](DATAFUSION.md) - SQL integration with ordered-index pruning
-- [Ordered-index migration](../../README.md#migrating-timestamp-only-callers) - Source-breaking migration table

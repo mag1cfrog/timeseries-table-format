@@ -27,7 +27,7 @@ def open_or_create_table() -> ttf.TimeSeriesTable:
         table_root=str(TABLE_ROOT),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
     )
 ```
@@ -54,8 +54,9 @@ def ingest_files(new_files: list[Path]) -> None:
         print(f"appended {segment.name} at table version {version}")
 ```
 
-If a file overlaps existing coverage, `append(...)` raises
-`CoverageOverlapError` and leaves that append uncommitted.
+If a file conflicts with committed coverage, `append(...)` raises
+`IndexIntervalOverlapError` and leaves that append uncommitted. Duplicate identity and interval
+pairs inside one file raise `DuplicateIndexIntervalError` before commit.
 
 !!! warning "Do not blindly ignore overlap errors"
     An overlap can mean a fully duplicated file or a file containing both old
@@ -80,5 +81,5 @@ def print_summary() -> None:
 Call `ingest_files(...)` and then `print_summary()` from your scheduled job.
 
 For overlap behavior and recovery details, see
-[Buckets and overlap](../concepts/bucketing_and_overlap.md) and
+[Index granularity and conflicts](../concepts/index_granularity_and_conflicts.md) and
 [Exceptions](../reference/exceptions.md).
