@@ -145,6 +145,29 @@ fn open_table_blocking(
     Ok(table)
 }
 
+fn set_latest_writer_feature(
+    table_root: &Path,
+    feature: &str,
+) -> StdResult<(), Box<dyn std::error::Error>> {
+    let log_dir = table_root.join("_timeseries_log");
+    let version: u64 = std::fs::read_to_string(log_dir.join("CURRENT"))?
+        .trim()
+        .parse()?;
+    let commit_path = log_dir.join(format!("{version:010}.json"));
+    let mut commit: serde_json::Value = serde_json::from_slice(&std::fs::read(&commit_path)?)?;
+    let metadata = commit["actions"]
+        .as_array_mut()
+        .and_then(|actions| {
+            actions
+                .iter_mut()
+                .find_map(|action| action.get_mut("UpdateTableMeta"))
+        })
+        .ok_or_else(|| io::Error::other("latest test commit must update table metadata"))?;
+    metadata["required_writer_features"] = serde_json::json!([feature]);
+    std::fs::write(commit_path, serde_json::to_vec(&commit)?)?;
+    Ok(())
+}
+
 fn create_table_with_segment(
     tmp: &TempDir,
     table_name: &str,
@@ -163,6 +186,50 @@ fn create_table_with_segment(
     ])?;
     assert_cli_success(&output);
     Ok(table_root)
+}
+
+#[test]
+fn cli_protocol_allows_query_and_rejects_append_before_source_read()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = create_table_with_segment(&tmp, "protocol_table")?;
+    set_latest_writer_feature(&table_root, "future_writer")?;
+
+    let query = run_cli(&[
+        "query",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--sql",
+        "SELECT COUNT(*) FROM protocol_table",
+    ])?;
+    assert_cli_success(&query);
+
+    let version_before = open_table_blocking(&table_root)?.state().version;
+    let missing_source = tmp.path().join("missing.parquet");
+    let append = run_cli(&[
+        "append",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--parquet",
+        missing_source.to_string_lossy().as_ref(),
+    ])?;
+
+    assert!(!append.status.success());
+    assert!(append.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&append.stderr);
+    assert!(
+        stderr.contains("unsupported table writer features") && stderr.contains("future_writer"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Failed to read Parquet source"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(
+        open_table_blocking(&table_root)?.state().version,
+        version_before
+    );
+    Ok(())
 }
 
 #[test]

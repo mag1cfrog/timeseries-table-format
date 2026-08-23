@@ -441,9 +441,7 @@ impl TimeSeriesTable {
     )]
     pub async fn optimize(&mut self) -> Result<OptimizeReport, TableError> {
         let result: Result<OptimizeReport, OptimizeError> = async {
-            self.state
-                .table_meta
-                .ensure_write_compatible()
+            self.ensure_write_compatible()
                 .map_err(OptimizeError::from)?;
 
             if self.index.entity_columns.is_empty() {

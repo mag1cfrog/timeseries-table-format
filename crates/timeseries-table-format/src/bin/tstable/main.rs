@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use timeseries_table_format::{
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
-    table::{OptimizeReport, TimeSeriesTable},
+    table::{AppendError, OptimizeReport, TableError, TimeSeriesTable},
 };
 
 use crate::{
@@ -305,6 +305,14 @@ async fn append_parquet_file(
     table_root: &Path,
     parquet: &Path,
 ) -> CliResult<u64> {
+    table
+        .ensure_write_compatible()
+        .map_err(AppendError::from)
+        .map_err(TableError::from)
+        .context(AppendSegmentSnafu {
+            table: table_root.display().to_string(),
+            parquet: parquet.display().to_string(),
+        })?;
     let reader = open_parquet_batch_reader(parquet)?;
     table.append(reader).await.context(AppendSegmentSnafu {
         table: table_root.display().to_string(),

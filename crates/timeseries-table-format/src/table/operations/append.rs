@@ -640,10 +640,7 @@ impl TimeSeriesTable {
         S: IntoRecordBatchReader<SourceKind>,
     {
         let append_result: Result<u64, AppendError> = async {
-            self.state
-                .table_meta
-                .ensure_write_compatible()
-                .map_err(AppendError::from)?;
+            self.ensure_write_compatible().map_err(AppendError::from)?;
 
             let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
