@@ -141,7 +141,7 @@ struct TableDefinitionReport {
     index_column: String,
     incoming_index_type: String,
     registered_index_type: String,
-    bucket_width: u64,
+    index_granularity: u64,
     entity_columns: Vec<String>,
 }
 
@@ -426,12 +426,12 @@ fn write_external_normalized_parquet(
 }
 
 fn table_definition() -> Result<TableMeta, Box<dyn std::error::Error>> {
-    let bucket_width = NonZeroU64::MIN;
+    let index_granularity = NonZeroU64::MIN;
     Ok(TableMeta::new_time_series_with_schema(
         IndexSpec {
             column: INDEX_COLUMN.to_string(),
             entity_columns: Vec::new(),
-            kind: IndexKind::UInt64 { bucket_width },
+            kind: IndexKind::UInt64 { index_granularity },
         },
         registered_logical_schema()?,
     ))
@@ -442,7 +442,7 @@ fn benchmark_table_definition_report() -> TableDefinitionReport {
         index_column: INDEX_COLUMN.to_string(),
         incoming_index_type: "uint32".to_string(),
         registered_index_type: "uint64".to_string(),
-        bucket_width: 1,
+        index_granularity: 1,
         entity_columns: Vec::new(),
     }
 }

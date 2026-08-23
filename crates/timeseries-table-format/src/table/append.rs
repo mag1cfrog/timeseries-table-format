@@ -24,7 +24,7 @@ use crate::{
     coverage::serde::{coverage_to_bytes, entity_coverage_to_bytes},
     coverage::{
         EntityCoverage,
-        bucket::logical_bucket_range,
+        index_interval::index_interval_for_id,
         io::{CoverageError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
@@ -51,9 +51,9 @@ use super::{
     TimeSeriesTable,
     append_schema::AppendSchemaNormalizer,
     error::{
-        AppendParquetSnafu, AppendSourceSnafu, CoverageBucketSnafu, CoverageOverlapSnafu,
-        EmptySegmentEntityCoverageSnafu, EntityCoverageOverlapSnafu,
-        EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
+        AppendParquetSnafu, AppendSourceSnafu, EmptySegmentEntityCoverageSnafu,
+        EntityIndexIntervalOverlapSnafu, EntityWithoutIndexCoverageSnafu,
+        ExistingSegmentMissingCoverageSnafu, IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu,
         MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentMetaSnafu,
         SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
     },
@@ -387,15 +387,16 @@ impl TimeSeriesTable {
                     .map_err(TableError::from)?;
             let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
 
-            if let Some((identity, bucket)) = segment_cov.overlap_example(&table_cov) {
-                let example_bucket_range =
-                    logical_bucket_range(&self.index.kind, bucket).context(CoverageBucketSnafu)?;
-                return EntityCoverageOverlapSnafu {
+            if let Some((identity, index_interval_id)) = segment_cov.overlap_example(&table_cov) {
+                let example_index_interval =
+                    index_interval_for_id(&self.index.kind, index_interval_id)
+                        .context(IndexIntervalMappingSnafu)?;
+                return EntityIndexIntervalOverlapSnafu {
                     segment_path: relative_path.to_string(),
                     overlap_count: segment_cov.intersection_cardinality(&table_cov),
                     example_identity: identity.clone(),
-                    example_bucket: bucket,
-                    example_bucket_range,
+                    example_index_interval_id: index_interval_id,
+                    example_index_interval,
                 }
                 .fail();
             }
@@ -421,14 +422,15 @@ impl TimeSeriesTable {
 
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
-            if let Some(example_bucket) = overlap.present().iter().next() {
-                let example_bucket_range = logical_bucket_range(&self.index.kind, example_bucket)
-                    .context(CoverageBucketSnafu)?;
-                return CoverageOverlapSnafu {
+            if let Some(example_index_interval_id) = overlap.present().iter().next() {
+                let example_index_interval =
+                    index_interval_for_id(&self.index.kind, example_index_interval_id)
+                        .context(IndexIntervalMappingSnafu)?;
+                return IndexIntervalOverlapSnafu {
                     segment_path: relative_path.to_string(),
                     overlap_count,
-                    example_bucket: Some(example_bucket),
-                    example_bucket_range,
+                    example_index_interval_id,
+                    example_index_interval,
                 }
                 .fail();
             }
@@ -765,7 +767,9 @@ mod tests {
     use crate::metadata::table_metadata::IndexValue;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
-    use crate::transaction_log::{CommitError, IndexKind, IndexSpec, TableMeta, TimeBucket};
+    use crate::transaction_log::{
+        CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
+    };
     use arrow::{
         array::{
             Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
@@ -924,7 +928,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         }
@@ -946,15 +950,16 @@ mod tests {
     }
 
     fn timestamp_only_batch(row_count: usize) -> Result<RecordBatch, ArrowError> {
-        timestamp_only_batch_starting_at_bucket(0, row_count)
+        timestamp_only_batch_starting_at_minute_offset(0, row_count)
     }
 
-    fn timestamp_only_batch_starting_at_bucket(
-        start_bucket: usize,
+    fn timestamp_only_batch_starting_at_minute_offset(
+        start_minute_offset: usize,
         row_count: usize,
     ) -> Result<RecordBatch, ArrowError> {
         timestamp_only_batch_with_millis(
-            (start_bucket..start_bucket + row_count).map(|bucket| bucket as i64 * 60_000),
+            (start_minute_offset..start_minute_offset + row_count)
+                .map(|minute_offset| minute_offset as i64 * 60_000),
         )
     }
 
@@ -980,7 +985,7 @@ mod tests {
                 column: "seq".to_string(),
                 entity_columns: vec!["device_id".to_string()],
                 kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(u64::from(u32::MAX) + 1).unwrap(),
+                    index_granularity: NonZeroU64::new(u64::from(u32::MAX) + 1).unwrap(),
                 },
             },
             LogicalSchema::new(vec![
@@ -1044,7 +1049,7 @@ mod tests {
                 column: "ts".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::Timestamp {
-                    bucket: TimeBucket::Minutes(1),
+                    index_granularity: TimeIndexGranularity::Minutes(1),
                     timezone: None,
                 },
             },
@@ -1168,7 +1173,10 @@ mod tests {
             )?)
             .await
             .expect_err("widened entity and index coverage must still reject overlap");
-        assert!(matches!(overlap, TableError::EntityCoverageOverlap { .. }));
+        assert!(matches!(
+            overlap,
+            TableError::EntityIndexIntervalOverlap { .. }
+        ));
         assert_eq!(table.state(), &state_before_overlap);
         assert_eq!(data_files(temp.path())?, data_before_overlap);
         assert_eq!(coverage_files(temp.path())?, coverage_before_overlap);
@@ -1319,7 +1327,7 @@ mod tests {
                 column: "seq".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(1).unwrap(),
+                    index_granularity: NonZeroU64::new(1).unwrap(),
                 },
             },
             LogicalSchema::new(vec![LogicalField {
@@ -1441,7 +1449,7 @@ mod tests {
             let request = AppendRequest::new(
                 AppendRequest::new(vec![
                     timestamp_only_batch(2)?,
-                    timestamp_only_batch_starting_at_bucket(2, 5)?,
+                    timestamp_only_batch_starting_at_minute_offset(2, 5)?,
                 ])
                 .max_rows_per_row_group(inner_limit),
             );
@@ -2304,7 +2312,7 @@ mod tests {
             table
                 .append(AppendRequest::new(batch).max_rows_per_row_group(1))
                 .await,
-            Err(TableError::EntityCoverageOverlap { .. })
+            Err(TableError::EntityIndexIntervalOverlap { .. })
         ));
         assert_eq!(table.state().version, 2);
         assert_eq!(
@@ -2379,7 +2387,7 @@ mod tests {
                     column: "ts".to_string(),
                     entity_columns: vec!["symbol".to_string()],
                     kind: IndexKind::Timestamp {
-                        bucket: TimeBucket::Minutes(1),
+                        index_granularity: TimeIndexGranularity::Minutes(1),
                         timezone: Some(timezone.to_string()),
                     },
                 },
@@ -2568,7 +2576,7 @@ mod tests {
                 assert!(segment_path.ends_with(".parquet"));
                 assert!(message.contains(&segment_path));
                 assert!(message.contains("Duplicate ordered-index interval"));
-                assert!(!message.contains("bucket"));
+                assert!(message.contains("ordered-index interval"));
                 assert_eq!(
                     example_index_interval.to_string(),
                     "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
@@ -2635,7 +2643,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string(), "venue".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -2783,11 +2791,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_six_no_entity_int64_append_uses_global_coverage() -> TestResult {
+    async fn append_without_entities_uses_global_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
@@ -2828,7 +2836,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
@@ -2848,18 +2856,18 @@ mod tests {
         write_arrow_parquet_int_time(&tmp.path().join(overlap_path), &[-19], &["A"], &[3.0])?;
         let overlap_error = append_parquet_fixture(&mut table, overlap_path)
             .await
-            .expect_err("negative bucket overlap must fail");
+            .expect_err("negative index interval overlap must fail");
         assert!(matches!(
             &overlap_error,
-            TableError::CoverageOverlap {
-                example_bucket_range,
+            TableError::IndexIntervalOverlap {
+                example_index_interval,
                 ..
-            } if example_bucket_range.to_string() == "[-20, -10)"
+            } if example_index_interval.to_string() == "[-20, -10)"
         ));
         assert!(
             overlap_error
                 .to_string()
-                .contains("example_bucket_range=[-20, -10)")
+                .contains("example_index_interval=[-20, -10)")
         );
 
         let mismatch_path = "data/schema-mismatch.parquet";
@@ -2884,7 +2892,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index.clone()))
@@ -2948,13 +2956,13 @@ mod tests {
         )?;
         let overlap_error = append_parquet_fixture(&mut table, overlap_path)
             .await
-            .expect_err("large uint64 bucket overlap must fail");
+            .expect_err("large uint64 index interval overlap must fail");
         assert!(matches!(
             overlap_error,
-            TableError::CoverageOverlap {
-                example_bucket_range,
+            TableError::IndexIntervalOverlap {
+                example_index_interval,
                 ..
-            } if example_bucket_range.to_string()
+            } if example_index_interval.to_string()
                 == "[18446744073709551610, 18446744073709551615]"
         ));
         assert_eq!(table.state, state_before);
@@ -2969,7 +2977,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
@@ -3003,7 +3011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_six_records_single_layout_for_each_entity_segment() -> TestResult {
+    async fn append_records_single_layout_for_each_entity_segment() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -3048,7 +3056,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_six_records_mixed_layout_for_multiple_identities() -> TestResult {
+    async fn append_records_mixed_layout_for_multiple_identities() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -3139,10 +3147,10 @@ mod tests {
         write_int32_entity_parquet(&tmp.path().join(overlap_path), &[1_500], &[-1], &[12.0])?;
         let error = append_parquet_fixture(&mut table, overlap_path)
             .await
-            .expect_err("same typed identity and bucket must overlap");
+            .expect_err("same typed identity and index interval must overlap");
         assert!(matches!(
             error,
-            TableError::EntityCoverageOverlap {
+            TableError::EntityIndexIntervalOverlap {
                 overlap_count: 1,
                 example_identity,
                 ..
@@ -3162,14 +3170,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_six_preserves_composite_identity_order_in_layout() -> TestResult {
+    async fn append_preserves_composite_identity_order_in_layout() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = IndexSpec {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string(), "venue".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -3227,10 +3235,10 @@ mod tests {
         write_composite_entity_parquet(&tmp.path().join(overlap_path), &[(1_500, "A", "X", 20.0)])?;
         let error = append_parquet_fixture(&mut table, overlap_path)
             .await
-            .expect_err("matching composite identity and bucket must overlap");
+            .expect_err("matching composite identity and index interval must overlap");
         assert!(matches!(
             error,
-            TableError::EntityCoverageOverlap {
+            TableError::EntityIndexIntervalOverlap {
                 overlap_count: 1,
                 example_identity,
                 ..
@@ -3282,7 +3290,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["device_id".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -3466,14 +3474,14 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::EntityCoverageOverlap {
+            TableError::EntityIndexIntervalOverlap {
                 overlap_count: 3,
                 example_identity,
-                example_bucket: 0x8000_0000_0000_0000,
-                example_bucket_range,
+                example_index_interval_id: 0x8000_0000_0000_0000,
+                example_index_interval,
                 ..
             } if example_identity.components() == [EntityValue::from("A")]
-                && example_bucket_range.to_string()
+                && example_index_interval.to_string()
                     == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
         ));
         Ok(())
@@ -3694,7 +3702,7 @@ mod tests {
         let err = append_parquet_fixture(&mut table, overlapping)
             .await
             .expect_err("overlap must be rejected");
-        assert!(matches!(err, TableError::EntityCoverageOverlap { .. }));
+        assert!(matches!(err, TableError::EntityIndexIntervalOverlap { .. }));
         assert_eq!(tokio::fs::read(snapshot_abs).await?, b"garbage");
         Ok(())
     }
@@ -3894,7 +3902,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut winner =
             TimeSeriesTable::create(location.clone(), TableMeta::new_time_series(index)).await?;
@@ -3927,7 +3935,7 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let index = registered_index(IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         });
         let mut table =
             TimeSeriesTable::create(location, TableMeta::new_time_series(index)).await?;
@@ -3973,16 +3981,20 @@ mod tests {
         for sidecar in &sidecars {
             tokio::fs::create_dir_all(tmp.path().join(sidecar)).await?;
         }
-        let example_bucket = crate::coverage::bucket::bucket_id(
-            &table.index.kind,
-            &IndexValue::Timestamp(utc_datetime(1970, 1, 1, 0, 0, 0)),
-        )?;
-        let source = TableError::EntityCoverageOverlap {
+        let example_index_interval_id =
+            crate::coverage::index_interval::index_interval_id_for_value(
+                &table.index.kind,
+                &IndexValue::Timestamp(utc_datetime(1970, 1, 1, 0, 0, 0)),
+            )?;
+        let source = TableError::EntityIndexIntervalOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
             example_identity: EntityIdentity::try_new(vec!["A".into()])?,
-            example_bucket,
-            example_bucket_range: logical_bucket_range(&table.index.kind, example_bucket)?,
+            example_index_interval_id,
+            example_index_interval: index_interval_for_id(
+                &table.index.kind,
+                example_index_interval_id,
+            )?,
         };
         let err = table.rollback_created_artifacts(&sidecars, source).await;
         let message = err.to_string();
@@ -3992,7 +4004,7 @@ mod tests {
             TableError::AppendRollback {
                 source,
                 cleanup_errors,
-            } if matches!(*source, TableError::EntityCoverageOverlap { .. })
+            } if matches!(*source, TableError::EntityIndexIntervalOverlap { .. })
                 && cleanup_errors.len() == 2
                 && cleanup_errors[0].contains("second-stuck.roar")
                 && cleanup_errors[1].contains("first-stuck.roar")
@@ -4121,13 +4133,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_fails_when_table_snapshot_bucket_mismatches_index() -> TestResult {
+    async fn append_fails_when_table_snapshot_granularity_mismatches_index() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
 
-        let rel1 = "data/seg-bucket-a.parquet";
-        let rel2 = "data/seg-bucket-b.parquet";
+        let rel1 = "data/seg-granularity-a.parquet";
+        let rel2 = "data/seg-granularity-b.parquet";
         let path1 = tmp.path().join(rel1);
         let path2 = tmp.path().join(rel2);
 
@@ -4154,8 +4166,8 @@ mod tests {
 
         append_parquet_fixture(&mut table, rel1).await?;
 
-        // Tamper snapshot pointer to a mismatching bucket spec.
-        let bad_bucket = TimeBucket::Hours(1);
+        // Tamper with the snapshot pointer's index granularity.
+        let incompatible_granularity = TimeIndexGranularity::Hours(1);
         let ptr = table
             .state
             .table_coverage
@@ -4164,7 +4176,7 @@ mod tests {
             .clone();
         table.state.table_coverage = Some(TableCoveragePointer {
             index_kind: IndexKind::Timestamp {
-                bucket: bad_bucket.clone(),
+                index_granularity: incompatible_granularity.clone(),
                 timezone: None,
             },
             coverage_path: ptr.coverage_path.clone(),
@@ -4173,7 +4185,7 @@ mod tests {
 
         let err = append_parquet_fixture(&mut table, rel2)
             .await
-            .expect_err("append should fail when snapshot bucket mismatches index");
+            .expect_err("append should fail when snapshot granularity mismatches the index");
 
         assert!(matches!(
             err,

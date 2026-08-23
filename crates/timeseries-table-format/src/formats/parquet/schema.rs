@@ -1033,7 +1033,7 @@ mod tests {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::MIN,
+                index_granularity: NonZeroU64::MIN,
             },
         }
     }

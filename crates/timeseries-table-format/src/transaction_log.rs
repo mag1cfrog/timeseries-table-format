@@ -71,7 +71,7 @@ pub mod table_state;
 mod log_integration_tests;
 
 pub use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TimeBucket,
+    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TimeIndexGranularity,
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
@@ -186,7 +186,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(60),
+                index_granularity: TimeIndexGranularity::Minutes(60),
                 timezone: Some("UTC".to_string()),
             },
         };
@@ -280,7 +280,10 @@ mod tests {
         // JSON with optional fields omitted.
         let json = r#"{
             "column": "ts",
-            "kind": { "type": "timestamp", "bucket": { "Hours": 1 } }
+            "kind": {
+                "type": "timestamp",
+                "index_granularity": { "Hours": 1 }
+            }
         }"#;
 
         let spec: IndexSpec = serde_json::from_str(json).expect("deserialize");
@@ -290,7 +293,7 @@ mod tests {
         assert_eq!(
             spec.kind,
             IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None
             }
         );
@@ -302,7 +305,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec![],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Seconds(30),
+                index_granularity: TimeIndexGranularity::Seconds(30),
                 timezone: None,
             },
         };
@@ -335,18 +338,18 @@ mod tests {
     }
 
     #[test]
-    fn all_time_bucket_variants_roundtrip() {
-        let buckets = vec![
-            TimeBucket::Seconds(15),
-            TimeBucket::Minutes(5),
-            TimeBucket::Hours(24),
-            TimeBucket::Days(7),
+    fn all_time_index_granularity_variants_roundtrip() {
+        let granularities = vec![
+            TimeIndexGranularity::Seconds(15),
+            TimeIndexGranularity::Minutes(5),
+            TimeIndexGranularity::Hours(24),
+            TimeIndexGranularity::Days(7),
         ];
 
-        for bucket in buckets {
-            let json = serde_json::to_string(&bucket).expect("serialize");
-            let decoded: TimeBucket = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(bucket, decoded);
+        for index_granularity in granularities {
+            let json = serde_json::to_string(&index_granularity).expect("serialize");
+            let decoded: TimeIndexGranularity = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(index_granularity, decoded);
         }
     }
 

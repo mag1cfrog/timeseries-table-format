@@ -348,7 +348,9 @@ mod tests {
 
     use crate::storage::{StorageLocation, layout};
     use crate::table::test_util::*;
-    use crate::transaction_log::{CommitError, IndexKind, TimeBucket, TransactionLogStore};
+    use crate::transaction_log::{
+        CommitError, IndexKind, TimeIndexGranularity, TransactionLogStore,
+    };
 
     use tempfile::TempDir;
 
@@ -457,7 +459,7 @@ mod tests {
 
         // State should be at version 1 with no segments.
         assert_eq!(table.state().version, 1);
-        assert_eq!(TABLE_FORMAT_VERSION, 6);
+        assert_eq!(TABLE_FORMAT_VERSION, 7);
         assert_eq!(
             table.state().table_meta.format_version(),
             TABLE_FORMAT_VERSION
@@ -633,7 +635,7 @@ mod tests {
         let mut updated_meta = meta.clone();
         if let TableKind::TimeSeries(spec) = &mut updated_meta.kind {
             spec.kind = IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(5),
+                index_granularity: TimeIndexGranularity::Minutes(5),
                 timezone: None,
             };
         }
@@ -667,7 +669,7 @@ mod tests {
             TableKind::TimeSeries(spec) => assert_eq!(
                 spec.kind,
                 IndexKind::Timestamp {
-                    bucket: TimeBucket::Minutes(5),
+                    index_granularity: TimeIndexGranularity::Minutes(5),
                     timezone: None
                 }
             ),
@@ -676,7 +678,7 @@ mod tests {
         assert_eq!(
             table.index_spec().kind,
             IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(5),
+                index_granularity: TimeIndexGranularity::Minutes(5),
                 timezone: None
             }
         );

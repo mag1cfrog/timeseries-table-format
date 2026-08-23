@@ -7,7 +7,7 @@
 //! # Overview
 //!
 //! Coverage sidecars are stored alongside table data and segments to track which
-//! time buckets have been observed. This module abstracts the I/O details:
+//! index intervals have been observed. This module abstracts the I/O details:
 //!
 //! - Serializes [`Coverage`] instances to bytes using the RoaringTreemap format.
 //! - Writes bytes to the table storage with atomic or new-only semantics.

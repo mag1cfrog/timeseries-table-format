@@ -23,7 +23,7 @@ fn metadata_pruning_accepts_only_exact_supported_entity_literals() -> DFResult<(
             "unsigned_64".to_string(),
         ],
         kind: crate::metadata::table_metadata::IndexKind::Int64 {
-            bucket_width: NonZeroU64::MIN,
+            index_granularity: NonZeroU64::MIN,
         },
     };
 
@@ -55,13 +55,13 @@ fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
-    use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeBucket};
+    use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeIndexGranularity};
 
     let index = IndexSpec {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     };

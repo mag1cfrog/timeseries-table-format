@@ -6,7 +6,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow_csv::ReaderBuilder;
 use arrow_csv::reader::Format;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Hours(1),
+            index_granularity: TimeIndexGranularity::Hours(1),
             timezone: None,
         },
     };

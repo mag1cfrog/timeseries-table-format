@@ -1,6 +1,6 @@
-//! In-memory coverage and gap analysis over the 64-bit bucket domain.
+//! In-memory coverage and gap analysis over the 64-bit index interval ID domain.
 
-pub mod bucket;
+pub mod index_interval;
 pub mod io;
 pub mod layout;
 pub mod serde;
@@ -15,8 +15,8 @@ use snafu::Snafu;
 
 pub use roaring::RoaringTreemap;
 
-/// Ordered 64-bit coverage bucket identity.
-pub type Bucket = u64;
+/// Ordered 64-bit index interval ID.
+pub type IndexIntervalId = u64;
 
 /// Exact scalar value in an entity identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -121,7 +121,7 @@ pub enum EntityIdentityError {
     Empty,
 }
 
-/// In-memory coverage over a discrete set of bucket identities.
+/// In-memory coverage over a discrete set of index interval IDs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Coverage {
     present: RoaringTreemap,
@@ -138,7 +138,7 @@ impl Coverage {
         Self { present }
     }
 
-    /// Borrow the present buckets.
+    /// Borrow the present index interval IDs.
     pub fn present(&self) -> &RoaringTreemap {
         &self.present
     }
@@ -163,31 +163,31 @@ impl Coverage {
         Self::from_treemap(&self.present & &other.present)
     }
 
-    /// Count buckets present in both coverage sets without materializing them.
+    /// Count index interval IDs present in both sets without materializing them.
     pub fn intersection_cardinality(&self, other: &Self) -> u64 {
         self.present.intersection_len(&other.present)
     }
 
-    /// Number of present buckets.
+    /// Number of present index interval IDs.
     pub fn cardinality(&self) -> u64 {
         self.present.len()
     }
 
-    /// Whether no buckets are present.
+    /// Whether no index interval IDs are present.
     pub fn is_empty(&self) -> bool {
         self.present.is_empty()
     }
 
-    /// Number of bucket identities in an inclusive range.
-    pub fn range_cardinality(range: &RangeInclusive<Bucket>) -> u128 {
+    /// Number of index interval IDs in an inclusive range.
+    pub fn range_cardinality(range: &RangeInclusive<IndexIntervalId>) -> u128 {
         if range.is_empty() {
             return 0;
         }
         u128::from(*range.end()) - u128::from(*range.start()) + 1
     }
 
-    /// Count present buckets in an inclusive range without materializing it.
-    pub fn covered_cardinality(&self, range: &RangeInclusive<Bucket>) -> u64 {
+    /// Count present index interval IDs in a range without materializing it.
+    pub fn covered_cardinality(&self, range: &RangeInclusive<IndexIntervalId>) -> u64 {
         if range.is_empty() {
             0
         } else {
@@ -198,13 +198,13 @@ impl Coverage {
     /// Return missing contiguous runs in an inclusive requested range.
     ///
     /// Long runs are optionally split into chunks of at most `max_run_len`.
-    /// Work is proportional to present buckets and returned runs, not the size
+    /// Work is proportional to present index interval IDs and returned runs, not the size
     /// of the requested range.
     pub fn missing_runs(
         &self,
-        range: &RangeInclusive<Bucket>,
+        range: &RangeInclusive<IndexIntervalId>,
         max_run_len: Option<u64>,
-    ) -> Vec<RangeInclusive<Bucket>> {
+    ) -> Vec<RangeInclusive<IndexIntervalId>> {
         if range.is_empty() || max_run_len == Some(0) {
             return Vec::new();
         }
@@ -216,17 +216,17 @@ impl Coverage {
         let mut present = self.present.iter();
         present.advance_to(start);
 
-        for bucket in present {
-            if bucket > end {
+        for index_interval_id in present {
+            if index_interval_id > end {
                 break;
             }
             let Some(missing_start) = cursor else {
                 break;
             };
-            if missing_start < bucket {
-                runs.push(missing_start..=bucket - 1);
+            if missing_start < index_interval_id {
+                runs.push(missing_start..=index_interval_id - 1);
             }
-            cursor = bucket.checked_add(1);
+            cursor = index_interval_id.checked_add(1);
         }
 
         if let Some(missing_start) = cursor.filter(|value| *value <= end) {
@@ -239,12 +239,12 @@ impl Coverage {
         }
     }
 
-    /// Return the last covered contiguous run of at least `min_len` buckets.
+    /// Return the last covered contiguous run of at least `min_len` IDs.
     pub fn last_run_with_min_len(
         &self,
-        range: &RangeInclusive<Bucket>,
+        range: &RangeInclusive<IndexIntervalId>,
         min_len: u64,
-    ) -> Option<RangeInclusive<Bucket>> {
+    ) -> Option<RangeInclusive<IndexIntervalId>> {
         if range.is_empty() || min_len == 0 {
             return None;
         }
@@ -253,20 +253,20 @@ impl Coverage {
         iter.advance_to(*range.start());
         iter.advance_back_to(*range.end());
 
-        let mut current: Option<(Bucket, Bucket)> = None;
+        let mut current: Option<(IndexIntervalId, IndexIntervalId)> = None;
         let mut last = None;
-        for bucket in iter {
+        for index_interval_id in iter {
             match current {
-                Some((start, end)) if end.checked_add(1) == Some(bucket) => {
-                    current = Some((start, bucket));
+                Some((start, end)) if end.checked_add(1) == Some(index_interval_id) => {
+                    current = Some((start, index_interval_id));
                 }
                 Some((start, end)) => {
                     if inclusive_len(start, end) >= u128::from(min_len) {
                         last = Some(start..=end);
                     }
-                    current = Some((bucket, bucket));
+                    current = Some((index_interval_id, index_interval_id));
                 }
-                None => current = Some((bucket, bucket)),
+                None => current = Some((index_interval_id, index_interval_id)),
             }
         }
 
@@ -279,7 +279,7 @@ impl Coverage {
     }
 
     /// Coverage ratio in `[0.0, 1.0]` for an inclusive range.
-    pub fn coverage_ratio(&self, range: &RangeInclusive<Bucket>) -> f64 {
+    pub fn coverage_ratio(&self, range: &RangeInclusive<IndexIntervalId>) -> f64 {
         let expected = Self::range_cardinality(range);
         if expected == 0 {
             return 1.0;
@@ -288,7 +288,7 @@ impl Coverage {
     }
 
     /// Length of the largest missing run in an inclusive range.
-    pub fn max_gap_len(&self, range: &RangeInclusive<Bucket>) -> u128 {
+    pub fn max_gap_len(&self, range: &RangeInclusive<IndexIntervalId>) -> u128 {
         self.missing_runs(range, None)
             .into_iter()
             .map(|run| inclusive_len(*run.start(), *run.end()))
@@ -296,40 +296,40 @@ impl Coverage {
             .unwrap_or(0)
     }
 
-    /// Return the last fully-covered contiguous window ending at or before a bucket.
+    /// Return the last fully-covered window ending at or before an index interval ID.
     pub fn last_window_at_or_before(
         &self,
-        end_bucket: Bucket,
+        end_index_interval_id: IndexIntervalId,
         len: u64,
-    ) -> Option<RangeInclusive<Bucket>> {
+    ) -> Option<RangeInclusive<IndexIntervalId>> {
         if len == 0 {
             return None;
         }
 
         let mut iter = self.present.iter();
-        iter.advance_back_to(end_bucket);
+        iter.advance_back_to(end_index_interval_id);
         let mut run_end = None;
-        let mut previous: Option<Bucket> = None;
+        let mut previous: Option<IndexIntervalId> = None;
         let mut run_len = 0u64;
 
-        for bucket in iter.rev() {
-            if previous.and_then(|value| value.checked_sub(1)) == Some(bucket) {
+        for index_interval_id in iter.rev() {
+            if previous.and_then(|value| value.checked_sub(1)) == Some(index_interval_id) {
                 run_len += 1;
             } else {
-                run_end = Some(bucket);
+                run_end = Some(index_interval_id);
                 run_len = 1;
             }
-            previous = Some(bucket);
+            previous = Some(index_interval_id);
 
             if run_len >= len {
-                return run_end.map(|end| bucket..=end);
+                return run_end.map(|end| index_interval_id..=end);
             }
         }
         None
     }
 }
 
-/// Independent bucket coverage for each ordered entity identity.
+/// Independent index interval IDs for each ordered entity identity.
 ///
 /// Explicit identities with empty coverage are preserved. An absent identity
 /// is still treated as empty and returned as `None` by [`EntityCoverage::get`].
@@ -393,7 +393,7 @@ impl EntityCoverage {
         }
     }
 
-    /// Return overlap only where both identity and bucket match.
+    /// Return overlap only where both identity and index interval ID match.
     pub fn intersect(&self, other: &Self) -> Self {
         let mut intersection = Self::empty();
         for (identity, coverage) in self.iter() {
@@ -404,7 +404,7 @@ impl EntityCoverage {
         intersection
     }
 
-    /// Count covered `(entity identity, bucket)` pairs.
+    /// Count covered `(entity identity, index interval ID)` pairs.
     pub fn cardinality(&self) -> u128 {
         self.by_identity
             .values()
@@ -412,7 +412,7 @@ impl EntityCoverage {
             .sum()
     }
 
-    /// Count overlapping `(entity identity, bucket)` pairs without materializing them.
+    /// Count overlapping `(entity identity, index interval ID)` pairs.
     pub fn intersection_cardinality(&self, other: &Self) -> u128 {
         self.iter()
             .filter_map(|(identity, coverage)| {
@@ -423,8 +423,11 @@ impl EntityCoverage {
             .sum()
     }
 
-    /// Return the first canonical identity and smallest overlapping bucket.
-    pub fn overlap_example<'a>(&'a self, other: &Self) -> Option<(&'a EntityIdentity, Bucket)> {
+    /// Return the first canonical identity and smallest overlapping index interval ID.
+    pub fn overlap_example<'a>(
+        &'a self,
+        other: &Self,
+    ) -> Option<(&'a EntityIdentity, IndexIntervalId)> {
         self.iter().find_map(|(identity, coverage)| {
             let other_coverage = other.get(identity)?;
             if coverage.present().is_disjoint(other_coverage.present()) {
@@ -434,28 +437,28 @@ impl EntityCoverage {
                 .intersect(other_coverage)
                 .present()
                 .min()
-                .map(|bucket| (identity, bucket))
+                .map(|index_interval_id| (identity, index_interval_id))
         })
     }
 }
 
-impl FromIterator<Bucket> for Coverage {
+impl FromIterator<IndexIntervalId> for Coverage {
     fn from_iter<I>(iter: I) -> Self
     where
-        I: IntoIterator<Item = Bucket>,
+        I: IntoIterator<Item = IndexIntervalId>,
     {
         Self::from_treemap(iter.into_iter().collect())
     }
 }
 
-fn inclusive_len(start: Bucket, end: Bucket) -> u128 {
+fn inclusive_len(start: IndexIntervalId, end: IndexIntervalId) -> u128 {
     u128::from(end) - u128::from(start) + 1
 }
 
 fn split_runs_by_len(
-    runs: Vec<RangeInclusive<Bucket>>,
+    runs: Vec<RangeInclusive<IndexIntervalId>>,
     max_len: u64,
-) -> Vec<RangeInclusive<Bucket>> {
+) -> Vec<RangeInclusive<IndexIntervalId>> {
     if max_len == 0 {
         return Vec::new();
     }
@@ -624,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_coverage_intersection_requires_identity_and_bucket() {
+    fn entity_coverage_intersection_requires_identity_and_interval() {
         let a = identity(&["A"]);
         let b = identity(&["B"]);
         let mut left = EntityCoverage::empty();
@@ -652,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_coverage_counts_same_bucket_once_per_identity() {
+    fn entity_coverage_counts_same_interval_once_per_identity() {
         let mut coverage = EntityCoverage::empty();
         coverage.union_coverage(identity(&["A"]), [u64::MAX].into_iter().collect());
         coverage.union_coverage(identity(&["B"]), [u64::MAX].into_iter().collect());
@@ -676,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_coverage_overlap_example_does_not_enumerate_dense_buckets() {
+    fn entity_coverage_overlap_example_does_not_enumerate_dense_intervals() {
         let entity = identity(&["dense"]);
         let last = u64::from(u32::MAX);
         let mut dense = RoaringTreemap::new();

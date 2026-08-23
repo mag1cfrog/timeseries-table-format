@@ -1,7 +1,7 @@
 //! Helpers for reading and computing segment-level ordered-index coverage.
 //!
 //! This module provides utilities for analyzing Parquet segments to extract
-//! coverage metadata: bucket assignments for ordered-index values within each
+//! coverage metadata: index interval IDs for ordered-index values within each
 //! segment. Coverage data is persisted in a RoaringTreemap sidecar
 //! file and referenced by the transaction log for efficient time-range queries.
 //!
@@ -32,8 +32,11 @@ use snafu::{Backtrace, Snafu};
 use tokio::task::JoinSet;
 
 use crate::{
-    coverage::bucket::{BucketError, LogicalBucketRange, bucket_id, logical_bucket_range},
-    coverage::{Bucket, Coverage, EntityIdentity, EntityIdentityError},
+    coverage::index_interval::{
+        IndexInterval, IndexIntervalMappingError, index_interval_for_id,
+        index_interval_id_for_value,
+    },
+    coverage::{Coverage, EntityIdentity, EntityIdentityError, IndexIntervalId},
     metadata::{
         segments::ParquetIndexColumnError,
         table_metadata::{IndexKind, IndexSpec, IndexValue},
@@ -50,8 +53,8 @@ use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 /// 1. Reads the Parquet segment file from storage.
 /// 2. Inspects the Parquet schema to locate the registered index column.
 /// 3. Validates that the column matches the registered index domain.
-/// 4. Streams projected index values and maps them to buckets.
-/// 5. Stores computed bucket IDs in a RoaringTreemap for efficient serialization.
+/// 4. Streams projected index values and maps them to index interval IDs.
+/// 5. Stores the IDs in a RoaringTreemap for efficient serialization.
 ///
 /// Errors at any stage are captured here with context about the segment path,
 /// column name, and raw values involved.
@@ -106,13 +109,13 @@ pub enum SegmentCoverageError {
         detail: String,
     },
 
-    /// Ordered-index bucket mapping failed.
-    #[snafu(display("Bucket mapping failed for segment {path}: {source}"))]
-    Bucket {
+    /// Ordered-index interval mapping failed.
+    #[snafu(display("Index interval mapping failed for segment {path}: {source}"))]
+    IndexIntervalMapping {
         /// The path to the segment file.
         path: String,
-        /// Bucket mapping failure.
-        source: BucketError,
+        /// Index interval mapping failure.
+        source: IndexIntervalMappingError,
     },
 
     /// Two rows for the same entity occupy one ordered-index interval.
@@ -125,7 +128,7 @@ pub enum SegmentCoverageError {
         /// Complete entity identity, or `None` for a table without entity columns.
         example_identity: Option<EntityIdentity>,
         /// Logical ordered-index interval occupied by both rows.
-        example_index_interval: LogicalBucketRange,
+        example_index_interval: IndexInterval,
     },
 
     /// A configured entity column is missing from the segment.
@@ -218,39 +221,41 @@ pub(super) fn timestamp_value(
         })
 }
 
-pub(super) fn map_and_insert_bucket(
+pub(super) fn map_and_insert_index_interval_id(
     bitmap: &mut RoaringTreemap,
     path: &str,
     index: &IndexSpec,
     value: IndexValue,
-) -> Result<(Bucket, bool), SegmentCoverageError> {
-    let bucket = bucket_id(&index.kind, &value).map_err(|source| SegmentCoverageError::Bucket {
-        path: path.to_string(),
-        source,
+) -> Result<(IndexIntervalId, bool), SegmentCoverageError> {
+    let index_interval_id = index_interval_id_for_value(&index.kind, &value).map_err(|source| {
+        SegmentCoverageError::IndexIntervalMapping {
+            path: path.to_string(),
+            source,
+        }
     })?;
-    Ok((bucket, bitmap.insert(bucket)))
+    Ok((index_interval_id, bitmap.insert(index_interval_id)))
 }
 
 pub(super) fn duplicate_index_interval_error(
     path: &str,
     index: &IndexSpec,
     identity: Option<&EntityIdentity>,
-    bucket: Bucket,
+    index_interval_id: IndexIntervalId,
 ) -> SegmentCoverageError {
-    match logical_bucket_range(&index.kind, bucket) {
+    match index_interval_for_id(&index.kind, index_interval_id) {
         Ok(example_index_interval) => SegmentCoverageError::DuplicateIndexInterval {
             path: path.to_string(),
             example_identity: identity.cloned(),
             example_index_interval,
         },
-        Err(source) => SegmentCoverageError::Bucket {
+        Err(source) => SegmentCoverageError::IndexIntervalMapping {
             path: path.to_string(),
             source,
         },
     }
 }
 
-fn add_array_buckets<T, F>(
+fn add_array_index_interval_ids<T, F>(
     bitmap: &mut RoaringTreemap,
     path: &str,
     index: &IndexSpec,
@@ -263,16 +268,28 @@ where
 {
     if array.null_count() == 0 {
         for &raw in array.values() {
-            let (bucket, inserted) = map_and_insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            let (index_interval_id, inserted) =
+                map_and_insert_index_interval_id(bitmap, path, index, to_value(raw)?)?;
             if !inserted {
-                return Err(duplicate_index_interval_error(path, index, None, bucket));
+                return Err(duplicate_index_interval_error(
+                    path,
+                    index,
+                    None,
+                    index_interval_id,
+                ));
             }
         }
     } else {
         for raw in array.iter().flatten() {
-            let (bucket, inserted) = map_and_insert_bucket(bitmap, path, index, to_value(raw)?)?;
+            let (index_interval_id, inserted) =
+                map_and_insert_index_interval_id(bitmap, path, index, to_value(raw)?)?;
             if !inserted {
-                return Err(duplicate_index_interval_error(path, index, None, bucket));
+                return Err(duplicate_index_interval_error(
+                    path,
+                    index,
+                    None,
+                    index_interval_id,
+                ));
             }
         }
     }
@@ -309,7 +326,7 @@ async fn compute_coverage_bitmap_from_stream(
                                     format!("Arrow {}", col.data_type()),
                                 )
                             })?;
-                        add_array_buckets(&mut bitmap, path_str, index, array, |raw| {
+                        add_array_index_interval_ids(&mut bitmap, path_str, index, array, |raw| {
                             timestamp_value(path_str, index, unit.clone(), raw)
                         })?;
                     }};
@@ -329,7 +346,7 @@ async fn compute_coverage_bitmap_from_stream(
                 let array = col.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
                     arrow_index_error(path_str, index, format!("Arrow {}", col.data_type()))
                 })?;
-                add_array_buckets(&mut bitmap, path_str, index, array, |raw| {
+                add_array_index_interval_ids(&mut bitmap, path_str, index, array, |raw| {
                     Ok(IndexValue::Int64(raw))
                 })?;
             }
@@ -337,7 +354,7 @@ async fn compute_coverage_bitmap_from_stream(
                 let array = col.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
                     arrow_index_error(path_str, index, format!("Arrow {}", col.data_type()))
                 })?;
-                add_array_buckets(&mut bitmap, path_str, index, array, |raw| {
+                add_array_index_interval_ids(&mut bitmap, path_str, index, array, |raw| {
                     Ok(IndexValue::UInt64(raw))
                 })?;
             }
@@ -361,18 +378,18 @@ async fn compute_coverage_bitmap_from_stream(
 /// This function:
 /// 1. Reads the Parquet segment file from storage.
 /// 2. Validates and projects the registered ordered-index column.
-/// 3. Iterates over non-null values and maps each through the shared bucket helper.
-/// 4. Returns a Coverage bitmap containing all bucket IDs found in the segment.
+/// 3. Maps each non-null value through the shared interval helper.
+/// 4. Returns a coverage bitmap containing all observed index interval IDs.
 ///
 /// # Arguments
 ///
 /// * `location` - The table location for accessing the storage layer.
 /// * `rel_path` - The relative path to the Parquet segment file.
-/// * `index` - The registered ordered-index column, domain, and bucket configuration.
+/// * `index` - The registered ordered-index column, domain, and granularity.
 ///
 /// # Returns
 ///
-/// A `Coverage` bitmap containing the bucket IDs of all observed index values in
+/// A [`Coverage`] bitmap containing the interval IDs of all observed index values in
 /// the segment, or a `SegmentCoverageError` if any stage of the process fails.
 pub async fn compute_segment_coverage(
     location: &TableLocation,
@@ -462,7 +479,7 @@ mod tests {
     use super::*;
     use std::{fs::File, io::SeekFrom, num::NonZeroU64, sync::Arc};
 
-    use crate::metadata::table_metadata::TimeBucket;
+    use crate::metadata::table_metadata::TimeIndexGranularity;
     use arrow::{
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
@@ -482,35 +499,37 @@ mod tests {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
-    const EPOCH_BUCKET: u64 = 0x8000_0000_0000_0000;
+    const EPOCH_INDEX_INTERVAL_ID: u64 = 0x8000_0000_0000_0000;
 
-    fn timestamp_index(column: &str, bucket: TimeBucket) -> IndexSpec {
+    fn timestamp_index(column: &str, index_granularity: TimeIndexGranularity) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Timestamp {
-                bucket,
+                index_granularity,
                 timezone: None,
             },
         }
     }
 
-    fn int64_index(column: &str, bucket_width: u64) -> IndexSpec {
+    fn int64_index(column: &str, index_granularity: u64) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(bucket_width).expect("nonzero test bucket"),
+                index_granularity: NonZeroU64::new(index_granularity)
+                    .expect("nonzero test granularity"),
             },
         }
     }
 
-    fn uint64_index(column: &str, bucket_width: u64) -> IndexSpec {
+    fn uint64_index(column: &str, index_granularity: u64) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(bucket_width).expect("nonzero test bucket"),
+                index_granularity: NonZeroU64::new(index_granularity)
+                    .expect("nonzero test granularity"),
             },
         }
     }
@@ -588,17 +607,19 @@ mod tests {
             .expect("uint64 batch")
     }
 
-    fn expected_buckets(
+    fn expected_interval_ids(
         index: &IndexSpec,
         values: impl IntoIterator<Item = IndexValue>,
     ) -> Vec<u64> {
-        let mut buckets = values
+        let mut interval_ids = values
             .into_iter()
-            .map(|value| bucket_id(&index.kind, &value).expect("valid test index value"))
+            .map(|value| {
+                index_interval_id_for_value(&index.kind, &value).expect("valid test index value")
+            })
             .collect::<Vec<_>>();
-        buckets.sort_unstable();
-        buckets.dedup();
-        buckets
+        interval_ids.sort_unstable();
+        interval_ids.dedup();
+        interval_ids
     }
 
     #[tokio::test]
@@ -615,20 +636,26 @@ mod tests {
         let cov_min = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
-        let buckets_min: Vec<u64> = cov_min.present().iter().collect();
-        assert_eq!(buckets_min, vec![EPOCH_BUCKET, EPOCH_BUCKET + 60]);
+        let interval_ids_min: Vec<u64> = cov_min.present().iter().collect();
+        assert_eq!(
+            interval_ids_min,
+            vec![EPOCH_INDEX_INTERVAL_ID, EPOCH_INDEX_INTERVAL_ID + 60]
+        );
 
         let cov_hr = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Hours(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Hours(1)),
         )
         .await?;
-        let buckets_hr: Vec<u64> = cov_hr.present().iter().collect();
-        assert_eq!(buckets_hr, vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]);
+        let interval_ids_hr: Vec<u64> = cov_hr.present().iter().collect();
+        assert_eq!(
+            interval_ids_hr,
+            vec![EPOCH_INDEX_INTERVAL_ID, EPOCH_INDEX_INTERVAL_ID + 1]
+        );
 
         Ok(())
     }
@@ -664,7 +691,7 @@ mod tests {
             let error = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                &timestamp_index("ts", TimeBucket::Minutes(1)),
+                &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
             )
             .await
             .expect_err("same-worker duplicate must be rejected");
@@ -683,13 +710,13 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
 
         assert_eq!(
             coverage.present().iter().collect::<Vec<_>>(),
-            vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]
+            vec![EPOCH_INDEX_INTERVAL_ID, EPOCH_INDEX_INTERVAL_ID + 1]
         );
         Ok(())
     }
@@ -717,7 +744,7 @@ mod tests {
         let error = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("cross-worker duplicate must be rejected");
@@ -750,17 +777,17 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
         assert_eq!(
             coverage.present().iter().collect::<Vec<_>>(),
             vec![
-                EPOCH_BUCKET,
-                EPOCH_BUCKET + 1,
-                EPOCH_BUCKET + 2,
-                EPOCH_BUCKET + 3,
-                EPOCH_BUCKET + 4
+                EPOCH_INDEX_INTERVAL_ID,
+                EPOCH_INDEX_INTERVAL_ID + 1,
+                EPOCH_INDEX_INTERVAL_ID + 2,
+                EPOCH_INDEX_INTERVAL_ID + 3,
+                EPOCH_INDEX_INTERVAL_ID + 4
             ]
         );
         Ok(())
@@ -792,7 +819,7 @@ mod tests {
         let signed = compute_segment_coverage(&location, signed_path, &signed_index).await?;
         assert_eq!(
             signed.present().iter().collect::<Vec<_>>(),
-            expected_buckets(
+            expected_interval_ids(
                 &signed_index,
                 signed_values.into_iter().map(IndexValue::Int64)
             )
@@ -822,7 +849,7 @@ mod tests {
         let unsigned = compute_segment_coverage(&location, unsigned_path, &unsigned_index).await?;
         assert_eq!(
             unsigned.present().iter().collect::<Vec<_>>(),
-            expected_buckets(
+            expected_interval_ids(
                 &unsigned_index,
                 unsigned_values.into_iter().map(IndexValue::UInt64)
             )
@@ -907,14 +934,14 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Seconds(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Seconds(1)),
         )
         .await?;
         assert_eq!(coverage.cardinality(), row_count as u64);
-        assert_eq!(coverage.present().min(), Some(EPOCH_BUCKET));
+        assert_eq!(coverage.present().min(), Some(EPOCH_INDEX_INTERVAL_ID));
         assert_eq!(
             coverage.present().max(),
-            Some(EPOCH_BUCKET + row_count as u64 - 1)
+            Some(EPOCH_INDEX_INTERVAL_ID + row_count as u64 - 1)
         );
         Ok(())
     }
@@ -933,7 +960,7 @@ mod tests {
         let error = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("duplicate split across decoder batches must be rejected");
@@ -982,12 +1009,12 @@ mod tests {
             let coverage = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                &timestamp_index("ts", TimeBucket::Seconds(1)),
+                &timestamp_index("ts", TimeIndexGranularity::Seconds(1)),
             )
             .await?;
             assert_eq!(
                 coverage.present().iter().collect::<Vec<_>>(),
-                vec![EPOCH_BUCKET + 1, EPOCH_BUCKET + 60]
+                vec![EPOCH_INDEX_INTERVAL_ID + 1, EPOCH_INDEX_INTERVAL_ID + 60]
             );
         }
         Ok(())
@@ -1005,7 +1032,7 @@ mod tests {
             let coverage = compute_segment_coverage(
                 &TableLocation::local(tmp.path()),
                 &rel_path,
-                &timestamp_index("ts", TimeBucket::Minutes(1)),
+                &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
             )
             .await?;
             assert!(coverage.present().is_empty());
@@ -1061,16 +1088,16 @@ mod tests {
         let coverage = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await?;
         assert_eq!(
             coverage.present().iter().collect::<Vec<_>>(),
             vec![
-                EPOCH_BUCKET,
-                EPOCH_BUCKET + 1,
-                EPOCH_BUCKET + 2,
-                EPOCH_BUCKET + 3
+                EPOCH_INDEX_INTERVAL_ID,
+                EPOCH_INDEX_INTERVAL_ID + 1,
+                EPOCH_INDEX_INTERVAL_ID + 2,
+                EPOCH_INDEX_INTERVAL_ID + 3
             ]
         );
         Ok(())
@@ -1087,7 +1114,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("missing_ts", TimeBucket::Minutes(1)),
+            &timestamp_index("missing_ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected missing column error");
@@ -1132,7 +1159,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected unsupported arrow type");
@@ -1182,7 +1209,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_coverage_supports_buckets_above_u32() -> TestResult {
+    async fn compute_coverage_supports_interval_ids_above_u32() -> TestResult {
         let tmp = TempDir::new()?;
         let rel_path = Path::new("data/overflow.parquet");
         let abs_path = tmp.path().join(rel_path);
@@ -1193,7 +1220,7 @@ mod tests {
         let coverage = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Seconds(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Seconds(1)),
         )
         .await?;
 
@@ -1214,7 +1241,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected storage error");
@@ -1243,7 +1270,7 @@ mod tests {
         let err = compute_segment_coverage(
             &location,
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .expect_err("expected parquet read error");
@@ -1290,7 +1317,7 @@ mod tests {
         let err = compute_segment_coverage(
             &TableLocation::local(tmp.path()),
             rel_path,
-            &timestamp_index("ts", TimeBucket::Minutes(1)),
+            &timestamp_index("ts", TimeIndexGranularity::Minutes(1)),
         )
         .await
         .unwrap_err();

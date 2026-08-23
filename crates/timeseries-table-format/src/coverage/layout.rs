@@ -11,7 +11,7 @@
 use snafu::Snafu;
 use uuid::Uuid;
 
-use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeBucket};
+use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeIndexGranularity};
 
 /// Root directory for coverage data.
 pub const COVERAGE_ROOT_DIR: &str = "_coverage";
@@ -113,9 +113,12 @@ fn coverage_id_v2(
     h.update(b"\0");
 
     match &index.kind {
-        IndexKind::Timestamp { bucket, timezone } => {
+        IndexKind::Timestamp {
+            index_granularity,
+            timezone,
+        } => {
             h.update(b"T");
-            hash_time_bucket(&mut h, bucket);
+            hash_time_index_granularity(&mut h, index_granularity);
             h.update(b"\0");
             match timezone {
                 Some(timezone) => {
@@ -127,13 +130,13 @@ fn coverage_id_v2(
                 }
             }
         }
-        IndexKind::Int64 { bucket_width } => {
+        IndexKind::Int64 { index_granularity } => {
             h.update(b"I");
-            h.update(&bucket_width.get().to_le_bytes());
+            h.update(&index_granularity.get().to_le_bytes());
         }
-        IndexKind::UInt64 { bucket_width } => {
+        IndexKind::UInt64 { index_granularity } => {
             h.update(b"U");
-            h.update(&bucket_width.get().to_le_bytes());
+            h.update(&index_granularity.get().to_le_bytes());
         }
     }
 
@@ -163,9 +166,12 @@ fn entity_coverage_id_v1(
     }
     h.update(b"K");
     match &index.kind {
-        IndexKind::Timestamp { bucket, timezone } => {
+        IndexKind::Timestamp {
+            index_granularity,
+            timezone,
+        } => {
             h.update(b"T");
-            hash_time_bucket(&mut h, bucket);
+            hash_time_index_granularity(&mut h, index_granularity);
             match timezone {
                 Some(timezone) => {
                     h.update(b"S");
@@ -176,13 +182,13 @@ fn entity_coverage_id_v1(
                 }
             }
         }
-        IndexKind::Int64 { bucket_width } => {
+        IndexKind::Int64 { index_granularity } => {
             h.update(b"I");
-            h.update(&bucket_width.get().to_le_bytes());
+            h.update(&index_granularity.get().to_le_bytes());
         }
-        IndexKind::UInt64 { bucket_width } => {
+        IndexKind::UInt64 { index_granularity } => {
             h.update(b"U");
-            h.update(&bucket_width.get().to_le_bytes());
+            h.update(&index_granularity.get().to_le_bytes());
         }
     }
     h.update(b"\0");
@@ -202,21 +208,24 @@ fn hash_usize(hasher: &mut blake3::Hasher, value: usize) {
     hasher.update(b":");
 }
 
-fn hash_time_bucket(hasher: &mut blake3::Hasher, bucket: &TimeBucket) {
-    match bucket {
-        TimeBucket::Seconds(n) => {
+fn hash_time_index_granularity(
+    hasher: &mut blake3::Hasher,
+    index_granularity: &TimeIndexGranularity,
+) {
+    match index_granularity {
+        TimeIndexGranularity::Seconds(n) => {
             hasher.update(b"S");
             hasher.update(&n.to_le_bytes());
         }
-        TimeBucket::Minutes(n) => {
+        TimeIndexGranularity::Minutes(n) => {
             hasher.update(b"M");
             hasher.update(&n.to_le_bytes());
         }
-        TimeBucket::Hours(n) => {
+        TimeIndexGranularity::Hours(n) => {
             hasher.update(b"H");
             hasher.update(&n.to_le_bytes());
         }
-        TimeBucket::Days(n) => {
+        TimeIndexGranularity::Days(n) => {
             hasher.update(b"D");
             hasher.update(&n.to_le_bytes());
         }
@@ -254,12 +263,12 @@ mod tests {
 
     use super::*;
 
-    fn timestamp_index(column: &str, bucket: TimeBucket) -> IndexSpec {
+    fn timestamp_index(column: &str, index_granularity: TimeIndexGranularity) -> IndexSpec {
         IndexSpec {
             column: column.to_string(),
             entity_columns: Vec::new(),
             kind: IndexKind::Timestamp {
-                bucket,
+                index_granularity,
                 timezone: None,
             },
         }
@@ -313,13 +322,14 @@ mod tests {
     }
 
     #[test]
-    fn segment_coverage_id_is_deterministic_and_valid() {
-        let index = timestamp_index("ts", TimeBucket::Minutes(1));
+    fn segment_coverage_id_matches_golden_value_and_is_valid() {
+        let index = timestamp_index("ts", TimeIndexGranularity::Minutes(1));
         let bytes = b"bitmap-bytes";
 
         let id1 = segment_coverage_id_v2(&index, bytes);
         let id2 = segment_coverage_id_v2(&index, bytes);
 
+        assert_eq!(id1, "segcov-00720d0b60b246ef53e757b286681cc0");
         assert_eq!(id1, id2, "same inputs must produce stable id");
         assert!(id1.starts_with("segcov-"));
         assert_eq!(id1.len(), "segcov-".len() + 32, "prefix + 32 hex chars");
@@ -330,12 +340,14 @@ mod tests {
     fn segment_coverage_id_changes_with_inputs() {
         let bytes = b"bytes";
 
-        let base_index = timestamp_index("ts", TimeBucket::Seconds(5));
+        let base_index = timestamp_index("ts", TimeIndexGranularity::Seconds(5));
         let base = segment_coverage_id_v2(&base_index, bytes);
-        let different_bucket =
-            segment_coverage_id_v2(&timestamp_index("ts", TimeBucket::Hours(5)), bytes);
+        let different_granularity = segment_coverage_id_v2(
+            &timestamp_index("ts", TimeIndexGranularity::Hours(5)),
+            bytes,
+        );
         let different_column = segment_coverage_id_v2(
-            &timestamp_index("event_time", TimeBucket::Seconds(5)),
+            &timestamp_index("event_time", TimeIndexGranularity::Seconds(5)),
             bytes,
         );
         let different_kind = segment_coverage_id_v2(
@@ -343,7 +355,7 @@ mod tests {
                 column: "ts".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(5).unwrap(),
+                    index_granularity: NonZeroU64::new(5).unwrap(),
                 },
             },
             bytes,
@@ -353,39 +365,43 @@ mod tests {
                 column: "ts".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::Int64 {
-                    bucket_width: NonZeroU64::new(5).unwrap(),
+                    index_granularity: NonZeroU64::new(5).unwrap(),
                 },
             },
             bytes,
         );
-        let different_width = segment_coverage_id_v2(
+        let different_integer_granularity = segment_coverage_id_v2(
             &IndexSpec {
                 column: "ts".to_string(),
                 entity_columns: Vec::new(),
                 kind: IndexKind::UInt64 {
-                    bucket_width: NonZeroU64::new(6).unwrap(),
+                    index_granularity: NonZeroU64::new(6).unwrap(),
                 },
             },
             bytes,
         );
         let different_bytes = segment_coverage_id_v2(&base_index, b"other");
 
-        assert_ne!(base, different_bucket, "bucket spec should affect id");
+        assert_ne!(
+            base, different_granularity,
+            "index granularity should affect id"
+        );
         assert_ne!(base, different_column, "index column should affect id");
         assert_ne!(base, different_kind, "index kind should affect id");
         assert_ne!(different_kind, different_integer_domain);
-        assert_ne!(different_kind, different_width);
+        assert_ne!(different_kind, different_integer_granularity);
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
     }
 
     #[test]
-    fn table_coverage_id_is_deterministic_and_valid() {
-        let index = timestamp_index("ts", TimeBucket::Hours(1));
+    fn table_coverage_id_matches_golden_value_and_is_valid() {
+        let index = timestamp_index("ts", TimeIndexGranularity::Hours(1));
         let bytes = b"table-bitmap";
 
         let id1 = table_coverage_id_v2(&index, bytes);
         let id2 = table_coverage_id_v2(&index, bytes);
 
+        assert_eq!(id1, "tblcov-38f0aa9c3e526d0cdabf234af8fb0fd3");
         assert_eq!(id1, id2, "same inputs must produce stable id");
         assert!(id1.starts_with("tblcov-"));
         assert_eq!(id1.len(), "tblcov-".len() + 32, "prefix + 32 hex chars");
@@ -396,28 +412,31 @@ mod tests {
     fn table_coverage_id_changes_with_inputs() {
         let bytes = b"bytes";
 
-        let base_index = timestamp_index("ts", TimeBucket::Minutes(15));
+        let base_index = timestamp_index("ts", TimeIndexGranularity::Minutes(15));
         let base = table_coverage_id_v2(&base_index, bytes);
-        let different_bucket =
-            table_coverage_id_v2(&timestamp_index("ts", TimeBucket::Days(1)), bytes);
+        let different_granularity =
+            table_coverage_id_v2(&timestamp_index("ts", TimeIndexGranularity::Days(1)), bytes);
         let different_column = table_coverage_id_v2(
-            &timestamp_index("event_time", TimeBucket::Minutes(15)),
+            &timestamp_index("event_time", TimeIndexGranularity::Minutes(15)),
             bytes,
         );
         let different_bytes = table_coverage_id_v2(&base_index, b"other");
 
-        assert_ne!(base, different_bucket, "bucket spec should affect id");
+        assert_ne!(
+            base, different_granularity,
+            "index granularity should affect id"
+        );
         assert_ne!(base, different_column, "index column should affect id");
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
     }
 
     #[test]
-    fn entity_coverage_ids_include_ordered_entity_columns() {
+    fn entity_coverage_ids_match_golden_values_and_include_ordered_columns() {
         let index = IndexSpec {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string(), "venue".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         };
@@ -428,10 +447,12 @@ mod tests {
         let bytes = b"entity-coverage-bytes";
 
         let segment = segment_entity_coverage_id_v1(&index, bytes);
+        assert_eq!(segment, "segcov-67c0022aad0d9f5bf5ea813e9ef88119");
         assert_ne!(segment, segment_entity_coverage_id_v1(&renamed, bytes));
         assert_ne!(segment, segment_entity_coverage_id_v1(&reordered, bytes));
 
         let table = table_entity_coverage_id_v1(&index, bytes);
+        assert_eq!(table, "tblcov-9c54647467c3a0e89e60675e00b7c75b");
         assert_ne!(table, table_entity_coverage_id_v1(&renamed, bytes));
         assert_ne!(table, table_entity_coverage_id_v1(&reordered, bytes));
     }

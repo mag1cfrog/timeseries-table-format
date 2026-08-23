@@ -19,7 +19,7 @@ use timeseries_table_format::{
     metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     },
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeBucket},
+    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
     table::{TableError, TimeSeriesTable},
 };
@@ -119,7 +119,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .append(open_parquet_batches(tmp.path().join(rel_overlap))?)
         .await
         .expect_err("overlapping append should fail");
-    assert!(matches!(err, TableError::EntityCoverageOverlap { .. }));
+    assert!(matches!(err, TableError::EntityIndexIntervalOverlap { .. }));
 
     let snapshot_after =
         read_entity_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
@@ -129,7 +129,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
 
 #[tokio::test]
 async fn coverage_queries_work_end_to_end() -> TestResult {
-    // Build a table with coverage over buckets 0, 1, 3, 4, and 5 (gap at 2).
+    // Build coverage over interval IDs 0, 1, 3, 4, and 5 (gap at 2).
     let tmp = TempDir::new()?;
     let location = TableLocation::local(tmp.path());
     let mut table =
@@ -149,7 +149,7 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     )?;
     write_parquet_rows(
         &tmp.path().join("data/cov-query-d.parquet"),
-        &[(480_000, "A", 6.0)], // isolated bucket 8
+        &[(480_000, "A", 6.0)], // isolated interval ID 8
     )?;
 
     table
@@ -177,7 +177,7 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     let table = TimeSeriesTable::open(location.clone()).await?;
 
     let start = ts_from_secs(0)?;
-    let end = ts_from_secs(360)?; // [0, 360) spans buckets 0..=5
+    let end = ts_from_secs(360)?; // [0, 360) spans interval IDs 0..=5
 
     let ratio = table.coverage_ratio_for_range(start, end).await?;
     assert!((ratio - (5.0 / 6.0)).abs() < 1e-12);
@@ -194,8 +194,8 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         0x8000_0000_0000_0004u64..=0x8000_0000_0000_0005u64
     );
 
-    // Check a shorter range that ends on a bucket boundary to exercise half-open logic.
-    let short_end = ts_from_secs(180)?; // start of bucket 3; expected buckets 0,1,2 (covered: 0,1)
+    // End at an interval boundary to exercise half-open logic.
+    let short_end = ts_from_secs(180)?; // interval IDs 0, 1, and 2; IDs 0 and 1 covered
     let short_ratio = table.coverage_ratio_for_range(start, short_end).await?;
     assert!((short_ratio - (2.0 / 3.0)).abs() < 1e-12);
 
@@ -208,9 +208,9 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
         Some(0x8000_0000_0000_0000u64..=0x8000_0000_0000_0001u64)
     );
 
-    // With a trailing single-bucket run (bucket 8), len should skip the short tail
+    // A trailing single-interval run at ID 8 is too short.
     // and return the last contiguous run of sufficient length.
-    let later_end = ts_from_secs(600)?; // start of bucket 10; covers up to bucket 9
+    let later_end = ts_from_secs(600)?; // start of interval 10; includes through ID 9
     let window_len = 2;
     let window = table
         .last_fully_covered_window(later_end, window_len)
@@ -261,7 +261,7 @@ fn make_basic_table_meta(
             Vec::new()
         },
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     };

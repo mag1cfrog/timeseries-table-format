@@ -33,7 +33,7 @@ use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 use super::{
     coverage::{
         SegmentCoverageError, arrow_index_error, duplicate_index_interval_error,
-        map_and_insert_bucket, timestamp_value,
+        map_and_insert_index_interval_id, timestamp_value,
     },
     schema::validate_parquet_index,
 };
@@ -235,19 +235,19 @@ async fn compute_entity_coverage_from_stream(
             if let Some(value) = ordered_index.value(row, path, index)? {
                 match by_identity.entry(identity) {
                     Entry::Occupied(mut entry) => {
-                        let (bucket, inserted) =
-                            map_and_insert_bucket(entry.get_mut(), path, index, value)?;
+                        let (index_interval_id, inserted) =
+                            map_and_insert_index_interval_id(entry.get_mut(), path, index, value)?;
                         if !inserted {
                             return Err(duplicate_index_interval_error(
                                 path,
                                 index,
                                 Some(entry.key()),
-                                bucket,
+                                index_interval_id,
                             ));
                         }
                     }
                     Entry::Vacant(entry) => {
-                        let (_, inserted) = map_and_insert_bucket(
+                        let (_, inserted) = map_and_insert_index_interval_id(
                             entry.insert(RoaringTreemap::new()),
                             path,
                             index,
@@ -279,7 +279,7 @@ async fn compute_entity_coverage_from_stream(
 /// # Errors
 ///
 /// Returns [`SegmentCoverageError`] for storage, Parquet, entity, index, or
-/// bucket validation failures.
+/// index interval validation failures.
 pub async fn compute_segment_entity_coverage(
     location: &TableLocation,
     rel_path: &Path,
@@ -395,12 +395,12 @@ pub async fn compute_segment_entity_coverage(
             source: ParquetError::General(format!("row-group scan task failed: {source}")),
             backtrace: Backtrace::capture(),
         })??;
-        if let Some((identity, bucket)) = merged.overlap_example(&coverage) {
+        if let Some((identity, index_interval_id)) = merged.overlap_example(&coverage) {
             return Err(duplicate_index_interval_error(
                 &path,
                 index,
                 Some(identity),
-                bucket,
+                index_interval_id,
             ));
         }
         merged.union_inplace(&coverage);
@@ -432,17 +432,17 @@ mod tests {
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::TempDir;
 
-    use crate::metadata::table_metadata::TimeBucket;
+    use crate::metadata::table_metadata::TimeIndexGranularity;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
-    const EPOCH_BUCKET: u64 = 0x8000_0000_0000_0000;
+    const EPOCH_INDEX_INTERVAL_ID: u64 = 0x8000_0000_0000_0000;
 
     fn timestamp_index() -> IndexSpec {
         IndexSpec {
             column: "ts".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         }
@@ -491,7 +491,7 @@ mod tests {
         write_batch(path, &batch, properties)
     }
 
-    fn buckets(coverage: &EntityCoverage, entity: &str) -> Vec<u64> {
+    fn interval_ids(coverage: &EntityCoverage, entity: &str) -> Vec<u64> {
         coverage
             .get(&identity(entity))
             .expect("entity coverage")
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn row_aligned_scan_does_not_invent_entity_bucket_pairs() -> TestResult {
+    async fn row_aligned_scan_does_not_invent_entity_interval_pairs() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
         write_timestamp_segment(
@@ -520,15 +520,18 @@ mod tests {
 
         assert_eq!(coverage.cardinality(), 3);
         assert_eq!(
-            buckets(&coverage, "A"),
-            vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]
+            interval_ids(&coverage, "A"),
+            vec![EPOCH_INDEX_INTERVAL_ID, EPOCH_INDEX_INTERVAL_ID + 1]
         );
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 2]);
+        assert_eq!(
+            interval_ids(&coverage, "B"),
+            vec![EPOCH_INDEX_INTERVAL_ID + 2]
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn same_bucket_remains_independent_for_each_entity() -> TestResult {
+    async fn same_interval_remains_independent_for_each_entity() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
         write_timestamp_segment(
@@ -546,8 +549,8 @@ mod tests {
         .await?;
 
         assert_eq!(coverage.cardinality(), 2);
-        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET]);
+        assert_eq!(interval_ids(&coverage, "A"), vec![EPOCH_INDEX_INTERVAL_ID]);
+        assert_eq!(interval_ids(&coverage, "B"), vec![EPOCH_INDEX_INTERVAL_ID]);
         Ok(())
     }
 
@@ -558,7 +561,7 @@ mod tests {
         let mut entities = vec!["A"; INSPECTION_BATCH_SIZE];
         entities.push("B");
         let mut timestamps = (0..INSPECTION_BATCH_SIZE)
-            .map(|bucket| Some(bucket as i64 * 3_600_000))
+            .map(|index_interval_id| Some(index_interval_id as i64 * 3_600_000))
             .collect::<Vec<_>>();
         timestamps.push(Some(INSPECTION_BATCH_SIZE as i64 * 3_600_000));
         write_timestamp_segment(&temp.path().join(rel_path), entities, timestamps, None)?;
@@ -570,16 +573,16 @@ mod tests {
         )
         .await?;
 
-        let a_buckets = buckets(&coverage, "A");
-        assert_eq!(a_buckets.len(), INSPECTION_BATCH_SIZE);
-        assert_eq!(a_buckets.first(), Some(&EPOCH_BUCKET));
+        let a_interval_ids = interval_ids(&coverage, "A");
+        assert_eq!(a_interval_ids.len(), INSPECTION_BATCH_SIZE);
+        assert_eq!(a_interval_ids.first(), Some(&EPOCH_INDEX_INTERVAL_ID));
         assert_eq!(
-            a_buckets.last(),
-            Some(&(EPOCH_BUCKET + INSPECTION_BATCH_SIZE as u64 - 1))
+            a_interval_ids.last(),
+            Some(&(EPOCH_INDEX_INTERVAL_ID + INSPECTION_BATCH_SIZE as u64 - 1))
         );
         assert_eq!(
-            buckets(&coverage, "B"),
-            vec![EPOCH_BUCKET + INSPECTION_BATCH_SIZE as u64]
+            interval_ids(&coverage, "B"),
+            vec![EPOCH_INDEX_INTERVAL_ID + INSPECTION_BATCH_SIZE as u64]
         );
         Ok(())
     }
@@ -590,7 +593,7 @@ mod tests {
         let rel_path = Path::new("segment.parquet");
         let entities = vec!["A"; INSPECTION_BATCH_SIZE + 1];
         let mut timestamps = (0..INSPECTION_BATCH_SIZE)
-            .map(|bucket| Some(bucket as i64 * 3_600_000))
+            .map(|index_interval_id| Some(index_interval_id as i64 * 3_600_000))
             .collect::<Vec<_>>();
         timestamps[INSPECTION_BATCH_SIZE / 2] = None;
         timestamps.push(Some(30_000));
@@ -618,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_bucket_for_different_identities_across_row_groups() -> TestResult {
+    async fn same_interval_for_different_identities_across_row_groups() -> TestResult {
         let temp = TempDir::new()?;
         let rel_path = Path::new("segment.parquet");
         write_timestamp_segment(
@@ -635,8 +638,8 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET]);
+        assert_eq!(interval_ids(&coverage, "A"), vec![EPOCH_INDEX_INTERVAL_ID]);
+        assert_eq!(interval_ids(&coverage, "B"), vec![EPOCH_INDEX_INTERVAL_ID]);
         Ok(())
     }
 
@@ -666,7 +669,7 @@ mod tests {
             column: "ts".to_string(),
             entity_columns: vec!["region".to_string(), "symbol".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         };
@@ -684,7 +687,7 @@ mod tests {
                 .present()
                 .iter()
                 .collect::<Vec<_>>(),
-            vec![EPOCH_BUCKET]
+            vec![EPOCH_INDEX_INTERVAL_ID]
         );
         assert_eq!(
             coverage
@@ -693,7 +696,7 @@ mod tests {
                 .present()
                 .iter()
                 .collect::<Vec<_>>(),
-            vec![EPOCH_BUCKET + 1]
+            vec![EPOCH_INDEX_INTERVAL_ID + 1]
         );
         Ok(())
     }
@@ -722,7 +725,7 @@ mod tests {
             column: "event.ts".to_string(),
             entity_columns: vec!["device.id".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         };
@@ -731,8 +734,11 @@ mod tests {
             compute_segment_entity_coverage(&TableLocation::local(temp.path()), rel_path, &index)
                 .await?;
 
-        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        assert_eq!(interval_ids(&coverage, "A"), vec![EPOCH_INDEX_INTERVAL_ID]);
+        assert_eq!(
+            interval_ids(&coverage, "B"),
+            vec![EPOCH_INDEX_INTERVAL_ID + 1]
+        );
         Ok(())
     }
 
@@ -777,8 +783,8 @@ mod tests {
             .await?;
 
             assert_eq!(
-                buckets(&coverage, "A"),
-                vec![EPOCH_BUCKET, EPOCH_BUCKET + 1]
+                interval_ids(&coverage, "A"),
+                vec![EPOCH_INDEX_INTERVAL_ID, EPOCH_INDEX_INTERVAL_ID + 1]
             );
         }
         Ok(())
@@ -812,8 +818,11 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
-        assert_eq!(buckets(&coverage, "B"), vec![EPOCH_BUCKET + 1]);
+        assert_eq!(interval_ids(&coverage, "A"), vec![EPOCH_INDEX_INTERVAL_ID]);
+        assert_eq!(
+            interval_ids(&coverage, "B"),
+            vec![EPOCH_INDEX_INTERVAL_ID + 1]
+        );
         Ok(())
     }
 
@@ -858,7 +867,7 @@ mod tests {
                 "unsigned_64".to_string(),
             ],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Hours(1),
+                index_granularity: TimeIndexGranularity::Hours(1),
                 timezone: None,
             },
         };
@@ -876,7 +885,7 @@ mod tests {
                     EntityValue::Int64(i64::MIN),
                     EntityValue::UInt64(above_i64_max),
                 ])?,
-                EPOCH_BUCKET,
+                EPOCH_INDEX_INTERVAL_ID,
             ),
             (
                 EntityIdentity::try_new(vec![
@@ -886,7 +895,7 @@ mod tests {
                     EntityValue::Int64(0),
                     EntityValue::UInt64(0),
                 ])?,
-                EPOCH_BUCKET + 1,
+                EPOCH_INDEX_INTERVAL_ID + 1,
             ),
             (
                 EntityIdentity::try_new(vec![
@@ -896,11 +905,11 @@ mod tests {
                     EntityValue::Int64(i64::MAX),
                     EntityValue::UInt64(u64::MAX),
                 ])?,
-                EPOCH_BUCKET + 2,
+                EPOCH_INDEX_INTERVAL_ID + 2,
             ),
         ];
         assert_eq!(coverage.identity_count(), cases.len());
-        for (identity, bucket) in cases {
+        for (identity, index_interval_id) in cases {
             assert_eq!(
                 coverage
                     .get(&identity)
@@ -908,7 +917,7 @@ mod tests {
                     .present()
                     .iter()
                     .collect::<Vec<_>>(),
-                vec![bucket]
+                vec![index_interval_id]
             );
         }
         Ok(())
@@ -1054,7 +1063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integer_indexes_use_registered_bucket_semantics() -> TestResult {
+    async fn integer_indexes_use_registered_granularity() -> TestResult {
         let temp = TempDir::new()?;
         let signed_path = Path::new("signed.parquet");
         let signed_schema = Arc::new(Schema::new(vec![
@@ -1073,7 +1082,7 @@ mod tests {
             column: "value".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::Int64 {
-                bucket_width: NonZeroU64::new(10).expect("nonzero bucket width"),
+                index_granularity: NonZeroU64::new(10).expect("nonzero index granularity"),
             },
         };
 
@@ -1084,12 +1093,12 @@ mod tests {
         )
         .await?;
         assert_eq!(
-            buckets(&signed, "A"),
+            interval_ids(&signed, "A"),
             vec![
-                EPOCH_BUCKET - 2,
-                EPOCH_BUCKET - 1,
-                EPOCH_BUCKET,
-                EPOCH_BUCKET + 1
+                EPOCH_INDEX_INTERVAL_ID - 2,
+                EPOCH_INDEX_INTERVAL_ID - 1,
+                EPOCH_INDEX_INTERVAL_ID,
+                EPOCH_INDEX_INTERVAL_ID + 1
             ]
         );
 
@@ -1110,7 +1119,7 @@ mod tests {
             column: "value".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::UInt64 {
-                bucket_width: NonZeroU64::new(10).expect("nonzero bucket width"),
+                index_granularity: NonZeroU64::new(10).expect("nonzero index granularity"),
             },
         };
 
@@ -1120,7 +1129,7 @@ mod tests {
             &unsigned_index,
         )
         .await?;
-        assert_eq!(buckets(&unsigned, "A"), vec![0, 1, u64::MAX / 10]);
+        assert_eq!(interval_ids(&unsigned, "A"), vec![0, 1, u64::MAX / 10]);
         Ok(())
     }
 
@@ -1144,7 +1153,7 @@ mod tests {
 
         assert_eq!(coverage.identity_count(), 3);
         assert_eq!(coverage.cardinality(), 1);
-        assert_eq!(buckets(&coverage, "A"), vec![EPOCH_BUCKET]);
+        assert_eq!(interval_ids(&coverage, "A"), vec![EPOCH_INDEX_INTERVAL_ID]);
         assert!(coverage.get(&identity("B")).expect("B coverage").is_empty());
         assert!(coverage.get(&identity("C")).expect("C coverage").is_empty());
         Ok(())

@@ -3,7 +3,7 @@
 //! This module reads table coverage bitmaps persisted alongside
 //! the table. It is responsible for:
 //! - Loading coverage snapshots via the transaction log pointer and enforcing
-//!   bucket compatibility.
+//!   index granularity compatibility.
 //! - Falling back to unioning segment coverage sidecars when the snapshot
 //!   pointer is missing or unreadable (strict vs recovery modes).
 
@@ -253,7 +253,7 @@ impl TimeSeriesTable {
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
                             recovery_source = "segment_sidecars",
-                            coverage_bucket_count = coverage.cardinality(),
+                            covered_index_interval_count = coverage.cardinality(),
                             outcome = "succeeded",
                             "Recovered table coverage from segment sidecars"
                         );
@@ -309,7 +309,7 @@ impl TimeSeriesTable {
 // Coverage query APIs for TimeSeriesTable.
 //
 // These APIs:
-// - derive an inclusive bucket range from an ordered-index range (half-open [start, end))
+// - derive an inclusive index interval ID range from `[start, end)`
 // - load table coverage (readonly recovery)
 // - reuse crate::coverage APIs (coverage_ratio, max_gap_len, last_window_at_or_before)
 use std::ops::RangeInclusive;
@@ -317,18 +317,18 @@ use std::ops::RangeInclusive;
 use snafu::ResultExt;
 
 use crate::{
-    coverage::Bucket,
-    coverage::bucket::{bucket_for_exclusive_end, bucket_range},
+    coverage::IndexIntervalId,
+    coverage::index_interval::{index_interval_id_for_exclusive_end, index_interval_id_range},
     metadata::table_metadata::{IndexValue, validate_index_range},
-    table::error::{CoverageBucketSnafu, InvalidRangeSnafu},
+    table::error::{IndexIntervalMappingSnafu, InvalidRangeSnafu},
 };
 
 impl TimeSeriesTable {
-    fn bucket_range_for_index_range<S, E>(
+    fn interval_ids_for_query_range<S, E>(
         &self,
         start: S,
         end: E,
-    ) -> Result<RangeInclusive<Bucket>, TableError>
+    ) -> Result<RangeInclusive<IndexIntervalId>, TableError>
     where
         S: Into<IndexValue>,
         E: Into<IndexValue>,
@@ -336,7 +336,8 @@ impl TimeSeriesTable {
         let start = start.into();
         let end = end.into();
         validate_index_range(&self.index_spec().kind, &start, &end).context(InvalidRangeSnafu)?;
-        bucket_range(&self.index_spec().kind, &start, &end).context(CoverageBucketSnafu)
+        index_interval_id_range(&self.index_spec().kind, &start, &end)
+            .context(IndexIntervalMappingSnafu)
     }
 
     // ---- public query APIs ----
@@ -351,7 +352,7 @@ impl TimeSeriesTable {
     /// Returns [`TableError::InvalidRange`] when the endpoints do not match the
     /// table index or `start >= end`, [`TableError::EntityIdentityRequired`]
     /// when the table has entity columns, and contextual coverage errors when
-    /// the snapshot cannot be loaded or the range cannot be bucketed.
+    /// the snapshot cannot be loaded or mapped to index interval IDs.
     ///
     /// # Examples
     /// ```
@@ -371,7 +372,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         self.ensure_global_coverage_query()?;
-        let range = self.bucket_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.coverage_ratio(&range))
     }
@@ -388,7 +389,7 @@ impl TimeSeriesTable {
     /// behavior as [`TimeSeriesTable::coverage_ratio_for_range`].
     ///
     /// # Examples
-    /// If entities `A` and `B` both have data in the same bucket, their coverage
+    /// If entities `A` and `B` both have data in the same interval, their coverage
     /// is still queried independently:
     /// ```
     /// use chrono::{TimeZone, Utc};
@@ -417,14 +418,14 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         let identity = self.resolve_entity_identity(entity)?;
-        let range = self.bucket_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let coverage = self.load_table_entity_snapshot_coverage_readonly().await?;
         Ok(coverage
             .get(&identity)
             .map_or(0.0, |coverage| coverage.coverage_ratio(&range)))
     }
 
-    /// Maximum contiguous missing run length in buckets for `[start, end)`.
+    /// Maximum contiguous missing run length in index intervals for `[start, end)`.
     ///
     /// This identity-free query is only valid for tables without configured
     /// entity columns.
@@ -433,7 +434,7 @@ impl TimeSeriesTable {
     /// Returns [`TableError::InvalidRange`] when the endpoints do not match the
     /// table index or `start >= end`, [`TableError::EntityIdentityRequired`]
     /// when the table has entity columns, and contextual coverage errors when
-    /// the snapshot cannot be loaded or the range cannot be bucketed.
+    /// the snapshot cannot be loaded or mapped to index interval IDs.
     ///
     /// # Examples
     /// ```
@@ -453,7 +454,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         self.ensure_global_coverage_query()?;
-        let range = self.bucket_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.max_gap_len(&range))
     }
@@ -469,7 +470,7 @@ impl TimeSeriesTable {
     /// Returns a typed entity identity error for missing, duplicate, unexpected,
     /// or unconfigured entity columns. It returns [`TableError::InvalidRange`]
     /// for invalid half-open range endpoints and contextual coverage errors when
-    /// the snapshot cannot be loaded or the range cannot be bucketed.
+    /// the snapshot cannot be loaded or mapped to index interval IDs.
     pub async fn max_gap_len_for_entity_range<S, E>(
         &self,
         entity: &[(&str, EntityValue)],
@@ -481,7 +482,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         let identity = self.resolve_entity_identity(entity)?;
-        let range = self.bucket_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let coverage = self.load_table_entity_snapshot_coverage_readonly().await?;
         Ok(coverage.get(&identity).map_or_else(
             || Coverage::range_cardinality(&range),
@@ -489,26 +490,26 @@ impl TimeSeriesTable {
         ))
     }
 
-    /// Return the last fully covered contiguous window of `window_len_buckets`
+    /// Return the last fully covered contiguous window of `window_len_intervals`
     /// ending before the exclusive ordered-index endpoint.
     ///
     /// Notes:
-    /// - This returns a bucket-id RangeInclusive in the 64-bit bucket domain.
-    /// - Returns `None` when `window_len_buckets == 0` or when no fully covered window is found.
+    /// - This returns inclusive index interval IDs in their 64-bit domain.
+    /// - Returns `None` for a zero-length window or when no complete window exists.
     /// - This identity-free query is only valid for tables without configured entity columns.
     ///
     /// # Errors
     /// Returns [`TableError::InvalidRange`] when `end` does not match the table
     /// index, [`TableError::EntityIdentityRequired`] when the table has entity
     /// columns, and contextual coverage errors when the endpoint cannot be
-    /// bucketed or the snapshot cannot be loaded.
+    /// mapped to an index interval ID or the snapshot cannot be loaded.
     ///
     /// # Examples
     /// ```
     /// use chrono::{TimeZone, Utc};
     /// # use timeseries_table_format::{storage::TableLocation, table::TimeSeriesTable};
     /// # async fn demo(table: &TimeSeriesTable) -> Result<(), timeseries_table_format::table::TableError> {
-    /// let ts_end = Utc.timestamp_opt(360, 0).single().unwrap(); // end of bucket 5
+    /// let ts_end = Utc.timestamp_opt(360, 0).single().unwrap(); // end of interval 5
     /// let window = table.last_fully_covered_window(ts_end, 2).await?;
     /// # let _ = window;
     /// # Ok(())
@@ -517,8 +518,8 @@ impl TimeSeriesTable {
     pub async fn last_fully_covered_window<E>(
         &self,
         end: E,
-        window_len_buckets: u64,
-    ) -> Result<Option<RangeInclusive<Bucket>>, TableError>
+        window_len_intervals: u64,
+    ) -> Result<Option<RangeInclusive<IndexIntervalId>>, TableError>
     where
         E: Into<IndexValue>,
     {
@@ -526,21 +527,22 @@ impl TimeSeriesTable {
         let end = end.into();
         end.validate_kind(&self.index_spec().kind)
             .context(InvalidRangeSnafu)?;
-        if window_len_buckets == 0 {
+        if window_len_intervals == 0 {
             return Ok(None);
         }
 
-        let end_bucket =
-            bucket_for_exclusive_end(&self.index_spec().kind, &end).context(CoverageBucketSnafu)?;
+        let end_index_interval_id =
+            index_interval_id_for_exclusive_end(&self.index_spec().kind, &end)
+                .context(IndexIntervalMappingSnafu)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
-        Ok(cov.last_window_at_or_before(end_bucket, window_len_buckets))
+        Ok(cov.last_window_at_or_before(end_index_interval_id, window_len_intervals))
     }
 
     /// Return one entity's last fully covered contiguous window ending before
     /// the exclusive ordered-index endpoint.
     ///
     /// Entity components are supplied by column name and canonicalized into the
-    /// configured entity-column order. Other entities cannot contribute buckets
+    /// configured entity-column order. Other entities cannot contribute intervals
     /// to the window. A complete identity not present in the table returns
     /// `None`, as does a zero-length window.
     ///
@@ -548,13 +550,13 @@ impl TimeSeriesTable {
     /// Returns a typed entity identity error for missing, duplicate, unexpected,
     /// or unconfigured entity columns. It returns [`TableError::InvalidRange`]
     /// when `end` does not match the table index and contextual coverage errors
-    /// when the endpoint cannot be bucketed or the snapshot cannot be loaded.
+    /// when the endpoint cannot be mapped or the snapshot cannot be loaded.
     pub async fn last_fully_covered_window_for_entity<E>(
         &self,
         entity: &[(&str, EntityValue)],
         end: E,
-        window_len_buckets: u64,
-    ) -> Result<Option<RangeInclusive<Bucket>>, TableError>
+        window_len_intervals: u64,
+    ) -> Result<Option<RangeInclusive<IndexIntervalId>>, TableError>
     where
         E: Into<IndexValue>,
     {
@@ -562,16 +564,17 @@ impl TimeSeriesTable {
         let end = end.into();
         end.validate_kind(&self.index_spec().kind)
             .context(InvalidRangeSnafu)?;
-        if window_len_buckets == 0 {
+        if window_len_intervals == 0 {
             return Ok(None);
         }
 
-        let end_bucket =
-            bucket_for_exclusive_end(&self.index_spec().kind, &end).context(CoverageBucketSnafu)?;
+        let end_index_interval_id =
+            index_interval_id_for_exclusive_end(&self.index_spec().kind, &end)
+                .context(IndexIntervalMappingSnafu)?;
         let coverage = self.load_table_entity_snapshot_coverage_readonly().await?;
-        Ok(coverage
-            .get(&identity)
-            .and_then(|coverage| coverage.last_window_at_or_before(end_bucket, window_len_buckets)))
+        Ok(coverage.get(&identity).and_then(|coverage| {
+            coverage.last_window_at_or_before(end_index_interval_id, window_len_intervals)
+        }))
     }
 }
 
@@ -583,14 +586,14 @@ mod tests {
     use crate::{
         coverage::{
             Coverage, EntityCoverage, EntityIdentity, EntityValue,
-            bucket::{BucketError, bucket_id},
+            index_interval::{IndexIntervalMappingError, index_interval_id_for_value},
             io::{write_coverage_sidecar_atomic, write_coverage_sidecar_new_bytes},
             serde::entity_coverage_to_bytes,
         },
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
         metadata::schema_compat::SchemaCompatibilityError,
         metadata::table_metadata::{
-            IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeBucket,
+            IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeIndexGranularity,
         },
         storage::TableLocation,
         table::test_util::{
@@ -1149,7 +1152,7 @@ mod tests {
     }
 
     async fn table_with_sparse_coverage() -> HelperResult<(TempDir, TimeSeriesTable)> {
-        // Buckets covered: 0, 1, 3 (gap at 2).
+        // Interval IDs covered: 0, 1, and 3 (gap at 2).
         let (tmp, mut table) = make_table().await?;
         append_segment(
             &mut table,
@@ -1178,7 +1181,7 @@ mod tests {
     }
 
     async fn table_with_contiguous_run() -> HelperResult<(TempDir, TimeSeriesTable)> {
-        // Buckets covered: 4 and 5 (contiguous run).
+        // Interval IDs covered: 4 and 5 (contiguous run).
         let (tmp, mut table) = make_table().await?;
         append_segment(
             &mut table,
@@ -1202,24 +1205,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bucket_range_rejects_invalid_range() -> TestResult {
+    async fn index_interval_id_range_rejects_invalid_index_range() -> TestResult {
         let (_tmp, table) = make_table().await?;
         let ts = utc_datetime(2024, 1, 1, 0, 0, 0);
 
         let err = table
-            .bucket_range_for_index_range(ts, ts)
+            .interval_ids_for_query_range(ts, ts)
             .expect_err("start >= end should be invalid");
         assert!(matches!(err, TableError::InvalidRange { .. }));
         Ok(())
     }
 
     #[tokio::test]
-    async fn bucket_range_uses_64_bit_signed_timestamp_mapping() -> TestResult {
+    async fn index_interval_id_range_uses_64_bit_signed_timestamp_mapping() -> TestResult {
         let (_tmp, table) = make_table().await?;
         let start = ts_from_secs(0);
-        let end = ts_from_secs(180); // covers buckets 0,1,2 with 1-minute bucket spec
+        let end = ts_from_secs(180); // covers the first three one-minute intervals
 
-        let range = table.bucket_range_for_index_range(start, end)?;
+        let range = table.interval_ids_for_query_range(start, end)?;
         assert_eq!(range, 0x8000_0000_0000_0000..=0x8000_0000_0000_0002);
         Ok(())
     }
@@ -1227,19 +1230,19 @@ mod tests {
     #[tokio::test]
     async fn signed_coverage_queries_handle_gaps_extremes_and_last_window() -> TestResult {
         let kind = IndexKind::Int64 {
-            bucket_width: NonZeroU64::new(10).unwrap(),
+            index_granularity: NonZeroU64::new(10).unwrap(),
         };
         let coverage: Coverage = [-10i64, 0, 10]
             .into_iter()
-            .map(|value| bucket_id(&kind, &value.into()).unwrap())
+            .map(|value| index_interval_id_for_value(&kind, &value.into()).unwrap())
             .collect();
         let huge_gap = u128::from(
-            bucket_id(&kind, &(-10i64).into()).unwrap()
-                - bucket_id(&kind, &i64::MIN.into()).unwrap(),
+            index_interval_id_for_value(&kind, &(-10i64).into()).unwrap()
+                - index_interval_id_for_value(&kind, &i64::MIN.into()).unwrap(),
         )
         .max(u128::from(
-            bucket_for_exclusive_end(&kind, &i64::MAX.into()).unwrap()
-                - bucket_id(&kind, &10i64.into()).unwrap(),
+            index_interval_id_for_exclusive_end(&kind, &i64::MAX.into()).unwrap()
+                - index_interval_id_for_value(&kind, &10i64.into()).unwrap(),
         ));
         let (_tmp, table) = table_with_index_coverage(kind, coverage).await?;
 
@@ -1258,8 +1261,8 @@ mod tests {
             .expect("signed window across zero");
         assert_eq!(
             window,
-            bucket_id(&table.index_spec().kind, &(-10i64).into()).unwrap()
-                ..=bucket_id(&table.index_spec().kind, &0i64.into()).unwrap()
+            index_interval_id_for_value(&table.index_spec().kind, &(-10i64).into()).unwrap()
+                ..=index_interval_id_for_value(&table.index_spec().kind, &0i64.into()).unwrap()
         );
         Ok(())
     }
@@ -1267,7 +1270,7 @@ mod tests {
     #[tokio::test]
     async fn unsigned_coverage_queries_preserve_large_values_and_boundaries() -> TestResult {
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let start = i64::MAX as u64 + 1;
         let coverage: Coverage = [start, start + 1, u64::MAX - 2, u64::MAX - 1]
@@ -1297,7 +1300,7 @@ mod tests {
     async fn coverage_ratio_uses_snapshot_when_present() -> TestResult {
         let (_tmp, table) = table_with_sparse_coverage().await?;
         let start = ts_from_secs(0);
-        let end = ts_from_secs(240); // buckets 0,1,2,3 expected
+        let end = ts_from_secs(240); // interval IDs 0, 1, 2, and 3 are expected
 
         let ratio = table.coverage_ratio_for_range(start, end).await?;
         assert!((ratio - 0.75).abs() < 1e-12);
@@ -1404,7 +1407,7 @@ mod tests {
             &capture,
             &pointer,
             "global",
-            "coverage_bucket_count",
+            "covered_index_interval_count",
             "3",
             &[&table_root],
         );
@@ -1496,7 +1499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coverage_ratio_errors_on_bucket_mismatch() -> TestResult {
+    async fn coverage_ratio_errors_on_index_granularity_mismatch() -> TestResult {
         let (_tmp, mut table) = table_with_sparse_coverage().await?;
         let mut ptr = table
             .state()
@@ -1504,7 +1507,7 @@ mod tests {
             .clone()
             .expect("snapshot pointer present");
         ptr.index_kind = IndexKind::Timestamp {
-            bucket: TimeBucket::Hours(1),
+            index_granularity: TimeIndexGranularity::Hours(1),
             timezone: None,
         };
         table.state_mut().table_coverage = Some(ptr.clone());
@@ -1512,7 +1515,7 @@ mod tests {
         let err = table
             .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
             .await
-            .expect_err("mismatched bucket spec should error");
+            .expect_err("mismatched index granularity should error");
 
         match err {
             TableError::TableCoverageIndexKindMismatch {
@@ -1537,7 +1540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coverage_ratio_handles_bucket_ids_above_u32() -> TestResult {
+    async fn coverage_ratio_handles_interval_ids_above_u32() -> TestResult {
         let (_tmp, table) = make_table().await?;
         let start = ts_from_secs(0);
         let end = ts_from_secs(((u32::MAX as i64) + 3) * 60);
@@ -1568,7 +1571,7 @@ mod tests {
     #[tokio::test]
     async fn last_window_respects_half_open_end_and_run_length() -> TestResult {
         let (_tmp, table) = table_with_contiguous_run().await?;
-        let ts_end = ts_from_secs(360); // exactly at the start of bucket 6
+        let ts_end = ts_from_secs(360); // exactly at the start of interval 6
 
         let win = table
             .last_fully_covered_window(ts_end, 2)
@@ -1585,7 +1588,7 @@ mod tests {
     async fn coverage_queries_validate_before_reading_coverage() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::UInt64 {
-            bucket_width: NonZeroU64::new(1).unwrap(),
+            index_granularity: NonZeroU64::new(1).unwrap(),
         };
         let meta = TableMeta::new_time_series(IndexSpec {
             column: "offset".to_string(),
@@ -1635,8 +1638,8 @@ mod tests {
         assert_eq!(table.last_fully_covered_window(0u64, 0).await?, None);
         assert!(matches!(
             table.last_fully_covered_window(0u64, 1).await,
-            Err(TableError::CoverageBucket {
-                source: BucketError::RangeEndUnderflow { .. }
+            Err(TableError::IndexIntervalMapping {
+                source: IndexIntervalMappingError::RangeEndUnderflow { .. }
             })
         ));
         Ok(())

@@ -8,7 +8,7 @@ use crate::exceptions::{
     TimeseriesTableError,
 };
 use timeseries_table_format::{
-    coverage::{EntityValue, bucket::LogicalBucketRange},
+    coverage::{EntityValue, index_interval::IndexInterval},
     storage::StorageError as CoreStorageError,
     table::TableError,
     transaction_log::CommitError,
@@ -79,8 +79,8 @@ fn coverage_overlap_error_to_py(
     msg: String,
     segment_path: String,
     overlap_count: u128,
-    example_bucket: Option<u64>,
-    example_bucket_range: LogicalBucketRange,
+    example_index_interval_id: u64,
+    example_index_interval: IndexInterval,
     example_entity_identity: Option<(&[String], &[EntityValue])>,
 ) -> PyErr {
     let py_err = CoverageOverlapError::new_err(msg);
@@ -92,10 +92,10 @@ fn coverage_overlap_error_to_py(
     if let Err(error) = exc.setattr("overlap_count", overlap_count) {
         return error;
     }
-    if let Err(error) = exc.setattr("example_bucket", example_bucket) {
+    if let Err(error) = exc.setattr("example_bucket", example_index_interval_id) {
         return error;
     }
-    if let Err(error) = exc.setattr("example_bucket_range", example_bucket_range.to_string()) {
+    if let Err(error) = exc.setattr("example_bucket_range", example_index_interval.to_string()) {
         return error;
     }
     match example_entity_identity {
@@ -144,34 +144,34 @@ pub(crate) fn table_error_to_py(
 
         TableError::TransactionLog { source } => commit_error_to_py(py, source),
 
-        TableError::CoverageOverlap {
+        TableError::IndexIntervalOverlap {
             segment_path,
             overlap_count,
-            example_bucket,
-            example_bucket_range,
+            example_index_interval_id,
+            example_index_interval,
         } => coverage_overlap_error_to_py(
             py,
             msg,
             segment_path,
             u128::from(overlap_count),
-            example_bucket,
-            example_bucket_range,
+            example_index_interval_id,
+            example_index_interval,
             None,
         ),
 
-        TableError::EntityCoverageOverlap {
+        TableError::EntityIndexIntervalOverlap {
             segment_path,
             overlap_count,
             example_identity,
-            example_bucket,
-            example_bucket_range,
+            example_index_interval_id,
+            example_index_interval,
         } => coverage_overlap_error_to_py(
             py,
             msg,
             segment_path,
             overlap_count,
-            Some(example_bucket),
-            example_bucket_range,
+            example_index_interval_id,
+            example_index_interval,
             Some((entity_columns, example_identity.components())),
         ),
 

@@ -12,7 +12,7 @@ use crate::metadata::logical_schema::{
 };
 use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
 use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket,
+    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeIndexGranularity,
 };
 use crate::storage::{StorageError, TableLocation, layout};
 use crate::transaction_log::{CommitError, LogAction, TransactionLogStore};
@@ -37,7 +37,7 @@ fn sample_time_index_spec() -> IndexSpec {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     }
@@ -556,7 +556,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
         column: "ts".to_string(),
         entity_columns: vec![],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     });
@@ -565,7 +565,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
         column: "event_time".to_string(), // Changed!
         entity_columns: vec!["user_id".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Hours(1),
+            index_granularity: TimeIndexGranularity::Hours(1),
             timezone: Some("UTC".to_string()),
         },
     });
@@ -590,7 +590,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
             assert_eq!(
                 spec.kind,
                 IndexKind::Timestamp {
-                    bucket: TimeBucket::Hours(1),
+                    index_granularity: TimeIndexGranularity::Hours(1),
                     timezone: Some("UTC".to_string())
                 }
             );

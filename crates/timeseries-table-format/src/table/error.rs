@@ -13,8 +13,8 @@ use snafu::prelude::*;
 
 use crate::{
     coverage::{
-        EntityIdentity,
-        bucket::{BucketError, LogicalBucketRange},
+        EntityIdentity, IndexIntervalId,
+        index_interval::{IndexInterval, IndexIntervalMappingError},
         io::CoverageError,
     },
     formats::parquet::{EntityRewriteError, SegmentCoverageError},
@@ -166,15 +166,15 @@ pub enum TableError {
     /// The ordered-index specification is structurally invalid.
     #[snafu(display("Invalid ordered index specification: {source}"))]
     IndexSpec {
-        /// Structural or bucket configuration failure.
+        /// Structural or index granularity failure.
         source: IndexSpecError,
     },
 
-    /// An ordered value could not be mapped to its coverage bucket.
-    #[snafu(display("Coverage bucket mapping failed: {source}"))]
-    CoverageBucket {
-        /// Domain, range, or bucket configuration failure.
-        source: BucketError,
+    /// An ordered value could not be mapped to its index interval ID.
+    #[snafu(display("Index interval mapping failed: {source}"))]
+    IndexIntervalMapping {
+        /// Domain, range, or index granularity failure.
+        source: IndexIntervalMappingError,
     },
 
     /// Segment bounds cannot be ordered in one native index domain.
@@ -341,7 +341,7 @@ pub enum TableError {
         /// Complete entity identity, or `None` for a table without entity columns.
         example_identity: Option<EntityIdentity>,
         /// Logical ordered-index interval occupied by both rows.
-        example_index_interval: LogicalBucketRange,
+        example_index_interval: IndexInterval,
     },
 
     /// Table coverage pointer uses a different ordered-index descriptor.
@@ -365,36 +365,36 @@ pub enum TableError {
         source: CoverageError,
     },
 
-    /// Appending would overlap existing table coverage.
+    /// Appending would overlap existing ordered-index intervals.
     #[snafu(display(
-        "Coverage overlap while appending {segment_path}: {overlap_count} overlapping buckets (example_bucket_range={example_bucket_range})"
+        "Ordered-index interval overlap while appending {segment_path}: {overlap_count} overlapping index intervals (example_index_interval={example_index_interval})"
     ))]
-    CoverageOverlap {
+    IndexIntervalOverlap {
         /// Relative path of the segment being appended.
         segment_path: String,
-        /// Number of overlapping buckets detected.
+        /// Number of overlapping index intervals.
         overlap_count: u64,
-        /// Internal example bucket retained for programmatic compatibility.
-        example_bucket: Option<u64>,
-        /// Logical ordered-index range covered by the example bucket.
-        example_bucket_range: LogicalBucketRange,
+        /// Internal index interval ID for the example interval.
+        example_index_interval_id: IndexIntervalId,
+        /// Example logical ordered-index interval.
+        example_index_interval: IndexInterval,
     },
 
-    /// Appending would overlap entity-scoped table coverage.
+    /// Appending would overlap entity-scoped ordered-index intervals.
     #[snafu(display(
-        "Entity coverage overlap while appending {segment_path}: {overlap_count} overlapping identity/bucket pairs (example_identity={example_identity:?}, example_bucket_range={example_bucket_range})"
+        "Entity ordered-index interval overlap while appending {segment_path}: {overlap_count} overlapping identity/index interval pairs (example_identity={example_identity:?}, example_index_interval={example_index_interval})"
     ))]
-    EntityCoverageOverlap {
+    EntityIndexIntervalOverlap {
         /// Relative path of the segment being appended.
         segment_path: String,
-        /// Number of overlapping `(entity identity, bucket)` pairs.
+        /// Number of overlapping `(entity identity, index interval)` pairs.
         overlap_count: u128,
         /// First overlapping identity in canonical order.
         example_identity: EntityIdentity,
-        /// Smallest overlapping bucket for `example_identity`.
-        example_bucket: u64,
-        /// Logical ordered-index range covered by the example bucket.
-        example_bucket_range: LogicalBucketRange,
+        /// Smallest overlapping index interval ID for `example_identity`.
+        example_index_interval_id: IndexIntervalId,
+        /// Example logical ordered-index interval.
+        example_index_interval: IndexInterval,
     },
 
     /// Entity-aware append produced no entity coverage.

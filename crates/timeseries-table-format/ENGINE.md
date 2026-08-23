@@ -22,7 +22,7 @@ See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
 ## Responsibilities
 - **Transaction log + metadata**: versioned commits, optimistic concurrency, table schema.
 - **Segment metadata**: min/max timestamps, row counts, file format, coverage sidecars.
-- **Coverage math**: RoaringBitmap overlap checks and gap analysis in bucket space.
+- **Coverage math**: RoaringBitmap overlap checks and gap analysis over index interval IDs.
 - **Storage access**: local filesystem backend and atomic IO helpers.
 - **User API**: create/open/append/scan plus coverage/gap queries.
 
@@ -72,9 +72,10 @@ Log actions:
 6. Commit `AddSegment` + optional `UpdateTableMeta` + `UpdateTableCoverage`.
 
 ## Coverage and gaps
-- **Bucket IDs**: timestamps are mapped to discrete bucket IDs using `TimeBucket`.
-- **Overlap checks**: tables with entity columns reject an existing complete identity/bucket pair;
-  tables without entity columns reject an existing bucket ID.
+- **Index interval IDs**: ordered-index values are mapped to discrete interval IDs using the
+  configured index granularity.
+- **Overlap checks**: tables with entity columns reject an existing complete identity/index
+  interval pair; tables without entity columns reject an existing index interval.
 - **Snapshots**: table coverage snapshots union segment coverage while preserving entity identity.
 - **Recovery**: if the snapshot sidecar is missing/corrupt, it is rebuilt from
   segment coverage sidecars when possible.
@@ -99,7 +100,7 @@ Log actions:
   widening before they are written.
 - Time column must exist and have a supported timestamp type.
 - If entity columns are configured, segments may contain multiple identities.
-  Coverage overlap is checked independently for each `(identity, bucket)` pair.
+  Coverage overlap is checked independently for each `(identity, index interval)` pair.
 
 ## Error behavior (high level)
 - Missing coverage snapshot when segments exist yields a clear error.

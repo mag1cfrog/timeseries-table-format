@@ -3,7 +3,7 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeBucket,
+    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeIndexGranularity,
 };
 use crate::storage::StorageLocation;
 use arrow::array::{
@@ -201,7 +201,7 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     };
@@ -242,7 +242,7 @@ pub(crate) fn make_int32_entity_table_meta() -> TableMeta {
             column: "ts".to_string(),
             entity_columns: vec!["device_id".to_string()],
             kind: IndexKind::Timestamp {
-                bucket: TimeBucket::Minutes(1),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 timezone: None,
             },
         },
@@ -599,7 +599,7 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
         column: "ts".to_string(),
         entity_columns: vec!["symbol".to_string()],
         kind: IndexKind::Timestamp {
-            bucket: TimeBucket::Minutes(1),
+            index_granularity: TimeIndexGranularity::Minutes(1),
             timezone: None,
         },
     };
