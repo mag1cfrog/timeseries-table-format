@@ -623,7 +623,7 @@ pub enum ArrowSchemaConversionError {
 
 /// Errors converting an Arrow schema into the table logical schema model.
 #[derive(Debug, Snafu)]
-pub(crate) enum ArrowToLogicalSchemaError {
+pub enum ArrowToLogicalSchemaError {
     /// An Arrow type cannot be represented exactly by the logical schema model.
     #[snafu(display(
         "Arrow type cannot be represented exactly in the table logical schema at '{column}': {data_type:?}"

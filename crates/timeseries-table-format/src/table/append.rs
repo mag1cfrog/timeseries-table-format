@@ -51,11 +51,12 @@ use super::{
     TimeSeriesTable,
     append_schema::AppendSchemaNormalizer,
     error::{
-        AppendParquetSnafu, AppendSourceSnafu, EmptySegmentEntityCoverageSnafu,
-        EntityIndexIntervalOverlapSnafu, EntityWithoutIndexCoverageSnafu,
-        ExistingSegmentMissingCoverageSnafu, IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu,
-        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentMetaSnafu,
-        SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
+        AppendError, AppendParquetSnafu, ArrowInputSnafu, ArrowToLogicalSchemaSnafu,
+        EmptySegmentEntityCoverageSnafu, EntityIndexIntervalOverlapSnafu,
+        EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
+        IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu, MissingCanonicalSchemaSnafu,
+        SchemaCompatibilitySnafu, SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu,
+        TableError,
     },
 };
 
@@ -139,7 +140,7 @@ pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
     }
 
     /// Convert this source without collecting its batches.
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError>;
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError>;
 }
 
 /// One Arrow source plus physical settings for a single append.
@@ -195,7 +196,7 @@ where
             .or_else(|| self.source.effective_max_rows_per_row_group())
     }
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         self.source.into_record_batch_reader()
     }
 }
@@ -206,7 +207,7 @@ where
 {
     type Reader = R;
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         Ok(self)
     }
 }
@@ -214,7 +215,7 @@ where
 impl IntoRecordBatchReader<ArrowRecordBatch> for ArrowRecordBatch {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         let schema = self.schema();
         Ok(Box::new(RecordBatchIterator::new(
             std::iter::once(Ok(self)),
@@ -226,11 +227,11 @@ impl IntoRecordBatchReader<ArrowRecordBatch> for ArrowRecordBatch {
 impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         let schema = self
             .first()
             .map(ArrowRecordBatch::schema)
-            .ok_or(TableError::EmptyAppendSource)?;
+            .ok_or(AppendError::EmptyInput)?;
         Ok(Box::new(RecordBatchIterator::new(
             self.into_iter().map(Ok::<_, ArrowError>),
             schema,
@@ -241,15 +242,14 @@ impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
 fn ensure_batch_matches_reader_schema(
     reader_schema: &SchemaRef,
     batch: &ArrowRecordBatch,
-) -> Result<(), TableError> {
+) -> Result<(), AppendError> {
     if batch.schema() == *reader_schema {
         Ok(())
     } else {
-        Err(TableError::AppendSource {
-            source: ArrowError::SchemaError(
-                "record batch schema does not match its reader schema".to_string(),
-            ),
-        })
+        Err(ArrowError::SchemaError(
+            "record batch schema does not match its reader schema".to_string(),
+        ))
+        .context(ArrowInputSnafu)
     }
 }
 
@@ -286,12 +286,9 @@ impl TimeSeriesTable {
 
         match self.state.table_meta.logical_schema.as_ref() {
             None if self.state.version == 1 => {
-                let incoming_logical_schema = LogicalSchema::try_from_arrow_schema(
-                    incoming_schema.as_ref(),
-                )
-                .map_err(|source| TableError::AppendSource {
-                    source: ArrowError::SchemaError(source.to_string()),
-                })?;
+                let incoming_logical_schema =
+                    LogicalSchema::try_from_arrow_schema(incoming_schema.as_ref())
+                        .context(ArrowToLogicalSchemaSnafu)?;
                 ensure_index_spec_matches_schema(&incoming_logical_schema, &self.index)
                     .context(SchemaCompatibilitySnafu)?;
                 Ok(AppendSchemaNormalizer::without_conversion(incoming_schema))
@@ -654,9 +651,10 @@ impl TimeSeriesTable {
         let result = async {
             let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
-                return Err(TableError::InvalidMaxRowsPerRowGroup {
+                return Err(AppendError::InvalidMaxRowsPerRowGroup {
                     max_rows_per_row_group: 0,
-                });
+                }
+                .into());
             }
             let next_version = checked_next_version(self.state.version)
                 .map_err(|source| TableError::TransactionLog { source })?;
@@ -667,14 +665,14 @@ impl TimeSeriesTable {
             let output_schema = Arc::clone(schema_normalizer.output_schema());
 
             let first_batch = loop {
-                let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
-                    return Err(TableError::EmptyAppendSource);
+                let Some(batch) = reader.next().transpose().context(ArrowInputSnafu)? else {
+                    return Err(AppendError::EmptyInput.into());
                 };
                 ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                 if batch.num_rows() != 0 {
                     break schema_normalizer
                         .normalize_batch(&batch)
-                        .context(AppendSourceSnafu)?;
+                        .context(ArrowInputSnafu)?;
                 }
                 tokio::task::yield_now().await;
             };
@@ -704,12 +702,12 @@ impl TimeSeriesTable {
                 tokio::task::yield_now().await;
 
                 for batch in reader {
-                    let batch = batch.context(AppendSourceSnafu)?;
+                    let batch = batch.context(ArrowInputSnafu)?;
                     ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                     if batch.num_rows() != 0 {
                         let batch = schema_normalizer
                             .normalize_batch(&batch)
-                            .context(AppendSourceSnafu)?;
+                            .context(ArrowInputSnafu)?;
                         writer.write(&batch).context(AppendParquetSnafu)?;
                     }
                     drop(batch);
@@ -1122,8 +1120,8 @@ mod tests {
 
         assert!(matches!(
             table.append(reader).await,
-            Err(TableError::AppendSource {
-                source: ArrowError::SchemaError(_)
+            Err(TableError::Append {
+                source: AppendError::ArrowToLogicalSchema { .. }
             })
         ));
         assert_eq!(observations.next_calls.get(), 0);
@@ -1371,7 +1369,12 @@ mod tests {
             .await
             .expect_err("source failure must abort widened append");
 
-        assert!(matches!(error, TableError::AppendSource { .. }));
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::ArrowInput { .. }
+            }
+        ));
         assert!(!observations.previous_batch_alive.get());
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
@@ -1438,7 +1441,7 @@ mod tests {
     #[test]
     fn into_record_batch_reader_rejects_schema_less_vec() {
         let result = Vec::<RecordBatch>::new().into_record_batch_reader();
-        assert!(matches!(result, Err(TableError::EmptyAppendSource)));
+        assert!(matches!(result, Err(AppendError::EmptyInput)));
     }
 
     #[tokio::test]
@@ -1502,8 +1505,10 @@ mod tests {
 
         assert!(matches!(
             table.append(request).await,
-            Err(TableError::InvalidMaxRowsPerRowGroup {
-                max_rows_per_row_group: 0
+            Err(TableError::Append {
+                source: AppendError::InvalidMaxRowsPerRowGroup {
+                    max_rows_per_row_group: 0
+                }
             })
         ));
         assert_eq!(observations.schema_calls.get(), 0);
@@ -1572,8 +1577,10 @@ mod tests {
             table
                 .append(AppendRequest::new(reader).max_rows_per_row_group(0))
                 .await,
-            Err(TableError::InvalidMaxRowsPerRowGroup {
-                max_rows_per_row_group: 0
+            Err(TableError::Append {
+                source: AppendError::InvalidMaxRowsPerRowGroup {
+                    max_rows_per_row_group: 0
+                }
             })
         ));
         assert_eq!(observations.schema_calls.get(), 0);
@@ -1750,12 +1757,16 @@ mod tests {
 
         assert!(matches!(
             table.append(vec![zero.clone(), zero]).await,
-            Err(TableError::EmptyAppendSource)
+            Err(TableError::Append {
+                source: AppendError::EmptyInput
+            })
         ));
         let empty = RecordBatchIterator::new(Vec::<Result<RecordBatch, ArrowError>>::new(), schema);
         assert!(matches!(
             table.append(empty).await,
-            Err(TableError::EmptyAppendSource)
+            Err(TableError::Append {
+                source: AppendError::EmptyInput
+            })
         ));
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
@@ -1797,7 +1808,12 @@ mod tests {
             };
             let error = result.expect_err("later batch must fail the append");
             assert!(
-                matches!(error, TableError::AppendSource { .. }),
+                matches!(
+                    error,
+                    TableError::Append {
+                        source: AppendError::ArrowInput { .. }
+                    }
+                ),
                 "configured={configured}, source_error={source_error}"
             );
             assert_eq!(

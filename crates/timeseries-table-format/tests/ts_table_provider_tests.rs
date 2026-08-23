@@ -39,7 +39,7 @@ use timeseries_table_format::metadata::logical_schema::{
 use timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError;
 use timeseries_table_format::metadata::segments::SegmentEntityLayout;
 use timeseries_table_format::storage::{TableLocation, layout};
-use timeseries_table_format::table::{TableError, TimeSeriesTable};
+use timeseries_table_format::table::{AppendError, TableError, TimeSeriesTable};
 use timeseries_table_format::transaction_log::{
     IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
 };
@@ -1159,7 +1159,9 @@ async fn append_public_sources_round_trip_exact_rows() -> TestResult {
 
     assert!(matches!(
         table.append(Vec::<RecordBatch>::new()).await,
-        Err(TableError::EmptyAppendSource)
+        Err(TableError::Append {
+            source: AppendError::EmptyInput
+        })
     ));
     assert_eq!(table.state().version, 1);
     assert!(table.state().segments.is_empty());
@@ -1487,7 +1489,9 @@ async fn append_rejects_adversarial_source_boundaries_without_artifacts() -> Tes
         assert!(
             matches!(
                 table.append(reader).await,
-                Err(TableError::AppendSource { .. })
+                Err(TableError::Append {
+                    source: AppendError::ArrowInput { .. }
+                })
             ),
             "{case}"
         );

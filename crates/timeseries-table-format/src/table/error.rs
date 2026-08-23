@@ -9,7 +9,7 @@
 use arrow::{datatypes::DataType, error::ArrowError};
 use chrono::{DateTime, Utc};
 use parquet::errors::ParquetError;
-use snafu::prelude::*;
+use snafu::{Backtrace, prelude::*};
 
 use crate::{
     coverage::{
@@ -19,12 +19,51 @@ use crate::{
     },
     formats::parquet::{EntityRewriteError, SegmentCoverageError},
     metadata::{
+        logical_schema::ArrowToLogicalSchemaError,
         schema_compat::SchemaCompatibilityError,
         table_metadata::{IndexKind, IndexSpecError, IndexValueError},
     },
     storage::StorageError,
     transaction_log::{CommitError, TableKind, segments::SegmentError},
 };
+
+/// Errors owned by an append operation.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum AppendError {
+    /// An Arrow input reader or batch normalization failed.
+    #[snafu(display("Arrow input error: {source}"))]
+    ArrowInput {
+        /// Arrow error returned while reading or normalizing a batch.
+        #[snafu(source)]
+        source: ArrowError,
+        /// Backtrace captured at the append input boundary.
+        backtrace: Backtrace,
+    },
+
+    /// An Arrow schema could not be represented by the table logical schema.
+    #[snafu(display("Invalid append input schema: {source}"))]
+    ArrowToLogicalSchema {
+        /// Arrow-to-logical schema conversion failure.
+        #[snafu(source)]
+        source: ArrowToLogicalSchemaError,
+        /// Backtrace captured at the append schema boundary.
+        backtrace: Backtrace,
+    },
+
+    /// An append input contained no rows.
+    #[snafu(display("Cannot append an empty Arrow input"))]
+    EmptyInput,
+
+    /// A configured Parquet row group cannot contain zero rows.
+    #[snafu(display(
+        "Invalid maximum rows per Parquet row group: {max_rows_per_row_group}; expected a positive value"
+    ))]
+    InvalidMaxRowsPerRowGroup {
+        /// Rejected per-append row-group limit.
+        max_rows_per_row_group: usize,
+    },
+}
 
 /// Errors from high-level time-series table operations.
 ///
@@ -34,6 +73,14 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum TableError {
+    /// An append operation failed.
+    #[snafu(context(false), display("Append failed: {source}"))]
+    Append {
+        /// Complete append-owned failure.
+        #[snafu(source, backtrace)]
+        source: AppendError,
+    },
+
     /// Any error coming from the transaction log / commit machinery
     /// (for example, OCC conflicts, storage failures, or corrupt commits).
     #[snafu(display("Transaction log error: {source}"))]
@@ -96,13 +143,6 @@ pub enum TableError {
         cleanup_errors: Vec<String>,
     },
 
-    /// An Arrow source or its batch normalization failed during append.
-    #[snafu(display("Arrow batch source error while appending: {source}"))]
-    AppendSource {
-        /// Arrow error returned while reading or normalizing a batch.
-        source: ArrowError,
-    },
-
     /// Parquet schema conversion or streaming output failed during append.
     #[snafu(display("Parquet write error while appending: {source}"))]
     AppendParquet {
@@ -121,19 +161,6 @@ pub enum TableError {
         /// Ambiguous transaction-log failure.
         #[snafu(source, backtrace)]
         source: CommitError,
-    },
-
-    /// An append source contained no rows.
-    #[snafu(display("Cannot append an empty Arrow batch source"))]
-    EmptyAppendSource,
-
-    /// A configured Parquet row group cannot contain zero rows.
-    #[snafu(display(
-        "Invalid maximum rows per Parquet row group: {max_rows_per_row_group}; expected a positive value"
-    ))]
-    InvalidMaxRowsPerRowGroup {
-        /// Rejected per-append row-group limit.
-        max_rows_per_row_group: usize,
     },
 
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
@@ -459,5 +486,39 @@ impl From<SegmentCoverageError> for TableError {
             },
             source => Self::SegmentCoverage { source },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use snafu::ErrorCompat;
+
+    use super::*;
+
+    #[test]
+    fn append_facade_preserves_arrow_source_and_backtrace() {
+        let append_error = AppendError::ArrowInput {
+            source: ArrowError::ComputeError("input failed".to_string()),
+            backtrace: Backtrace::capture(),
+        };
+        let error = TableError::from(append_error);
+
+        let append_source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<AppendError>())
+            .expect("append source");
+        let arrow_source = append_source
+            .source()
+            .and_then(|source| source.downcast_ref::<ArrowError>())
+            .expect("Arrow source");
+        let append_backtrace = ErrorCompat::backtrace(append_source).expect("append backtrace");
+        let table_backtrace = ErrorCompat::backtrace(&error).expect("table backtrace");
+
+        assert!(
+            matches!(arrow_source, ArrowError::ComputeError(message) if message == "input failed")
+        );
+        assert!(std::ptr::eq(table_backtrace, append_backtrace));
     }
 }

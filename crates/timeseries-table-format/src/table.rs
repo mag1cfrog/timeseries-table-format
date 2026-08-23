@@ -43,7 +43,7 @@ use crate::{
     },
 };
 
-pub use error::TableError;
+pub use error::{AppendError, TableError};
 pub use optimize::OptimizeReport;
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
