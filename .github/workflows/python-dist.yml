@@ -392,6 +392,7 @@ jobs:
               "python/timeseries_table_format/__init__.py",
               "python/timeseries_table_format/__init__.pyi",
               "python/timeseries_table_format/_native.pyi",
+              "python/timeseries_table_format/notebook_display.css",
               "python/timeseries_table_format/py.typed",
           }
           with tarfile.open(sdists[0], "r:gz") as sdist:
@@ -473,6 +474,7 @@ jobs:
               "timeseries_table_format/__init__.py",
               "timeseries_table_format/__init__.pyi",
               "timeseries_table_format/_native.pyi",
+              "timeseries_table_format/notebook_display.css",
               "timeseries_table_format/notebook_display.py",
               "timeseries_table_format/notebook_display_config.py",
               "timeseries_table_format/py.typed",

@@ -1,9 +1,11 @@
-import html as _html
 import builtins
+import html as _html
 import os
 import sys
-from typing import Callable, Any
 from dataclasses import dataclass, field
+from functools import cache
+from importlib import resources
+from typing import Any, Callable
 
 import pyarrow as pa
 
@@ -293,6 +295,17 @@ def _load_config_from_env() -> None:
         load_notebook_display_config(path)
 
 
+@cache
+def _notebook_display_style() -> str:
+    css = (
+        resources.files("timeseries_table_format")
+        .joinpath("notebook_display.css")
+        .read_text(encoding="utf-8")
+        .rstrip()
+    )
+    return f"<style>\n{css}\n</style>"
+
+
 def render_arrow_table_html(
     table: pa.Table,
     *,
@@ -340,183 +353,7 @@ def render_arrow_table_html(
     # Precompute numeric columns for CSS classing.
     numeric_cols = [_is_numeric_arrow_type(f.type) for f in fields]
 
-    # Build HTML.
-    style = """
-<style>
-.ttf-arrow-preview {
-  /* Theme-aware defaults: prefers VS Code/Jupyter variables when available. */
-  --ttf-bg: var(--vscode-editor-background, #ffffff);
-  --ttf-fg: var(--vscode-editor-foreground, #111827);
-  --ttf-muted: var(--vscode-descriptionForeground, #64748b);
-  --ttf-border: rgba(127, 127, 127, 0.35);
-  --ttf-grid: rgba(127, 127, 127, 0.18);
-  --ttf-head-bg: rgba(127, 127, 127, 0.10);
-  --ttf-zebra: rgba(127, 127, 127, 0.05);
-  --ttf-hover: rgba(127, 127, 127, 0.08);
-
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-  font-size: 12px;
-  line-height: 1.35;
-  color: var(--ttf-fg);
-}
-
-@media (prefers-color-scheme: dark) {
-  .ttf-arrow-preview {
-    --ttf-bg: var(--vscode-editor-background, #0b1220);
-    --ttf-fg: var(--vscode-editor-foreground, #e5e7eb);
-    --ttf-muted: var(--vscode-descriptionForeground, #94a3b8);
-    --ttf-border: rgba(160, 160, 160, 0.35);
-    --ttf-grid: rgba(160, 160, 160, 0.18);
-    --ttf-head-bg: rgba(255, 255, 255, 0.07);
-    --ttf-zebra: rgba(255, 255, 255, 0.04);
-    --ttf-hover: rgba(255, 255, 255, 0.06);
-  }
-}
-
-.ttf-arrow-preview .ttf-wrap {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border: 1px solid var(--ttf-border);
-  border-radius: 10px;
-  background: var(--ttf-bg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-  -webkit-overflow-scrolling: touch;
-  scrollbar-gutter: stable both-edges;
-  /* Give room for overlay scrollbars / rounded corners so the last column doesn't get clipped. */
-  padding-bottom: 8px;
-  box-sizing: border-box;
-}
-
-.ttf-arrow-preview .ttf-wrap.ttf-scroll-y {
-  max-height: var(--ttf-max-height, 420px);
-  overflow-y: auto;
-}
-
-.ttf-arrow-preview table {
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
-  /* Width is set via an inline CSS variable to avoid long cell values expanding the table. */
-  width: var(--ttf-table-width, auto);
-  margin-right: 12px;
-}
-
-.ttf-arrow-preview th,
-.ttf-arrow-preview td {
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--ttf-grid);
-  white-space: nowrap;
-  vertical-align: top;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ttf-arrow-preview.ttf-align-right th,
-.ttf-arrow-preview.ttf-align-right td {
-  text-align: right;
-}
-
-.ttf-arrow-preview.ttf-align-left th,
-.ttf-arrow-preview.ttf-align-left td {
-  text-align: left;
-}
-
-.ttf-arrow-preview.ttf-align-auto th,
-.ttf-arrow-preview.ttf-align-auto td {
-  text-align: left;
-}
-
-.ttf-arrow-preview.ttf-align-auto th.ttf-num,
-.ttf-arrow-preview.ttf-align-auto td.ttf-num {
-  text-align: right;
-}
-
-.ttf-arrow-preview thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  /* Make the header visually tinted but fully opaque so scrolled cell text doesn't show through. */
-  background: var(--ttf-bg);
-  background: linear-gradient(var(--ttf-head-bg), var(--ttf-head-bg)), var(--ttf-bg);
-  border-bottom: 1px solid var(--ttf-border);
-  font-weight: 600;
-}
-
-@supports (background: color-mix(in srgb, white 50%, transparent)) {
-  .ttf-arrow-preview thead th {
-    /* Slight translucency with backdrop blur to avoid readable text bleeding through. */
-    background: linear-gradient(var(--ttf-head-bg), var(--ttf-head-bg)),
-      color-mix(in srgb, var(--ttf-bg) 90%, transparent);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-  }
-}
-
-.ttf-arrow-preview thead th .ttf-colname {
-  display: block;
-  white-space: nowrap;
-}
-
-.ttf-arrow-preview thead th .ttf-coltype {
-  display: block;
-  margin-top: 2px;
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--ttf-muted);
-  white-space: nowrap;
-}
-
-.ttf-arrow-preview th.ttf-gap,
-.ttf-arrow-preview td.ttf-gap {
-  text-align: center !important;
-  color: var(--ttf-muted);
-  font-style: italic;
-}
-
-.ttf-arrow-preview .ttf-null {
-  color: var(--ttf-muted);
-  font-style: italic;
-}
-
-.ttf-arrow-preview .ttf-cell[data-truncated="1"]::after {
-  content: "…";
-  padding-left: 0.25ch;
-  color: var(--ttf-muted);
-  user-select: none;
-}
-
-.ttf-arrow-preview tbody tr.ttf-gap-row td {
-  text-align: center !important;
-  color: var(--ttf-muted);
-  font-style: italic;
-}
-
-.ttf-arrow-preview tbody tr:nth-child(even) {
-  background: var(--ttf-zebra);
-}
-
-.ttf-arrow-preview tbody tr:hover {
-  background: var(--ttf-hover);
-}
-
-.ttf-arrow-preview td.ttf-num {
-  font-variant-numeric: tabular-nums;
-}
-
-.ttf-arrow-preview .ttf-footer {
-  margin-top: 6px;
-  color: var(--ttf-muted);
-  text-align: left;
-}
-
-.ttf-arrow-preview .ttf-meta {
-  color: var(--ttf-muted);
-  font-size: 11px;
-}
-</style>
-""".strip()
+    style = _notebook_display_style()
 
     # Header
     col_widths = [

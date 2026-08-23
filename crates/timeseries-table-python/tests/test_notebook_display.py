@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import types
 from dataclasses import dataclass
+from importlib import resources
 from typing import Any, Callable
 
 import pyarrow as pa
@@ -24,6 +25,17 @@ class FakeDisplayFormatter:
 @dataclass
 class FakeShell:
     display_formatter: FakeDisplayFormatter
+
+
+def test_render_html_embeds_packaged_stylesheet():
+    stylesheet = (
+        resources.files("timeseries_table_format")
+        .joinpath("notebook_display.css")
+        .read_text(encoding="utf-8")
+        .rstrip()
+    )
+    html = nd.render_arrow_table_html(pa.table({"x": [1]}))
+    assert f"<style>\n{stylesheet}\n</style>" in html
 
 
 def test_render_html_escapes_and_truncates():
