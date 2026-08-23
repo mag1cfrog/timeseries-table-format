@@ -17,7 +17,7 @@ TABLE_DIR_BULK="/workspace/${WORK_DIR}/timeseries_table/${TABLE_NAME}_bulk"
 
 ${COMPOSE} exec -T timeseries_table bash -lc "/usr/local/cargo/bin/cargo build -p timeseries-table-format --features cli --bin tstable --release"
 ${COMPOSE} exec -T timeseries_table bash -lc "rm -rf '${TABLE_DIR_BULK}' && mkdir -p '${TABLE_DIR_BULK}'"
-${COMPOSE} exec -T timeseries_table bash -lc "target/release/tstable create --table '${TABLE_DIR_BULK}' --index-column '${TIME_COLUMN}' --index-type timestamp --bucket 1s"
+${COMPOSE} exec -T timeseries_table bash -lc "target/release/tstable create --table '${TABLE_DIR_BULK}' --index-column '${TIME_COLUMN}' --index-type timestamp --index-granularity 1s"
 
 bulk_rel="raw/${TLC_FILE_PREFIX}${START_MONTH}.parquet"
 bulk_path="/workspace/${DATASET_DIR}/${bulk_rel}"
@@ -29,7 +29,7 @@ elapsed=$(( $(now_ms) - start ))
 emit_row "$CSV_OUT" "timeseries_table" "bulk_ingest" "$bulk_rel" "$bulk_rows" "$bulk_bytes" "$elapsed" "$CPU_LIMIT" "$MEM_LIMIT" ""
 
 ${COMPOSE} exec -T timeseries_table bash -lc "rm -rf '${TABLE_DIR}' && mkdir -p '${TABLE_DIR}'"
-${COMPOSE} exec -T timeseries_table bash -lc "target/release/tstable create --table '${TABLE_DIR}' --index-column '${TIME_COLUMN}' --index-type timestamp --bucket 1s"
+${COMPOSE} exec -T timeseries_table bash -lc "target/release/tstable create --table '${TABLE_DIR}' --index-column '${TIME_COLUMN}' --index-type timestamp --index-granularity 1s"
 
 mapfile -t daily_files < <(ls -1 "${ROOT_DIR}/${DATASET_DIR}/daily"/fhvhv_*.parquet | sort)
 for file in "${daily_files[@]}"; do

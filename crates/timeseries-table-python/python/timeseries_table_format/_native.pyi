@@ -18,17 +18,23 @@ class TimeseriesTableError(Exception): ...
 class StorageError(TimeseriesTableError): ...
 class ConflictError(TimeseriesTableError): ...
 
-class CoverageOverlapError(TimeseriesTableError):
+class IndexIntervalOverlapError(TimeseriesTableError):
     segment_path: str
     """Path to the Parquet segment that triggered the overlap."""
-    overlap_count: int
-    """Number of overlapping buckets, or entity/bucket pairs for an entity-aware table."""
-    example_entity_identity: dict[str, str | int] | None
-    """One typed identity in configured column order, or `None` for global coverage."""
-    example_bucket: int | None
-    """Internal overlapping bucket identifier, retained for compatibility."""
-    example_bucket_range: str
-    """Logical ordered-index interval covered by `example_bucket`."""
+    conflict_count: int
+    """Number of conflicting intervals, or identity and interval pairs."""
+    example_identity: dict[str, str | int] | None
+    """One complete identity, or `None` for a table without entity columns."""
+    example_index_interval: str
+    """One conflicting logical ordered-index interval."""
+
+class DuplicateIndexIntervalError(TimeseriesTableError):
+    segment_path: str
+    """Path to the generated Parquet segment that contains the duplicate."""
+    example_identity: dict[str, str | int] | None
+    """One complete identity, or `None` for a table without entity columns."""
+    example_index_interval: str
+    """One duplicated logical ordered-index interval."""
 
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
@@ -194,9 +200,8 @@ class TimeSeriesTable:
         table_root: str,
         index_column: str,
         index_type: Literal["timestamp", "int64", "uint64"],
+        index_granularity: str | int,
         entity_columns: list[str] | None = None,
-        bucket: str | None = None,
-        bucket_width: int | None = None,
         timezone: str | None = None,
     ) -> TimeSeriesTable:
         """Create a new time-series table at `table_root`.
@@ -209,13 +214,12 @@ class TimeSeriesTable:
             Name of the ascending ordered-index column.
         index_type:
             One of `"timestamp"`, `"int64"`, or `"uint64"`.
+        index_granularity:
+            Timestamp interval string such as `"1h"`, or a positive integer for `"int64"`
+            and `"uint64"` indexes.
         entity_columns:
             Ordered column names that define independent identities within the table. One
             Parquet segment may contain multiple identities.
-        bucket:
-            Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
-        bucket_width:
-            Required positive integer width for `"int64"` and `"uint64"` indexes.
         timezone:
             Optional timestamp timezone; rejected for integer indexes.
 
@@ -263,8 +267,10 @@ class TimeSeriesTable:
             If `source` is not one of the supported Arrow forms.
         ValueError
             If the Arrow C Stream exporter or capsule is invalid.
-        CoverageOverlapError
+        IndexIntervalOverlapError
             If incoming coverage overlaps committed coverage for the same entity.
+        DuplicateIndexIntervalError
+            If two incoming rows for one entity occupy the same index interval.
         SchemaMismatchError
             If the Arrow schema does not match the table's established schema.
         TimeseriesTableError
@@ -304,29 +310,29 @@ class TimeSeriesTable:
         Timestamp:
 
             {
-                "column": str,
+                "index_column": str,
                 "entity_columns": list[str],
-                "kind": "timestamp",
-                "bucket": str,
+                "index_type": "timestamp",
+                "index_granularity": str,
                 "timezone": str | None,
             }
 
         Int64:
 
             {
-                "column": str,
+                "index_column": str,
                 "entity_columns": list[str],
-                "kind": "int64",
-                "bucket_width": int,
+                "index_type": "int64",
+                "index_granularity": int,
             }
 
         UInt64:
 
             {
-                "column": str,
+                "index_column": str,
                 "entity_columns": list[str],
-                "kind": "uint64",
-                "bucket_width": int,
+                "index_type": "uint64",
+                "index_granularity": int,
             }
         """
         ...

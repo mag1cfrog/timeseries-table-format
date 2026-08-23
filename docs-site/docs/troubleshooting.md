@@ -19,24 +19,24 @@ session.sql("SELECT CAST($1 AS BIGINT) AS value", params=[1])
 See [Use SQL parameters](tutorials/parameterized_queries.md) for supported
 values and placeholder styles.
 
-## `CoverageOverlapError` during append
+## Index interval conflict during append
 
-The incoming segment covers at least one bucket already present for the same
-entity. The rejected append is not committed.
+`IndexIntervalOverlapError` means an incoming identity and interval pair already exists in
+committed data. `DuplicateIndexIntervalError` means the same pair occurs twice within the incoming
+append. The rejected append is not committed.
 
-1. Check whether the entire file is a duplicate or only part of it overlaps.
-2. For a duplicate file, leave it unappended.
-3. For a partial overlap, create a segment containing only uncovered buckets.
+1. Inspect `example_identity` and `example_index_interval` on the exception.
+2. Remove duplicated input if the row is redundant.
+3. If both rows are legitimate, use a finer granularity in a newly created table.
 
-Do not automatically catch and ignore every overlap error. That can discard
-new data contained in a partially overlapping file.
+Do not automatically catch and ignore interval errors. A rejected append may also contain valid
+new rows that would be silently discarded.
 
-The bucket configuration is stored when the table is created and cannot be
-changed in place. If it is too coarse, create a new table with a finer `bucket`
-or `bucket_width`, then re-append the original source files.
+Index granularity is stored when the table is created and cannot be changed in place. It does not
+resample, aggregate, sort, or repair input.
 
-See [Buckets and overlap](concepts/bucketing_and_overlap.md) for the coverage
-model.
+See [Index granularity and conflicts](concepts/index_granularity_and_conflicts.md) for the complete
+uniqueness model.
 
 ## Append rejects the ordered-index column
 
@@ -46,7 +46,7 @@ column must either match it or use a supported
 units and timezones must match exactly, and signed and unsigned indexes are
 never converted into each other.
 
-See [Ordered indexes, buckets, and overlap](concepts/bucketing_and_overlap.md)
+See [Ordered indexes, granularity, and conflicts](concepts/index_granularity_and_conflicts.md)
 for the complete index rules.
 
 ## `SchemaMismatchError` during append

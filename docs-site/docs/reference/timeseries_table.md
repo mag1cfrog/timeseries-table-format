@@ -3,9 +3,9 @@
 `TimeSeriesTable` manages table lifecycle (create/open/append/optimize) on the local filesystem.
 
 `entity_columns` is an ordered identity definition. A table may contain many identities, and one
-Parquet segment may contain rows for several identities. Ordered-index values and buckets may
-repeat across different identities; an append is rejected only when the same complete identity
-already covers the bucket.
+Parquet segment may contain rows for several identities. Different identities may use the same
+index interval. One complete identity may have at most one row per interval, both within one
+append and across committed appends.
 
 Registered entity column types are Arrow `string`, `large_string`, `int32`, `int64`, and `uint64`.
 Actual values must be non-null. Composite identity components follow the configured

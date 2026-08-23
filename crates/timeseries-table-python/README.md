@@ -14,7 +14,7 @@ DataFusion SQL. Query results are returned as `pyarrow.Table` objects.
 ## What it provides
 
 - Timestamp, Int64, or UInt64 ordered indexes
-- Per-entity coverage tracking and overlap-safe ingestion
+- Per-entity index-interval uniqueness within and across appends
 - Local table roots with managed metadata and table-relative Parquet segment paths
 - DataFusion SQL over managed tables and standalone Parquet data
 - Materialized and streaming Arrow result APIs
@@ -56,7 +56,7 @@ table = ttf.TimeSeriesTable.create(
     table_root="prices",
     index_column="ts",
     index_type="timestamp",
-    bucket="1h",
+    index_granularity="1h",
     entity_columns=["symbol"],
 )
 parquet_file = pq.ParquetFile("prices.parquet")

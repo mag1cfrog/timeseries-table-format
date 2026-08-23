@@ -69,9 +69,9 @@ with tempfile.TemporaryDirectory() as d:
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
-        timezone=None,
+        timezone="UTC",
     )
 
     incoming = Path(d) / "incoming.parquet"
@@ -116,8 +116,8 @@ identifiers are abbreviated for readability:
     "format": "parquet",
     "entity_layout": {"Single": ["NVDA"]},
     "index_min": {"type": "timestamp", "value": "2024-06-01T00:00:00Z"},
-    "index_max": {"type": "timestamp", "value": "2024-06-10T23:00:00Z"},
-    "row_count": 240,
+    "index_max": {"type": "timestamp", "value": "2024-06-01T00:00:00Z"},
+    "row_count": 1,
     "file_size": 14272,
     "coverage_path": "_coverage/segments/segcov-738cffb9d4ae1f5ce014c4beda6dfd6b-5c2deace-0d7f-4de0-a7c5-088bb8990c9b.roar"
   }
@@ -161,15 +161,14 @@ def parquet_reader(path: Path) -> pa.RecordBatchReader:
 with tempfile.TemporaryDirectory() as d:
     base = Path(d)
 
-    # None = no timezone normalization (use timestamps as stored in Parquet)
-    tz_config = None
+    tz_config = "UTC"
 
     prices_root = base / "prices_tbl"
     prices = ttf.TimeSeriesTable.create(
         table_root=str(prices_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=tz_config,
     )
@@ -194,7 +193,7 @@ with tempfile.TemporaryDirectory() as d:
         table_root=str(volumes_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=tz_config,
     )
@@ -256,13 +255,13 @@ Coverage is how I solved it -- and it bought me two things I didn't expect to ge
 
 ### What "coverage" means (in one sentence)
 
-Here, `bucket="1h"` tracks which one-hour slots have data. Int64 and UInt64 indexes use the same model with `bucket_width` in application-defined units.
+Here, `index_granularity="1h"` divides the timestamp domain into one-hour logical intervals. Each complete entity identity may have at most one row in an interval. Int64 and UInt64 indexes use a positive integer granularity in application-defined units.
 
 ### What `_coverage/` stores
 
 Under the table root, `_coverage/` stores small sidecar files:
 
-- `_coverage/segments/<id>.roar` - coverage for a segment (compressed roaring bitmaps -- fast set operations on bucket IDs)
+- `_coverage/segments/<id>.roar` - coverage for a segment (compressed roaring bitmaps -- fast set operations on index interval IDs)
 - `_coverage/table/<ver>-<id>.roar` - a snapshot coverage for the whole table at a log version
 
 The table snapshot is basically the union of segment coverages so far.
@@ -272,11 +271,12 @@ The table snapshot is basically the union of segment coverages so far.
 ### How append uses coverage (end-to-end)
 
 When you append a Parquet file, the flow becomes:
-1. Map the segment's chronological index values into bucket IDs using its configured `bucket` or `bucket_width`.
-2. Load the current table coverage snapshot (or empty for the first append).
-3. Check overlap: `segment_coverage & table_coverage`.
-4. If overlap is non-empty, reject the append (this surfaces as `CoverageOverlapError` in Python).
-5. Otherwise:
+1. Map chronological index values into logical intervals using the configured index granularity.
+2. Reject any repeated identity and interval pair in the incoming rows (`DuplicateIndexIntervalError` in Python).
+3. Load the current table coverage snapshot (or empty for the first append).
+4. Check overlap: `segment_coverage & table_coverage`.
+5. If overlap is non-empty, reject the append (`IndexIntervalOverlapError` in Python).
+6. Otherwise:
     - write the segment coverage sidecar (coverage_path)
     - write the new table snapshot sidecar
     - commit the log update (same Delta-style OCC as before)

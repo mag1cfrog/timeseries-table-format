@@ -25,7 +25,7 @@ def _make_table(root) -> ttf.TimeSeriesTable:
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -36,7 +36,7 @@ def _make_table_with_schema(root, seg_path) -> ttf.TimeSeriesTable:
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -52,7 +52,7 @@ def test_register_tstable_succeeds_and_replaces(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -83,7 +83,7 @@ def test_register_tstable_empty_name_rejected(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

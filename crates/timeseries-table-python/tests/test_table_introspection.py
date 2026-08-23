@@ -33,7 +33,7 @@ def test_table_introspection_matches_expected_spec(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="2hours",  # alias input; expect canonical "2h"
+        index_granularity="2hours",  # alias input; expect canonical "2h"
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -46,17 +46,17 @@ def test_table_introspection_matches_expected_spec(tmp_path):
 
     spec = tbl.index_spec()
     assert set(spec.keys()) == {
-        "column",
+        "index_column",
         "entity_columns",
-        "kind",
-        "bucket",
+        "index_type",
+        "index_granularity",
         "timezone",
     }
     assert spec == {
-        "column": "ts",
+        "index_column": "ts",
         "entity_columns": ["symbol"],
-        "kind": "timestamp",
-        "bucket": "2h",
+        "index_type": "timestamp",
+        "index_granularity": "2h",
         "timezone": None,
     }
 
@@ -73,59 +73,61 @@ def test_table_introspection_defaults_and_timezone(tmp_path):
         table_root=str(root),
         index_column="timestamp",
         index_type="timestamp",
-        bucket="15min",  # alias input; expect canonical "15m"
+        index_granularity="15min",  # alias input; expect canonical "15m"
         entity_columns=None,
         timezone="America/New_York",
     )
 
     spec = tbl.index_spec()
     assert set(spec.keys()) == {
-        "column",
+        "index_column",
         "entity_columns",
-        "kind",
-        "bucket",
+        "index_type",
+        "index_granularity",
         "timezone",
     }
     assert spec == {
-        "column": "timestamp",
+        "index_column": "timestamp",
         "entity_columns": [],
-        "kind": "timestamp",
-        "bucket": "15m",
+        "index_type": "timestamp",
+        "index_granularity": "15m",
         "timezone": "America/New_York",
     }
 
-    assert isinstance(spec["column"], str)
+    assert isinstance(spec["index_column"], str)
     assert isinstance(spec["entity_columns"], list)
     assert all(isinstance(x, str) for x in spec["entity_columns"])
-    assert isinstance(spec["bucket"], str)
+    assert isinstance(spec["index_granularity"], str)
     assert isinstance(spec["timezone"], str)
 
 
 @pytest.mark.parametrize(
-    ("index_type", "bucket_width"),
+    ("index_type", "index_granularity"),
     [("int64", 4), ("uint64", 2**64 - 1)],
 )
-def test_integer_index_spec_has_only_variant_keys(tmp_path, index_type, bucket_width):
+def test_integer_index_spec_has_only_variant_keys(
+    tmp_path, index_type, index_granularity
+):
     root = tmp_path / index_type
     table = ttf.TimeSeriesTable.create(
         table_root=str(root),
         index_column="idx",
         index_type=index_type,
         entity_columns=["symbol"],
-        bucket_width=bucket_width,
+        index_granularity=index_granularity,
     )
 
     assert table.index_spec() == {
-        "column": "idx",
+        "index_column": "idx",
         "entity_columns": ["symbol"],
-        "kind": index_type,
-        "bucket_width": bucket_width,
+        "index_type": index_type,
+        "index_granularity": index_granularity,
     }
     assert ttf.TimeSeriesTable.open(str(root)).index_spec() == table.index_spec()
 
 
 @pytest.mark.parametrize(
-    ("bucket_spec", "expected"),
+    ("index_granularity", "expected"),
     [
         ("1s", "1s"),
         ("2sec", "2s"),
@@ -142,22 +144,22 @@ def test_integer_index_spec_has_only_variant_keys(tmp_path, index_type, bucket_w
         ("6H", "6h"),
     ],
 )
-def test_table_introspection_bucket_formatting_canonical(
-    bucket_spec, expected, tmp_path
+def test_table_introspection_granularity_formatting_canonical(
+    index_granularity, expected, tmp_path
 ):
-    root = tmp_path / f"table_{_safe_name(bucket_spec)}"
+    root = tmp_path / f"table_{_safe_name(index_granularity)}"
 
     tbl = ttf.TimeSeriesTable.create(
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket=bucket_spec,
+        index_granularity=index_granularity,
         entity_columns=["symbol"],
         timezone=None,
     )
 
     spec = tbl.index_spec()
-    assert spec["bucket"] == expected
+    assert spec["index_granularity"] == expected
 
 
 def test_table_introspection_entity_columns_preserves_order(tmp_path):
@@ -167,7 +169,7 @@ def test_table_introspection_entity_columns_preserves_order(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["b", "a"],
         timezone=None,
     )
@@ -183,7 +185,7 @@ def test_table_introspection_version_updates_after_append(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -214,7 +216,7 @@ def test_table_introspection_returns_python_native_types(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -224,14 +226,14 @@ def test_table_introspection_returns_python_native_types(tmp_path):
 
     spec = tbl.index_spec()
     assert set(spec.keys()) == {
-        "column",
+        "index_column",
         "entity_columns",
-        "kind",
-        "bucket",
+        "index_type",
+        "index_granularity",
         "timezone",
     }
-    assert isinstance(spec["column"], str)
+    assert isinstance(spec["index_column"], str)
     assert isinstance(spec["entity_columns"], list)
     assert all(isinstance(x, str) for x in spec["entity_columns"])
-    assert isinstance(spec["bucket"], str)
+    assert isinstance(spec["index_granularity"], str)
     assert spec["timezone"] is None or isinstance(spec["timezone"], str)

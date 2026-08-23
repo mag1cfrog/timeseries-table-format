@@ -46,8 +46,8 @@ mod _native {
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;
     use crate::{
         exceptions::{
-            ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
-            StorageError, TimeseriesTableError,
+            ConflictError, DataFusionError, DuplicateIndexIntervalError, IndexIntervalOverlapError,
+            SchemaMismatchError, StorageError, TimeseriesTableError,
         },
         tokio_runner,
     };
@@ -1421,7 +1421,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Arrow data). For SQL
     /// querying across one or more registered tables, use `Session`.
     ///
-    /// Appends are overlap-checked according to the table's persisted ordered-index bucket.
+    /// Appends are overlap-checked according to the table's persisted index granularity.
     #[pyclass]
     struct TimeSeriesTable {
         inner: timeseries_table_format::table::TimeSeriesTable,
@@ -1431,7 +1431,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     #[pymethods]
     impl TimeSeriesTable {
         #[classmethod]
-        #[pyo3(signature = (*, table_root, index_column, index_type, entity_columns=None, bucket=None, bucket_width=None, timezone=None))]
+        #[pyo3(signature = (*, table_root, index_column, index_type, index_granularity, entity_columns=None, timezone=None))]
         /// Create a new time-series table at `table_root`.
         ///
         /// Parameters
@@ -1442,16 +1442,15 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///     Name of the ascending ordered-index column.
         /// index_type:
         ///     One of `"timestamp"`, `"int64"`, or `"uint64"`.
+        /// index_granularity:
+        ///     Timestamp interval string such as `"1h"`, or a positive Python integer for
+        ///     `"int64"` and `"uint64"` indexes.
         /// entity_columns:
         ///     Column names that define ordered entity identities for this table. Segments may
         ///     contain multiple identities; coverage is tracked independently for each identity.
         ///     Supported canonical Arrow types are string, large_string, int32, int64, and uint64.
         ///     Actual entity values must be non-null. After schema adoption, append may losslessly
         ///     widen narrower integers but never converts between signed and unsigned values.
-        /// bucket:
-        ///     Required timestamp bucket such as `"1h"`, `"5m"`, `"30s"`, or `"1d"`.
-        /// bucket_width:
-        ///     Required positive integer bucket width for `"int64"` and `"uint64"` indexes.
         /// timezone:
         ///     Optional timestamp timezone; rejected for integer indexes.
         ///
@@ -1470,9 +1469,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             table_root: String,
             index_column: String,
             index_type: String,
+            index_granularity: &Bound<'_, PyAny>,
             entity_columns: Option<Vec<String>>,
-            bucket: Option<String>,
-            bucket_width: Option<&Bound<'_, PyAny>>,
             timezone: Option<String>,
         ) -> PyResult<Self> {
             use crate::tokio_runner;
@@ -1498,66 +1496,75 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             let kind = match index_type.as_str() {
                 "timestamp" => {
-                    if bucket_width.is_some() {
+                    if !index_granularity.is_instance_of::<pyo3::types::PyString>() {
                         return Err(invalid(
-                            "bucket_width",
-                            "use bucket for timestamp indexes".to_string(),
+                            "index_granularity",
+                            "must be a string using s, m, h, or d units for timestamp indexes"
+                                .to_string(),
                         ));
                     }
-                    let bucket = bucket.as_deref().ok_or_else(|| {
-                        invalid("bucket", "is required for timestamp indexes".to_string())
+                    let value = index_granularity.extract::<String>().map_err(|_| {
+                        invalid(
+                            "index_granularity",
+                            "must be a string using s, m, h, or d units for timestamp indexes"
+                                .to_string(),
+                        )
                     })?;
-                    let bucket = TimeIndexGranularity::parse(bucket)
-                        .map_err(|error| invalid("bucket", error.to_string()))?;
+                    let index_granularity = TimeIndexGranularity::parse(&value)
+                        .map_err(|error| {
+                            invalid(
+                                "index_granularity",
+                                format!(
+                                    "must be a string using s, m, h, or d units for timestamp indexes: {error}"
+                                ),
+                            )
+                        })?;
                     IndexKind::Timestamp {
-                        index_granularity: bucket,
+                        index_granularity,
                         timezone,
                     }
                 }
                 "int64" | "uint64" => {
-                    if bucket.is_some() {
-                        return Err(invalid(
-                            "bucket",
-                            "is only valid for timestamp indexes".to_string(),
-                        ));
-                    }
                     if timezone.is_some() {
                         return Err(invalid(
                             "timezone",
                             "is only valid for timestamp indexes".to_string(),
                         ));
                     }
-                    let value = bucket_width.ok_or_else(|| {
-                        invalid(
-                            "bucket_width",
-                            "is required for integer indexes".to_string(),
-                        )
-                    })?;
-                    if value.is_instance_of::<pyo3::types::PyBool>()
-                        || !value.is_instance_of::<pyo3::types::PyInt>()
+                    if index_granularity.is_instance_of::<pyo3::types::PyBool>()
+                        || !index_granularity.is_instance_of::<pyo3::types::PyInt>()
                     {
                         return Err(invalid(
-                            "bucket_width",
-                            "must be a Python int, not bool".to_string(),
+                            "index_granularity",
+                            format!(
+                                "must be a Python int in 1..={} for integer indexes; bool is not accepted",
+                                u64::MAX
+                            ),
                         ));
                     }
-                    let value = value.extract::<u64>().map_err(|_| {
+                    let value = index_granularity.extract::<u64>().map_err(|_| {
                         invalid(
-                            "bucket_width",
-                            format!("must be an integer in 1..={}", u64::MAX),
+                            "index_granularity",
+                            format!(
+                                "must be a Python int in 1..={} for integer indexes",
+                                u64::MAX
+                            ),
                         )
                     })?;
-                    let bucket_width = NonZeroU64::new(value)
-                        .ok_or_else(|| invalid("bucket_width", "must be at least 1".to_string()))?;
+                    let index_granularity = NonZeroU64::new(value).ok_or_else(|| {
+                        invalid(
+                            "index_granularity",
+                            format!(
+                                "must be a Python int in 1..={} for integer indexes",
+                                u64::MAX
+                            ),
+                        )
+                    })?;
 
                     if index_type == "int64" {
-                        IndexKind::Int64 {
-                            index_granularity: bucket_width,
-                        }
+                        IndexKind::Int64 { index_granularity }
                     } else {
-                        IndexKind::UInt64 {
-                            index_granularity: bucket_width,
-                        }
+                        IndexKind::UInt64 { index_granularity }
                     }
                 }
                 _ => {
@@ -1659,10 +1666,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///
         ///     ```python
         ///     {
-        ///         "column": str,
+        ///         "index_column": str,
         ///         "entity_columns": list[str],
-        ///         "kind": "timestamp",
-        ///         "bucket": str,
+        ///         "index_type": "timestamp",
+        ///         "index_granularity": str,
         ///         "timezone": str | None,
         ///     }
         ///     ```
@@ -1671,10 +1678,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///
         ///     ```python
         ///     {
-        ///         "column": str,
+        ///         "index_column": str,
         ///         "entity_columns": list[str],
-        ///         "kind": "int64",
-        ///         "bucket_width": int,
+        ///         "index_type": "int64",
+        ///         "index_granularity": int,
         ///     }
         ///     ```
         ///
@@ -1682,10 +1689,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///
         ///     ```python
         ///     {
-        ///         "column": str,
+        ///         "index_column": str,
         ///         "entity_columns": list[str],
-        ///         "kind": "uint64",
-        ///         "bucket_width": int,
+        ///         "index_type": "uint64",
+        ///         "index_granularity": int,
         ///     }
         ///     ```
         fn index_spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -1693,26 +1700,26 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             let spec = self.inner.index_spec();
             let d = PyDict::new(py);
-            d.set_item("column", spec.column.clone())?;
+            d.set_item("index_column", spec.column.clone())?;
             d.set_item("entity_columns", spec.entity_columns.clone())?;
-            d.set_item("kind", spec.kind.name())?;
+            d.set_item("index_type", spec.kind.name())?;
             match &spec.kind {
                 IndexKind::Timestamp {
                     index_granularity,
                     timezone,
                 } => {
-                    let bucket = match index_granularity {
+                    let index_granularity = match index_granularity {
                         TimeIndexGranularity::Seconds(n) => format!("{n}s"),
                         TimeIndexGranularity::Minutes(n) => format!("{n}m"),
                         TimeIndexGranularity::Hours(n) => format!("{n}h"),
                         TimeIndexGranularity::Days(n) => format!("{n}d"),
                     };
-                    d.set_item("bucket", bucket)?;
+                    d.set_item("index_granularity", index_granularity)?;
                     d.set_item("timezone", timezone.clone())?;
                 }
                 IndexKind::Int64 { index_granularity }
                 | IndexKind::UInt64 { index_granularity } => {
-                    d.set_item("bucket_width", index_granularity.get())?;
+                    d.set_item("index_granularity", index_granularity.get())?;
                 }
             }
 
@@ -2454,8 +2461,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         m.add("StorageError", py.get_type::<StorageError>())?;
         m.add("ConflictError", py.get_type::<ConflictError>())?;
         m.add(
-            "CoverageOverlapError",
-            py.get_type::<CoverageOverlapError>(),
+            "IndexIntervalOverlapError",
+            py.get_type::<IndexIntervalOverlapError>(),
+        )?;
+        m.add(
+            "DuplicateIndexIntervalError",
+            py.get_type::<DuplicateIndexIntervalError>(),
         )?;
         m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
         m.add("DataFusionError", py.get_type::<DataFusionError>())?;

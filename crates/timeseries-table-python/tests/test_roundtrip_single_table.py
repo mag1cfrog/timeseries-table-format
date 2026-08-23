@@ -42,7 +42,7 @@ def test_create_append_register_sql_roundtrip(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -85,19 +85,19 @@ def test_create_append_register_sql_roundtrip(tmp_path):
 
 def test_uint64_create_append_session_roundtrip_and_signed_rollback(tmp_path):
     table_root = tmp_path / "counters_tbl"
-    bucket_width = 1
+    index_granularity = 1
     tstable = ttf.TimeSeriesTable.create(
         table_root=str(table_root),
         index_column="idx",
         index_type="uint64",
-        bucket_width=bucket_width,
+        index_granularity=index_granularity,
         entity_columns=["symbol"],
     )
     assert tstable.index_spec() == {
-        "column": "idx",
+        "index_column": "idx",
         "entity_columns": ["symbol"],
-        "kind": "uint64",
-        "bucket_width": bucket_width,
+        "index_type": "uint64",
+        "index_granularity": index_granularity,
     }
 
     signed = tmp_path / "signed.parquet"
@@ -154,7 +154,7 @@ def test_register_tstable_before_first_append_fails_then_succeeds(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -179,7 +179,7 @@ def test_append_rejects_time_column_wrong_type(tmp_path, bad_ts_type: pa.DataTyp
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -205,7 +205,7 @@ def test_append_rejects_time_column_unit_mismatch_after_schema_adoption(
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

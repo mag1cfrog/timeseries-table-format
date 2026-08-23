@@ -14,8 +14,8 @@ pub enum CliError {
     #[snafu(display("Failed to initialize CLI diagnostics: {reason}"))]
     DiagnosticsInitialization { reason: String },
 
-    #[snafu(display("Invalid --bucket '{spec}' for --index-type timestamp: {source}"))]
-    InvalidBucket {
+    #[snafu(display("Invalid --index-granularity '{spec}' for --index-type timestamp: {source}"))]
+    InvalidTimeIndexGranularity {
         spec: String,
         source: ParseTimeIndexGranularityError,
     },

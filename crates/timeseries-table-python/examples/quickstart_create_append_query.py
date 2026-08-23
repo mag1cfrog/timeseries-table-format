@@ -30,7 +30,7 @@ def run(*, table_root: Path) -> pa.Table:
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["exchange_id", "symbol"],
         timezone=None,
     )

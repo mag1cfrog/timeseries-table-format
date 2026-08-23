@@ -20,7 +20,7 @@ use crate::{
     BackendArg, IndexTypeArg, append_parquet_file,
     engine::{Engine, QuerySession},
     error::{CliError, CliResult, CreateTableSnafu, OpenTableSnafu, StorageSnafu},
-    make_engine, open_table, parse_bucket_width, parse_time_bucket,
+    make_engine, open_table, parse_integer_index_granularity, parse_time_index_granularity,
     query::{
         OutputFormat, QueryOpts, default_table_name, page_output, preview_message,
         print_query_result, quote_identifier, render_preview, write_query_summary,
@@ -263,8 +263,9 @@ async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
     let kind = match index_type {
         IndexTypeArg::Timestamp => {
             let index_granularity = loop {
-                let spec = prompt_non_empty("time bucket (e.g. 1s, 1m, 1h, 1d): ")?;
-                match parse_time_bucket(&spec) {
+                let spec =
+                    prompt_non_empty("index granularity (time interval, e.g. 1s, 1m, 1h, 1d): ")?;
+                match parse_time_index_granularity(&spec) {
                     Ok(index_granularity) => break index_granularity,
                     Err(error) => println!("{error}"),
                 }
@@ -277,8 +278,10 @@ async fn create_table_interactive(table_root: &Path) -> CliResult<()> {
         }
         IndexTypeArg::Int64 | IndexTypeArg::UInt64 => {
             let index_granularity = loop {
-                let spec = prompt_non_empty("integer bucket width (positive index-value units): ")?;
-                match parse_bucket_width(&spec, index_type) {
+                let spec = prompt_non_empty(
+                    "index granularity (positive integer in index-value units): ",
+                )?;
+                match parse_integer_index_granularity(&spec, index_type) {
                     Ok(index_granularity) => break index_granularity,
                     Err(error) => println!("{error}"),
                 }
@@ -1519,13 +1522,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_time_bucket_accepts_and_rejects() {
-        assert!(parse_time_bucket("1s").is_ok());
-        assert!(parse_time_bucket("1m").is_ok());
-        assert!(parse_time_bucket("1h").is_ok());
-        assert!(parse_time_bucket("1d").is_ok());
-        assert!(parse_time_bucket("1x").is_err());
-        assert!(parse_time_bucket("bogus").is_err());
+    fn parse_time_index_granularity_accepts_and_rejects() {
+        assert!(parse_time_index_granularity("1s").is_ok());
+        assert!(parse_time_index_granularity("1m").is_ok());
+        assert!(parse_time_index_granularity("1h").is_ok());
+        assert!(parse_time_index_granularity("1d").is_ok());
+        assert!(parse_time_index_granularity("1x").is_err());
+        assert!(parse_time_index_granularity("bogus").is_err());
     }
 
     #[test]

@@ -19,11 +19,12 @@ Run this example from an empty working directory. It creates a table at
 `TimeSeriesTable.create(...)` initializes the table root and its metadata:
 
 - `index_column="ts"` selects the ascending timestamp column.
-- `bucket="1h"` tracks coverage in one-hour windows. It does not resample data.
+- `index_granularity="1h"` divides the timestamp domain into one-hour logical intervals.
 - `entity_columns=["exchange_id", "symbol"]` tracks coverage independently for each
   composite identity.
 
-This means NVDA and AAPL can cover the same hour without conflicting. The
+This means NVDA and AAPL can use the same hour without conflicting. Each
+complete identity may have at most one row in that hour. The
 entity columns are an ordered identity definition, not instructions to create
 one table per entity. `exchange_id` is an Arrow Int32 column, so the example
 also shows a numeric identity component.
@@ -33,13 +34,13 @@ also shows a numeric identity component.
 The example opens the Parquet file lazily as a `RecordBatchReader` and passes
 it to `append(...)`. Append consumes the batches incrementally and writes one
 table-owned segment. The source contains both NVDA and AAPL rows in the same
-hourly buckets; a segment does not need to contain only one identity. The
+hourly intervals; a segment does not need to contain only one identity. The
 Parquet `ts` column must be an Arrow timestamp because that is the index type
 stored in the table metadata.
 
-If another file covers an existing bucket for NVDA, the append raises
-`CoverageOverlapError` for that identity/bucket pair. AAPL coverage in that
-same bucket remains independent.
+If another file uses an existing interval for NVDA, the append raises
+`IndexIntervalOverlapError`. AAPL may independently use that same interval.
+Two NVDA rows in the same incoming interval raise `DuplicateIndexIntervalError`.
 
 !!! warning "Run the example once"
     Running the example again fails because `./my_table` already contains a

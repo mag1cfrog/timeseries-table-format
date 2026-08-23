@@ -6,7 +6,7 @@ your application.
 
 ## Create the table
 
-Set `index_type` and provide a positive `bucket_width` in index-value units:
+Set `index_type` and provide a positive `index_granularity` in index-value units:
 
 ```python
 import timeseries_table_format as ttf
@@ -15,14 +15,14 @@ signed = ttf.TimeSeriesTable.create(
     table_root="signed_ticks",
     index_column="tick",
     index_type="int64",
-    bucket_width=10,
+    index_granularity=10,
 )
 
 unsigned = ttf.TimeSeriesTable.create(
     table_root="unsigned_counters",
     index_column="counter",
     index_type="uint64",
-    bucket_width=100,
+    index_granularity=100,
 )
 ```
 
@@ -50,5 +50,5 @@ WHERE counter >= CAST('9223372036854775808' AS BIGINT UNSIGNED);
 Python query parameters accept integers only in the Int64 range. Write larger
 UInt64 constants with an explicit cast as shown above.
 
-See [Buckets and overlap](../concepts/bucketing_and_overlap.md) for integer
-bucketing semantics and current index limitations.
+See [Index granularity and conflicts](../concepts/index_granularity_and_conflicts.md) for integer
+interval semantics and current index limitations.

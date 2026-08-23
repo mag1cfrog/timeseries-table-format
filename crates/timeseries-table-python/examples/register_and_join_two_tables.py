@@ -44,7 +44,7 @@ def run(*, base_dir: Path) -> pa.Table:
         table_root=str(prices_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -57,7 +57,7 @@ def run(*, base_dir: Path) -> pa.Table:
         table_root=str(volumes_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

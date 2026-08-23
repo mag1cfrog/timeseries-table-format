@@ -46,7 +46,7 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
         table_root=str(root),
         index_column="tick",
         index_type="uint64",
-        bucket_width=10,
+        index_granularity=10,
         entity_columns=["fleet_id", "device_id"],
     )
     device_a = tmp_path / "device-a.parquet"
@@ -70,15 +70,15 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
     version = table.version()
     assert table.index_spec()["entity_columns"] == ["fleet_id", "device_id"]
 
-    with pytest.raises(ttf.CoverageOverlapError) as excinfo:
+    with pytest.raises(ttf.IndexIntervalOverlapError) as excinfo:
         table.append(parquet_reader(duplicate))
 
     error = excinfo.value
     assert error.segment_path.startswith("data/")
     assert error.segment_path.endswith(".parquet")
-    assert error.overlap_count == 2
-    assert error.example_entity_identity == {"fleet_id": -1, "device_id": "A"}
-    assert error.example_bucket == 0
+    assert error.conflict_count == 2
+    assert error.example_identity == {"fleet_id": -1, "device_id": "A"}
+    assert error.example_index_interval == "[0, 10)"
     assert table.version() == version
 
     expected = (

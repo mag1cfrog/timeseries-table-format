@@ -10,7 +10,7 @@ Use it when:
 
 - New time-series Parquet files arrive over time.
 - You want one managed table root instead of custom file-discovery code.
-- Each entity and time bucket should be ingested at most once.
+- Each complete entity identity should have at most one row per index interval.
 - You want SQL results as `pyarrow.Table` or `pyarrow.RecordBatchReader` objects.
 
 ## Choose another tool when

@@ -103,7 +103,7 @@ fn write_numeric_segment(
 fn shell_input_for_create(
     table_root: &std::path::Path,
     index_column: &str,
-    bucket: &str,
+    index_granularity: &str,
     timezone: Option<&str>,
     entities: Option<&str>,
     first_segment: &std::path::Path,
@@ -112,7 +112,7 @@ fn shell_input_for_create(
     input.push_str(&format!("{}\n", table_root.display()));
     input.push_str(&format!("{index_column}\n"));
     input.push_str("timestamp\n");
-    input.push_str(&format!("{bucket}\n"));
+    input.push_str(&format!("{index_granularity}\n"));
     if let Some(tz) = timezone {
         input.push_str(tz);
     }
@@ -138,6 +138,7 @@ async fn shell_interactive_create_and_append() -> TestResult<()> {
     let output = run_shell_with_input(&["shell"], &input).await?;
 
     assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("index granularity (time interval"));
     assert!(table_root.join("_timeseries_log").exists());
 
     let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
@@ -173,12 +174,12 @@ async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
         ),
     ];
 
-    for (index_type, bucket_width, data_type, values, expected_kind) in cases {
+    for (index_type, index_granularity, data_type, values, expected_kind) in cases {
         let table_root = tmp.path().join(index_type);
         let segment = table_root.join("data/segment.parquet");
         write_numeric_segment(&segment, data_type, values)?;
         let input = format!(
-            "{}\nidx\n{index_type}\n{bucket_width}\n\n{}\nexit\n",
+            "{}\nidx\n{index_type}\n{index_granularity}\n\n{}\nexit\n",
             table_root.display(),
             segment.display()
         );
@@ -191,7 +192,7 @@ async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!stdout.contains("timezone (optional"));
-        assert!(stdout.contains("integer bucket width"));
+        assert!(stdout.contains("index granularity (positive integer"));
 
         let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
         assert_eq!(table.index_spec().column, "idx");
@@ -202,7 +203,7 @@ async fn shell_interactive_creates_integer_indexes() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn shell_interactive_reprompts_invalid_index_type_and_width() -> TestResult<()> {
+async fn shell_interactive_reprompts_invalid_index_type_and_granularity() -> TestResult<()> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     let segment = table_root.join("data/segment.parquet");
@@ -225,7 +226,7 @@ async fn shell_interactive_reprompts_invalid_index_type_and_width() -> TestResul
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Invalid index type 'integer'"));
-    assert!(stdout.contains("Invalid --bucket-width for --index-type int64"));
+    assert!(stdout.contains("Invalid --index-granularity for --index-type int64"));
 
     let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
     assert_eq!(
@@ -323,7 +324,7 @@ async fn shell_uses_one_subscriber_for_diagnostic_operations() -> TestResult<()>
 }
 
 #[tokio::test]
-async fn shell_interactive_reprompts_invalid_bucket() -> TestResult<()> {
+async fn shell_interactive_reprompts_invalid_index_granularity() -> TestResult<()> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     let seg_path = table_root.join("data/seg.parquet");
@@ -344,7 +345,7 @@ async fn shell_interactive_reprompts_invalid_bucket() -> TestResult<()> {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Invalid --bucket '1x'"));
+    assert!(stdout.contains("Invalid --index-granularity '1x'"));
 
     let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
     assert!(table.state().table_meta.logical_schema().is_some());

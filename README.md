@@ -35,12 +35,14 @@ entity, rejects overlapping appends, and exposes the result through DataFusion
 SQL.
 
 Use a Timestamp, Int64, or UInt64 column as the ordered index. The table format
-handles metadata, transactions, coverage, and segment discovery.
+handles metadata, transactions, coverage, and segment discovery. Index
+granularity defines logical intervals, and each complete entity identity may
+have at most one row per interval, both within and across appends.
 
 | Need | Built-in support |
 |---|---|
 | Know whether a time range is covered | Coverage indexes and gap queries |
-| Prevent duplicate time windows | Per-entity overlap detection |
+| Enforce one row per identity and interval | Validation within and across appends |
 | Query many Parquet segments | DataFusion SQL with segment pruning |
 | Run without Spark or a database server | Rust core, Python package, and CLI |
 
@@ -62,7 +64,7 @@ table = ttf.TimeSeriesTable.create(
     table_root="prices",
     index_column="ts",
     index_type="timestamp",
-    bucket="1h",
+    index_granularity="1h",
     entity_columns=["symbol"],
 )
 parquet_file = pq.ParquetFile("prices.parquet")
