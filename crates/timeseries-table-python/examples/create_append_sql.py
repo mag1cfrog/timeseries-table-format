@@ -34,7 +34,7 @@ def run(*, table_root: Path, rows: int) -> pa.Table:
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

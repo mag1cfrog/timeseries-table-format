@@ -422,7 +422,7 @@ def test_session_sql_reader_registered_tstable_and_join(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

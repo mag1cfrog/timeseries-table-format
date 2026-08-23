@@ -74,7 +74,7 @@ def test_session_sql_join_tstable_and_parquet(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -130,7 +130,7 @@ def test_session_sql_left_join_dim_missing_keys_preserves_fact_rows(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -167,7 +167,7 @@ def test_session_sql_join_duplicate_dim_keys_multiplies_rows(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )
@@ -204,7 +204,7 @@ def test_session_sql_join_key_type_mismatch_is_visible_and_raises(tmp_path):
         table_root=str(table_root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

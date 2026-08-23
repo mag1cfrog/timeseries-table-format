@@ -25,7 +25,7 @@ def _create_entity_table(root) -> ttf.TimeSeriesTable:
         table_root=str(root),
         index_column="tick",
         index_type="uint64",
-        bucket_width=10,
+        index_granularity=10,
         entity_columns=["device_id"],
     )
 
@@ -73,7 +73,7 @@ def test_optimize_maps_applicability_error_with_table_context(tmp_path):
         table_root=str(root),
         index_column="tick",
         index_type="uint64",
-        bucket_width=10,
+        index_granularity=10,
     )
 
     with pytest.raises(ttf.TimeseriesTableError, match="no entity columns") as excinfo:

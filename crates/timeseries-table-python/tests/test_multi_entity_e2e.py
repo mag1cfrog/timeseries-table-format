@@ -46,7 +46,7 @@ def test_multi_entity_optimize_preserves_queries_across_reopen(tmp_path):
         table_root=str(root),
         index_column="tick",
         index_type="uint64",
-        bucket_width=10,
+        index_granularity=10,
         entity_columns=["fleet_id", "device_id"],
     )
     device_a = tmp_path / "device-a.parquet"

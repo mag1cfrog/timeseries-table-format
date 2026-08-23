@@ -16,7 +16,7 @@ def test_smoke_constructs_session_and_table(tmp_path):
         table_root=str(root),
         index_column="ts",
         index_type="timestamp",
-        bucket="1h",
+        index_granularity="1h",
         entity_columns=["symbol"],
         timezone=None,
     )

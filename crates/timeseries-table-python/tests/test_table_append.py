@@ -17,7 +17,7 @@ def _create_table(tmp_path) -> tuple[ttf.TimeSeriesTable, str]:
         table_root=str(root),
         index_column="ts",
         index_type="int64",
-        bucket_width=10,
+        index_granularity=10,
         entity_columns=["symbol"],
     )
     return table, str(root)
@@ -235,7 +235,7 @@ def test_append_midstream_error_rolls_back_data_and_version(tmp_path):
         table_root=str(root),
         index_column="x",
         index_type="int64",
-        bucket_width=1,
+        index_granularity=1,
     )
     source = testing._test_sql_reader_midstream_error()
 
@@ -331,7 +331,7 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
         table_root=str(root),
         index_column="x",
         index_type="int64",
-        bucket_width=1,
+        index_granularity=1,
     )
     source, counter = testing._test_append_stream_with_release_counter(
         fail_after_first=fail_after_first
@@ -360,7 +360,7 @@ def test_append_maps_missing_stream_error_details_and_releases_once(tmp_path):
         table_root=str(root),
         index_column="x",
         index_type="int64",
-        bucket_width=1,
+        index_granularity=1,
     )
     source, counter = testing._test_append_stream_with_release_counter(
         fail_after_first=True,
@@ -402,7 +402,7 @@ def test_append_releases_native_stream_once_when_schema_import_fails(tmp_path):
     [
         (
             "negative-int64",
-            {"index_column": "idx", "index_type": "int64", "bucket_width": 10},
+            {"index_column": "idx", "index_type": "int64", "index_granularity": 10},
             pa.record_batch(
                 {
                     "idx": pa.array([-20, -10], type=pa.int64()),
@@ -412,7 +412,7 @@ def test_append_releases_native_stream_once_when_schema_import_fails(tmp_path):
         ),
         (
             "high-uint64",
-            {"index_column": "idx", "index_type": "uint64", "bucket_width": 10},
+            {"index_column": "idx", "index_type": "uint64", "index_granularity": 10},
             pa.record_batch(
                 {
                     "idx": pa.array([2**64 - 20, 2**64 - 11], type=pa.uint64()),
@@ -425,7 +425,7 @@ def test_append_releases_native_stream_once_when_schema_import_fails(tmp_path):
             {
                 "index_column": "ts",
                 "index_type": "timestamp",
-                "bucket": "1h",
+                "index_granularity": "1h",
                 "timezone": "America/Phoenix",
             },
             pa.record_batch(
@@ -486,7 +486,7 @@ def test_append_releases_gil_while_consuming_slow_native_stream(tmp_path):
         table_root=str(root),
         index_column="value",
         index_type="int64",
-        bucket_width=1,
+        index_granularity=1,
     )
     source = testing._test_sql_reader_delayed_batches(
         batch_count=5,

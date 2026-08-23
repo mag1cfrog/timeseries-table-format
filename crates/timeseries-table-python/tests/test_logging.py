@@ -57,7 +57,7 @@ def test_native_operation_uses_python_logging_namespace():
                 table_root=str(Path(directory) / "table"),
                 index_column="ts",
                 index_type="timestamp",
-                bucket="1h",
+                index_granularity="1h",
             )
 
         created = next(
@@ -106,7 +106,7 @@ def test_native_logging_cache_can_be_refreshed_after_level_changes():
                 table_root=str(root / "quiet"),
                 index_column="ts",
                 index_type="timestamp",
-                bucket="1h",
+                index_granularity="1h",
             )
             assert records == []
 
@@ -115,7 +115,7 @@ def test_native_logging_cache_can_be_refreshed_after_level_changes():
                 table_root=str(root / "still-quiet"),
                 index_column="ts",
                 index_type="timestamp",
-                bucket="1h",
+                index_granularity="1h",
             )
             assert records == []
 
@@ -124,7 +124,7 @@ def test_native_logging_cache_can_be_refreshed_after_level_changes():
                 table_root=str(root / "visible"),
                 index_column="ts",
                 index_type="timestamp",
-                bucket="1h",
+                index_granularity="1h",
             )
 
         assert any(
@@ -165,7 +165,7 @@ def test_reload_does_not_duplicate_native_records():
                 table_root=str(Path(directory) / "table"),
                 index_column="ts",
                 index_type="timestamp",
-                bucket="1h",
+                index_granularity="1h",
             )
 
         created = [
@@ -236,7 +236,7 @@ def test_logging_handler_failure_does_not_fail_committed_operation():
                 table_root=str(Path(directory) / "table"),
                 index_column="ts",
                 index_type="int64",
-                bucket_width=10,
+                index_granularity=10,
             )
             assert table.version() == 1
         """
@@ -274,7 +274,7 @@ def test_native_records_exclude_sensitive_operation_inputs():
                 table_root=str(table_root),
                 index_column="ts",
                 index_type="int64",
-                bucket_width=10,
+                index_granularity=10,
                 entity_columns=["private_entity_key_348"],
             )
             pq.write_table(
@@ -344,7 +344,7 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
                 table_root=str(table_root),
                 index_column="ts",
                 index_type="int64",
-                bucket_width=10,
+                index_granularity=10,
             )
 
             first = root / "first.parquet"
@@ -424,7 +424,7 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
                 table_root=str(table_root),
                 index_column="tick",
                 index_type="uint64",
-                bucket_width=10,
+                index_granularity=10,
                 entity_columns=["device_id"],
             )
             pq.write_table(

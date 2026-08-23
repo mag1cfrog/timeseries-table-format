@@ -631,7 +631,7 @@ def main(argv: list[str]) -> int:
                 table_root=str(table_root),
                 index_column="ts",
                 index_type="timestamp",
-                bucket="1h",
+                index_granularity="1h",
                 # This benchmark measures query conversion, not entity-aware coverage, so
                 # `entity_id` remains a normal query column.
                 entity_columns=[],
