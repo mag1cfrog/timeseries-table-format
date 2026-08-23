@@ -1433,14 +1433,17 @@ async fn append_rejects_hostile_arrow_types_without_artifacts() -> TestResult {
                 &error,
                 TableError::Append {
                     source: AppendError::InputSchemaCompatibility {
-                        source:
-                            SchemaCompatibilityError::IncomingTypeMismatch {
-                                column,
-                                incoming_type,
-                                ..
-                            }
+                        source,
+                        ..
                     }
-                } if column == "price" && incoming_type == &hostile_type
+                } if matches!(
+                    source.as_ref(),
+                    SchemaCompatibilityError::IncomingTypeMismatch {
+                        column,
+                        incoming_type,
+                        ..
+                    } if column == "price" && incoming_type == &hostile_type
+                )
             ),
             "unexpected {case} error: {error}"
         );

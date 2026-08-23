@@ -71,8 +71,10 @@ pub enum AppendError {
     )]
     InputSchemaCompatibility {
         /// Complete schema compatibility failure.
-        #[snafu(source, backtrace)]
-        source: SchemaCompatibilityError,
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured at the append schema boundary.
+        backtrace: Backtrace,
     },
 
     /// A generated segment is incompatible with the table schema.
@@ -83,8 +85,10 @@ pub enum AppendError {
         /// Generated table-relative segment path.
         segment_path: String,
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
         source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured at the generated-segment schema boundary.
+        backtrace: Backtrace,
     },
 
     /// Table state lacks the canonical schema required by append.
@@ -100,8 +104,10 @@ pub enum AppendError {
     #[snafu(context(false), display("Generated segment metadata error: {source}"))]
     SegmentMetadata {
         /// Complete segment metadata failure.
-        #[snafu(source(from(SegmentError, Box::new)), backtrace)]
+        #[snafu(source(from(SegmentError, Box::new)))]
         source: Box<SegmentError>,
+        /// Backtrace captured because not every segment error variant owns one.
+        backtrace: Backtrace,
     },
 
     /// Streaming the append input into Parquet failed.
@@ -118,8 +124,10 @@ pub enum AppendError {
     #[snafu(context(false), display("Segment coverage error: {source}"))]
     GeneratedSegmentCoverage {
         /// Complete segment coverage derivation failure.
-        #[snafu(source(from(SegmentCoverageError, Box::new)), backtrace)]
+        #[snafu(source(from(SegmentCoverageError, Box::new)))]
         source: Box<SegmentCoverageError>,
+        /// Backtrace captured because not every segment coverage error variant owns one.
+        backtrace: Backtrace,
     },
 
     /// An ordered-index interval could not be reconstructed for a diagnostic.
@@ -212,7 +220,7 @@ pub enum AppendError {
     },
 
     /// Direct storage access for an append artifact failed.
-    #[snafu(context(false), display("Append storage error: {source}"))]
+    #[snafu(context(false), display("Storage error: {source}"))]
     Storage {
         /// Complete storage failure.
         #[snafu(source, backtrace)]
@@ -220,7 +228,7 @@ pub enum AppendError {
     },
 
     /// Publishing the append transaction failed with a definite outcome.
-    #[snafu(context(false), display("Append commit error: {source}"))]
+    #[snafu(context(false), display("Commit error: {source}"))]
     Commit {
         /// Complete transaction-log failure.
         #[snafu(source, backtrace)]
@@ -229,7 +237,7 @@ pub enum AppendError {
 
     /// The append transaction may have committed, so its artifacts were preserved.
     #[snafu(display(
-        "Append commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
+        "Commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
     ))]
     CommitAmbiguous {
         /// Generated table-relative Parquet path that was preserved.
@@ -240,7 +248,14 @@ pub enum AppendError {
     },
 
     /// Append failed and one or more attempt-owned artifacts could not be removed.
-    #[snafu(display("Append failed: {source}; artifact rollback also failed: {cleanup_errors:?}"))]
+    #[snafu(display(
+        "{source}; artifact rollback also failed: [{}]",
+        cleanup_errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))]
     Rollback {
         /// Original append failure that triggered rollback.
         #[snafu(source, backtrace)]
@@ -595,6 +610,13 @@ mod tests {
     }
 
     #[test]
+    fn append_schema_wrapper_captures_a_backtrace_for_a_source_without_one() {
+        let error = AppendError::from(SchemaCompatibilityError::MissingTableSchema);
+
+        assert!(ErrorCompat::backtrace(&error).is_some());
+    }
+
+    #[test]
     fn append_rollback_preserves_primary_chain_cleanup_errors_and_backtrace() {
         let commit_error = CommitError::Conflict {
             expected: 1,
@@ -644,6 +666,9 @@ mod tests {
             cleanup_errors.as_slice(),
             [StorageError::OtherIo { path, .. }] if path == "data/segment.parquet"
         ));
+        let message = error.to_string();
+        assert!(message.contains("cleanup failed"));
+        assert!(!message.contains("Backtrace"));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(&error).expect("table backtrace"),
             commit_backtrace

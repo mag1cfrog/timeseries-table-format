@@ -2639,7 +2639,7 @@ mod tests {
         let message = error.to_string();
         match error {
             TableError::Append {
-                source: AppendError::GeneratedSegmentCoverage { source },
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
             } => match *source {
                 SegmentCoverageError::DuplicateIndexInterval {
                     path: segment_path,
@@ -2696,7 +2696,7 @@ mod tests {
         assert!(matches!(
             error,
             TableError::Append {
-                source: AppendError::GeneratedSegmentCoverage { source },
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
             } if matches!(source.as_ref(),
                 SegmentCoverageError::DuplicateIndexInterval {
                     example_identity: None,
@@ -2755,7 +2755,7 @@ mod tests {
         assert!(matches!(
             error,
             TableError::Append {
-                source: AppendError::GeneratedSegmentCoverage { source },
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
             } if matches!(source.as_ref(),
                 SegmentCoverageError::DuplicateIndexInterval {
                     example_identity: Some(example_identity),
@@ -2799,7 +2799,7 @@ mod tests {
         assert!(matches!(
             error,
             TableError::Append {
-                source: AppendError::GeneratedSegmentCoverage { source },
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
             } if matches!(source.as_ref(),
                 SegmentCoverageError::DuplicateIndexInterval {
                     example_identity: Some(example_identity),
@@ -3088,18 +3088,21 @@ mod tests {
 
         assert!(
             matches!(
-            error,
-            TableError::Append {
-                source: AppendError::InputSchemaCompatibility {
-                    source:
-                        crate::metadata::schema_compat::SchemaCompatibilityError::IndexKindMismatch {
-                            expected: "uint64",
-                            actual: LogicalDataType::Int64,
-                            ..
-                        }
-                }
-            }
-        ),
+                error,
+                TableError::Append {
+                    source: AppendError::InputSchemaCompatibility {
+                        ref source,
+                        ..
+                    }
+                } if matches!(
+                    source.as_ref(),
+                    crate::metadata::schema_compat::SchemaCompatibilityError::IndexKindMismatch {
+                        expected: "uint64",
+                        actual: LogicalDataType::Int64,
+                        ..
+                    }
+                )
+            ),
             "unexpected error: {error:?}"
         );
         assert_eq!(table.state, state_before);
@@ -3428,13 +3431,16 @@ mod tests {
             error,
             TableError::Append {
                 source: AppendError::InputSchemaCompatibility {
-                    source:
-                        crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
-                            column,
-                            actual: LogicalDataType::Bool,
-                        }
+                    ref source,
+                    ..
                 }
-            } if column == "device_id"
+            } if matches!(
+                source.as_ref(),
+                crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
+                    column,
+                    actual: LogicalDataType::Bool,
+                } if column == "device_id"
+            )
         ));
         assert_eq!(table.state, state_before);
         assert!(coverage_files(tmp.path())?.is_empty());

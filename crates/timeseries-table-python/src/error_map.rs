@@ -165,32 +165,20 @@ fn duplicate_index_interval_error_to_py(
     py_err
 }
 
-#[allow(dead_code)]
-pub(crate) fn table_error_to_py(
+fn append_error_to_py(
     py: Python<'_>,
-    err: TableError,
+    err: AppendError,
     entity_columns: &[String],
+    msg: String,
 ) -> PyErr {
-    let msg = err.to_string();
-
     match err {
-        TableError::Storage { source }
-        | TableError::Append {
-            source: AppendError::Storage { source },
-        } => storage_error_to_py(py, source),
-
-        TableError::TransactionLog { source }
-        | TableError::Append {
-            source: AppendError::Commit { source },
-        } => commit_error_to_py(py, source),
-
-        TableError::Append {
-            source: AppendError::CommitAmbiguous { source, .. },
-        } => commit_error_to_py(py, *source),
-
-        TableError::Append {
-            source: AppendError::GeneratedSegmentCoverage { source },
-        } => match *source {
+        AppendError::Rollback { source, .. } => {
+            append_error_to_py(py, *source, entity_columns, msg)
+        }
+        AppendError::Storage { source } => storage_error_to_py(py, source),
+        AppendError::Commit { source } => commit_error_to_py(py, source),
+        AppendError::CommitAmbiguous { source, .. } => commit_error_to_py(py, *source),
+        AppendError::GeneratedSegmentCoverage { source, .. } => match *source {
             SegmentCoverageError::DuplicateIndexInterval {
                 path,
                 example_identity,
@@ -205,16 +193,12 @@ pub(crate) fn table_error_to_py(
             ),
             _ => TimeseriesTableError::new_err(msg),
         },
-
-        TableError::Append {
-            source:
-                AppendError::PersistedIndexIntervalOverlap {
-                    segment_path,
-                    overlap_count,
-                    example_identity,
-                    example_index_interval_id: _,
-                    example_index_interval,
-                },
+        AppendError::PersistedIndexIntervalOverlap {
+            segment_path,
+            overlap_count,
+            example_identity,
+            example_index_interval_id: _,
+            example_index_interval,
         } => index_interval_overlap_error_to_py(
             py,
             msg,
@@ -224,14 +208,83 @@ pub(crate) fn table_error_to_py(
             entity_columns,
             example_identity.as_ref(),
         ),
+        AppendError::InputSchemaCompatibility { .. }
+        | AppendError::GeneratedSegmentSchemaCompatibility { .. } => {
+            SchemaMismatchError::new_err(msg)
+        }
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
 
-        TableError::SchemaCompatibility { .. }
-        | TableError::Append {
-            source:
-                AppendError::InputSchemaCompatibility { .. }
-                | AppendError::GeneratedSegmentSchemaCompatibility { .. },
-        } => SchemaMismatchError::new_err(err.to_string()),
+#[allow(dead_code)]
+pub(crate) fn table_error_to_py(
+    py: Python<'_>,
+    err: TableError,
+    entity_columns: &[String],
+) -> PyErr {
+    let msg = err.to_string();
+
+    match err {
+        TableError::Storage { source } => storage_error_to_py(py, source),
+
+        TableError::TransactionLog { source } => commit_error_to_py(py, source),
+
+        TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
+
+        TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),
 
         _ => TimeseriesTableError::new_err(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use pyo3::types::PyAnyMethods;
+    use timeseries_table_format::{
+        coverage::index_interval::{index_interval_for_id, index_interval_id_for_value},
+        storage::StorageLocation,
+        transaction_log::{IndexKind, IndexValue},
+    };
+
+    use super::*;
+
+    #[test]
+    fn rollback_preserves_the_primary_python_exception_category() {
+        let kind = IndexKind::Int64 {
+            index_granularity: NonZeroU64::new(10).expect("nonzero test index granularity"),
+        };
+        let example_index_interval_id = index_interval_id_for_value(&kind, &IndexValue::Int64(0))
+            .expect("valid test index interval ID");
+        let example_index_interval = index_interval_for_id(&kind, example_index_interval_id)
+            .expect("valid test index interval");
+        let cleanup_error =
+            StorageLocation::parse("").expect_err("empty storage location must fail");
+        let error = TableError::from(AppendError::Rollback {
+            source: Box::new(AppendError::PersistedIndexIntervalOverlap {
+                segment_path: "data/test.parquet".to_string(),
+                overlap_count: 1,
+                example_identity: None,
+                example_index_interval_id,
+                example_index_interval: Box::new(example_index_interval),
+            }),
+            cleanup_errors: vec![cleanup_error],
+        });
+
+        Python::initialize();
+        Python::attach(|py| {
+            let error = table_error_to_py(py, error, &[]);
+            assert!(error.is_instance_of::<IndexIntervalOverlapError>(py));
+            assert_eq!(
+                error
+                    .value(py)
+                    .getattr("conflict_count")
+                    .expect("conflict_count")
+                    .extract::<u128>()
+                    .expect("integer conflict_count"),
+                1
+            );
+        });
     }
 }
