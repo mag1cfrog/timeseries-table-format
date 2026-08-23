@@ -43,7 +43,8 @@ use super::{TimeSeriesScan, TimeSeriesTable};
 
 const SCAN_BATCH_SIZE: usize = 8_192;
 
-type ScanStream = Pin<Box<dyn futures::Stream<Item = Result<RecordBatch, ScanError>> + Send>>;
+type SegmentScanStream =
+    Pin<Box<dyn futures::Stream<Item = Result<RecordBatch, ScanError>> + Send>>;
 
 /// Errors from planning or lazily executing a table scan.
 #[derive(Debug, Snafu)]
@@ -269,13 +270,13 @@ fn to_bounds_i64(
     }
 }
 
-async fn segment_range_stream<S, E>(
+async fn build_segment_scan_stream<S, E>(
     reader: impl AsyncFileReader + Unpin + 'static,
     path: String,
     index_column: &str,
     start: S,
     end: E,
-) -> Result<ScanStream, ScanError>
+) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
     E: Into<IndexValue>,
@@ -407,13 +408,13 @@ where
     Ok(Box::pin(stream))
 }
 
-async fn read_segment_range<S, E>(
+async fn open_segment_scan<S, E>(
     location: &TableLocation,
     segment: &SegmentMeta,
     index_column: &str,
     start: S,
     end: E,
-) -> Result<ScanStream, ScanError>
+) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
     E: Into<IndexValue>,
@@ -425,12 +426,12 @@ where
             path: &segment.path,
         })?;
 
-    segment_range_stream(reader, segment.path.clone(), index_column, start, end).await
+    build_segment_scan_stream(reader, segment.path.clone(), index_column, start, end).await
 }
 
 struct ScanState {
     candidates: std::vec::IntoIter<SegmentMeta>,
-    current: Option<ScanStream>,
+    current: Option<SegmentScanStream>,
     location: TableLocation,
     index_column: String,
     start: IndexValue,
@@ -438,7 +439,14 @@ struct ScanState {
 }
 
 impl TimeSeriesTable {
-    fn plan_scan_range(&self, start: IndexValue, end: IndexValue) -> Result<ScanStream, ScanError> {
+    fn build_scan_stream(
+        &self,
+        start: IndexValue,
+        end: IndexValue,
+    ) -> Result<
+        impl futures::Stream<Item = Result<RecordBatch, ScanError>> + Send + 'static,
+        ScanError,
+    > {
         validate_index_range(&self.index.kind, &start, &end).context(InvalidRangeSnafu)?;
 
         // Pick candidate segments and sort them by index_min, index_max, and path.
@@ -471,7 +479,7 @@ impl TimeSeriesTable {
                     return Ok(None);
                 };
                 state.current = Some(
-                    read_segment_range(
+                    open_segment_scan(
                         &state.location,
                         &segment,
                         &state.index_column,
@@ -483,7 +491,7 @@ impl TimeSeriesTable {
             }
         });
 
-        Ok(Box::pin(stream))
+        Ok(stream)
     }
 
     /// Scan the time-series table for record batches overlapping `[start, end)`,
@@ -498,7 +506,7 @@ impl TimeSeriesTable {
     {
         let start = start.into();
         let end = end.into();
-        let stream = self.plan_scan_range(start, end).context(ScanSnafu)?;
+        let stream = self.build_scan_stream(start, end).context(ScanSnafu)?;
         Ok(Box::pin(
             stream.map_err(|source| TableError::Scan { source }),
         ))
@@ -546,6 +554,7 @@ mod tests {
         data: bytes::Bytes,
         stats: Arc<TrackingStats>,
         gate: Option<(usize, futures::channel::oneshot::Receiver<()>)>,
+        fail_on_read_call: Option<usize>,
     }
 
     impl TrackingReader {
@@ -556,9 +565,16 @@ mod tests {
                     data,
                     stats: Arc::clone(&stats),
                     gate: None,
+                    fail_on_read_call: None,
                 },
                 stats,
             )
+        }
+
+        fn with_failure(data: bytes::Bytes, failed_call: usize) -> (Self, Arc<TrackingStats>) {
+            let (mut reader, stats) = Self::new(data);
+            reader.fail_on_read_call = Some(failed_call);
+            (reader, stats)
         }
 
         fn with_gate(
@@ -602,8 +618,15 @@ mod tests {
 
     impl AsyncFileReader for TrackingReader {
         fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<bytes::Bytes>> {
-            let (_, mut ranges) = self.read_ranges(vec![range]);
-            futures::future::ready(Ok(ranges.pop().expect("one requested range"))).boxed()
+            let (call, mut ranges) = self.read_ranges(vec![range]);
+            let result = if self.fail_on_read_call == Some(call) {
+                Err(ParquetError::General(
+                    "injected batch read failure".to_string(),
+                ))
+            } else {
+                Ok(ranges.pop().expect("one requested range"))
+            };
+            futures::future::ready(result).boxed()
         }
 
         fn get_byte_ranges(
@@ -611,6 +634,7 @@ mod tests {
             ranges: Vec<Range<u64>>,
         ) -> BoxFuture<'_, ParquetResult<Vec<bytes::Bytes>>> {
             let (call, bytes) = self.read_ranges(ranges);
+            let fail = self.fail_on_read_call == Some(call);
             let gate = self
                 .gate
                 .as_ref()
@@ -620,7 +644,13 @@ mod tests {
                 if let Some(gate) = gate {
                     let _ = gate.await;
                 }
-                Ok(bytes)
+                if fail {
+                    Err(ParquetError::General(
+                        "injected batch read failure".to_string(),
+                    ))
+                } else {
+                    Ok(bytes)
+                }
             }
             .boxed()
         }
@@ -938,6 +968,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_range_rejects_reversed_unsigned_range() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::UInt64 {
+            index_granularity: NonZeroU64::new(1).unwrap(),
+        };
+        let table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+
+        assert!(matches!(
+            table.scan_range(2u64, 1u64).await,
+            Err(TableError::Scan {
+                source: ScanError::InvalidRange {
+                    source: IndexValueError::InvalidRange { .. },
+                    ..
+                }
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integer_segment_stream_is_directly_polled() -> TestResult {
         let tmp = TempDir::new()?;
         let path = tmp.path().join("int64-stream.parquet");
@@ -947,7 +999,7 @@ mod tests {
         )?;
         let data = bytes::Bytes::from(std::fs::read(path)?);
         let (reader, stats) = TrackingReader::new(data.clone());
-        let mut stream = segment_range_stream(
+        let mut stream = build_segment_scan_stream(
             reader,
             "data/int64-stream.parquet".to_string(),
             "ts",
@@ -974,7 +1026,7 @@ mod tests {
         assert!(stats.dropped.load(Ordering::SeqCst));
 
         let (reader, stats, release) = TrackingReader::with_gate(data, 2);
-        let mut stream = segment_range_stream(
+        let mut stream = build_segment_scan_stream(
             reader,
             "data/int64-stream.parquet".to_string(),
             "ts",
@@ -1004,6 +1056,45 @@ mod tests {
                 .num_rows(),
             1
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn segment_scan_preserves_lazy_batch_read_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("lazy-read-failure.parquet");
+        write_index_parquet(&path, Arc::new(Int64Array::from(vec![0, 1])))?;
+        let data = bytes::Bytes::from(std::fs::read(path)?);
+        let (reader, stats) = TrackingReader::with_failure(data, 1);
+        let mut stream = build_segment_scan_stream(
+            reader,
+            "data/lazy-read-failure.parquet".to_string(),
+            "ts",
+            0i64,
+            2i64,
+        )
+        .await?;
+
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
+        let error = stream
+            .next()
+            .await
+            .expect("lazy batch read")
+            .expect_err("injected read must fail");
+        assert!(matches!(
+            &error,
+            ScanError::Parquet {
+                path,
+                operation: "reading a batch",
+                ..
+            } if path == "data/lazy-read-failure.parquet"
+        ));
+        assert!(matches!(
+            error.source(),
+            Some(source) if source.downcast_ref::<Box<ParquetError>>().is_some()
+        ));
+        assert!(ErrorCompat::backtrace(&error).is_some());
+        assert!(stream.next().await.is_none());
         Ok(())
     }
 
@@ -1208,7 +1299,7 @@ mod tests {
         let file_size = data.len();
 
         let (reader, stats) = TrackingReader::new(data.clone());
-        let mut stream = segment_range_stream(
+        let mut stream = build_segment_scan_stream(
             reader,
             "data/multi-row-group.parquet".to_string(),
             "ts",
@@ -1237,7 +1328,7 @@ mod tests {
         assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
 
         let (reader, gated_stats, release) = TrackingReader::with_gate(data, 2);
-        let mut stream = segment_range_stream(
+        let mut stream = build_segment_scan_stream(
             reader,
             "data/multi-row-group.parquet".to_string(),
             "ts",
@@ -1300,7 +1391,7 @@ mod tests {
         let data = bytes::Bytes::from(std::fs::read(path)?);
         let (reader, stats, release) = TrackingReader::with_gate(data, 2);
 
-        let mut stream = segment_range_stream(
+        let mut stream = build_segment_scan_stream(
             reader,
             "data/filtered-row-groups.parquet".to_string(),
             "ts",
@@ -1325,7 +1416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_segment_range_errors_when_missing_time_column() -> TestResult {
+    async fn open_segment_scan_errors_when_missing_time_column() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -1347,7 +1438,7 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = match read_segment_range(&location, &segment, "ts", start, end).await {
+        let err = match open_segment_scan(&location, &segment, "ts", start, end).await {
             Err(err) => err,
             Ok(_) => panic!("missing ts column should error"),
         };
@@ -1358,7 +1449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_segment_range_errors_on_unsupported_time_type() -> TestResult {
+    async fn open_segment_scan_errors_on_unsupported_time_type() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
@@ -1381,7 +1472,7 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = match read_segment_range(&location, &segment, "ts", start, end).await {
+        let err = match open_segment_scan(&location, &segment, "ts", start, end).await {
             Err(err) => err,
             Ok(_) => panic!("unsupported time type should error"),
         };
@@ -1392,24 +1483,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_segment_range_overflow_bounds_nanoseconds() -> TestResult {
+    async fn scan_range_reports_timestamp_conversion_overflow() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(
+            location,
+            make_table_meta_with_unit(LogicalTimestampUnit::Nanos),
+        )
+        .await?;
 
         let rel = "data/nano-empty.parquet";
         let path = tmp.path().join(rel);
         write_arrow_parquet_with_unit(&path, ArrowTimeUnit::Nanosecond, &[], &[], &[])?;
-
-        let segment = SegmentMeta {
-            path: rel.to_string(),
-            format: FileFormat::Parquet,
-            entity_layout: SegmentEntityLayout::NotApplicable,
-            index_min: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
-            index_max: (utc_datetime(2024, 1, 1, 0, 0, 0)).into(),
-            row_count: 0,
-            file_size: None,
-            coverage_path: None,
-        };
 
         let huge = Utc
             .timestamp_opt(9_223_372_037, 0)
@@ -1418,12 +1503,35 @@ mod tests {
         let end = huge
             .checked_add_signed(chrono::Duration::seconds(1))
             .unwrap();
-        let err = match read_segment_range(&location, &segment, "ts", huge, end).await {
-            Err(err) => err,
-            Ok(_) => panic!("overflow during bound conversion should error"),
-        };
 
-        assert!(matches!(err, ScanError::TimeConversionOverflow { .. }));
+        let segment = SegmentMeta {
+            path: rel.to_string(),
+            format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::NotApplicable,
+            index_min: huge.into(),
+            index_max: huge.into(),
+            row_count: 0,
+            file_size: None,
+            coverage_path: None,
+        };
+        table.state.segments.insert(segment.path.clone(), segment);
+
+        let mut stream = table.scan_range(huge, end).await?;
+        let error = stream
+            .next()
+            .await
+            .expect("timestamp conversion error")
+            .expect_err("overflow during bound conversion must fail");
+
+        assert!(matches!(
+            &error,
+            TableError::Scan {
+                source: ScanError::TimeConversionOverflow { .. }
+            }
+        ));
+        assert!(error.to_string().contains(rel));
+        assert!(ErrorCompat::backtrace(&error).is_some());
+        assert!(stream.next().await.is_none());
         Ok(())
     }
 
@@ -2016,6 +2124,50 @@ mod tests {
         assert!(matches!(
             storage_source,
             storage::StorageError::NotFound { .. }
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(storage_source).expect("storage backtrace"),
+        ));
+        assert!(error.to_string().contains(rel));
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_range_preserves_non_not_found_storage_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            index_granularity: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(tmp.path()), integer_table_meta(kind))
+                .await?;
+        let rel = "../outside.parquet";
+        table.state.segments.insert(
+            rel.to_string(),
+            indexed_segment(rel, 0i64.into(), 1i64.into()),
+        );
+
+        let mut stream = table.scan_range(0i64, 2i64).await?;
+        let error = stream
+            .next()
+            .await
+            .expect("invalid storage path error")
+            .expect_err("invalid storage path must fail");
+        let scan_source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ScanError>())
+            .expect("scan source");
+        let storage_source = scan_source
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<storage::StorageError>>())
+            .map(Box::as_ref)
+            .expect("storage source");
+
+        assert!(matches!(
+            storage_source,
+            storage::StorageError::OtherIo { .. }
         ));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(&error).expect("table backtrace"),
