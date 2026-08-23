@@ -19,7 +19,6 @@ Create these approval-gated GitHub environments:
 - `crates-io-release`
 - `pypi`
 - `testpypi`
-- `testpypi-snapshot`
 
 Configure a crates.io trusted publisher for `timeseries-table-format` with:
 
@@ -62,8 +61,10 @@ full wheel and sdist rehearsal is useful. Keep its `snapshot` input enabled so
 the build uses a unique development version and cannot collide with a production
 version.
 
-The `TestPyPI snapshot` workflow automatically publishes an Ubuntu wheel after
-relevant changes land on `main`. TestPyPI uploads are disposable and may be
+The `Python snapshot` workflow automatically builds Linux and Windows wheels
+after relevant changes land on `main`, retains them as GitHub Actions artifacts
+for seven days, and installs those exact wheels in its smoke-test matrix. It does
+not publish to TestPyPI. TestPyPI rehearsal uploads are disposable and may be
 rerun; production PyPI uploads are immutable.
 
 ## Recovering a partial release
