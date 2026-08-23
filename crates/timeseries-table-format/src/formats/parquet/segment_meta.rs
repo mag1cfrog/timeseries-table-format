@@ -21,7 +21,7 @@ use tokio::task::JoinSet;
 use crate::metadata::segments::ParquetIndexColumnError;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::storage::{TableLocation, file_size, open_parquet_reader};
-use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
+use crate::transaction_log::segments::{SegmentError, SegmentMetaError, SegmentResult};
 use crate::transaction_log::{FileFormat, SegmentEntityLayout, SegmentMeta};
 
 use super::schema::{ParquetIndexKind, ParquetTimestampUnit, validate_parquet_index};
@@ -330,7 +330,7 @@ async fn scan_index_row_groups(
         tasks.spawn(async move {
             let file = open_parquet_reader(location.as_ref(), &rel_path)
                 .await
-                .map_err(map_storage_error)?;
+                .map_err(SegmentError::from)?;
             let reader = ParquetRecordBatchStreamBuilder::new_with_metadata(file, metadata)
                 .with_projection(mask)
                 .with_row_groups(chunk)
@@ -414,7 +414,7 @@ pub(crate) async fn segment_meta_from_parquet(
     let path_str = rel_path.display().to_string();
     let file_size = file_size(location.as_ref(), rel_path)
         .await
-        .map_err(map_storage_error)?;
+        .map_err(SegmentError::from)?;
     if file_size < 8 {
         return Err(SegmentMetaError::TooShort {
             path: path_str.clone(),
@@ -424,7 +424,7 @@ pub(crate) async fn segment_meta_from_parquet(
 
     let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
-        .map_err(map_storage_error)?;
+        .map_err(SegmentError::from)?;
 
     let metadata = ArrowReaderMetadata::load_async(&mut file, ArrowReaderOptions::default())
         .await

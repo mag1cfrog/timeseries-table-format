@@ -21,9 +21,7 @@ use crate::metadata::logical_schema::{
 use crate::metadata::segments::ParquetIndexColumnError;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec};
 use crate::storage::{TableLocation, open_parquet_reader};
-use crate::transaction_log::segments::{
-    SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
-};
+use crate::transaction_log::segments::{SegmentError, SegmentMetaError, SegmentResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ParquetTimestampUnit {
@@ -602,7 +600,7 @@ pub async fn logical_schema_from_parquet(
     let path = rel_path.display().to_string();
     let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
-        .map_err(map_storage_error)?;
+        .map_err(SegmentError::from)?;
     let metadata =
         file.get_metadata(None)
             .await

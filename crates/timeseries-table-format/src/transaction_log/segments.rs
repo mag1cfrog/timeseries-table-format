@@ -50,22 +50,21 @@ pub enum SegmentError {
 #[allow(clippy::result_large_err)]
 pub type SegmentResult<T> = Result<T, SegmentError>;
 
-/// Convert a lower-level `StorageError` into the corresponding `SegmentError`.
-///
-/// A missing path receives segment-specific context. Every other storage
-/// failure remains a typed source under `SegmentError::Storage`.
-pub fn map_storage_error(err: StorageError) -> SegmentError {
-    let (is_missing, path) = match &err {
-        StorageError::NotFound { path, .. } => (true, path.clone()),
-        StorageError::AlreadyExists { path, .. }
-        | StorageError::OtherIo { path, .. }
-        | StorageError::CleanupFailed { path, .. } => (false, path.clone()),
-    };
+impl From<StorageError> for SegmentError {
+    fn from(source: StorageError) -> Self {
+        let is_missing = matches!(&source, StorageError::NotFound { .. });
+        let path = match &source {
+            StorageError::NotFound { path, .. }
+            | StorageError::AlreadyExists { path, .. }
+            | StorageError::OtherIo { path, .. }
+            | StorageError::CleanupFailed { path, .. } => path.clone(),
+        };
 
-    if is_missing {
-        SegmentError::MissingFile { path, source: err }
-    } else {
-        SegmentError::Storage { path, source: err }
+        if is_missing {
+            Self::MissingFile { path, source }
+        } else {
+            Self::Storage { path, source }
+        }
     }
 }
 
@@ -147,7 +146,7 @@ mod tests {
             source: io::Error::new(io::ErrorKind::NotFound, "missing").into(),
             backtrace: Backtrace::capture(),
         };
-        let error = map_storage_error(storage);
+        let error = SegmentError::from(storage);
 
         let segment_backtrace = ErrorCompat::backtrace(&error).expect("segment backtrace");
         let storage = error
@@ -178,7 +177,7 @@ mod tests {
         };
 
         assert!(matches!(
-            map_storage_error(storage),
+            SegmentError::from(storage),
             SegmentError::Storage {
                 source: StorageError::OtherIo { .. },
                 ..
