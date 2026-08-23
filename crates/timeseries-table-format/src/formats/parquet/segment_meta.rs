@@ -21,7 +21,7 @@ use tokio::task::JoinSet;
 use crate::metadata::segments::ParquetIndexColumnError;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::storage::{TableLocation, file_size, open_parquet_reader};
-use crate::transaction_log::segments::{SegmentMetaError, SegmentResult, map_storage_error};
+use crate::transaction_log::segments::{SegmentError, SegmentMetaError, SegmentResult};
 use crate::transaction_log::{FileFormat, SegmentEntityLayout, SegmentMeta};
 
 use super::schema::{ParquetIndexKind, ParquetTimestampUnit, validate_parquet_index};
@@ -330,7 +330,7 @@ async fn scan_index_row_groups(
         tasks.spawn(async move {
             let file = open_parquet_reader(location.as_ref(), &rel_path)
                 .await
-                .map_err(map_storage_error)?;
+                .map_err(SegmentError::from)?;
             let reader = ParquetRecordBatchStreamBuilder::new_with_metadata(file, metadata)
                 .with_projection(mask)
                 .with_row_groups(chunk)
@@ -414,7 +414,7 @@ pub(crate) async fn segment_meta_from_parquet(
     let path_str = rel_path.display().to_string();
     let file_size = file_size(location.as_ref(), rel_path)
         .await
-        .map_err(map_storage_error)?;
+        .map_err(SegmentError::from)?;
     if file_size < 8 {
         return Err(SegmentMetaError::TooShort {
             path: path_str.clone(),
@@ -424,7 +424,7 @@ pub(crate) async fn segment_meta_from_parquet(
 
     let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
-        .map_err(map_storage_error)?;
+        .map_err(SegmentError::from)?;
 
     let metadata = ArrowReaderMetadata::load_async(&mut file, ArrowReaderOptions::default())
         .await
@@ -514,7 +514,7 @@ pub(crate) async fn segment_meta_from_parquet(
 mod tests {
     use super::*;
     use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity};
-    use crate::transaction_log::segments::{SegmentError, SegmentIoError};
+    use crate::transaction_log::segments::SegmentError;
     use arrow::array::{
         ArrayRef, BinaryBuilder, Int64Array, TimestampMillisecondArray, UInt64Array,
     };
@@ -523,6 +523,7 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use parquet::basic::{Compression, LogicalType, Repetition, TimeUnit, Type as PhysicalType};
     use parquet::column::writer::ColumnWriter;
+    use parquet::errors::ParquetError;
     use parquet::file::metadata::{
         ColumnChunkMetaData, FileMetaData, ParquetMetaDataWriter, RowGroupMetaData,
     };
@@ -530,6 +531,8 @@ mod tests {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::types::{SchemaDescriptor, Type};
+    use snafu::ErrorCompat;
+    use std::error::Error as _;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::num::NonZeroU64;
@@ -1199,7 +1202,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue {
                     path,
                     column,
@@ -1220,7 +1223,7 @@ mod tests {
         let signed = segment_meta_from_parquet(&location, signed_path, &int64_index("index")).await;
         assert!(matches!(
             signed,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue {
                     expected_domain: "int64",
                     ..
@@ -1239,7 +1242,7 @@ mod tests {
             segment_meta_from_parquet(&location, unsigned_path, &uint64_index("index")).await;
         assert!(matches!(
             unsigned,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue {
                     expected_domain: "uint64",
                     ..
@@ -1328,7 +1331,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue { .. }
             })
         ));
@@ -1414,7 +1417,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1444,7 +1447,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1471,7 +1474,7 @@ mod tests {
             segment_meta_from_parquet(&location, signed_path, &uint64_index("index")).await;
         assert!(matches!(
             signed_as_unsigned,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1491,7 +1494,7 @@ mod tests {
             segment_meta_from_parquet(&location, unsigned_path, &int64_index("index")).await;
         assert!(matches!(
             unsigned_as_signed,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1527,7 +1530,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::ParquetStatsShape { path, column, .. }
             }) if path == "data/out_of_range.parquet" && column == "ts"
         ));
@@ -1545,14 +1548,28 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"PAR1PAR1garbage").await?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
+        let error = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts"))
+            .await
+            .expect_err("corrupt Parquet must fail");
+
+        let segment_backtrace = ErrorCompat::backtrace(&error).expect("segment backtrace");
+        let metadata = error
+            .source()
+            .and_then(|source| source.downcast_ref::<SegmentMetaError>())
+            .expect("segment metadata source");
+        let metadata_backtrace = ErrorCompat::backtrace(metadata).expect("metadata backtrace");
+        metadata
+            .source()
+            .and_then(|source| source.downcast_ref::<ParquetError>())
+            .expect("Parquet source");
 
         assert!(matches!(
-            result,
-            Err(SegmentError::Meta {
-                source: SegmentMetaError::ParquetRead { .. }
-            })
+            &error,
+            SegmentError::Metadata {
+                source: SegmentMetaError::ParquetRead { path, .. }
+            } if path == "data/corrupt.parquet"
         ));
+        assert!(std::ptr::eq(segment_backtrace, metadata_backtrace));
         Ok(())
     }
 
@@ -1569,7 +1586,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::TooShort { .. }
             })
         ));
@@ -1586,9 +1603,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Io {
-                source: SegmentIoError::MissingFile { path, .. }
-            }) if path == "data/missing.parquet"
+            Err(SegmentError::MissingFile { path, .. }) if path == "data/missing.parquet"
         ));
         Ok(())
     }

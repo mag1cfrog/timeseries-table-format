@@ -12,7 +12,7 @@ use snafu::{Backtrace, prelude::*};
 use crate::{
     coverage::EntityIdentity,
     metadata::{
-        logical_schema::LogicalSchemaError,
+        logical_schema::LogicalSchemaValidationError,
         table_metadata::{IndexKind, IndexValue, IndexValueError},
     },
 };
@@ -213,8 +213,10 @@ pub enum SegmentMetaError {
         /// The path to the file without a valid LogicalSchema.
         path: String,
         /// Underlying logical schema error that triggered this failure.
-        #[snafu(source)]
-        source: LogicalSchemaError,
+        #[snafu(source(from(LogicalSchemaValidationError, Box::new)))]
+        source: Box<LogicalSchemaValidationError>,
+        /// Backtrace captured with segment path context.
+        backtrace: Backtrace,
     },
 }
 

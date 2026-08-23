@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, path::Path};
 use crate::{
     coverage::{
         Coverage, EntityCoverage, EntityIdentity, EntityValue,
-        io::{CoverageError, read_coverage_sidecar, read_entity_coverage_sidecar},
+        io::{CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
     metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
     transaction_log::table_state::TableCoveragePointer,
@@ -23,12 +23,12 @@ use super::{TimeSeriesTable, error::TableError};
 fn ensure_entity_coverage_identity_schema(
     coverage: &EntityCoverage,
     table: &TimeSeriesTable,
-) -> Result<(), CoverageError> {
-    let schema = require_table_schema(&table.state().table_meta)
-        .map_err(|source| CoverageError::EntityIdentitySchema { source })?;
+) -> Result<(), CoverageSidecarError> {
+    let schema =
+        require_table_schema(&table.state().table_meta).map_err(CoverageSidecarError::from)?;
     for (identity, _) in coverage.iter() {
         ensure_entity_identity_matches_schema(schema, table.index_spec(), identity)
-            .map_err(|source| CoverageError::EntityIdentitySchema { source })?;
+            .map_err(CoverageSidecarError::from)?;
     }
     Ok(())
 }
@@ -94,7 +94,7 @@ impl TimeSeriesTable {
     async fn read_validated_entity_coverage_sidecar(
         &self,
         path: &Path,
-    ) -> Result<EntityCoverage, CoverageError> {
+    ) -> Result<EntityCoverage, CoverageSidecarError> {
         let coverage = read_entity_coverage_sidecar(self.location(), path).await?;
         ensure_entity_coverage_identity_schema(&coverage, self)?;
         Ok(coverage)
@@ -705,13 +705,17 @@ mod tests {
         assert!(matches!(
             snapshot_error,
             TableError::CoverageSidecar {
-                source: CoverageError::EntityIdentitySchema {
-                    source: SchemaCompatibilityError::EntityIdentityArityMismatch {
-                        expected: 1,
-                        actual: 2,
-                    },
+                source: CoverageSidecarError::EntityIdentitySchema {
+                    source,
+                    ..
                 },
-            }
+            } if matches!(
+                source.as_ref(),
+                SchemaCompatibilityError::EntityIdentityArityMismatch {
+                    expected: 1,
+                    actual: 2,
+                }
+            )
         ));
 
         let mut wrong_type = EntityCoverage::empty();
@@ -755,14 +759,18 @@ mod tests {
                 && coverage_path == segment_coverage_path
                 && matches!(
                     &*source,
-                    CoverageError::EntityIdentitySchema {
-                        source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+                    CoverageSidecarError::EntityIdentitySchema {
+                        source,
+                        ..
+                    }
+                    if matches!(
+                        source.as_ref(),
+                        SchemaCompatibilityError::EntityIdentityTypeMismatch {
                             column,
                             expected: crate::metadata::logical_schema::LogicalDataType::Utf8,
                             actual: "int32",
-                        },
-                    }
-                    if column == "symbol"
+                        } if column == "symbol"
+                    )
                 )
         ));
         Ok(())

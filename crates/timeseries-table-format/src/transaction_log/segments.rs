@@ -1,4 +1,4 @@
-//! Segment IO error types.
+//! Segment access error types.
 //!
 //! The canonical segment metadata model lives in [`crate::metadata::segments`]
 //! and contains **no storage IO**.
@@ -6,89 +6,79 @@
 //! This module maps storage failures into the segment errors returned by
 //! format-specific readers.
 
-use snafu::{Backtrace, prelude::*};
+use snafu::prelude::*;
 
 use crate::storage::StorageError;
 
-// Expose the pure segment types alongside their IO-layer errors.
+// Expose the pure segment types alongside their access errors.
 pub use crate::metadata::segments::{
     FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError,
 };
 
-/// IO-layer errors when constructing/validating segments.
+/// Errors while reading or validating one segment.
 #[derive(Debug, Snafu)]
-pub enum SegmentIoError {
-    /// The file is missing or not a regular file.
-    #[snafu(display("Segment file missing or not a regular file: {path}"))]
+pub enum SegmentError {
+    /// The segment file is missing.
+    #[snafu(display("Segment file not found: {path}"))]
     MissingFile {
-        /// The path to the missing or invalid file.
+        /// Path to the missing file.
         path: String,
-        /// Backtrace for debugging.
-        backtrace: Backtrace,
-    },
-
-    /// Generic I/O error while validating the segment.
-    #[snafu(display("I/O error while validating segment at {path}: {source}"))]
-    Storage {
-        /// The path to the file that caused the I/O error.
-        path: String,
-        /// Underlying storage error that caused this I/O failure.
+        /// Storage failure that identified the missing file.
         #[snafu(source, backtrace)]
         source: StorageError,
     },
-}
 
-/// Segment error at the IO boundary: either a storage failure or a pure metadata failure.
-#[derive(Debug, Snafu)]
-pub enum SegmentError {
-    /// Storage / backend error while accessing a segment.
-    #[snafu(transparent)]
-    Io {
-        /// The underlying IO-layer error.
-        source: SegmentIoError,
+    /// Another storage failure occurred while accessing the segment.
+    #[snafu(display("Storage error while accessing segment at {path}: {source}"))]
+    Storage {
+        /// Path to the segment that could not be accessed.
+        path: String,
+        /// Underlying storage failure.
+        #[snafu(source, backtrace)]
+        source: StorageError,
     },
 
     /// Pure metadata/decoding/validation error.
-    #[snafu(transparent)]
-    Meta {
+    #[snafu(context(false), display("{source}"))]
+    Metadata {
         /// The underlying pure metadata error.
+        #[snafu(source, backtrace)]
         source: SegmentMetaError,
     },
 }
 
-/// Convenience alias for results returned by IO-layer segment operations.
+/// Convenience alias for results returned by segment access operations.
 #[allow(clippy::result_large_err)]
 pub type SegmentResult<T> = Result<T, SegmentError>;
 
-/// Convert a lower-level `StorageError` into the corresponding `SegmentError`.
-///
-/// - `StorageError::NotFound` is mapped to `SegmentIoError::MissingFile`.
-/// - All other storage errors are wrapped in `SegmentIoError::Storage`,
-///   preserving the original `StorageError` as the source for diagnostics.
-pub fn map_storage_error(err: StorageError) -> SegmentError {
-    let (is_missing, path) = match &err {
-        StorageError::NotFound { path, .. } => (true, path.clone()),
-        StorageError::AlreadyExists { path, .. }
-        | StorageError::OtherIo { path, .. }
-        | StorageError::CleanupFailed { path, .. } => (false, path.clone()),
-    };
+impl From<StorageError> for SegmentError {
+    fn from(source: StorageError) -> Self {
+        let is_missing = matches!(&source, StorageError::NotFound { .. });
+        let path = match &source {
+            StorageError::NotFound { path, .. }
+            | StorageError::AlreadyExists { path, .. }
+            | StorageError::OtherIo { path, .. }
+            | StorageError::CleanupFailed { path, .. } => path.clone(),
+        };
 
-    if is_missing {
-        SegmentIoError::MissingFile {
-            path,
-            backtrace: Backtrace::capture(),
+        if is_missing {
+            Self::MissingFile { path, source }
+        } else {
+            Self::Storage { path, source }
         }
-        .into()
-    } else {
-        SegmentIoError::Storage { path, source: err }.into()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{error::Error as _, io};
+
     use super::*;
     use chrono::Utc;
     use chrono::{DateTime, TimeZone};
+    use snafu::{Backtrace, ErrorCompat};
+
+    use crate::storage::StorageBackendError;
 
     fn utc_datetime(
         year: i32,
@@ -148,5 +138,51 @@ mod tests {
         let error = serde_json::from_value::<SegmentMeta>(value)
             .expect_err("segment metadata must include entity_layout");
         assert!(error.to_string().contains("entity_layout"));
+    }
+
+    #[test]
+    fn missing_segment_preserves_storage_source_and_backtrace() {
+        let storage = StorageError::NotFound {
+            path: "data/missing.parquet".to_string(),
+            source: io::Error::new(io::ErrorKind::NotFound, "missing").into(),
+            backtrace: Backtrace::capture(),
+        };
+        let error = SegmentError::from(storage);
+
+        let segment_backtrace = ErrorCompat::backtrace(&error).expect("segment backtrace");
+        let storage = error
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageError>())
+            .expect("storage source");
+        let storage_backtrace = ErrorCompat::backtrace(storage).expect("storage backtrace");
+        let backend = storage
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageBackendError>())
+            .expect("storage backend source");
+        let io_source = backend
+            .source()
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .expect("io source");
+
+        assert!(matches!(&error, SegmentError::MissingFile { .. }));
+        assert_eq!(io_source.kind(), io::ErrorKind::NotFound);
+        assert!(std::ptr::eq(segment_backtrace, storage_backtrace));
+    }
+
+    #[test]
+    fn non_missing_storage_failure_remains_a_storage_error() {
+        let storage = StorageError::OtherIo {
+            path: "data/unreadable.parquet".to_string(),
+            source: io::Error::from(io::ErrorKind::PermissionDenied).into(),
+            backtrace: Backtrace::capture(),
+        };
+
+        assert!(matches!(
+            SegmentError::from(storage),
+            SegmentError::Storage {
+                source: StorageError::OtherIo { .. },
+                ..
+            }
+        ));
     }
 }

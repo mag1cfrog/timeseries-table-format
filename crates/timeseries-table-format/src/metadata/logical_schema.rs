@@ -7,7 +7,7 @@ use std::{collections::HashSet, fmt, sync::Arc};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, TimeUnit};
 
 use serde::{Deserialize, Serialize};
-use snafu::prelude::*;
+use snafu::{Backtrace, prelude::*};
 
 /// Units for logical timestamps recorded in the table metadata.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub struct LogicalField {
 }
 
 impl LogicalField {
-    fn to_arrow_field_ref(&self, path: &str) -> Result<FieldRef, SchemaConvertError> {
+    fn to_arrow_field_ref(&self, path: &str) -> Result<FieldRef, ArrowSchemaConversionError> {
         let dt = self.data_type.to_arrow_datatype(path)?;
         Ok(Arc::new(Field::new(self.name.clone(), dt, self.nullable)))
     }
@@ -147,7 +147,7 @@ pub enum LogicalDataType {
 }
 
 impl LogicalDataType {
-    fn to_arrow_datatype(&self, column: &str) -> Result<DataType, SchemaConvertError> {
+    fn to_arrow_datatype(&self, column: &str) -> Result<DataType, ArrowSchemaConversionError> {
         Ok(match self {
             LogicalDataType::Bool => DataType::Boolean,
             LogicalDataType::Int32 => DataType::Int32,
@@ -160,10 +160,11 @@ impl LogicalDataType {
 
             LogicalDataType::FixedBinary { byte_width } => {
                 if *byte_width <= 0 {
-                    return Err(SchemaConvertError::FixedBinaryInvalidWidth {
-                        column: column.to_string(),
+                    return FixedBinaryInvalidWidthSnafu {
+                        column,
                         byte_width: *byte_width,
-                    });
+                    }
+                    .fail();
                 }
                 DataType::FixedSizeBinary(*byte_width)
             }
@@ -174,37 +175,38 @@ impl LogicalDataType {
             }
 
             LogicalDataType::Int96 => {
-                return Err(SchemaConvertError::Int96Unsupported {
-                    column: column.to_string(),
-                });
+                return Int96UnsupportedSnafu { column }.fail();
             }
 
             LogicalDataType::Decimal { precision, scale } => {
                 let precision = *precision;
                 let scale = *scale;
                 if precision <= 0 {
-                    return Err(SchemaConvertError::DecimalInvalid {
-                        column: column.to_string(),
+                    return DecimalInvalidSnafu {
+                        column,
                         precision,
                         scale,
-                        details: "precision must be > 0".to_string(),
-                    });
+                        details: "precision must be > 0",
+                    }
+                    .fail();
                 }
                 if scale < 0 {
-                    return Err(SchemaConvertError::DecimalInvalid {
-                        column: column.to_string(),
+                    return DecimalInvalidSnafu {
+                        column,
                         precision,
                         scale,
-                        details: "scale must be >= 0".to_string(),
-                    });
+                        details: "scale must be >= 0",
+                    }
+                    .fail();
                 }
                 if scale > precision {
-                    return Err(SchemaConvertError::DecimalInvalid {
-                        column: column.to_string(),
+                    return DecimalInvalidSnafu {
+                        column,
                         precision,
                         scale,
-                        details: "scale must be <= precision".to_string(),
-                    });
+                        details: "scale must be <= precision",
+                    }
+                    .fail();
                 }
 
                 if precision <= 38 {
@@ -212,12 +214,13 @@ impl LogicalDataType {
                 } else if precision <= 76 {
                     DataType::Decimal256(precision as u8, scale as i8)
                 } else {
-                    return Err(SchemaConvertError::DecimalInvalid {
-                        column: column.to_string(),
+                    return DecimalInvalidSnafu {
+                        column,
                         precision,
                         scale,
-                        details: "precision exceeds Arrow maximum (76 digits)".to_string(),
-                    });
+                        details: "precision exceeds Arrow maximum (76 digits)",
+                    }
+                    .fail();
                 }
             }
 
@@ -242,9 +245,7 @@ impl LogicalDataType {
                 keys_sorted,
             } => {
                 if key.nullable {
-                    return Err(SchemaConvertError::MapKeyMustBeNonNull {
-                        column: column.to_string(),
-                    });
+                    return MapKeyMustBeNonNullSnafu { column }.fail();
                 }
 
                 // Canonical Arrow Map field names are "entries", "key", "value"
@@ -268,10 +269,7 @@ impl LogicalDataType {
             }
 
             LogicalDataType::Other(name) => {
-                return Err(SchemaConvertError::OtherTypeUnsupported {
-                    column: column.to_string(),
-                    name: name.clone(),
-                });
+                return OtherTypeUnsupportedSnafu { column, name }.fail();
             }
         })
     }
@@ -356,8 +354,8 @@ impl LogicalSchema {
     /// Convert this logical schema to an owned Arrow [`Schema`].
     ///
     /// Fails if any column uses a logical type that cannot be represented in
-    /// Arrow (see [`SchemaConvertError`]).
-    pub fn to_arrow_schema(&self) -> Result<Schema, SchemaConvertError> {
+    /// Arrow (see [`ArrowSchemaConversionError`]).
+    pub fn to_arrow_schema(&self) -> Result<Schema, ArrowSchemaConversionError> {
         let mut fields = Vec::with_capacity(self.columns.len());
         for c in &self.columns {
             let fref = c.to_arrow_field_ref(&c.name)?;
@@ -370,14 +368,14 @@ impl LogicalSchema {
     /// Convert this logical schema to a shared Arrow [`SchemaRef`].
     ///
     /// This is a convenience wrapper around [`Self::to_arrow_schema`].
-    pub fn to_arrow_schema_ref(&self) -> Result<SchemaRef, SchemaConvertError> {
+    pub fn to_arrow_schema_ref(&self) -> Result<SchemaRef, ArrowSchemaConversionError> {
         Ok(Arc::new(self.to_arrow_schema()?))
     }
 }
 
 /// Errors that can occur while constructing or validating a logical schema.
 #[derive(Debug, Clone, Snafu, PartialEq, Eq)]
-pub enum LogicalSchemaError {
+pub enum LogicalSchemaValidationError {
     /// Duplicate column names are not allowed.
     #[snafu(display("Duplicate column name: {column}"))]
     DuplicateColumn {
@@ -407,7 +405,7 @@ pub enum LogicalSchemaError {
 
     /// Duplicate field names within a struct are not allowed.
     #[snafu(display("Duplicate field name: column={column_path}, field={field}"))]
-    DuplicatedFieldName {
+    DuplicateFieldName {
         /// Column path for the struct that contains the duplicate field.
         column_path: String,
         /// Duplicate field name.
@@ -415,7 +413,7 @@ pub enum LogicalSchemaError {
     },
 
     /// Map key fields must be non-nullable in schema validation.
-    #[snafu(display("Invalid Map Key: map key should not be null for column={column_path}"))]
+    #[snafu(display("Invalid map key for column '{column_path}': keys must be non-nullable"))]
     InvalidMapKeyNullability {
         /// Column path for the map with an invalid key nullability.
         column_path: String,
@@ -465,7 +463,7 @@ pub enum LogicalSchemaError {
 
 impl LogicalSchema {
     /// Construct a validated logical schema (rejects duplicate column names).
-    pub fn new(columns: Vec<LogicalField>) -> Result<Self, LogicalSchemaError> {
+    pub fn new(columns: Vec<LogicalField>) -> Result<Self, LogicalSchemaValidationError> {
         let mut seen = HashSet::new();
         for col in &columns {
             if !seen.insert(col.name.clone()) {
@@ -486,25 +484,27 @@ impl LogicalSchema {
     }
 }
 
-fn validate_field(field: &LogicalField, path: &str) -> Result<(), LogicalSchemaError> {
+fn validate_field(field: &LogicalField, path: &str) -> Result<(), LogicalSchemaValidationError> {
     validate_dtype(&field.data_type, path)
 }
 
-fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaError> {
+fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaValidationError> {
     match dt {
         LogicalDataType::FixedBinary { byte_width } => {
             if *byte_width <= 0 {
-                return Err(LogicalSchemaError::FixedBinaryInvalidWidthInSchema {
-                    column: path.to_string(),
-                    byte_width: *byte_width,
-                });
+                return Err(
+                    LogicalSchemaValidationError::FixedBinaryInvalidWidthInSchema {
+                        column: path.to_string(),
+                        byte_width: *byte_width,
+                    },
+                );
             }
             Ok(())
         }
 
         LogicalDataType::Struct { fields } => {
             if fields.is_empty() {
-                return Err(LogicalSchemaError::EmptyStruct {
+                return Err(LogicalSchemaValidationError::EmptyStruct {
                     column_path: path.to_string(),
                 });
             }
@@ -512,14 +512,14 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaE
             let mut seen = HashSet::with_capacity(fields.len());
             for child in fields {
                 if child.name.trim().is_empty() {
-                    return Err(LogicalSchemaError::StructFieldNameEmpty {
+                    return Err(LogicalSchemaValidationError::StructFieldNameEmpty {
                         column_path: path.to_string(),
                         field: child.name.clone(),
                     });
                 }
 
                 if !seen.insert(child.name.clone()) {
-                    return Err(LogicalSchemaError::DuplicatedFieldName {
+                    return Err(LogicalSchemaValidationError::DuplicateFieldName {
                         column_path: path.to_string(),
                         field: child.name.clone(),
                     });
@@ -532,7 +532,7 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaE
 
         LogicalDataType::List { elements } => {
             if elements.name.trim().is_empty() {
-                return Err(LogicalSchemaError::ListElementNameEmpty {
+                return Err(LogicalSchemaValidationError::ListElementNameEmpty {
                     column_path: path.to_string(),
                 });
             }
@@ -542,7 +542,7 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaE
 
         LogicalDataType::Map { key, value, .. } => {
             if key.nullable {
-                return Err(LogicalSchemaError::InvalidMapKeyNullability {
+                return Err(LogicalSchemaValidationError::InvalidMapKeyNullability {
                     column_path: path.to_string(),
                 });
             }
@@ -558,20 +558,9 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaE
     }
 }
 
-/// Errors encountered while converting between logical schema representations.
+/// Errors encountered while converting a logical schema to Arrow.
 #[derive(Debug, Snafu)]
-pub enum SchemaConvertError {
-    /// The logical type is not supported by the target representation.
-    #[snafu(display("unsupported logical type for column '{column}': {type_name} ({details})"))]
-    UnsupportedLogicalType {
-        /// Column name that failed conversion.
-        column: String,
-        /// High-level type name (for diagnostics).
-        type_name: String,
-        /// Additional details describing why it is unsupported.
-        details: String,
-    },
-
+pub enum ArrowSchemaConversionError {
     /// FixedBinary fields must declare a positive byte width.
     #[snafu(display(
         "invalid FixedBinary byte_width for column '{column}': {byte_width} (must be > 0)"
@@ -581,22 +570,28 @@ pub enum SchemaConvertError {
         column: String,
         /// Declared byte width.
         byte_width: i32,
+        /// Backtrace captured at the conversion boundary.
+        backtrace: Backtrace,
     },
 
-    /// Int96 is rejected for now to avoid legacy timestamp ambiguity.
-    #[snafu(display("Int96 is not supported in v0.1 for column '{column}'"))]
+    /// Int96 cannot be represented without legacy timestamp ambiguity.
+    #[snafu(display("Int96 cannot be converted to Arrow for column '{column}'"))]
     Int96Unsupported {
         /// Column name that failed conversion.
         column: String,
+        /// Backtrace captured at the conversion boundary.
+        backtrace: Backtrace,
     },
 
-    /// Catch-all "Other" types are not accepted in v0.1.
-    #[snafu(display("Other type '{name}' is not supported in v0.1 for column '{column}'"))]
+    /// A named catch-all logical type cannot be represented in Arrow.
+    #[snafu(display("Logical type '{name}' cannot be converted to Arrow for column '{column}'"))]
     OtherTypeUnsupported {
         /// Column name that failed conversion.
         column: String,
         /// Type name reported by the source.
         name: String,
+        /// Backtrace captured at the conversion boundary.
+        backtrace: Backtrace,
     },
 
     /// Decimal precision/scale is out of supported bounds for Arrow conversion.
@@ -612,6 +607,8 @@ pub enum SchemaConvertError {
         scale: i32,
         /// Human-readable details describing the constraint violation.
         details: String,
+        /// Backtrace captured at the conversion boundary.
+        backtrace: Backtrace,
     },
 
     /// Map keys must be non-nullable when converting to Arrow.
@@ -619,6 +616,8 @@ pub enum SchemaConvertError {
     MapKeyMustBeNonNull {
         /// Column name that failed conversion.
         column: String,
+        /// Backtrace captured at the conversion boundary.
+        backtrace: Backtrace,
     },
 }
 
@@ -640,7 +639,7 @@ pub(crate) enum ArrowToLogicalSchemaError {
     #[snafu(display("invalid logical schema derived from Arrow: {source}"))]
     InvalidArrowLogicalSchema {
         /// Logical schema validation failure.
-        source: LogicalSchemaError,
+        source: LogicalSchemaValidationError,
     },
 }
 
@@ -955,7 +954,7 @@ mod tests {
             assert!(
                 matches!(
                     &err,
-                    LogicalSchemaError::FixedBinaryInvalidWidthInSchema {
+                    LogicalSchemaValidationError::FixedBinaryInvalidWidthInSchema {
                         column,
                         byte_width
                     } if column == "bad_fixed" && *byte_width == width
@@ -978,7 +977,8 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                SchemaConvertError::Int96Unsupported { column } if column == "legacy_ts"
+                ArrowSchemaConversionError::Int96Unsupported { column, .. }
+                    if column == "legacy_ts"
             ),
             "unexpected error: {err:?}"
         );
@@ -1072,7 +1072,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                LogicalSchemaError::StructFieldNameEmpty { column_path, field }
+                LogicalSchemaValidationError::StructFieldNameEmpty { column_path, field }
                 if column_path == "root" && field.is_empty()
             ),
             "unexpected error: {err:?}"
@@ -1092,7 +1092,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                SchemaConvertError::OtherTypeUnsupported { column, name }
+                ArrowSchemaConversionError::OtherTypeUnsupported { column, name, .. }
                     if column == "opaque" && name == "parquet::Map"
             ),
             "unexpected error: {err:?}"
@@ -1177,7 +1177,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                SchemaConvertError::DecimalInvalid { column, precision, scale, .. }
+                ArrowSchemaConversionError::DecimalInvalid { column, precision, scale, .. }
                     if column == "dec_too_large" && *precision == 77 && *scale == 0
             ),
             "unexpected error: {err:?}"
@@ -1204,7 +1204,13 @@ mod tests {
             assert!(
                 matches!(
                     &err,
-                    SchemaConvertError::DecimalInvalid { column, precision: p, scale: s, details }
+                    ArrowSchemaConversionError::DecimalInvalid {
+                        column,
+                        precision: p,
+                        scale: s,
+                        details,
+                        ..
+                    }
                         if column == name && *p == precision && *s == scale && details.contains(details_substr)
                 ),
                 "unexpected error: {err:?}"

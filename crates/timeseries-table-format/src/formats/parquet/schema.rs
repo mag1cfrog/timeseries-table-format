@@ -15,14 +15,13 @@ use parquet::schema::types::{SchemaDescriptor, Type};
 use snafu::Backtrace;
 
 use crate::metadata::logical_schema::{
-    LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
+    LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
+    LogicalTimestampUnit,
 };
 use crate::metadata::segments::ParquetIndexColumnError;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec};
 use crate::storage::{TableLocation, open_parquet_reader};
-use crate::transaction_log::segments::{
-    SegmentError, SegmentMetaError, SegmentResult, map_storage_error,
-};
+use crate::transaction_log::segments::{SegmentError, SegmentMetaError, SegmentResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ParquetTimestampUnit {
@@ -161,7 +160,7 @@ fn map_parquet_col_to_logical_type(
     physical: PhysicalType,
     logical: Option<&LogicalType>,
     fixed_len_byte_array_len: Option<i32>,
-) -> Result<LogicalDataType, LogicalSchemaError> {
+) -> Result<LogicalDataType, LogicalSchemaValidationError> {
     // First: look at logical annotation when present
     if let Some(logical) = logical {
         match logical {
@@ -215,15 +214,17 @@ fn map_parquet_col_to_logical_type(
         PhysicalType::BYTE_ARRAY => LogicalDataType::Binary,
         PhysicalType::FIXED_LEN_BYTE_ARRAY => {
             let byte_width = fixed_len_byte_array_len.ok_or_else(|| {
-                LogicalSchemaError::FixedBinaryMissingLength {
+                LogicalSchemaValidationError::FixedBinaryMissingLength {
                     column: column.to_string(),
                 }
             })?;
             if byte_width <= 0 {
-                return Err(LogicalSchemaError::FixedBinaryInvalidWidthInSchema {
-                    column: column.to_string(),
-                    byte_width,
-                });
+                return Err(
+                    LogicalSchemaValidationError::FixedBinaryInvalidWidthInSchema {
+                        column: column.to_string(),
+                        byte_width,
+                    },
+                );
             }
             LogicalDataType::FixedBinary { byte_width }
         }
@@ -266,7 +267,7 @@ fn type_shape(t: &Type) -> String {
 fn parquet_primitive_to_logical_datatype(
     t: &Type,
     column_path: &str,
-) -> Result<LogicalDataType, LogicalSchemaError> {
+) -> Result<LogicalDataType, LogicalSchemaValidationError> {
     let physical = t.get_physical_type();
     let logical = t.get_basic_info().logical_type_ref();
 
@@ -285,7 +286,7 @@ fn parquet_primitive_to_logical_datatype(
 fn parquet_type_to_logical_datatype(
     t: &Type,
     path: &str,
-) -> Result<LogicalDataType, LogicalSchemaError> {
+) -> Result<LogicalDataType, LogicalSchemaValidationError> {
     // If this group is annotated as LIST/MAP, preserve semantics.
     if let Some(logical) = t.get_basic_info().logical_type_ref() {
         match logical {
@@ -309,38 +310,47 @@ fn parquet_type_to_logical_datatype(
     }
 }
 
-fn parse_parquet_list(t: &Type, column_path: &str) -> Result<LogicalDataType, LogicalSchemaError> {
+fn parse_parquet_list(
+    t: &Type,
+    column_path: &str,
+) -> Result<LogicalDataType, LogicalSchemaValidationError> {
     if !t.is_group() {
-        return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "LIST annotation on a primitive is unsupported; observed {}",
-                type_shape(t)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetListEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "LIST annotation on a primitive is unsupported; observed {}",
+                    type_shape(t)
+                ),
+            },
+        );
     }
 
     let outer = t.get_fields();
     if outer.len() != 1 {
-        return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "LIST group must have exactly 1 child, got {}; observed {}",
-                outer.len(),
-                type_shape(t)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetListEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "LIST group must have exactly 1 child, got {}; observed {}",
+                    outer.len(),
+                    type_shape(t)
+                ),
+            },
+        );
     }
 
     let repeated = &outer[0];
     if !matches!(repeated.get_basic_info().repetition(), Repetition::REPEATED) {
-        return Err(LogicalSchemaError::UnsupportedParquetListEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "LIST child must be REPEATED; observed {}",
-                type_shape(repeated)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetListEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "LIST child must be REPEATED; observed {}",
+                    type_shape(repeated)
+                ),
+            },
+        );
     }
 
     // Canonical: repeated group with exactly 1 child => element
@@ -366,55 +376,66 @@ fn parse_parquet_list(t: &Type, column_path: &str) -> Result<LogicalDataType, Lo
     })
 }
 
-fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, LogicalSchemaError> {
+fn parse_parquet_map(
+    t: &Type,
+    column_path: &str,
+) -> Result<LogicalDataType, LogicalSchemaValidationError> {
     if !t.is_group() {
-        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "MAP annotation on a primitive is unsupported; observed {}",
-                type_shape(t)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "MAP annotation on a primitive is unsupported; observed {}",
+                    type_shape(t)
+                ),
+            },
+        );
     }
 
     let outer = t.get_fields();
     if outer.len() != 1 {
-        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "MAP group must have exactly 1 child, got {}; observed {}",
-                outer.len(),
-                type_shape(t)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "MAP group must have exactly 1 child, got {}; observed {}",
+                    outer.len(),
+                    type_shape(t)
+                ),
+            },
+        );
     }
 
     let kv = &outer[0];
     if !kv.is_group() || !matches!(kv.get_basic_info().repetition(), Repetition::REPEATED) {
-        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "MAP child must be a REPEATED group (key_value); observed {}",
-                type_shape(kv)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "MAP child must be a REPEATED group (key_value); observed {}",
+                    type_shape(kv)
+                ),
+            },
+        );
     }
 
     let kv_fields = kv.get_fields();
     if !(kv_fields.len() == 1 || kv_fields.len() == 2) {
-        return Err(LogicalSchemaError::UnsupportedParquetMapEncoding {
-            column_path: column_path.to_string(),
-            details: format!(
-                "key_value group must have 1 or 2 children, got {}; observed {}",
-                kv_fields.len(),
-                type_shape(kv)
-            ),
-        });
+        return Err(
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
+                column_path: column_path.to_string(),
+                details: format!(
+                    "key_value group must have 1 or 2 children, got {}; observed {}",
+                    kv_fields.len(),
+                    type_shape(kv)
+                ),
+            },
+        );
     }
 
     let key_t = &kv_fields[0];
     if !matches!(key_t.get_basic_info().repetition(), Repetition::REQUIRED) {
-        return Err(LogicalSchemaError::InvalidMapKeyNullability {
+        return Err(LogicalSchemaValidationError::InvalidMapKeyNullability {
             column_path: column_path.to_string(),
         });
     }
@@ -448,7 +469,7 @@ fn parse_parquet_map(t: &Type, column_path: &str) -> Result<LogicalDataType, Log
 fn parquet_type_to_logical_field(
     t: &Type,
     parent: &str,
-) -> Result<LogicalField, LogicalSchemaError> {
+) -> Result<LogicalField, LogicalSchemaValidationError> {
     let info = t.get_basic_info();
     let name = info.name().to_string();
     let path = join_path(parent, &name);
@@ -522,7 +543,7 @@ fn parquet_type_to_logical_field(
 
 fn logical_schema_from_parquet_fields(
     meta: &FileMetaData,
-) -> Result<LogicalSchema, LogicalSchemaError> {
+) -> Result<LogicalSchema, LogicalSchemaValidationError> {
     let fields = meta
         .schema_descr()
         .root_schema()
@@ -547,7 +568,8 @@ fn logical_schema_from_parquet_metadata(
         return logical_schema_from_parquet_fields(meta).map_err(|source| {
             SegmentMetaError::LogicalSchemaInvalid {
                 path: path.to_string(),
-                source,
+                source: Box::new(source),
+                backtrace: Backtrace::capture(),
             }
         });
     }
@@ -578,7 +600,7 @@ pub async fn logical_schema_from_parquet(
     let path = rel_path.display().to_string();
     let mut file = open_parquet_reader(location.as_ref(), rel_path)
         .await
-        .map_err(map_storage_error)?;
+        .map_err(SegmentError::from)?;
     let metadata =
         file.get_metadata(None)
             .await
@@ -595,7 +617,6 @@ pub async fn logical_schema_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction_log::segments::SegmentIoError;
     use arrow::{
         array::{RecordBatch, TimestampMillisecondArray, new_null_array},
         datatypes::{DataType, Field, Fields, Schema},
@@ -819,9 +840,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Io {
-                source: SegmentIoError::MissingFile { path, .. }
-            }) if path == "data/missing.parquet"
+            Err(SegmentError::MissingFile { path, .. }) if path == "data/missing.parquet"
         ));
         Ok(())
     }
@@ -837,7 +856,7 @@ mod tests {
         let result = logical_schema_from_parquet(&TableLocation::local(tmp.path()), rel_path).await;
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::ParquetRead { .. }
             })
         ));
@@ -1056,7 +1075,7 @@ mod tests {
     fn assert_schema_err(
         rel_path: &Path,
         schema: Arc<Type>,
-        expected: LogicalSchemaError,
+        expected: LogicalSchemaValidationError,
     ) -> TestResult {
         let tmp = TempDir::new()?;
         let abs = tmp.path().join(rel_path);
@@ -1288,7 +1307,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                LogicalSchemaError::FixedBinaryMissingLength { column } if column == "bin"
+                LogicalSchemaValidationError::FixedBinaryMissingLength { column } if column == "bin"
             ),
             "unexpected error: {err:?}"
         );
@@ -2153,7 +2172,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::UnsupportedParquetMapEncoding {
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
                 column_path: "attrs".to_string(),
                 details: "MAP child must be a REPEATED group (key_value); observed primitive(REPEATED, INT32)".to_string(),
             },
@@ -2199,7 +2218,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::UnsupportedParquetListEncoding {
+            LogicalSchemaValidationError::UnsupportedParquetListEncoding {
                 column_path: "values".to_string(),
                 details: "LIST group must have exactly 1 child, got 2; observed group(OPTIONAL, children=[a:REPEATED, b:REPEATED])".to_string(),
             },
@@ -2226,7 +2245,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::UnsupportedParquetListEncoding {
+            LogicalSchemaValidationError::UnsupportedParquetListEncoding {
                 column_path: "values".to_string(),
                 details: "LIST child must be REPEATED; observed primitive(OPTIONAL, INT32)"
                     .to_string(),
@@ -2355,7 +2374,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::UnsupportedParquetMapEncoding {
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
                 column_path: "attrs".to_string(),
                 details:
                     "MAP child must be a REPEATED group (key_value); observed group(OPTIONAL, children=[key:REQUIRED])"
@@ -2394,7 +2413,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::UnsupportedParquetMapEncoding {
+            LogicalSchemaValidationError::UnsupportedParquetMapEncoding {
                 column_path: "attrs".to_string(),
                 details: "key_value group must have 1 or 2 children, got 3; observed group(REPEATED, children=[key:REQUIRED, v1:OPTIONAL, v2:OPTIONAL])"
                     .to_string(),
@@ -2426,7 +2445,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::InvalidMapKeyNullability {
+            LogicalSchemaValidationError::InvalidMapKeyNullability {
                 column_path: "attrs".to_string(),
             },
         )
@@ -2448,7 +2467,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::EmptyStruct {
+            LogicalSchemaValidationError::EmptyStruct {
                 column_path: "s".to_string(),
             },
         )
@@ -2476,7 +2495,7 @@ mod tests {
         assert_schema_err(
             rel_path,
             schema,
-            LogicalSchemaError::DuplicatedFieldName {
+            LogicalSchemaValidationError::DuplicateFieldName {
                 column_path: "s".to_string(),
                 field: "a".to_string(),
             },

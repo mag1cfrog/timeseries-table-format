@@ -25,7 +25,7 @@ use crate::{
     coverage::{
         EntityCoverage,
         index_interval::index_interval_for_id,
-        io::{CoverageError, write_coverage_sidecar_new_bytes},
+        io::write_coverage_sidecar_new_bytes,
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
             segment_entity_coverage_id_v1, table_coverage_id_v2, table_entity_coverage_id_v1,
@@ -405,13 +405,13 @@ impl TimeSeriesTable {
 
             let seg_bytes = entity_coverage_to_bytes(&segment_cov).map_err(|source| {
                 TableError::CoverageSidecar {
-                    source: CoverageError::EntitySerde { source },
+                    source: source.into(),
                 }
             })?;
             let snapshot_bytes =
                 entity_coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
                     TableError::CoverageSidecar {
-                        source: CoverageError::EntitySerde { source },
+                        source: source.into(),
                     }
                 })?;
             (seg_bytes, snapshot_bytes, entity_layout)
@@ -439,12 +439,12 @@ impl TimeSeriesTable {
 
             let seg_bytes =
                 coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
-                    source: CoverageError::Serde { source },
+                    source: source.into(),
                 })?;
             let snapshot_bytes =
                 coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
                     TableError::CoverageSidecar {
-                        source: CoverageError::Serde { source },
+                        source: source.into(),
                     }
                 })?;
             (
@@ -470,7 +470,7 @@ impl TimeSeriesTable {
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
         let seg_cov_path = segment_coverage_key(&segment_file_id).map_err(|source| {
             TableError::CoverageSidecar {
-                source: CoverageError::Layout { source },
+                source: source.into(),
             }
         })?;
 
@@ -483,7 +483,7 @@ impl TimeSeriesTable {
         let snapshot_path =
             table_snapshot_key(next_version, &snapshot_file_id).map_err(|source| {
                 TableError::CoverageSidecar {
-                    source: CoverageError::Layout { source },
+                    source: source.into(),
                 }
             })?;
 
@@ -759,7 +759,9 @@ impl TimeSeriesTable {
 mod tests {
     use super::super::test_util::*;
     use super::*;
-    use crate::coverage::io::{read_coverage_sidecar, read_entity_coverage_sidecar};
+    use crate::coverage::io::{
+        CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar,
+    };
     use crate::coverage::serde::entity_coverage_from_bytes;
     use crate::coverage::{EntityCoverage, EntityIdentity, EntityValue};
     use crate::metadata::logical_schema::{
@@ -2089,7 +2091,7 @@ mod tests {
             assert!(matches!(
                 error,
                 TableError::CoverageSidecar {
-                    source: CoverageError::Storage {
+                    source: CoverageSidecarError::Storage {
                         source: StorageError::CleanupFailed { .. }
                     }
                 }

@@ -19,11 +19,13 @@ use uuid::Uuid;
 use crate::{
     coverage::{
         EntityCoverage, EntityIdentity,
-        io::{CoverageError, read_entity_coverage_sidecar, write_coverage_sidecar_new_bytes},
+        io::{
+            CoverageSidecarError, read_entity_coverage_sidecar, write_coverage_sidecar_new_bytes,
+        },
         layout::{
             coverage_file_id_for_attempt, segment_coverage_key, segment_entity_coverage_id_v1,
         },
-        serde::{EntityCoverageSerdeError, entity_coverage_to_bytes},
+        serde::{CoverageCodecError, entity_coverage_to_bytes},
     },
     formats::parquet::{
         INSPECTION_BATCH_SIZE, SegmentCoverageError, compute_segment_entity_coverage,
@@ -110,14 +112,14 @@ pub enum EntityRewriteError {
     #[snafu(display("Failed to access entity coverage sidecar: {source}"))]
     CoverageSidecar {
         /// Existing coverage sidecar failure.
-        source: CoverageError,
+        source: CoverageSidecarError,
     },
 
     /// Entity coverage serialization failed.
     #[snafu(display("Failed to serialize staged entity coverage: {source}"))]
     CoverageSerialization {
         /// Existing coverage codec failure.
-        source: EntityCoverageSerdeError,
+        source: CoverageCodecError,
     },
 
     /// Storage access failed.
@@ -1093,7 +1095,7 @@ mod tests {
         assert!(matches!(
             error,
             EntityRewriteError::CoverageSidecar {
-                source: CoverageError::Storage {
+                source: CoverageSidecarError::Storage {
                     source: StorageError::AlreadyExists { .. }
                 }
             }
@@ -1143,7 +1145,7 @@ mod tests {
         assert!(matches!(
             *source,
             EntityRewriteError::CoverageSidecar {
-                source: CoverageError::Storage {
+                source: CoverageSidecarError::Storage {
                     source: StorageError::AlreadyExists { .. }
                 }
             }
@@ -1184,7 +1186,7 @@ mod tests {
         assert!(matches!(
             error,
             EntityRewriteError::CoverageSidecar {
-                source: CoverageError::Storage {
+                source: CoverageSidecarError::Storage {
                     source: StorageError::CleanupFailed { .. }
                 }
             }
@@ -1364,7 +1366,9 @@ mod tests {
         assert!(matches!(
             error,
             EntityRewriteError::CoverageSidecar {
-                source: CoverageError::NotFound { .. }
+                source: CoverageSidecarError::Storage {
+                    source: StorageError::NotFound { .. }
+                }
             }
         ));
 
@@ -1380,7 +1384,7 @@ mod tests {
         assert!(matches!(
             error,
             EntityRewriteError::CoverageSidecar {
-                source: CoverageError::EntitySerde { .. }
+                source: CoverageSidecarError::Codec { .. }
             }
         ));
 

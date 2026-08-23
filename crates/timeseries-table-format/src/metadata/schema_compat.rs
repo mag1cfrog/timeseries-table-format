@@ -13,7 +13,7 @@ use crate::{
     coverage::{EntityIdentity, EntityValue},
     metadata::{
         logical_schema::{
-            LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, SchemaConvertError,
+            ArrowSchemaConversionError, LogicalDataType, LogicalField, LogicalSchema,
         },
         table_metadata::{IndexKind, IndexSpec, TableMeta},
     },
@@ -144,8 +144,8 @@ pub enum SchemaCompatibilityError {
     #[snafu(display("Registered table schema cannot be converted to Arrow: {source}"))]
     RegisteredSchemaConversion {
         /// The logical-to-Arrow conversion failure.
-        #[snafu(source)]
-        source: SchemaConvertError,
+        #[snafu(source(from(ArrowSchemaConversionError, Box::new)), backtrace)]
+        source: Box<ArrowSchemaConversionError>,
     },
 
     /// Column exists in both schemas, but the logical type / nullability differ.
@@ -186,14 +186,6 @@ pub enum SchemaCompatibilityError {
         expected: &'static str,
         /// Logical type found in the schema.
         actual: LogicalDataType,
-    },
-
-    /// Logical schema construction or validation failed.
-    #[snafu(display("Logical schema is invalid: {source}"))]
-    LogicalSchema {
-        /// The underlying logical schema error.
-        #[snafu(source)]
-        source: LogicalSchemaError,
     },
 }
 

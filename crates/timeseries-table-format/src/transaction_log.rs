@@ -154,7 +154,8 @@ pub(crate) fn checked_next_version(expected: u64) -> Result<u64, CommitError> {
 mod tests {
     use crate::coverage::EntityIdentity;
     use crate::metadata::logical_schema::{
-        LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError, LogicalTimestampUnit,
+        LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
+        LogicalTimestampUnit,
     };
     use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
     use crate::transaction_log::*;
@@ -272,7 +273,9 @@ mod tests {
         ]);
 
         let err = dup.expect_err("duplicate columns should be rejected");
-        assert!(matches!(err, LogicalSchemaError::DuplicateColumn { column } if column == "ts"));
+        assert!(
+            matches!(err, LogicalSchemaValidationError::DuplicateColumn { column } if column == "ts")
+        );
     }
 
     #[test]

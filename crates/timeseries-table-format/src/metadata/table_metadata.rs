@@ -9,9 +9,9 @@ use std::{cmp::Ordering, collections::HashSet, fmt, num::NonZeroU64, str::FromSt
 use arrow::datatypes::SchemaRef;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use snafu::prelude::*;
+use snafu::{Backtrace, prelude::*};
 
-use crate::metadata::logical_schema::{LogicalSchema, SchemaConvertError};
+use crate::metadata::logical_schema::{ArrowSchemaConversionError, LogicalSchema};
 
 /// Current table metadata / log format version written by new tables.
 ///
@@ -59,16 +59,20 @@ pub struct TableMeta {
 
 /// Errors encountered while retrieving or converting a table's logical schema.
 #[derive(Debug, Snafu)]
-pub enum TableMetaSchemaError {
+pub enum TableArrowSchemaError {
     /// The table metadata has not yet recorded a canonical logical schema.
     #[snafu(display("table has no canonical logical schema yet (logical_schema is None)"))]
-    MissingCanonicalSchema,
+    MissingCanonicalSchema {
+        /// Backtrace captured at the table schema boundary.
+        backtrace: Backtrace,
+    },
 
     /// Failed to convert the logical schema to Arrow types.
-    #[snafu(transparent)]
-    Convert {
+    #[snafu(display("Failed to convert the table logical schema to Arrow: {source}"))]
+    Conversion {
         /// Underlying conversion error.
-        source: SchemaConvertError,
+        #[snafu(source, backtrace)]
+        source: ArrowSchemaConversionError,
     },
 }
 
@@ -120,17 +124,15 @@ impl TableMeta {
 
     /// Convert the table's logical schema to a shared Arrow [`SchemaRef`].
     ///
-    /// Returns [`TableMetaSchemaError::MissingCanonicalSchema`] if the schema has
+    /// Returns [`TableArrowSchemaError::MissingCanonicalSchema`] if the schema has
     /// not yet been established for the table.
-    pub fn arrow_schema_ref(&self) -> Result<SchemaRef, TableMetaSchemaError> {
+    pub fn arrow_schema_ref(&self) -> Result<SchemaRef, TableArrowSchemaError> {
         let logical = self
             .logical_schema
             .as_ref()
-            .ok_or(TableMetaSchemaError::MissingCanonicalSchema)?;
+            .ok_or_else(|| MissingCanonicalSchemaSnafu.build())?;
 
-        logical
-            .to_arrow_schema_ref()
-            .map_err(|source| TableMetaSchemaError::Convert { source })
+        logical.to_arrow_schema_ref().context(ConversionSnafu)
     }
 }
 
@@ -591,10 +593,13 @@ pub enum IndexValueError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use crate::metadata::logical_schema::{LogicalDataType, LogicalField};
 
     use super::*;
     use chrono::TimeZone;
+    use snafu::ErrorCompat;
 
     fn sample_time_index_spec() -> IndexSpec {
         IndexSpec {
@@ -771,7 +776,11 @@ mod tests {
     fn table_meta_arrow_schema_ref_requires_logical_schema() {
         let meta = TableMeta::new_time_series(sample_time_index_spec());
         let err = meta.arrow_schema_ref().unwrap_err();
-        assert!(matches!(err, TableMetaSchemaError::MissingCanonicalSchema));
+        assert!(matches!(
+            &err,
+            TableArrowSchemaError::MissingCanonicalSchema { .. }
+        ));
+        assert!(ErrorCompat::backtrace(&err).is_some());
     }
 
     #[test]
@@ -785,15 +794,20 @@ mod tests {
         let meta = TableMeta::new_time_series_with_schema(sample_time_index_spec(), logical);
 
         let err = meta.arrow_schema_ref().unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                TableMetaSchemaError::Convert {
-                    source: SchemaConvertError::Int96Unsupported { column }
-                } if column == "legacy_ts"
-            ),
-            "unexpected error: {err:?}"
-        );
+        let table_backtrace = ErrorCompat::backtrace(&err).expect("table schema backtrace");
+        let conversion = err
+            .source()
+            .and_then(|source| source.downcast_ref::<ArrowSchemaConversionError>())
+            .expect("Arrow conversion source");
+        let conversion_backtrace =
+            ErrorCompat::backtrace(conversion).expect("conversion backtrace");
+
+        assert!(matches!(
+            conversion,
+            ArrowSchemaConversionError::Int96Unsupported { column, .. }
+                if column == "legacy_ts"
+        ));
+        assert!(std::ptr::eq(table_backtrace, conversion_backtrace));
     }
 
     #[test]
