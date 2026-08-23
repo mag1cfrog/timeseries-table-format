@@ -92,7 +92,7 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish-pypi.yml'
               - '.github/workflows/publish-testpypi.yml'
-              - '.github/workflows/publish-testpypi-snapshot.yml'
+              - '.github/workflows/python-snapshot.yml'
               - '.github/workflows/python-dist.yml'
       - name: Check for skip labels
         id: skip
