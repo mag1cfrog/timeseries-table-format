@@ -375,7 +375,7 @@ impl TimeSeriesTable {
         // 3-5) Load, compute, and compare coverage using the entity-column mode.
         let (seg_cov_bytes, new_snap_cov_bytes, entity_layout) = if has_entity_columns {
             let table_cov = self
-                .load_table_entity_snapshot_coverage_readonly::<AppendError>()
+                .load_entity_coverage_with_recovery::<AppendError>()
                 .await?;
 
             let segment_cov =
@@ -408,7 +408,7 @@ impl TimeSeriesTable {
             (seg_bytes, snapshot_bytes, entity_layout)
         } else {
             let table_cov = self
-                .load_table_snapshot_coverage_readonly::<AppendError>()
+                .load_global_coverage_with_recovery::<AppendError>()
                 .await?;
 
             let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
@@ -3262,13 +3262,13 @@ mod tests {
         ));
 
         let snapshot = table
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .load_entity_coverage_with_recovery::<AppendError>()
             .await?;
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state(), table.state());
         assert_eq!(
             reopened
-                .recover_table_entity_coverage_from_segments::<TableError>()
+                .recover_entity_coverage_from_segments::<AppendError>()
                 .await?,
             snapshot
         );
@@ -3509,7 +3509,7 @@ mod tests {
                 .all(|segment| segment.coverage_path.is_some())
         );
         let expected_snapshot = table
-            .recover_table_entity_coverage_from_segments::<TableError>()
+            .recover_entity_coverage_from_segments::<AppendError>()
             .await?;
 
         let ptr = table
@@ -3651,7 +3651,7 @@ mod tests {
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
         let expected = reopened
-            .recover_table_entity_coverage_from_segments::<TableError>()
+            .recover_entity_coverage_from_segments::<AppendError>()
             .await?;
 
         let snapshot_cov =
@@ -3707,7 +3707,7 @@ mod tests {
         tokio::fs::remove_file(&snapshot_abs).await?;
 
         let recovered = table
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .load_entity_coverage_with_recovery::<AppendError>()
             .await?;
 
         let mut expected = EntityCoverage::empty();
@@ -3767,7 +3767,7 @@ mod tests {
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
         let recovered = table
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .load_entity_coverage_with_recovery::<AppendError>()
             .await?;
 
         let mut expected = EntityCoverage::empty();
@@ -3875,7 +3875,7 @@ mod tests {
         table.state = state;
 
         let err = table
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .load_entity_coverage_with_recovery::<AppendError>()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -3941,7 +3941,7 @@ mod tests {
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
         let err = table
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .load_entity_coverage_with_recovery::<AppendError>()
             .await
             .expect_err("corrupt sidecar should error");
 

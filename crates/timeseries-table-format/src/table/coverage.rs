@@ -342,9 +342,7 @@ impl TimeSeriesTable {
         }
     }
 
-    pub(crate) async fn load_entity_coverage_with_recovery<E>(
-        &self,
-    ) -> Result<EntityCoverage, E>
+    pub(crate) async fn load_entity_coverage_with_recovery<E>(&self) -> Result<EntityCoverage, E>
     where
         E: CoverageRecoveryError,
     {
@@ -353,8 +351,7 @@ impl TimeSeriesTable {
                 if self.state().segments.is_empty() {
                     return Ok(EntityCoverage::empty());
                 }
-                self.recover_entity_coverage_from_segments::<E>()
-                    .await
+                self.recover_entity_coverage_from_segments::<E>().await
             }
             Some(ptr) => {
                 self.validate_coverage_pointer_index_kind::<E>(ptr)?;
@@ -958,7 +955,7 @@ mod tests {
         });
 
         let snapshot_error = table
-            .read_validated_entity_coverage_sidecar(Path::new(snapshot_path))
+            .read_and_validate_entity_coverage_sidecar(Path::new(snapshot_path))
             .await
             .expect_err("snapshot identity arity must match the table");
         assert!(matches!(
@@ -1000,7 +997,7 @@ mod tests {
         tokio::fs::write(tmp.path().join(&segment_coverage_path), &wrong_type_bytes).await?;
 
         let recovery_error = table
-            .recover_table_entity_coverage_from_segments::<TableError>()
+            .recover_entity_coverage_from_segments::<CoverageQueryError>()
             .await
             .expect_err("segment identity type must match the table schema");
         assert!(matches!(

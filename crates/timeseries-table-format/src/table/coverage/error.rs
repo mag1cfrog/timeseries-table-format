@@ -34,7 +34,7 @@ pub enum CoverageQueryError {
 
     /// Constructing a canonical entity identity failed.
     #[snafu(display("Invalid coverage query entity identity: {source}"))]
-    EntityIdentity {
+    InvalidEntityIdentity {
         /// Complete entity identity construction error.
         source: EntityIdentityError,
         /// Backtrace captured at the coverage query boundary.
