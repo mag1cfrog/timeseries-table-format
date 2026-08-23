@@ -12,8 +12,8 @@ use snafu::{IntoError, ResultExt};
 use tokio::fs;
 
 use crate::storage::{
-    BackendError, FileCleanupGuard, OtherIoSnafu, StorageLocation, StorageResult, create_new_file,
-    create_parent_dir, join_local,
+    FileCleanupGuard, OtherIoSnafu, StorageBackendError, StorageLocation, StorageResult,
+    create_new_file, create_parent_dir, join_local,
 };
 
 #[cfg(test)]
@@ -98,7 +98,7 @@ impl LocalSink {
 
         // Use std::fs::File because Arrow writers require std::io::Write.
         let file = std::fs::File::create(&tmp_path)
-            .map_err(BackendError::Local)
+            .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: tmp_path.display().to_string(),
             })?;
@@ -142,7 +142,7 @@ impl LocalSink {
     async fn finish(&mut self) -> StorageResult<()> {
         self.writer
             .flush()
-            .map_err(BackendError::Local)
+            .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: self.path.display().to_string(),
             })?;
@@ -150,7 +150,7 @@ impl LocalSink {
         self.writer
             .get_ref()
             .sync_all()
-            .map_err(BackendError::Local)
+            .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: self.path.display().to_string(),
             })?;
@@ -160,7 +160,7 @@ impl LocalSink {
             return Err(OtherIoSnafu {
                 path: self.path.display().to_string(),
             }
-            .into_error(BackendError::Local(io::Error::other(
+            .into_error(StorageBackendError::from(io::Error::other(
                 "injected output finish failure",
             ))));
         }
@@ -168,7 +168,7 @@ impl LocalSink {
         if let LocalFinish::Rename(final_path) = &self.finish {
             fs::rename(&self.path, final_path)
                 .await
-                .map_err(BackendError::Local)
+                .map_err(StorageBackendError::from)
                 .context(OtherIoSnafu {
                     path: final_path.display().to_string(),
                 })?;
@@ -280,7 +280,7 @@ impl OutputLocation {
             return Err(OtherIoSnafu {
                 path: "<empty output location>".to_string(),
             }
-            .into_error(BackendError::Local(std::io::Error::new(
+            .into_error(StorageBackendError::from(std::io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "output location is empty",
             ))));
@@ -295,10 +295,12 @@ impl OutputLocation {
                     OtherIoSnafu {
                         path: trimmed.to_string(),
                     }
-                    .into_error(BackendError::Local(std::io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "output location has no file name",
-                    )))
+                    .into_error(StorageBackendError::from(
+                        std::io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "output location has no file name",
+                        ),
+                    ))
                 })?;
                 let base = path
                     .parent()

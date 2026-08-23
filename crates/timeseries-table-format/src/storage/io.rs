@@ -14,7 +14,7 @@ use std::{
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::storage::{
-    BackendError, NotFoundSnafu, OtherIoSnafu, StorageError, StorageLocation, StorageResult,
+    NotFoundSnafu, OtherIoSnafu, StorageBackendError, StorageError, StorageLocation, StorageResult,
     normalize_relative_storage_path,
 };
 
@@ -78,14 +78,13 @@ fn cleanup_failure(path: &Path, operation: StorageError, cleanup: io::Error) -> 
     let path = path.display().to_string();
     let cleanup_error = StorageError::OtherIo {
         path: path.clone(),
-        source: BackendError::Local(cleanup),
+        source: cleanup.into(),
         backtrace: Backtrace::capture(),
     };
     StorageError::CleanupFailed {
         path,
         operation_error: Box::new(operation),
         cleanup_error: Box::new(cleanup_error),
-        backtrace: Backtrace::capture(),
     }
 }
 
@@ -245,7 +244,7 @@ fn has_cleanup_failure(path: &Path) -> bool {
 fn write_failure(path: &Path) -> StorageError {
     StorageError::OtherIo {
         path: path.display().to_string(),
-        source: BackendError::Local(io::Error::other("injected write failure")),
+        source: io::Error::other("injected write failure").into(),
         backtrace: Backtrace::capture(),
     }
 }
@@ -273,14 +272,14 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
 
         file.write_all(contents)
             .await
-            .map_err(BackendError::Local)
+            .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: path.display().to_string(),
             })?;
 
         file.sync_all()
             .await
-            .map_err(BackendError::Local)
+            .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: path.display().to_string(),
             })?;
@@ -316,13 +315,13 @@ pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File>
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
             Err(StorageError::AlreadyExists {
                 path: path.display().to_string(),
-                source: BackendError::Local(source),
+                source: source.into(),
                 backtrace: Backtrace::capture(),
             })
         }
         Err(source) => Err(StorageError::OtherIo {
             path: path.display().to_string(),
-            source: BackendError::Local(source),
+            source: source.into(),
             backtrace: Backtrace::capture(),
         }),
     }
@@ -350,9 +349,9 @@ pub(crate) async fn open_parquet_reader(
         StorageLocation::Local(_) => match fs::File::open(absolute_path).await {
             Ok(file) => Ok(Box::new(file)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Err(BackendError::Local(error)).context(NotFoundSnafu { path })
+                Err(StorageBackendError::from(error)).context(NotFoundSnafu { path })
             }
-            Err(error) => Err(BackendError::Local(error)).context(OtherIoSnafu { path }),
+            Err(error) => Err(StorageBackendError::from(error)).context(OtherIoSnafu { path }),
         },
     }
 }
@@ -361,7 +360,7 @@ pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)
             .await
-            .map_err(BackendError::Local)
+            .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: parent.display().to_string(),
             })?;
@@ -384,7 +383,7 @@ pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
 ///
 /// # Errors
 ///
-/// Returns `StorageError::LocalIo` when filesystem I/O fails; other internal
+/// Returns `StorageError::OtherIo` when filesystem I/O fails; other internal
 /// helpers may add context to the returned error.
 pub async fn write_atomic(
     location: &StorageLocation,
@@ -407,7 +406,7 @@ pub async fn write_atomic(
                 // Opening through Tokio would leave a non-cancellable blocking
                 // task able to recreate this path after the future is dropped.
                 let file = std::fs::File::create(&tmp_path)
-                    .map_err(BackendError::Local)
+                    .map_err(StorageBackendError::from)
                     .context(OtherIoSnafu {
                         path: tmp_path.display().to_string(),
                     })?;
@@ -415,14 +414,14 @@ pub async fn write_atomic(
 
                 file.write_all(contents)
                     .await
-                    .map_err(BackendError::Local)
+                    .map_err(StorageBackendError::from)
                     .context(OtherIoSnafu {
                         path: tmp_path.display().to_string(),
                     })?;
 
                 file.sync_all()
                     .await
-                    .map_err(BackendError::Local)
+                    .map_err(StorageBackendError::from)
                     .context(OtherIoSnafu {
                         path: tmp_path.display().to_string(),
                     })?;
@@ -435,7 +434,7 @@ pub async fn write_atomic(
             // dropping the future cannot publish CURRENT and then roll back
             // the commit file before this function observes success.
             std::fs::rename(&tmp_path, &abs)
-                .map_err(BackendError::Local)
+                .map_err(StorageBackendError::from)
                 .context(OtherIoSnafu {
                     path: abs.display().to_string(),
                 })?;
@@ -453,7 +452,7 @@ pub async fn write_atomic(
 ///
 /// Currently only `StorageLocation::Local` is supported. On success this returns
 /// the file contents; if the file cannot be found a `StorageError::NotFound` is
-/// returned, while other filesystem problems produce `StorageError::LocalIo`.
+/// returned, while other filesystem problems produce `StorageError::OtherIo`.
 pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> StorageResult<String> {
     match location {
         StorageLocation::Local(_) => {
@@ -461,11 +460,11 @@ pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> Stor
 
             match fs::read_to_string(&abs).await {
                 Ok(s) => Ok(s),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Err(BackendError::Local(e))
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StorageBackendError::from(e))
                     .context(NotFoundSnafu {
                         path: abs.display().to_string(),
                     }),
-                Err(e) => Err(BackendError::Local(e)).context(OtherIoSnafu {
+                Err(e) => Err(StorageBackendError::from(e)).context(OtherIoSnafu {
                     path: abs.display().to_string(),
                 }),
             }
@@ -481,7 +480,7 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
             if take_cleanup_failure(&abs) {
                 return Err(StorageError::OtherIo {
                     path: abs.display().to_string(),
-                    source: BackendError::Local(io::Error::other("injected cleanup failure")),
+                    source: io::Error::other("injected cleanup failure").into(),
                     backtrace: Backtrace::capture(),
                 });
             }
@@ -490,13 +489,13 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
                 Err(source) if source.kind() == io::ErrorKind::NotFound => {
                     Err(StorageError::NotFound {
                         path: abs.display().to_string(),
-                        source: BackendError::Local(source),
+                        source: source.into(),
                         backtrace: Backtrace::capture(),
                     })
                 }
                 Err(source) => Err(StorageError::OtherIo {
                     path: abs.display().to_string(),
-                    source: BackendError::Local(source),
+                    source: source.into(),
                     backtrace: Backtrace::capture(),
                 }),
             }
@@ -550,9 +549,11 @@ pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> Stor
             match fs::read(&abs).await {
                 Ok(bytes) => Ok(bytes),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    Err(BackendError::Local(e)).context(NotFoundSnafu { path: path_str })
+                    Err(StorageBackendError::from(e)).context(NotFoundSnafu { path: path_str })
                 }
-                Err(e) => Err(BackendError::Local(e)).context(OtherIoSnafu { path: path_str }),
+                Err(e) => {
+                    Err(StorageBackendError::from(e)).context(OtherIoSnafu { path: path_str })
+                }
             }
         }
     }
@@ -571,9 +572,11 @@ pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageRe
             match meta {
                 Ok(m) => Ok(m.len()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    Err(BackendError::Local(e)).context(NotFoundSnafu { path: path_str })
+                    Err(StorageBackendError::from(e)).context(NotFoundSnafu { path: path_str })
                 }
-                Err(e) => Err(BackendError::Local(e)).context(OtherIoSnafu { path: path_str }),
+                Err(e) => {
+                    Err(StorageBackendError::from(e)).context(OtherIoSnafu { path: path_str })
+                }
             }
         }
     }

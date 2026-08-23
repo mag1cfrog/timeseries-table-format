@@ -6,7 +6,7 @@ use snafu::IntoError;
 #[cfg(feature = "datafusion")]
 use snafu::ResultExt;
 
-use crate::storage::{BackendError, OtherIoSnafu, StorageLocation, StorageResult};
+use crate::storage::{OtherIoSnafu, StorageBackendError, StorageLocation, StorageResult};
 
 /// Table root location with table-scoped semantics.
 ///
@@ -58,13 +58,13 @@ impl TableLocation {
         match self.as_ref() {
             StorageLocation::Local(root) => {
                 let absolute = std::path::absolute(root.join(native_path))
-                    .map_err(BackendError::Local)
+                    .map_err(StorageBackendError::from)
                     .context(OtherIoSnafu {
                         path: normalized.clone(),
                     })?;
 
                 ObjectStorePath::from_absolute_path(absolute).map_err(|source| {
-                    OtherIoSnafu { path: normalized }.into_error(BackendError::Local(
+                    OtherIoSnafu { path: normalized }.into_error(StorageBackendError::from(
                         std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
                     ))
                 })
@@ -124,7 +124,7 @@ fn invalid_relative_storage_path(path: &Path, reason: &str) -> crate::storage::S
     } else {
         path.display().to_string()
     };
-    OtherIoSnafu { path: path.clone() }.into_error(BackendError::Local(std::io::Error::new(
+    OtherIoSnafu { path: path.clone() }.into_error(StorageBackendError::from(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         format!("invalid table-relative storage path '{path}': {reason}"),
     )))

@@ -514,7 +514,7 @@ pub(crate) async fn segment_meta_from_parquet(
 mod tests {
     use super::*;
     use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity};
-    use crate::transaction_log::segments::{SegmentError, SegmentIoError};
+    use crate::transaction_log::segments::SegmentError;
     use arrow::array::{
         ArrayRef, BinaryBuilder, Int64Array, TimestampMillisecondArray, UInt64Array,
     };
@@ -1199,7 +1199,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue {
                     path,
                     column,
@@ -1220,7 +1220,7 @@ mod tests {
         let signed = segment_meta_from_parquet(&location, signed_path, &int64_index("index")).await;
         assert!(matches!(
             signed,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue {
                     expected_domain: "int64",
                     ..
@@ -1239,7 +1239,7 @@ mod tests {
             segment_meta_from_parquet(&location, unsigned_path, &uint64_index("index")).await;
         assert!(matches!(
             unsigned,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue {
                     expected_domain: "uint64",
                     ..
@@ -1328,7 +1328,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::NoObservedIndexValue { .. }
             })
         ));
@@ -1414,7 +1414,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1444,7 +1444,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1471,7 +1471,7 @@ mod tests {
             segment_meta_from_parquet(&location, signed_path, &uint64_index("index")).await;
         assert!(matches!(
             signed_as_unsigned,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1491,7 +1491,7 @@ mod tests {
             segment_meta_from_parquet(&location, unsigned_path, &int64_index("index")).await;
         assert!(matches!(
             unsigned_as_signed,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::OrderedIndexColumn {
                     source: ParquetIndexColumnError {
                         path,
@@ -1527,7 +1527,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::ParquetStatsShape { path, column, .. }
             }) if path == "data/out_of_range.parquet" && column == "ts"
         ));
@@ -1549,7 +1549,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::ParquetRead { .. }
             })
         ));
@@ -1569,7 +1569,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::TooShort { .. }
             })
         ));
@@ -1586,9 +1586,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Io {
-                source: SegmentIoError::MissingFile { path, .. }
-            }) if path == "data/missing.parquet"
+            Err(SegmentError::MissingFile { path, .. }) if path == "data/missing.parquet"
         ));
         Ok(())
     }

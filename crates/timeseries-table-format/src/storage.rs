@@ -80,7 +80,7 @@ impl StorageLocation {
             return Err(OtherIoSnafu {
                 path: "<empty table location>".to_string(),
             }
-            .into_error(BackendError::Local(std::io::Error::new(
+            .into_error(StorageBackendError::from(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "table location is empty",
             ))));
@@ -117,7 +117,7 @@ impl StorageLocation {
                 return Err(OtherIoSnafu {
                     path: trimmed.to_string(),
                 }
-                .into_error(BackendError::Local(std::io::Error::new(
+                .into_error(StorageBackendError::from(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     format!("unsupported table location scheme: {scheme}"),
                 ))));
@@ -140,11 +140,12 @@ mod tests {
     fn parse_rejects_empty_location() {
         let err = StorageLocation::parse("   ").expect_err("expected error");
         match err {
-            StorageError::OtherIo { source, .. } => match source {
-                BackendError::Local(inner) => {
-                    assert_eq!(inner.kind(), io::ErrorKind::InvalidInput);
-                }
-            },
+            StorageError::OtherIo {
+                source: StorageBackendError::Filesystem { source },
+                ..
+            } => {
+                assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -154,11 +155,12 @@ mod tests {
         let err =
             StorageLocation::parse("s3://bucket/path").expect_err("expected unsupported scheme");
         match err {
-            StorageError::OtherIo { source, .. } => match source {
-                BackendError::Local(inner) => {
-                    assert_eq!(inner.kind(), io::ErrorKind::Unsupported);
-                }
-            },
+            StorageError::OtherIo {
+                source: StorageBackendError::Filesystem { source },
+                ..
+            } => {
+                assert_eq!(source.kind(), io::ErrorKind::Unsupported);
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }

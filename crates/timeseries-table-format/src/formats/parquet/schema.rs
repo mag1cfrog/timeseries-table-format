@@ -595,7 +595,6 @@ pub async fn logical_schema_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction_log::segments::SegmentIoError;
     use arrow::{
         array::{RecordBatch, TimestampMillisecondArray, new_null_array},
         datatypes::{DataType, Field, Fields, Schema},
@@ -819,9 +818,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SegmentError::Io {
-                source: SegmentIoError::MissingFile { path, .. }
-            }) if path == "data/missing.parquet"
+            Err(SegmentError::MissingFile { path, .. }) if path == "data/missing.parquet"
         ));
         Ok(())
     }
@@ -837,7 +834,7 @@ mod tests {
         let result = logical_schema_from_parquet(&TableLocation::local(tmp.path()), rel_path).await;
         assert!(matches!(
             result,
-            Err(SegmentError::Meta {
+            Err(SegmentError::Metadata {
                 source: SegmentMetaError::ParquetRead { .. }
             })
         ));
