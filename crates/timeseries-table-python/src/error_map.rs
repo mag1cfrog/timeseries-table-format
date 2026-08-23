@@ -10,7 +10,7 @@ use crate::exceptions::{
 use timeseries_table_format::{
     coverage::{EntityIdentity, EntityValue, index_interval::IndexInterval},
     storage::StorageError as CoreStorageError,
-    table::TableError,
+    table::{AppendError, TableError},
     transaction_log::CommitError,
 };
 
@@ -221,9 +221,12 @@ pub(crate) fn table_error_to_py(
             Some(&example_identity),
         ),
 
-        TableError::SchemaCompatibility { .. } | TableError::SegmentSchemaCompatibility { .. } => {
-            SchemaMismatchError::new_err(err.to_string())
-        }
+        TableError::SchemaCompatibility { .. }
+        | TableError::Append {
+            source:
+                AppendError::InputSchemaCompatibility { .. }
+                | AppendError::GeneratedSegmentSchemaCompatibility { .. },
+        } => SchemaMismatchError::new_err(err.to_string()),
 
         _ => TimeseriesTableError::new_err(err.to_string()),
     }

@@ -63,6 +63,56 @@ pub enum AppendError {
         /// Rejected per-append row-group limit.
         max_rows_per_row_group: usize,
     },
+
+    /// Append input is incompatible with the table schema or index specification.
+    #[snafu(
+        context(false),
+        display("Append input schema is incompatible: {source}")
+    )]
+    InputSchemaCompatibility {
+        /// Complete schema compatibility failure.
+        #[snafu(source, backtrace)]
+        source: SchemaCompatibilityError,
+    },
+
+    /// A generated segment is incompatible with the table schema.
+    #[snafu(display(
+        "Generated segment {segment_path} is incompatible with the table schema: {source}"
+    ))]
+    GeneratedSegmentSchemaCompatibility {
+        /// Generated table-relative segment path.
+        segment_path: String,
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
+        source: Box<SchemaCompatibilityError>,
+    },
+
+    /// Table state lacks the canonical schema required by append.
+    #[snafu(display(
+        "Table has no logical_schema at version {version}; cannot append without a canonical schema"
+    ))]
+    MissingCanonicalTableSchema {
+        /// Transaction log version missing a canonical logical schema.
+        version: u64,
+    },
+
+    /// Reading metadata from the generated segment failed.
+    #[snafu(context(false), display("Generated segment metadata error: {source}"))]
+    SegmentMetadata {
+        /// Complete segment metadata failure.
+        #[snafu(source(from(SegmentError, Box::new)), backtrace)]
+        source: Box<SegmentError>,
+    },
+
+    /// Streaming the append input into Parquet failed.
+    #[snafu(display("Parquet write error: {source}"))]
+    ParquetWrite {
+        /// Parquet writer failure.
+        #[snafu(source)]
+        source: ParquetError,
+        /// Backtrace captured at the append writer boundary.
+        backtrace: Backtrace,
+    },
 }
 
 /// Errors from high-level time-series table operations.
@@ -143,13 +193,6 @@ pub enum TableError {
         cleanup_errors: Vec<String>,
     },
 
-    /// Parquet schema conversion or streaming output failed during append.
-    #[snafu(display("Parquet write error while appending: {source}"))]
-    AppendParquet {
-        /// Parquet writer error.
-        source: ParquetError,
-    },
-
     /// A streaming append may have committed, so its generated data path must
     /// be preserved until the caller resolves the transaction outcome.
     #[snafu(display(
@@ -211,15 +254,7 @@ pub enum TableError {
         source: IndexValueError,
     },
 
-    /// Segment-level metadata / Parquet error during append (for example, missing time column, unsupported type, corrupt stats).
-    #[snafu(display("Segment metadata error while appending: {source}"))]
-    SegmentMeta {
-        /// Underlying segment metadata error.
-        #[snafu(source, backtrace)]
-        source: SegmentError,
-    },
-
-    /// Schema compatibility error when appending a segment with incompatible schema (no evolution allowed in v0.1).
+    /// Schema compatibility validation failed.
     #[snafu(display("Schema compatibility error: {source}"))]
     SchemaCompatibility {
         /// Underlying schema compatibility error.
@@ -227,19 +262,8 @@ pub enum TableError {
         source: SchemaCompatibilityError,
     },
 
-    /// A segment's schema is incompatible with the table or index specification.
-    #[snafu(display("Schema compatibility error for segment {path}: {source}"))]
-    SegmentSchemaCompatibility {
-        /// Table-relative segment path.
-        path: String,
-        /// Underlying schema compatibility error.
-        #[snafu(source)]
-        source: SchemaCompatibilityError,
-    },
-
-    /// Table has progressed past the initial metadata commit but still lacks
-    /// a canonical logical schema (invariant violation for v0.1).
-    #[snafu(display("Table has no logical_schema at version {version}; cannot append in v0.1"))]
+    /// Table state lacks a canonical logical schema.
+    #[snafu(display("Table has no logical_schema at version {version}"))]
     MissingCanonicalSchema {
         /// The transaction log version missing a canonical logical schema.
         version: u64,
@@ -518,6 +542,30 @@ mod tests {
 
         assert!(
             matches!(arrow_source, ArrowError::ComputeError(message) if message == "input failed")
+        );
+        assert!(std::ptr::eq(table_backtrace, append_backtrace));
+    }
+
+    #[test]
+    fn append_facade_preserves_parquet_source_and_backtrace() {
+        let error = TableError::from(AppendError::ParquetWrite {
+            source: ParquetError::General("write failed".to_string()),
+            backtrace: Backtrace::capture(),
+        });
+
+        let append_source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<AppendError>())
+            .expect("append source");
+        let parquet_source = append_source
+            .source()
+            .and_then(|source| source.downcast_ref::<ParquetError>())
+            .expect("Parquet source");
+        let append_backtrace = ErrorCompat::backtrace(append_source).expect("append backtrace");
+        let table_backtrace = ErrorCompat::backtrace(&error).expect("table backtrace");
+
+        assert!(
+            matches!(parquet_source, ParquetError::General(message) if message == "write failed")
         );
         assert!(std::ptr::eq(table_backtrace, append_backtrace));
     }

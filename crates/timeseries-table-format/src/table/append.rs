@@ -51,11 +51,10 @@ use super::{
     TimeSeriesTable,
     append_schema::AppendSchemaNormalizer,
     error::{
-        AppendError, AppendParquetSnafu, ArrowInputSnafu, ArrowToLogicalSchemaSnafu,
-        EmptySegmentEntityCoverageSnafu, EntityIndexIntervalOverlapSnafu,
-        EntityWithoutIndexCoverageSnafu, ExistingSegmentMissingCoverageSnafu,
-        IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu, MissingCanonicalSchemaSnafu,
-        SchemaCompatibilitySnafu, SegmentMetaSnafu, SegmentSchemaCompatibilitySnafu, StorageSnafu,
+        AppendError, ArrowInputSnafu, ArrowToLogicalSchemaSnafu, EmptySegmentEntityCoverageSnafu,
+        EntityIndexIntervalOverlapSnafu, EntityWithoutIndexCoverageSnafu,
+        ExistingSegmentMissingCoverageSnafu, GeneratedSegmentSchemaCompatibilitySnafu,
+        IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu, ParquetWriteSnafu, StorageSnafu,
         TableError,
     },
 };
@@ -290,21 +289,22 @@ impl TimeSeriesTable {
                     LogicalSchema::try_from_arrow_schema(incoming_schema.as_ref())
                         .context(ArrowToLogicalSchemaSnafu)?;
                 ensure_index_spec_matches_schema(&incoming_logical_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)?;
+                    .map_err(AppendError::from)?;
                 Ok(AppendSchemaNormalizer::without_conversion(incoming_schema))
             }
-            None => MissingCanonicalSchemaSnafu {
+            None => Err(AppendError::MissingCanonicalTableSchema {
                 version: self.state.version,
             }
-            .fail(),
+            .into()),
             Some(table_schema) => {
                 ensure_index_spec_matches_schema(table_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)?;
-                AppendSchemaNormalizer::for_registered_schema(
+                    .map_err(AppendError::from)?;
+                let normalizer = AppendSchemaNormalizer::for_registered_schema(
                     incoming_schema.as_ref(),
                     table_schema,
                 )
-                .context(SchemaCompatibilitySnafu)
+                .map_err(AppendError::from)?;
+                Ok(normalizer)
             }
         }
     }
@@ -325,7 +325,7 @@ impl TimeSeriesTable {
         let (mut segment_meta, _) =
             segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
-                .context(SegmentMetaSnafu)?;
+                .map_err(AppendError::from)?;
         let row_count = segment_meta.row_count;
         let span = tracing::Span::current();
         span.record("row_count", row_count);
@@ -335,10 +335,10 @@ impl TimeSeriesTable {
 
         let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
-            .context(SegmentMetaSnafu)?;
+            .map_err(AppendError::from)?;
         ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
-            SegmentSchemaCompatibilitySnafu {
-                path: relative_path.to_string(),
+            GeneratedSegmentSchemaCompatibilitySnafu {
+                segment_path: relative_path.to_string(),
             },
         )?;
 
@@ -358,15 +358,15 @@ impl TimeSeriesTable {
                 Some(updated_meta)
             }
             None => {
-                return MissingCanonicalSchemaSnafu {
+                return Err(AppendError::MissingCanonicalTableSchema {
                     version: expected_version,
                 }
-                .fail();
+                .into());
             }
             Some(table_schema) => {
                 ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
-                    .context(SegmentSchemaCompatibilitySnafu {
-                        path: relative_path.to_string(),
+                    .context(GeneratedSegmentSchemaCompatibilitySnafu {
+                        segment_path: relative_path.to_string(),
                     })?;
                 None
             }
@@ -696,8 +696,8 @@ impl TimeSeriesTable {
                 });
                 let mut writer =
                     ParquetArrowWriter::try_new(sink, output_schema, writer_properties)
-                        .context(AppendParquetSnafu)?;
-                writer.write(&first_batch).context(AppendParquetSnafu)?;
+                        .context(ParquetWriteSnafu)?;
+                writer.write(&first_batch).context(ParquetWriteSnafu)?;
                 drop(first_batch);
                 tokio::task::yield_now().await;
 
@@ -708,13 +708,13 @@ impl TimeSeriesTable {
                         let batch = schema_normalizer
                             .normalize_batch(&batch)
                             .context(ArrowInputSnafu)?;
-                        writer.write(&batch).context(AppendParquetSnafu)?;
+                        writer.write(&batch).context(ParquetWriteSnafu)?;
                     }
                     drop(batch);
                     tokio::task::yield_now().await;
                 }
 
-                let sink = writer.into_inner().context(AppendParquetSnafu)?;
+                let sink = writer.into_inner().context(ParquetWriteSnafu)?;
                 sink.finish().await.context(StorageSnafu)
             }
             .await;
@@ -1090,7 +1090,12 @@ mod tests {
             .await
             .expect_err("incompatible declared schema must fail");
 
-        assert!(matches!(error, TableError::SchemaCompatibility { .. }));
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::InputSchemaCompatibility { .. }
+            }
+        ));
         assert!(error.to_string().contains(expected_column));
         assert!(observations.schema_calls.get() > 0);
         assert_eq!(observations.next_calls.get(), 0);
@@ -1877,7 +1882,12 @@ mod tests {
                 assert!(matches!(error, TableError::Storage { .. }), "{stage:?}");
             } else {
                 assert!(
-                    matches!(error, TableError::AppendParquet { .. }),
+                    matches!(
+                        error,
+                        TableError::Append {
+                            source: AppendError::ParquetWrite { .. }
+                        }
+                    ),
                     "{stage:?}: {error}"
                 );
             }
@@ -2069,7 +2079,12 @@ mod tests {
         else {
             panic!("unexpected error: {error}");
         };
-        assert!(matches!(*source, TableError::AppendParquet { .. }));
+        assert!(matches!(
+            *source,
+            TableError::Append {
+                source: AppendError::ParquetWrite { .. }
+            }
+        ));
         assert_eq!(cleanup_errors.len(), 1);
         let remaining = std::fs::read_dir(&data_dir)?.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(remaining.len(), 1);
@@ -2312,7 +2327,9 @@ mod tests {
 
         assert!(matches!(
             table.append(input_batch(vec![1])?).await,
-            Err(TableError::SchemaCompatibility { .. })
+            Err(TableError::Append {
+                source: AppendError::InputSchemaCompatibility { .. }
+            })
         ));
         assert_eq!(table.state().version, 1);
         assert!(!temp.path().join("data").exists());
@@ -2900,7 +2917,9 @@ mod tests {
             append_parquet_fixture(&mut table, mismatch_path)
                 .await
                 .expect_err("later schema mismatch must fail"),
-            TableError::SchemaCompatibility { .. }
+            TableError::Append {
+                source: AppendError::InputSchemaCompatibility { .. }
+            }
         ));
         assert_eq!(table.state, state_before);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -3013,13 +3032,15 @@ mod tests {
         assert!(
             matches!(
             error,
-            TableError::SchemaCompatibility {
-                source:
-                    crate::metadata::schema_compat::SchemaCompatibilityError::IndexKindMismatch {
-                        expected: "uint64",
-                        actual: LogicalDataType::Int64,
-                        ..
-                    }
+            TableError::Append {
+                source: AppendError::InputSchemaCompatibility {
+                    source:
+                        crate::metadata::schema_compat::SchemaCompatibilityError::IndexKindMismatch {
+                            expected: "uint64",
+                            actual: LogicalDataType::Int64,
+                            ..
+                        }
+                }
             }
         ),
             "unexpected error: {error:?}"
@@ -3340,12 +3361,14 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::SchemaCompatibility {
-                source:
-                    crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
-                        column,
-                        actual: LogicalDataType::Bool,
-                    }
+            TableError::Append {
+                source: AppendError::InputSchemaCompatibility {
+                    source:
+                        crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
+                            column,
+                            actual: LogicalDataType::Bool,
+                        }
+                }
             } if column == "device_id"
         ));
         assert_eq!(table.state, state_before);
