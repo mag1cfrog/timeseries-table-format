@@ -93,3 +93,46 @@ pub enum CliError {
     ))]
     CsvUnsupportedType { field: String, data_type: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use timeseries_table_format::{
+        coverage::io::CoverageSidecarError,
+        storage::StorageLocation,
+        table::{CoverageQueryError, TableError},
+    };
+
+    use super::CliError;
+
+    #[test]
+    fn datafusion_cli_error_preserves_coverage_query_hierarchy() {
+        let storage = StorageLocation::parse("").expect_err("empty location must fail");
+        let error = CliError::DataFusion {
+            source: datafusion::error::DataFusionError::External(Box::new(
+                TableError::CoverageQuery {
+                    source: CoverageQueryError::CoverageSidecar {
+                        path: "_coverage/table/missing.roar".to_string(),
+                        source: Box::new(CoverageSidecarError::Storage { source: storage }),
+                    },
+                },
+            )),
+        };
+
+        let datafusion = error
+            .source()
+            .and_then(|source| source.downcast_ref::<datafusion::error::DataFusionError>())
+            .expect("DataFusion source");
+        let table = datafusion
+            .source()
+            .and_then(|source| source.downcast_ref::<TableError>())
+            .expect("table source");
+        assert!(matches!(
+            table.source()
+                .and_then(|source| source.downcast_ref::<CoverageQueryError>()),
+            Some(CoverageQueryError::CoverageSidecar { path, .. })
+                if path == "_coverage/table/missing.roar"
+        ));
+    }
+}

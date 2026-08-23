@@ -717,8 +717,7 @@ mod tests {
                 CoverageSidecarError, write_coverage_sidecar_atomic,
                 write_coverage_sidecar_new_bytes,
             },
-            serde::CoverageCodecError,
-            serde::entity_coverage_to_bytes,
+            serde::{CoverageCodecError, coverage_to_bytes, entity_coverage_to_bytes},
         },
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
         metadata::schema_compat::SchemaCompatibilityError,
@@ -804,35 +803,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_snapshot_corruption_preserves_codec_source_and_backtrace() -> TestResult {
+    async fn strict_snapshot_corruption_and_truncation_preserve_codec_source_and_backtrace()
+    -> TestResult {
         let (tmp, mut table) = make_table().await?;
-        let coverage_path = "_coverage/table/corrupt.roar";
-        let absolute = tmp.path().join(coverage_path);
-        std::fs::create_dir_all(absolute.parent().expect("coverage parent"))?;
-        std::fs::write(&absolute, b"not a bitmap")?;
-        table.state_mut().table_coverage = Some(TableCoveragePointer {
-            index_kind: table.index_spec().kind.clone(),
-            coverage_path: coverage_path.to_string(),
-            version: table.state().version,
-        });
+        let valid = coverage_to_bytes(&Coverage::from_iter([1u64]))?;
+        let cases = [
+            ("corrupt", b"not a bitmap".to_vec()),
+            ("truncated", valid[..valid.len() - 1].to_vec()),
+        ];
 
-        let error = table
-            .load_table_coverage_snapshot_only()
-            .await
-            .expect_err("corrupt snapshot must fail");
-        let query = coverage_query_source(&error);
-        let sidecar = coverage_sidecar_source(query);
-        let codec = sidecar
-            .source()
-            .and_then(|source| source.downcast_ref::<CoverageCodecError>())
-            .expect("codec source");
+        for (name, bytes) in cases {
+            let coverage_path = format!("_coverage/table/{name}.roar");
+            let absolute = tmp.path().join(&coverage_path);
+            std::fs::create_dir_all(absolute.parent().expect("coverage parent"))?;
+            std::fs::write(&absolute, bytes)?;
+            table.state_mut().table_coverage = Some(TableCoveragePointer {
+                index_kind: table.index_spec().kind.clone(),
+                coverage_path,
+                version: table.state().version,
+            });
+
+            let error = table
+                .load_table_coverage_snapshot_only()
+                .await
+                .expect_err("invalid snapshot must fail");
+            let query = coverage_query_source(&error);
+            let sidecar = coverage_sidecar_source(query);
+            let codec = sidecar
+                .source()
+                .and_then(|source| source.downcast_ref::<CoverageCodecError>())
+                .expect("codec source");
+            assert!(matches!(
+                codec,
+                CoverageCodecError::BitmapDeserialization { .. }
+            ));
+            assert!(std::ptr::eq(
+                ErrorCompat::backtrace(&error).expect("table backtrace"),
+                ErrorCompat::backtrace(codec).expect("codec backtrace"),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_snapshot_requires_a_pointer_when_segments_exist() -> TestResult {
+        let (_tmp, mut table) = table_with_sparse_coverage().await?;
+        table.state_mut().table_coverage = None;
+
         assert!(matches!(
-            codec,
-            CoverageCodecError::BitmapDeserialization { .. }
-        ));
-        assert!(std::ptr::eq(
-            ErrorCompat::backtrace(&error).expect("table backtrace"),
-            ErrorCompat::backtrace(codec).expect("codec backtrace"),
+            table.load_table_coverage_snapshot_only().await,
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::MissingTableCoveragePointer { .. }
+            })
         ));
         Ok(())
     }
@@ -1872,6 +1894,35 @@ mod tests {
 
     #[tokio::test]
     async fn coverage_queries_validate_before_reading_coverage() -> TestResult {
+        let (_tmp, timestamp_table) = make_table().await?;
+        let timestamp = ts_from_secs(1);
+        assert!(matches!(
+            timestamp_table
+                .coverage_ratio_for_range(timestamp, timestamp)
+                .await,
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::InvalidRange {
+                    source: IndexValueError::InvalidRange { .. },
+                    ..
+                }
+            })
+        ));
+
+        let signed_kind = IndexKind::Int64 {
+            index_granularity: NonZeroU64::new(1).unwrap(),
+        };
+        let (_tmp, signed_table) =
+            table_with_index_coverage(signed_kind, Coverage::empty()).await?;
+        assert!(matches!(
+            signed_table.max_gap_len_for_range(1i64, 0i64).await,
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::InvalidRange {
+                    source: IndexValueError::InvalidRange { .. },
+                    ..
+                }
+            })
+        ));
+
         let tmp = TempDir::new()?;
         let kind = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
