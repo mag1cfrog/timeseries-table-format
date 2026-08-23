@@ -44,7 +44,7 @@ use crate::{
 };
 
 pub use coverage::CoverageQueryError;
-pub use error::{AppendError, TableError};
+pub use error::{AppendError, OptimizeError, TableError};
 pub use optimize::OptimizeReport;
 pub use scan::ScanError;
 

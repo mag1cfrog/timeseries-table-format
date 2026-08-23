@@ -85,6 +85,8 @@ pub enum EntityRewriteError {
     InvalidInput {
         /// Inconsistent input detail.
         reason: String,
+        /// Backtrace captured at the invalid rewrite boundary.
+        backtrace: Backtrace,
     },
 
     /// A completed staged output violates a rewrite invariant.
@@ -92,12 +94,15 @@ pub enum EntityRewriteError {
     InvalidOutput {
         /// Failed output invariant.
         reason: String,
+        /// Backtrace captured at the failed rewrite invariant.
+        backtrace: Backtrace,
     },
 
     /// Segment metadata or schema inspection failed.
     #[snafu(display("Failed to inspect Parquet segment: {source}"))]
     SegmentInspection {
         /// Existing Parquet inspection failure.
+        #[snafu(source, backtrace)]
         source: SegmentError,
     },
 
@@ -105,6 +110,7 @@ pub enum EntityRewriteError {
     #[snafu(display("Failed to inspect exact entity coverage: {source}"))]
     CoverageInspection {
         /// Existing entity coverage inspection failure.
+        #[snafu(source, backtrace)]
         source: SegmentCoverageError,
     },
 
@@ -112,6 +118,7 @@ pub enum EntityRewriteError {
     #[snafu(display("Failed to access entity coverage sidecar: {source}"))]
     CoverageSidecar {
         /// Existing coverage sidecar failure.
+        #[snafu(source, backtrace)]
         source: CoverageSidecarError,
     },
 
@@ -119,6 +126,7 @@ pub enum EntityRewriteError {
     #[snafu(display("Failed to serialize staged entity coverage: {source}"))]
     CoverageSerialization {
         /// Existing coverage codec failure.
+        #[snafu(source, backtrace)]
         source: CoverageCodecError,
     },
 
@@ -126,6 +134,7 @@ pub enum EntityRewriteError {
     #[snafu(display("Staged entity rewrite storage failure: {source}"))]
     Storage {
         /// Existing storage failure.
+        #[snafu(source, backtrace)]
         source: StorageError,
     },
 
@@ -153,13 +162,19 @@ pub enum EntityRewriteError {
 
     /// Rewrite failed and one or more private objects could not be removed.
     #[snafu(display(
-        "Staged entity rewrite failed: {source}; cleanup also failed: {cleanup_errors:?}"
+        "{source}; staged-object rollback also failed: [{}]",
+        cleanup_errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
     ))]
     Cleanup {
         /// Primary rewrite failure.
+        #[snafu(source, backtrace)]
         source: Box<EntityRewriteError>,
-        /// Every private path whose cleanup failed.
-        cleanup_errors: Vec<String>,
+        /// Typed cleanup failure for every private object that could not be removed.
+        cleanup_errors: Vec<StorageError>,
     },
 }
 
@@ -178,12 +193,14 @@ impl Write for SinkWriter {
 fn invalid_input(reason: impl Into<String>) -> EntityRewriteError {
     EntityRewriteError::InvalidInput {
         reason: reason.into(),
+        backtrace: Backtrace::capture(),
     }
 }
 
 fn invalid_output(reason: impl Into<String>) -> EntityRewriteError {
     EntityRewriteError::InvalidOutput {
         reason: reason.into(),
+        backtrace: Backtrace::capture(),
     }
 }
 
@@ -198,11 +215,11 @@ fn canonical_path(path: &str, description: &str) -> Result<(), EntityRewriteErro
     Ok(())
 }
 
-async fn cleanup_created(location: &TableLocation, created_paths: &[String]) -> Vec<String> {
+async fn cleanup_created(location: &TableLocation, created_paths: &[String]) -> Vec<StorageError> {
     let mut errors = Vec::new();
     for path in created_paths.iter().rev() {
         if let Err(error) = remove_file_if_exists(location.as_ref(), Path::new(path)).await {
-            errors.push(format!("{path}: {error}"));
+            errors.push(error);
         }
     }
     errors
@@ -1153,7 +1170,9 @@ mod tests {
         assert_eq!(cleanup_errors.len(), owned_paths.len());
         for path in &owned_paths {
             assert!(
-                cleanup_errors.iter().any(|error| error.contains(path)),
+                cleanup_errors
+                    .iter()
+                    .any(|error| error.to_string().contains(path)),
                 "cleanup failure omitted {path}"
             );
             assert!(fixture.temp.path().join(path).exists());

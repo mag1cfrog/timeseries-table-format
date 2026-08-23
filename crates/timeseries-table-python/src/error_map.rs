@@ -11,10 +11,10 @@ use timeseries_table_format::{
     coverage::{
         EntityIdentity, EntityValue, index_interval::IndexInterval, io::CoverageSidecarError,
     },
-    formats::parquet::SegmentCoverageError,
+    formats::parquet::{EntityRewriteError, SegmentCoverageError},
     storage::StorageError as CoreStorageError,
-    table::{AppendError, CoverageQueryError, ScanError, TableError},
-    transaction_log::CommitError,
+    table::{AppendError, CoverageQueryError, OptimizeError, ScanError, TableError},
+    transaction_log::{CommitError, segments::SegmentError},
 };
 
 #[allow(dead_code)]
@@ -218,6 +218,44 @@ fn append_error_to_py(
     }
 }
 
+fn coverage_sidecar_error_to_py(py: Python<'_>, err: CoverageSidecarError, msg: String) -> PyErr {
+    match err {
+        CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
+        CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn entity_rewrite_error_to_py(py: Python<'_>, err: EntityRewriteError, msg: String) -> PyErr {
+    match err {
+        EntityRewriteError::Cleanup { source, .. } => entity_rewrite_error_to_py(py, *source, msg),
+        EntityRewriteError::SegmentInspection {
+            source: SegmentError::MissingFile { source, .. } | SegmentError::Storage { source, .. },
+        }
+        | EntityRewriteError::CoverageInspection {
+            source: SegmentCoverageError::Storage { source, .. },
+        }
+        | EntityRewriteError::Storage { source } => storage_error_to_py(py, source),
+        EntityRewriteError::CoverageSidecar { source } => {
+            coverage_sidecar_error_to_py(py, source, msg)
+        }
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn optimize_error_to_py(py: Python<'_>, err: OptimizeError, msg: String) -> PyErr {
+    match err {
+        OptimizeError::Rollback { source, .. } => optimize_error_to_py(py, *source, msg),
+        OptimizeError::MixedSegmentRewrite { source } => {
+            entity_rewrite_error_to_py(py, *source, msg)
+        }
+        OptimizeError::SchemaValidation { .. } => SchemaMismatchError::new_err(msg),
+        OptimizeError::CoverageSidecar { source } => coverage_sidecar_error_to_py(py, *source, msg),
+        OptimizeError::Commit { source } => commit_error_to_py(py, source),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn table_error_to_py(
     py: Python<'_>,
@@ -237,11 +275,7 @@ pub(crate) fn table_error_to_py(
             source:
                 CoverageQueryError::CoverageSnapshotRead { source, .. }
                 | CoverageQueryError::SegmentCoverageSidecarRead { source, .. },
-        } => match *source {
-            CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
-            CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
-            _ => TimeseriesTableError::new_err(msg),
-        },
+        } => coverage_sidecar_error_to_py(py, *source, msg),
 
         TableError::CoverageQuery {
             source: CoverageQueryError::SchemaCompatibility { .. },
@@ -250,6 +284,8 @@ pub(crate) fn table_error_to_py(
         TableError::TransactionLog { source } => commit_error_to_py(py, source),
 
         TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
+
+        TableError::Optimize { source } => optimize_error_to_py(py, source, msg),
 
         TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),
 
@@ -359,6 +395,32 @@ mod tests {
                     .expect("integer conflict_count"),
                 1
             );
+        });
+    }
+
+    #[test]
+    fn optimize_commit_and_rollback_preserve_storage_python_categories() {
+        init_python();
+        let commit = TableError::from(OptimizeError::Commit {
+            source: CommitError::Storage {
+                source: invalid_location_error(),
+            },
+        });
+        let rollback = TableError::from(OptimizeError::Rollback {
+            source: Box::new(OptimizeError::MixedSegmentRewrite {
+                source: Box::new(EntityRewriteError::Storage {
+                    source: invalid_location_error(),
+                }),
+            }),
+            cleanup_errors: vec![invalid_location_error()],
+        });
+
+        Python::attach(|py| {
+            let commit = table_error_to_py(py, commit, &[]);
+            assert!(commit.is_instance_of::<StorageError>(py));
+
+            let rollback = table_error_to_py(py, rollback, &[]);
+            assert!(rollback.is_instance_of::<StorageError>(py));
         });
     }
 }

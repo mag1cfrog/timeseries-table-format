@@ -263,6 +263,108 @@ pub enum AppendError {
     },
 }
 
+/// Errors owned by an entity-layout optimization operation.
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+pub enum OptimizeError {
+    /// Entity-layout optimization requires at least one entity column.
+    #[snafu(display(
+        "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
+    ))]
+    NotApplicable {
+        /// User-facing table root.
+        table_root: String,
+    },
+
+    /// Staging replacements for one mixed segment failed.
+    #[snafu(context(false), display("Mixed-segment rewrite failed: {source}"))]
+    MixedSegmentRewrite {
+        /// Complete mixed-segment rewrite failure.
+        #[snafu(source(from(EntityRewriteError, Box::new)), backtrace)]
+        source: Box<EntityRewriteError>,
+    },
+
+    /// Live segment bounds cannot be ordered in one native index domain.
+    #[snafu(
+        context(false),
+        display("Invalid segment ordered-index bounds: {source}")
+    )]
+    InvalidSegmentBounds {
+        /// Complete bounds validation failure.
+        #[snafu(source)]
+        source: IndexValueError,
+        /// Backtrace captured because index value validation does not own one.
+        backtrace: Backtrace,
+    },
+
+    /// Optimization cannot use the table's canonical schema.
+    #[snafu(
+        context(false),
+        display("Optimization schema validation failed: {source}")
+    )]
+    SchemaValidation {
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured because schema compatibility errors do not own one.
+        backtrace: Backtrace,
+    },
+
+    /// A coverage sidecar required to validate a staged plan could not be read.
+    #[snafu(
+        context(false),
+        display("Optimization coverage sidecar error: {source}")
+    )]
+    CoverageSidecar {
+        /// Complete coverage sidecar failure.
+        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
+        source: Box<CoverageSidecarError>,
+    },
+
+    /// A staged optimization plan violated an atomic publication invariant.
+    #[snafu(display("Invalid staged entity-layout optimization plan: {reason}"))]
+    InvalidStagedPlan {
+        /// Failed plan invariant.
+        reason: String,
+        /// Backtrace captured at the failed internal invariant.
+        backtrace: Backtrace,
+    },
+
+    /// An optimization count could not be represented without wrapping.
+    #[snafu(display("Entity-layout optimization count overflow: {field}"))]
+    CountOverflow {
+        /// Report or version field that overflowed.
+        field: &'static str,
+        /// Backtrace captured at the failed internal arithmetic boundary.
+        backtrace: Backtrace,
+    },
+
+    /// Publishing the optimization transaction failed.
+    #[snafu(context(false), display("Optimization commit failed: {source}"))]
+    Commit {
+        /// Complete transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
+    },
+
+    /// Optimization failed and one or more owned staged objects could not be removed.
+    #[snafu(display(
+        "{source}; staged-object rollback also failed: [{}]",
+        cleanup_errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))]
+    Rollback {
+        /// Original optimization failure that triggered rollback.
+        #[snafu(source, backtrace)]
+        source: Box<OptimizeError>,
+        /// Typed cleanup failure for every staged object that could not be removed.
+        cleanup_errors: Vec<StorageError>,
+    },
+}
+
 /// Errors from high-level time-series table operations.
 ///
 /// Each variant carries enough context for callers to surface actionable
@@ -304,47 +406,12 @@ pub enum TableError {
         source: CommitError,
     },
 
-    /// Entity-layout optimization does not apply to a table without entities.
-    #[snafu(display(
-        "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
-    ))]
-    OptimizeNotApplicable {
-        /// User-facing table root.
-        table_root: String,
-    },
-
-    /// Rewriting one mixed source into staged replacements failed.
-    #[snafu(display("Entity-layout optimization rewrite failed: {source}"))]
-    OptimizeRewrite {
-        /// Storage-level mixed segment rewrite failure.
-        #[snafu(source)]
-        source: EntityRewriteError,
-    },
-
-    /// A staged optimization plan violated an atomic publication invariant.
-    #[snafu(display("Invalid entity-layout optimization plan: {reason}"))]
-    OptimizeInvariant {
-        /// Failed plan invariant.
-        reason: String,
-    },
-
-    /// An optimization count could not be represented without wrapping.
-    #[snafu(display("Entity-layout optimization count overflow: {field}"))]
-    OptimizeCountOverflow {
-        /// Report or version field that overflowed.
-        field: &'static str,
-    },
-
-    /// Optimization failed and one or more owned staged objects could not be removed.
-    #[snafu(display(
-        "Entity-layout optimization failed: {source}; staged-object cleanup also failed: {cleanup_errors:?}"
-    ))]
-    OptimizeRollback {
-        /// Original optimization failure.
-        #[snafu(source)]
-        source: Box<TableError>,
-        /// Every private path whose cleanup failed.
-        cleanup_errors: Vec<String>,
+    /// An entity-layout optimization operation failed.
+    #[snafu(context(false), display("Entity-layout optimization failed: {source}"))]
+    Optimize {
+        /// Complete optimization-owned failure.
+        #[snafu(source, backtrace)]
+        source: OptimizeError,
     },
 
     /// Attempting to open a table that has no commits at all (CURRENT == 0).
@@ -547,6 +614,137 @@ mod tests {
         ));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(primary).expect("primary backtrace"),
+            commit_backtrace
+        ));
+    }
+
+    #[test]
+    fn optimize_facade_preserves_commit_source_and_backtrace() {
+        let error = TableError::from(OptimizeError::Commit {
+            source: CommitError::Conflict {
+                expected: 3,
+                found: 4,
+                backtrace: Backtrace::capture(),
+            },
+        });
+
+        let optimize = error
+            .source()
+            .and_then(|source| source.downcast_ref::<OptimizeError>())
+            .expect("optimize source");
+        let commit = optimize
+            .source()
+            .and_then(|source| source.downcast_ref::<CommitError>())
+            .expect("commit source");
+        let commit_backtrace = ErrorCompat::backtrace(commit).expect("commit backtrace");
+
+        assert!(matches!(
+            commit,
+            CommitError::Conflict {
+                expected: 3,
+                found: 4,
+                ..
+            }
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(optimize).expect("optimize backtrace"),
+            commit_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            commit_backtrace
+        ));
+    }
+
+    #[test]
+    fn optimize_facade_preserves_rewrite_storage_source_and_backtrace() {
+        let error = TableError::from(OptimizeError::from(EntityRewriteError::Storage {
+            source: StorageError::OtherIo {
+                path: "data/mixed.parquet".to_string(),
+                source: io::Error::other("read failed").into(),
+                backtrace: Backtrace::capture(),
+            },
+        }));
+
+        let optimize = error
+            .source()
+            .and_then(|source| source.downcast_ref::<OptimizeError>())
+            .expect("optimize source");
+        let rewrite = optimize
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<EntityRewriteError>>())
+            .map(Box::as_ref)
+            .expect("rewrite source");
+        let storage = rewrite
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageError>())
+            .expect("storage source");
+        let storage_backtrace = ErrorCompat::backtrace(storage).expect("storage backtrace");
+
+        assert!(matches!(
+            storage,
+            StorageError::OtherIo { path, .. } if path == "data/mixed.parquet"
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(rewrite).expect("rewrite backtrace"),
+            storage_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(optimize).expect("optimize backtrace"),
+            storage_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            storage_backtrace
+        ));
+    }
+
+    #[test]
+    fn optimize_rollback_preserves_primary_chain_and_typed_cleanup_errors() {
+        let error = TableError::from(OptimizeError::Rollback {
+            source: Box::new(OptimizeError::Commit {
+                source: CommitError::Conflict {
+                    expected: 5,
+                    found: 6,
+                    backtrace: Backtrace::capture(),
+                },
+            }),
+            cleanup_errors: vec![StorageError::OtherIo {
+                path: "data/_staged/segment.parquet".to_string(),
+                source: io::Error::other("cleanup failed").into(),
+                backtrace: Backtrace::capture(),
+            }],
+        });
+
+        let rollback = error
+            .source()
+            .and_then(|source| source.downcast_ref::<OptimizeError>())
+            .expect("optimize source");
+        let cleanup_errors = match rollback {
+            OptimizeError::Rollback { cleanup_errors, .. } => cleanup_errors,
+            other => panic!("unexpected optimize error: {other:?}"),
+        };
+        let primary = rollback
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<OptimizeError>>())
+            .map(Box::as_ref)
+            .expect("primary optimize source");
+        let commit = primary
+            .source()
+            .and_then(|source| source.downcast_ref::<CommitError>())
+            .expect("commit source");
+        let commit_backtrace = ErrorCompat::backtrace(commit).expect("commit backtrace");
+
+        assert!(matches!(
+            cleanup_errors.as_slice(),
+            [StorageError::OtherIo { path, .. }] if path == "data/_staged/segment.parquet"
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(rollback).expect("rollback backtrace"),
+            commit_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
             commit_backtrace
         ));
     }
