@@ -113,6 +113,103 @@ pub enum AppendError {
         /// Backtrace captured at the append writer boundary.
         backtrace: Backtrace,
     },
+
+    /// Deriving ordered-index coverage from the generated segment failed.
+    #[snafu(context(false), display("Segment coverage error: {source}"))]
+    GeneratedSegmentCoverage {
+        /// Complete segment coverage derivation failure.
+        #[snafu(source(from(SegmentCoverageError, Box::new)), backtrace)]
+        source: Box<SegmentCoverageError>,
+    },
+
+    /// An ordered-index interval could not be reconstructed for a diagnostic.
+    #[snafu(context(false), display("Index interval mapping failed: {source}"))]
+    IndexIntervalMapping {
+        /// Complete interval mapping failure.
+        #[snafu(source)]
+        source: IndexIntervalMappingError,
+        /// Backtrace captured at the append boundary.
+        backtrace: Backtrace,
+    },
+
+    /// A coverage sidecar could not be prepared or written.
+    #[snafu(context(false), display("Coverage sidecar error: {source}"))]
+    CoverageSidecar {
+        /// Complete coverage sidecar failure.
+        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
+        source: Box<CoverageSidecarError>,
+    },
+
+    /// The generated segment overlaps coverage already persisted by the table.
+    #[snafu(display(
+        "Ordered-index interval overlap while appending {segment_path}: {overlap_count} overlapping identity/index interval pairs (example_identity={example_identity:?}, example_index_interval={example_index_interval})"
+    ))]
+    PersistedIndexIntervalOverlap {
+        /// Relative path of the generated segment.
+        segment_path: String,
+        /// Number of overlapping identity/index interval pairs.
+        overlap_count: u128,
+        /// First overlapping identity, or `None` for a table-wide index.
+        example_identity: Option<EntityIdentity>,
+        /// Internal ID of the example interval.
+        example_index_interval_id: IndexIntervalId,
+        /// Logical ordered-index interval represented by the example ID.
+        example_index_interval: Box<IndexInterval>,
+    },
+
+    /// An entity-aware generated segment produced no entity coverage.
+    #[snafu(display("No entity coverage derived while appending segment {segment_path}"))]
+    EmptySegmentEntityCoverage {
+        /// Relative path of the generated segment.
+        segment_path: String,
+    },
+
+    /// One entity has rows but no usable ordered-index coverage.
+    #[snafu(display(
+        "Entity {identity:?} in segment {segment_path} has no non-null ordered-index values"
+    ))]
+    EntityWithoutIndexCoverage {
+        /// Relative path of the generated segment.
+        segment_path: String,
+        /// Complete identity whose rows all have null ordered-index values.
+        identity: EntityIdentity,
+    },
+
+    /// An existing segment lacks coverage metadata required by append.
+    #[snafu(display(
+        "Cannot append because existing segment {segment_path} is missing coverage_path"
+    ))]
+    ExistingSegmentMissingCoverageMetadata {
+        /// Canonical segment path missing coverage metadata.
+        segment_path: String,
+    },
+
+    /// A table coverage snapshot describes a different ordered index.
+    #[snafu(display(
+        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
+    ))]
+    CoverageSnapshotIndexKindMismatch {
+        /// Index descriptor defined by table metadata.
+        expected: IndexKind,
+        /// Index descriptor recorded by the snapshot pointer.
+        actual: IndexKind,
+        /// Log version where the mismatching pointer was recorded.
+        pointer_version: u64,
+    },
+
+    /// Reading one existing segment's coverage sidecar during recovery failed.
+    #[snafu(display(
+        "Cannot recover append coverage: failed to read segment {segment_path} coverage at {coverage_path}: {source}"
+    ))]
+    ExistingSegmentCoverageSidecarRead {
+        /// Canonical path of the segment whose sidecar could not be read.
+        segment_path: String,
+        /// Path of the failed coverage sidecar.
+        coverage_path: String,
+        /// Complete coverage sidecar failure.
+        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
+        source: Box<CoverageSidecarError>,
+    },
 }
 
 /// Errors from high-level time-series table operations.
@@ -374,27 +471,6 @@ pub enum TableError {
         timestamp: DateTime<Utc>,
     },
 
-    /// Segment Coverage error.
-    #[snafu(display("Segment coverage error: {source}"))]
-    SegmentCoverage {
-        /// Underlying coverage error.
-        #[snafu(source, backtrace)]
-        source: SegmentCoverageError,
-    },
-
-    /// Two incoming rows for one complete entity identity occupy the same interval.
-    #[snafu(display(
-        "Duplicate ordered-index interval {example_index_interval} while appending {segment_path}"
-    ))]
-    DuplicateIndexInterval {
-        /// Relative path of the generated segment being appended.
-        segment_path: String,
-        /// Complete entity identity, or `None` for a table without entity columns.
-        example_identity: Option<EntityIdentity>,
-        /// Logical ordered-index interval occupied by both rows.
-        example_index_interval: IndexInterval,
-    },
-
     /// Table coverage pointer uses a different ordered-index descriptor.
     #[snafu(display(
         "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
@@ -414,56 +490,6 @@ pub enum TableError {
         /// Underlying coverage sidecar error.
         #[snafu(source, backtrace)]
         source: CoverageSidecarError,
-    },
-
-    /// Appending would overlap existing ordered-index intervals.
-    #[snafu(display(
-        "Ordered-index interval overlap while appending {segment_path}: {overlap_count} overlapping index intervals (example_index_interval={example_index_interval})"
-    ))]
-    IndexIntervalOverlap {
-        /// Relative path of the segment being appended.
-        segment_path: String,
-        /// Number of overlapping index intervals.
-        overlap_count: u64,
-        /// Internal index interval ID for the example interval.
-        example_index_interval_id: IndexIntervalId,
-        /// Example logical ordered-index interval.
-        example_index_interval: IndexInterval,
-    },
-
-    /// Appending would overlap entity-scoped ordered-index intervals.
-    #[snafu(display(
-        "Entity ordered-index interval overlap while appending {segment_path}: {overlap_count} overlapping identity/index interval pairs (example_identity={example_identity:?}, example_index_interval={example_index_interval})"
-    ))]
-    EntityIndexIntervalOverlap {
-        /// Relative path of the segment being appended.
-        segment_path: String,
-        /// Number of overlapping `(entity identity, index interval)` pairs.
-        overlap_count: u128,
-        /// First overlapping identity in canonical order.
-        example_identity: EntityIdentity,
-        /// Smallest overlapping index interval ID for `example_identity`.
-        example_index_interval_id: IndexIntervalId,
-        /// Example logical ordered-index interval.
-        example_index_interval: IndexInterval,
-    },
-
-    /// Entity-aware append produced no entity coverage.
-    #[snafu(display("No entity coverage derived while appending segment {segment_path}"))]
-    EmptySegmentEntityCoverage {
-        /// Relative path of the segment being appended.
-        segment_path: String,
-    },
-
-    /// One entity has rows but no usable ordered-index coverage.
-    #[snafu(display(
-        "Entity {identity:?} in segment {segment_path} has no non-null ordered-index values"
-    ))]
-    EntityWithoutIndexCoverage {
-        /// Relative path of the segment being appended.
-        segment_path: String,
-        /// Complete identity whose rows all have null ordered-index values.
-        identity: EntityIdentity,
     },
 
     /// Existing segment lacks a coverage_path when coverage is required.
@@ -494,23 +520,6 @@ pub enum TableError {
         "Cannot append because table has segments but no table coverage snapshot pointer in state"
     ))]
     MissingTableCoveragePointer,
-}
-
-impl From<SegmentCoverageError> for TableError {
-    fn from(source: SegmentCoverageError) -> Self {
-        match source {
-            SegmentCoverageError::DuplicateIndexInterval {
-                path,
-                example_identity,
-                example_index_interval,
-            } => Self::DuplicateIndexInterval {
-                segment_path: path,
-                example_identity,
-                example_index_interval,
-            },
-            source => Self::SegmentCoverage { source },
-        }
-    }
 }
 
 #[cfg(test)]

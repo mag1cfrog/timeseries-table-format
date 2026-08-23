@@ -9,6 +9,7 @@ use crate::exceptions::{
 };
 use timeseries_table_format::{
     coverage::{EntityIdentity, EntityValue, index_interval::IndexInterval},
+    formats::parquet::SegmentCoverageError,
     storage::StorageError as CoreStorageError,
     table::{AppendError, TableError},
     transaction_log::CommitError,
@@ -177,48 +178,41 @@ pub(crate) fn table_error_to_py(
 
         TableError::TransactionLog { source } => commit_error_to_py(py, source),
 
-        TableError::DuplicateIndexInterval {
-            segment_path,
-            example_identity,
-            example_index_interval,
-        } => duplicate_index_interval_error_to_py(
+        TableError::Append {
+            source: AppendError::GeneratedSegmentCoverage { source },
+        } => match *source {
+            SegmentCoverageError::DuplicateIndexInterval {
+                path,
+                example_identity,
+                example_index_interval,
+            } => duplicate_index_interval_error_to_py(
+                py,
+                msg,
+                path,
+                example_index_interval,
+                entity_columns,
+                example_identity.as_ref(),
+            ),
+            _ => TimeseriesTableError::new_err(msg),
+        },
+
+        TableError::Append {
+            source:
+                AppendError::PersistedIndexIntervalOverlap {
+                    segment_path,
+                    overlap_count,
+                    example_identity,
+                    example_index_interval_id: _,
+                    example_index_interval,
+                },
+        } => index_interval_overlap_error_to_py(
             py,
             msg,
             segment_path,
-            example_index_interval,
+            overlap_count,
+            *example_index_interval,
             entity_columns,
             example_identity.as_ref(),
-        ),
-
-        TableError::IndexIntervalOverlap {
-            segment_path,
-            overlap_count,
-            example_index_interval_id: _,
-            example_index_interval,
-        } => index_interval_overlap_error_to_py(
-            py,
-            msg,
-            segment_path,
-            u128::from(overlap_count),
-            example_index_interval,
-            entity_columns,
-            None,
-        ),
-
-        TableError::EntityIndexIntervalOverlap {
-            segment_path,
-            overlap_count,
-            example_identity,
-            example_index_interval_id: _,
-            example_index_interval,
-        } => index_interval_overlap_error_to_py(
-            py,
-            msg,
-            segment_path,
-            overlap_count,
-            example_index_interval,
-            entity_columns,
-            Some(&example_identity),
         ),
 
         TableError::SchemaCompatibility { .. }

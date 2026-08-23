@@ -1115,7 +1115,9 @@ mod tests {
             .iter()
             .map(|path| table.state().segments[path].clone())
             .collect::<Vec<_>>();
-        let expected_coverage = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let expected_coverage = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
         let coverage_pointer = table
             .state()
             .table_coverage
@@ -1219,7 +1221,7 @@ mod tests {
         assert_eq!(reopened.state(), table.state());
         assert_eq!(
             reopened
-                .recover_table_entity_coverage_from_segments()
+                .recover_table_entity_coverage_from_segments::<TableError>()
                 .await?,
             expected_coverage
         );

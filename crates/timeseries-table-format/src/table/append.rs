@@ -25,7 +25,7 @@ use crate::{
     coverage::{
         EntityCoverage,
         index_interval::index_interval_for_id,
-        io::write_coverage_sidecar_new_bytes,
+        io::{CoverageSidecarError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
             segment_entity_coverage_id_v1, table_coverage_id_v2, table_entity_coverage_id_v1,
@@ -51,32 +51,28 @@ use super::{
     TimeSeriesTable,
     append_schema::AppendSchemaNormalizer,
     error::{
-        AppendError, ArrowInputSnafu, ArrowToLogicalSchemaSnafu, EmptySegmentEntityCoverageSnafu,
-        EntityIndexIntervalOverlapSnafu, EntityWithoutIndexCoverageSnafu,
-        ExistingSegmentMissingCoverageSnafu, GeneratedSegmentSchemaCompatibilitySnafu,
-        IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu, ParquetWriteSnafu, StorageSnafu,
-        TableError,
+        AppendError, ArrowInputSnafu, ArrowToLogicalSchemaSnafu,
+        GeneratedSegmentSchemaCompatibilitySnafu, ParquetWriteSnafu, StorageSnafu, TableError,
     },
 };
 
 fn classify_entity_layout(
     segment_path: &str,
     coverage: &EntityCoverage,
-) -> Result<SegmentEntityLayout, TableError> {
+) -> Result<SegmentEntityLayout, AppendError> {
     let first_identity = coverage
         .iter()
         .next()
         .map(|(identity, _)| identity)
-        .context(EmptySegmentEntityCoverageSnafu {
+        .ok_or_else(|| AppendError::EmptySegmentEntityCoverage {
             segment_path: segment_path.to_string(),
         })?;
 
     if let Some((identity, _)) = coverage.iter().find(|(_, coverage)| coverage.is_empty()) {
-        return EntityWithoutIndexCoverageSnafu {
+        return Err(AppendError::EntityWithoutIndexCoverage {
             segment_path: segment_path.to_string(),
             identity: identity.clone(),
-        }
-        .fail();
+        });
     }
 
     Ok(if coverage.identity_count() == 1 {
@@ -86,13 +82,12 @@ fn classify_entity_layout(
     })
 }
 
-fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), TableError> {
+fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), AppendError> {
     for seg in state.segments.values() {
         if seg.coverage_path.is_none() {
-            return ExistingSegmentMissingCoverageSnafu {
-                path: seg.path.clone(),
-            }
-            .fail();
+            return Err(AppendError::ExistingSegmentMissingCoverageMetadata {
+                segment_path: seg.path.clone(),
+            });
         }
     }
 
@@ -376,12 +371,14 @@ impl TimeSeriesTable {
 
         // 3-5) Load, compute, and compare coverage using the entity-column mode.
         let (seg_cov_bytes, new_snap_cov_bytes, entity_layout) = if has_entity_columns {
-            let table_cov = self.load_table_entity_snapshot_coverage_readonly().await?;
+            let table_cov = self
+                .load_table_entity_snapshot_coverage_readonly::<AppendError>()
+                .await?;
 
             let segment_cov =
                 compute_segment_entity_coverage(self.location(), rel_path, &self.index)
                     .await
-                    .map_err(TableError::from)?;
+                    .map_err(AppendError::from)?;
             let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
 
             if let Some((identity, index_interval_id)) =
@@ -389,61 +386,55 @@ impl TimeSeriesTable {
             {
                 let example_index_interval =
                     index_interval_for_id(&self.index.kind, index_interval_id)
-                        .context(IndexIntervalMappingSnafu)?;
-                return EntityIndexIntervalOverlapSnafu {
+                        .map_err(AppendError::from)?;
+                return Err(AppendError::PersistedIndexIntervalOverlap {
                     segment_path: relative_path.to_string(),
                     overlap_count: segment_cov.intersection_cardinality(&table_cov),
-                    example_identity: identity.clone(),
+                    example_identity: Some(identity.clone()),
                     example_index_interval_id: index_interval_id,
-                    example_index_interval,
+                    example_index_interval: Box::new(example_index_interval),
                 }
-                .fail();
+                .into());
             }
 
-            let seg_bytes = entity_coverage_to_bytes(&segment_cov).map_err(|source| {
-                TableError::CoverageSidecar {
-                    source: source.into(),
-                }
-            })?;
-            let snapshot_bytes =
-                entity_coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
-                    TableError::CoverageSidecar {
-                        source: source.into(),
-                    }
-                })?;
+            let seg_bytes = entity_coverage_to_bytes(&segment_cov)
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
+            let snapshot_bytes = entity_coverage_to_bytes(&table_cov.union(&segment_cov))
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
             (seg_bytes, snapshot_bytes, entity_layout)
         } else {
-            let table_cov = self.load_table_snapshot_coverage_readonly().await?;
+            let table_cov = self
+                .load_table_snapshot_coverage_readonly::<AppendError>()
+                .await?;
 
             let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
                 .await
-                .map_err(TableError::from)?;
+                .map_err(AppendError::from)?;
 
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
             if let Some(example_index_interval_id) = overlap.present().iter().next() {
                 let example_index_interval =
                     index_interval_for_id(&self.index.kind, example_index_interval_id)
-                        .context(IndexIntervalMappingSnafu)?;
-                return IndexIntervalOverlapSnafu {
+                        .map_err(AppendError::from)?;
+                return Err(AppendError::PersistedIndexIntervalOverlap {
                     segment_path: relative_path.to_string(),
-                    overlap_count,
+                    overlap_count: u128::from(overlap_count),
+                    example_identity: None,
                     example_index_interval_id,
-                    example_index_interval,
+                    example_index_interval: Box::new(example_index_interval),
                 }
-                .fail();
+                .into());
             }
 
-            let seg_bytes =
-                coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
-                    source: source.into(),
-                })?;
-            let snapshot_bytes =
-                coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
-                    TableError::CoverageSidecar {
-                        source: source.into(),
-                    }
-                })?;
+            let seg_bytes = coverage_to_bytes(&segment_cov)
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
+            let snapshot_bytes = coverage_to_bytes(&table_cov.union(&segment_cov))
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
             (
                 seg_bytes,
                 snapshot_bytes,
@@ -465,11 +456,9 @@ impl TimeSeriesTable {
             segment_coverage_id_v2(&self.index, &seg_cov_bytes)
         };
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
-        let seg_cov_path = segment_coverage_key(&segment_file_id).map_err(|source| {
-            TableError::CoverageSidecar {
-                source: source.into(),
-            }
-        })?;
+        let seg_cov_path = segment_coverage_key(&segment_file_id)
+            .map_err(CoverageSidecarError::from)
+            .map_err(AppendError::from)?;
 
         let snapshot_content_id = if has_entity_columns {
             table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
@@ -477,12 +466,9 @@ impl TimeSeriesTable {
             table_coverage_id_v2(&self.index, &new_snap_cov_bytes)
         };
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
-        let snapshot_path =
-            table_snapshot_key(next_version, &snapshot_file_id).map_err(|source| {
-                TableError::CoverageSidecar {
-                    source: source.into(),
-                }
-            })?;
+        let snapshot_path = table_snapshot_key(next_version, &snapshot_file_id)
+            .map_err(CoverageSidecarError::from)
+            .map_err(AppendError::from)?;
 
         let mut created_sidecars = Vec::new();
         let mut segment_sidecar_guard = storage::FileCleanupGuard::new_disarmed(
@@ -501,10 +487,7 @@ impl TimeSeriesTable {
                 created_sidecars.push(seg_cov_path.clone());
             }
             let error = self
-                .rollback_created_artifacts(
-                    &created_sidecars,
-                    TableError::CoverageSidecar { source },
-                )
+                .rollback_created_artifacts(&created_sidecars, AppendError::from(source).into())
                 .await;
             return Err(error);
         }
@@ -526,7 +509,7 @@ impl TimeSeriesTable {
             if source.storage_cleanup_failed() {
                 created_sidecars.push(snapshot_path.clone());
             }
-            let error = TableError::CoverageSidecar { source };
+            let error = AppendError::from(source).into();
             let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
                 .await;
@@ -762,6 +745,7 @@ mod tests {
     };
     use crate::coverage::serde::entity_coverage_from_bytes;
     use crate::coverage::{EntityCoverage, EntityIdentity, EntityValue};
+    use crate::formats::parquet::SegmentCoverageError;
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
@@ -1182,7 +1166,9 @@ mod tests {
             .expect_err("widened entity and index coverage must still reject overlap");
         assert!(matches!(
             overlap,
-            TableError::EntityIndexIntervalOverlap { .. }
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap { .. }
+            }
         ));
         assert_eq!(table.state(), &state_before_overlap);
         assert_eq!(data_files(temp.path())?, data_before_overlap);
@@ -2121,11 +2107,14 @@ mod tests {
 
             assert!(matches!(
                 error,
-                TableError::CoverageSidecar {
-                    source: CoverageSidecarError::Storage {
+                TableError::Append {
+                    source: AppendError::CoverageSidecar { source }
+                } if matches!(
+                    source.as_ref(),
+                    CoverageSidecarError::Storage {
                         source: StorageError::CleanupFailed { .. }
                     }
-                }
+                )
             ));
             assert_eq!(table.state().version, 1, "{sidecar_dir}");
             assert!(table.state().segments.is_empty(), "{sidecar_dir}");
@@ -2349,7 +2338,9 @@ mod tests {
             table
                 .append(AppendRequest::new(batch).max_rows_per_row_group(1))
                 .await,
-            Err(TableError::EntityIndexIntervalOverlap { .. })
+            Err(TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap { .. }
+            })
         ));
         assert_eq!(table.state().version, 2);
         assert_eq!(
@@ -2581,7 +2572,7 @@ mod tests {
     fn entity_layout_classification_rejects_empty_coverage() {
         assert!(matches!(
             classify_entity_layout("data/empty.parquet", &EntityCoverage::empty()),
-            Err(TableError::EmptySegmentEntityCoverage { segment_path })
+            Err(AppendError::EmptySegmentEntityCoverage { segment_path })
                 if segment_path == "data/empty.parquet"
         ));
     }
@@ -2604,21 +2595,26 @@ mod tests {
 
         let message = error.to_string();
         match error {
-            TableError::DuplicateIndexInterval {
-                segment_path,
-                example_identity: None,
-                example_index_interval,
-            } => {
-                assert!(segment_path.starts_with("data/"));
-                assert!(segment_path.ends_with(".parquet"));
-                assert!(message.contains(&segment_path));
-                assert!(message.contains("Duplicate ordered-index interval"));
-                assert!(message.contains("ordered-index interval"));
-                assert_eq!(
-                    example_index_interval.to_string(),
-                    "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
-                );
-            }
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source },
+            } => match *source {
+                SegmentCoverageError::DuplicateIndexInterval {
+                    path: segment_path,
+                    example_identity: None,
+                    example_index_interval,
+                } => {
+                    assert!(segment_path.starts_with("data/"));
+                    assert!(segment_path.ends_with(".parquet"));
+                    assert!(message.contains(&segment_path));
+                    assert!(message.contains("Duplicate ordered-index interval"));
+                    assert!(message.contains("ordered-index interval"));
+                    assert_eq!(
+                        example_index_interval.to_string(),
+                        "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+                    );
+                }
+                other => panic!("expected duplicate interval source, got {other:?}"),
+            },
             other => panic!("expected duplicate interval error, got {other:?}"),
         }
         assert_eq!(table.state(), &state_before);
@@ -2656,12 +2652,16 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::DuplicateIndexInterval {
-                example_identity: None,
-                example_index_interval,
-                ..
-            } if example_index_interval.to_string()
-                == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source },
+            } if matches!(source.as_ref(),
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: None,
+                    example_index_interval,
+                    ..
+                } if example_index_interval.to_string()
+                    == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+            )
         ));
         assert_eq!(table.state(), &state_before);
         assert!(data_files(temp.path())?.is_empty());
@@ -2711,11 +2711,15 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::DuplicateIndexInterval {
-                example_identity: Some(example_identity),
-                ..
-            } if example_identity.components()
-                == [EntityValue::from("A"), EntityValue::from("Z")]
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source },
+            } if matches!(source.as_ref(),
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: Some(example_identity),
+                    ..
+                } if example_identity.components()
+                    == [EntityValue::from("A"), EntityValue::from("Z")]
+            )
         ));
         assert_eq!(table.state(), &state_before);
         Ok(())
@@ -2751,13 +2755,17 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::DuplicateIndexInterval {
-                example_identity: Some(example_identity),
-                example_index_interval,
-                ..
-            } if example_identity == expected_identity
-                && example_index_interval.to_string()
-                    == "[1970-01-01T00:01:00Z, 1970-01-01T00:02:00Z)"
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source },
+            } if matches!(source.as_ref(),
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: Some(example_identity),
+                    example_index_interval,
+                    ..
+                } if example_identity == &expected_identity
+                    && example_index_interval.to_string()
+                        == "[1970-01-01T00:01:00Z, 1970-01-01T00:02:00Z)"
+            )
         ));
         assert_eq!(table.state(), &state_before);
         assert_eq!(table.log.load_current_version().await?, 2);
@@ -2896,9 +2904,12 @@ mod tests {
             .expect_err("negative index interval overlap must fail");
         assert!(matches!(
             &overlap_error,
-            TableError::IndexIntervalOverlap {
-                example_index_interval,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    example_identity: None,
+                    example_index_interval,
+                    ..
+                }
             } if example_index_interval.to_string() == "[-20, -10)"
         ));
         assert!(
@@ -2998,9 +3009,12 @@ mod tests {
             .expect_err("large uint64 index interval overlap must fail");
         assert!(matches!(
             overlap_error,
-            TableError::IndexIntervalOverlap {
-                example_index_interval,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    example_identity: None,
+                    example_index_interval,
+                    ..
+                }
             } if example_index_interval.to_string()
                 == "[18446744073709551610, 18446744073709551615]"
         ));
@@ -3191,19 +3205,23 @@ mod tests {
             .expect_err("same typed identity and index interval must overlap");
         assert!(matches!(
             error,
-            TableError::EntityIndexIntervalOverlap {
-                overlap_count: 1,
-                example_identity,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    overlap_count: 1,
+                    example_identity: Some(example_identity),
+                    ..
+                }
             } if example_identity == negative_identity
         ));
 
-        let snapshot = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let snapshot = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state(), table.state());
         assert_eq!(
             reopened
-                .recover_table_entity_coverage_from_segments()
+                .recover_table_entity_coverage_from_segments::<TableError>()
                 .await?,
             snapshot
         );
@@ -3279,10 +3297,12 @@ mod tests {
             .expect_err("matching composite identity and index interval must overlap");
         assert!(matches!(
             error,
-            TableError::EntityIndexIntervalOverlap {
-                overlap_count: 1,
-                example_identity,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    overlap_count: 1,
+                    example_identity: Some(example_identity),
+                    ..
+                }
             } if example_identity.components()
                 == [EntityValue::from("A"), EntityValue::from("X")]
         ));
@@ -3313,7 +3333,9 @@ mod tests {
             .expect_err("identity without index coverage must be rejected");
 
         match error {
-            TableError::EntityWithoutIndexCoverage { identity, .. } => {
+            TableError::Append {
+                source: AppendError::EntityWithoutIndexCoverage { identity, .. },
+            } => {
                 assert_eq!(identity.components(), [EntityValue::from("B")]);
             }
             other => panic!("unexpected error: {other:?}"),
@@ -3436,7 +3458,9 @@ mod tests {
                 .values()
                 .all(|segment| segment.coverage_path.is_some())
         );
-        let expected_snapshot = table.recover_table_entity_coverage_from_segments().await?;
+        let expected_snapshot = table
+            .recover_table_entity_coverage_from_segments::<TableError>()
+            .await?;
 
         let ptr = table
             .state
@@ -3517,12 +3541,14 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::EntityIndexIntervalOverlap {
-                overlap_count: 3,
-                example_identity,
-                example_index_interval_id: 0x8000_0000_0000_0000,
-                example_index_interval,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    overlap_count: 3,
+                    example_identity: Some(example_identity),
+                    example_index_interval_id: 0x8000_0000_0000_0000,
+                    example_index_interval,
+                    ..
+                }
             } if example_identity.components() == [EntityValue::from("A")]
                 && example_index_interval.to_string()
                     == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
@@ -3575,7 +3601,7 @@ mod tests {
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
         let expected = reopened
-            .recover_table_entity_coverage_from_segments()
+            .recover_table_entity_coverage_from_segments::<TableError>()
             .await?;
 
         let snapshot_cov =
@@ -3630,7 +3656,9 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let recovered = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
 
         let mut expected = EntityCoverage::empty();
         for seg in state.segments.values() {
@@ -3688,7 +3716,9 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let recovered = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
 
         let mut expected = EntityCoverage::empty();
         for seg in state.segments.values() {
@@ -3745,7 +3775,12 @@ mod tests {
         let err = append_parquet_fixture(&mut table, overlapping)
             .await
             .expect_err("overlap must be rejected");
-        assert!(matches!(err, TableError::EntityIndexIntervalOverlap { .. }));
+        assert!(matches!(
+            err,
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap { .. }
+            }
+        ));
         assert_eq!(tokio::fs::read(snapshot_abs).await?, b"garbage");
         Ok(())
     }
@@ -3790,7 +3825,7 @@ mod tests {
         table.state = state;
 
         let err = table
-            .load_table_entity_snapshot_coverage_readonly()
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -3856,7 +3891,7 @@ mod tests {
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
         let err = table
-            .load_table_entity_snapshot_coverage_readonly()
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
             .await
             .expect_err("corrupt sidecar should error");
 
@@ -4029,16 +4064,17 @@ mod tests {
                 &table.index.kind,
                 &IndexValue::Timestamp(utc_datetime(1970, 1, 1, 0, 0, 0)),
             )?;
-        let source = TableError::EntityIndexIntervalOverlap {
+        let source = AppendError::PersistedIndexIntervalOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
-            example_identity: EntityIdentity::try_new(vec!["A".into()])?,
+            example_identity: Some(EntityIdentity::try_new(vec!["A".into()])?),
             example_index_interval_id,
-            example_index_interval: index_interval_for_id(
+            example_index_interval: Box::new(index_interval_for_id(
                 &table.index.kind,
                 example_index_interval_id,
-            )?,
-        };
+            )?),
+        }
+        .into();
         let err = table.rollback_created_artifacts(&sidecars, source).await;
         let message = err.to_string();
 
@@ -4047,7 +4083,12 @@ mod tests {
             TableError::AppendRollback {
                 source,
                 cleanup_errors,
-            } if matches!(*source, TableError::EntityIndexIntervalOverlap { .. })
+            } if matches!(
+                *source,
+                TableError::Append {
+                    source: AppendError::PersistedIndexIntervalOverlap { .. }
+                }
+            )
                 && cleanup_errors.len() == 2
                 && cleanup_errors[0].contains("second-stuck.roar")
                 && cleanup_errors[1].contains("first-stuck.roar")
@@ -4107,7 +4148,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { .. }
+            TableError::Append {
+                source: AppendError::ExistingSegmentMissingCoverageMetadata { .. }
+            }
         ));
         Ok(())
     }
@@ -4232,7 +4275,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::TableCoverageIndexKindMismatch { .. }
+            TableError::Append {
+                source: AppendError::CoverageSnapshotIndexKindMismatch { .. }
+            }
         ));
         Ok(())
     }
