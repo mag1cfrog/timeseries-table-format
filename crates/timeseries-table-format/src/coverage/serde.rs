@@ -46,7 +46,7 @@
 use std::{io::Cursor, str::Utf8Error};
 
 use roaring::{RoaringBitmap, RoaringTreemap};
-use snafu::{ResultExt, Snafu};
+use snafu::{Backtrace, ResultExt, Snafu};
 
 use crate::coverage::{Coverage, EntityCoverage, EntityIdentity, EntityIdentityError, EntityValue};
 
@@ -56,98 +56,109 @@ const ENTITY_VALUE_INT32: u8 = 2;
 const ENTITY_VALUE_INT64: u8 = 3;
 const ENTITY_VALUE_UINT64: u8 = 4;
 
-/// Errors that can occur during coverage serialization or deserialization.
-///
-/// These errors indicate I/O failures when reading or writing the RoaringTreemap
-/// binary format. Callers should handle these gracefully and may retry or fall back
-/// to recovering coverage from the source data.
+/// Errors from the global and entity-aware coverage codecs.
 #[derive(Debug, Snafu)]
-pub enum CoverageSerdeError {
+pub enum CoverageCodecError {
     /// I/O error during serialization of a coverage bitmap.
     #[snafu(display("Failed to serialize roaring bitmap: {source}"))]
-    Serialize {
+    BitmapSerialization {
         /// The underlying I/O error.
         source: std::io::Error,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// I/O error during deserialization of a coverage bitmap.
     #[snafu(display("Failed to deserialize roaring bitmap: {source}"))]
-    Deserialize {
+    BitmapDeserialization {
         /// The underlying I/O error.
         source: std::io::Error,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
-}
 
-/// Errors from the distinct entity-aware coverage encoding.
-#[derive(Debug, Snafu)]
-pub enum EntityCoverageSerdeError {
     /// An in-memory length cannot be represented by the format.
     #[snafu(display("Entity coverage {field} is too large to serialize"))]
     LengthOverflow {
         /// The field whose length overflowed.
         field: &'static str,
-    },
-
-    /// A nested bitmap could not be serialized.
-    #[snafu(display("Failed to serialize nested entity coverage: {source}"))]
-    SerializeCoverage {
-        /// The nested global coverage error.
-        source: CoverageSerdeError,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// The payload is not entity-aware coverage.
     #[snafu(display("Invalid entity coverage payload identifier"))]
-    InvalidMagic,
+    InvalidEntityCoverageMagic {
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
+    },
 
     /// A fixed-size field is incomplete.
     #[snafu(display("Truncated entity coverage payload"))]
-    Truncated,
+    TruncatedPayload {
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
+    },
 
     /// A declared count or length is not valid for the remaining payload.
     #[snafu(display("Invalid entity coverage {field}"))]
     InvalidLength {
         /// The invalid field.
         field: &'static str,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// An identity component is not valid UTF-8.
     #[snafu(display("Invalid entity identity string: {source}"))]
-    InvalidString {
+    InvalidEntityUtf8 {
         /// The UTF-8 validation error.
         source: Utf8Error,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// An identity component uses an unknown scalar type tag.
     #[snafu(display("Unknown entity identity value type tag: {tag}"))]
-    UnknownValueType {
+    UnknownEntityValueTag {
         /// Unrecognized encoded type tag.
         tag: u8,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// An encoded identity is incomplete.
     #[snafu(display("Invalid entity identity: {source}"))]
-    InvalidIdentity {
+    InvalidEntityIdentity {
         /// The identity validation error.
         source: EntityIdentityError,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// The payload contains the same identity more than once.
     #[snafu(display("Duplicate entity identity in coverage payload: {identity:?}"))]
-    DuplicateIdentity {
+    DuplicateEntityIdentity {
         /// The repeated identity.
         identity: EntityIdentity,
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
     },
 
     /// A nested RoaringTreemap payload is malformed.
     #[snafu(display("Malformed nested entity coverage: {source}"))]
-    MalformedCoverage {
+    MalformedNestedCoverage {
         /// The nested global coverage error.
-        source: CoverageSerdeError,
+        #[snafu(source(from(CoverageCodecError, Box::new)), backtrace)]
+        source: Box<CoverageCodecError>,
     },
 
-    /// Bytes remain after the declared entity entries.
-    #[snafu(display("Trailing bytes after entity coverage payload"))]
-    TrailingBytes,
+    /// Bytes remain after the declared coverage payload.
+    #[snafu(display("Trailing bytes after coverage payload"))]
+    TrailingBytes {
+        /// Backtrace captured at the codec boundary.
+        backtrace: Backtrace,
+    },
 }
 
 /// Serialize a coverage bitmap to a byte vector.
@@ -165,14 +176,14 @@ pub enum EntityCoverageSerdeError {
 ///
 /// # Errors
 ///
-/// Returns [`CoverageSerdeError::Serialize`] if an I/O error occurs during serialization.
-pub fn coverage_to_bytes(cov: &Coverage) -> Result<Vec<u8>, CoverageSerdeError> {
+/// Returns [`CoverageCodecError::BitmapSerialization`] if bitmap serialization fails.
+pub fn coverage_to_bytes(cov: &Coverage) -> Result<Vec<u8>, CoverageCodecError> {
     let mut out = Vec::new();
     {
         let mut w = Cursor::new(&mut out);
         cov.present()
             .serialize_into(&mut w)
-            .context(SerializeSnafu)?;
+            .context(BitmapSerializationSnafu)?;
     }
     Ok(out)
 }
@@ -192,19 +203,14 @@ pub fn coverage_to_bytes(cov: &Coverage) -> Result<Vec<u8>, CoverageSerdeError> 
 ///
 /// # Errors
 ///
-/// Returns [`CoverageSerdeError::Deserialize`] if an I/O error occurs during deserialization
-/// or if the byte sequence is not a valid RoaringTreemap.
-pub fn coverage_from_bytes(bytes: &[u8]) -> Result<Coverage, CoverageSerdeError> {
+/// Returns [`CoverageCodecError::BitmapDeserialization`] for an invalid bitmap
+/// or [`CoverageCodecError::TrailingBytes`] for appended data.
+pub fn coverage_from_bytes(bytes: &[u8]) -> Result<Coverage, CoverageCodecError> {
     let mut r = Cursor::new(bytes);
-    let present = RoaringTreemap::deserialize_from(&mut r).context(DeserializeSnafu)?;
+    let present = RoaringTreemap::deserialize_from(&mut r).context(BitmapDeserializationSnafu)?;
 
     if r.position() != bytes.len() as u64 {
-        return Err(CoverageSerdeError::Deserialize {
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "trailing bytes after roaring bitmap",
-            ),
-        });
+        return TrailingBytesSnafu.fail();
     }
 
     Ok(Coverage::from_treemap(present))
@@ -214,15 +220,14 @@ pub fn coverage_from_bytes(bytes: &[u8]) -> Result<Coverage, CoverageSerdeError>
 ///
 /// # Errors
 ///
-/// Returns [`EntityCoverageSerdeError`] if a count cannot be represented or a
+/// Returns [`CoverageCodecError`] if a count cannot be represented or a
 /// nested coverage bitmap cannot be serialized.
-pub fn entity_coverage_to_bytes(
-    coverage: &EntityCoverage,
-) -> Result<Vec<u8>, EntityCoverageSerdeError> {
+pub fn entity_coverage_to_bytes(coverage: &EntityCoverage) -> Result<Vec<u8>, CoverageCodecError> {
     let entity_count = u32::try_from(coverage.identity_count()).map_err(|_| {
-        EntityCoverageSerdeError::LengthOverflow {
+        LengthOverflowSnafu {
             field: "entity count",
         }
+        .build()
     })?;
 
     let mut out = Vec::new();
@@ -231,9 +236,10 @@ pub fn entity_coverage_to_bytes(
 
     for (identity, nested) in coverage.iter() {
         let component_count = u32::try_from(identity.components().len()).map_err(|_| {
-            EntityCoverageSerdeError::LengthOverflow {
+            LengthOverflowSnafu {
                 field: "identity component count",
             }
+            .build()
         })?;
         out.extend_from_slice(&component_count.to_be_bytes());
 
@@ -242,9 +248,10 @@ pub fn entity_coverage_to_bytes(
                 EntityValue::Utf8(value) => {
                     out.push(ENTITY_VALUE_UTF8);
                     let component_len = u64::try_from(value.len()).map_err(|_| {
-                        EntityCoverageSerdeError::LengthOverflow {
+                        LengthOverflowSnafu {
                             field: "identity component length",
                         }
+                        .build()
                     })?;
                     out.extend_from_slice(&component_len.to_be_bytes());
                     out.extend_from_slice(value.as_bytes());
@@ -264,12 +271,12 @@ pub fn entity_coverage_to_bytes(
             }
         }
 
-        let nested_bytes = canonical_nested_coverage_to_bytes(nested)
-            .map_err(|source| EntityCoverageSerdeError::SerializeCoverage { source })?;
+        let nested_bytes = canonical_nested_coverage_to_bytes(nested)?;
         let nested_len = u64::try_from(nested_bytes.len()).map_err(|_| {
-            EntityCoverageSerdeError::LengthOverflow {
+            LengthOverflowSnafu {
                 field: "nested coverage length",
             }
+            .build()
         })?;
         out.extend_from_slice(&nested_len.to_be_bytes());
         out.extend_from_slice(&nested_bytes);
@@ -282,14 +289,12 @@ pub fn entity_coverage_to_bytes(
 ///
 /// # Errors
 ///
-/// Returns [`EntityCoverageSerdeError`] for malformed, ambiguous, truncated,
+/// Returns [`CoverageCodecError`] for malformed, ambiguous, truncated,
 /// or non-entity-aware input.
-pub fn entity_coverage_from_bytes(
-    bytes: &[u8],
-) -> Result<EntityCoverage, EntityCoverageSerdeError> {
+pub fn entity_coverage_from_bytes(bytes: &[u8]) -> Result<EntityCoverage, CoverageCodecError> {
     let mut remaining = bytes;
     if take(&mut remaining, ENTITY_COVERAGE_MAGIC.len())? != ENTITY_COVERAGE_MAGIC {
-        return Err(EntityCoverageSerdeError::InvalidMagic);
+        return InvalidEntityCoverageMagicSnafu.fail();
     }
 
     let entity_count = read_u32(&mut remaining)? as usize;
@@ -297,9 +302,10 @@ pub fn entity_coverage_from_bytes(
     for _ in 0..entity_count {
         let component_count = read_u32(&mut remaining)? as usize;
         if component_count > remaining.len().saturating_sub(8) / 5 {
-            return Err(EntityCoverageSerdeError::InvalidLength {
+            return InvalidLengthSnafu {
                 field: "identity component count",
-            });
+            }
+            .fail();
         }
 
         let mut components = Vec::new();
@@ -310,40 +316,38 @@ pub fn entity_coverage_from_bytes(
                     let component_len = read_u64(&mut remaining)?;
                     let component_bytes =
                         take_declared(&mut remaining, component_len, "identity component length")?;
-                    let component = std::str::from_utf8(component_bytes)
-                        .map_err(|source| EntityCoverageSerdeError::InvalidString { source })?;
+                    let component =
+                        std::str::from_utf8(component_bytes).context(InvalidEntityUtf8Snafu)?;
                     EntityValue::Utf8(component.to_owned())
                 }
                 ENTITY_VALUE_INT32 => EntityValue::Int32(read_i32(&mut remaining)?),
                 ENTITY_VALUE_INT64 => EntityValue::Int64(read_i64(&mut remaining)?),
                 ENTITY_VALUE_UINT64 => EntityValue::UInt64(read_u64(&mut remaining)?),
-                tag => return Err(EntityCoverageSerdeError::UnknownValueType { tag }),
+                tag => return UnknownEntityValueTagSnafu { tag }.fail(),
             };
             components.push(component);
         }
 
-        let identity = EntityIdentity::try_new(components)
-            .map_err(|source| EntityCoverageSerdeError::InvalidIdentity { source })?;
+        let identity = EntityIdentity::try_new(components).context(InvalidEntityIdentitySnafu)?;
         if coverage.get(&identity).is_some() {
-            return Err(EntityCoverageSerdeError::DuplicateIdentity { identity });
+            return DuplicateEntityIdentitySnafu { identity }.fail();
         }
 
         let nested_len = read_u64(&mut remaining)?;
         let nested_bytes = take_declared(&mut remaining, nested_len, "nested coverage length")?;
-        let nested = coverage_from_bytes(nested_bytes)
-            .map_err(|source| EntityCoverageSerdeError::MalformedCoverage { source })?;
+        let nested = coverage_from_bytes(nested_bytes).context(MalformedNestedCoverageSnafu)?;
         coverage.union_coverage(identity, nested);
     }
 
     if !remaining.is_empty() {
-        return Err(EntityCoverageSerdeError::TrailingBytes);
+        return TrailingBytesSnafu.fail();
     }
     Ok(coverage)
 }
 
 /// Serialize after removing empty partitions and construction-history-dependent
 /// Roaring container choices from entity-aware nested coverage.
-fn canonical_nested_coverage_to_bytes(coverage: &Coverage) -> Result<Vec<u8>, CoverageSerdeError> {
+fn canonical_nested_coverage_to_bytes(coverage: &Coverage) -> Result<Vec<u8>, CoverageCodecError> {
     let present = RoaringTreemap::from_bitmaps(
         coverage
             .present()
@@ -362,9 +366,9 @@ fn canonical_nested_coverage_to_bytes(coverage: &Coverage) -> Result<Vec<u8>, Co
     coverage_to_bytes(&Coverage::from_treemap(present))
 }
 
-fn take<'a>(remaining: &mut &'a [u8], len: usize) -> Result<&'a [u8], EntityCoverageSerdeError> {
+fn take<'a>(remaining: &mut &'a [u8], len: usize) -> Result<&'a [u8], CoverageCodecError> {
     if remaining.len() < len {
-        return Err(EntityCoverageSerdeError::Truncated);
+        return TruncatedPayloadSnafu.fail();
     }
     let (value, rest) = remaining.split_at(len);
     *remaining = rest;
@@ -375,34 +379,33 @@ fn take_declared<'a>(
     remaining: &mut &'a [u8],
     len: u64,
     field: &'static str,
-) -> Result<&'a [u8], EntityCoverageSerdeError> {
-    let len =
-        usize::try_from(len).map_err(|_| EntityCoverageSerdeError::InvalidLength { field })?;
+) -> Result<&'a [u8], CoverageCodecError> {
+    let len = usize::try_from(len).map_err(|_| InvalidLengthSnafu { field }.build())?;
     if len > remaining.len() {
-        return Err(EntityCoverageSerdeError::InvalidLength { field });
+        return InvalidLengthSnafu { field }.fail();
     }
     take(remaining, len)
 }
 
-fn read_u32(remaining: &mut &[u8]) -> Result<u32, EntityCoverageSerdeError> {
+fn read_u32(remaining: &mut &[u8]) -> Result<u32, CoverageCodecError> {
     let mut encoded = [0; 4];
     encoded.copy_from_slice(take(remaining, 4)?);
     Ok(u32::from_be_bytes(encoded))
 }
 
-fn read_i32(remaining: &mut &[u8]) -> Result<i32, EntityCoverageSerdeError> {
+fn read_i32(remaining: &mut &[u8]) -> Result<i32, CoverageCodecError> {
     let mut encoded = [0; 4];
     encoded.copy_from_slice(take(remaining, 4)?);
     Ok(i32::from_be_bytes(encoded))
 }
 
-fn read_i64(remaining: &mut &[u8]) -> Result<i64, EntityCoverageSerdeError> {
+fn read_i64(remaining: &mut &[u8]) -> Result<i64, CoverageCodecError> {
     let mut encoded = [0; 8];
     encoded.copy_from_slice(take(remaining, 8)?);
     Ok(i64::from_be_bytes(encoded))
 }
 
-fn read_u64(remaining: &mut &[u8]) -> Result<u64, EntityCoverageSerdeError> {
+fn read_u64(remaining: &mut &[u8]) -> Result<u64, CoverageCodecError> {
     let mut encoded = [0; 8];
     encoded.copy_from_slice(take(remaining, 8)?);
     Ok(u64::from_be_bytes(encoded))
@@ -461,7 +464,7 @@ mod tests {
         let bad = b"not a roaring bitmap";
         let err = coverage_from_bytes(bad).unwrap_err();
         match err {
-            CoverageSerdeError::Deserialize { .. } => {}
+            CoverageCodecError::BitmapDeserialization { .. } => {}
             _ => panic!("expected deserialize error"),
         }
     }
@@ -472,7 +475,7 @@ mod tests {
         bytes.extend_from_slice(&coverage_to_bytes(&Coverage::from_iter([1u64])).unwrap());
 
         let err = coverage_from_bytes(&bytes).unwrap_err();
-        assert!(matches!(err, CoverageSerdeError::Deserialize { .. }));
+        assert!(matches!(err, CoverageCodecError::TrailingBytes { .. }));
     }
 
     #[test]
@@ -495,12 +498,12 @@ mod tests {
             let mut w = FailingWriter;
             cov.present()
                 .serialize_into(&mut w)
-                .map_err(|e| CoverageSerdeError::Serialize { source: e })
+                .context(BitmapSerializationSnafu)
                 .unwrap_err()
         };
 
         match err {
-            CoverageSerdeError::Serialize { .. } => {}
+            CoverageCodecError::BitmapSerialization { .. } => {}
             _ => panic!("expected serialize error"),
         }
     }
@@ -661,14 +664,14 @@ mod tests {
         invalid_magic[0] ^= 0xff;
         assert!(matches!(
             entity_coverage_from_bytes(&invalid_magic),
-            Err(EntityCoverageSerdeError::InvalidMagic)
+            Err(CoverageCodecError::InvalidEntityCoverageMagic { .. })
         ));
 
         let mut version_one = bytes.clone();
         version_one[..8].copy_from_slice(b"TSTECOV1");
         assert!(matches!(
             entity_coverage_from_bytes(&version_one),
-            Err(EntityCoverageSerdeError::InvalidMagic)
+            Err(CoverageCodecError::InvalidEntityCoverageMagic { .. })
         ));
 
         let mut invalid_count = bytes.clone();
@@ -679,28 +682,28 @@ mod tests {
         empty_identity[12..16].copy_from_slice(&0u32.to_be_bytes());
         assert!(matches!(
             entity_coverage_from_bytes(&empty_identity),
-            Err(EntityCoverageSerdeError::InvalidIdentity { .. })
+            Err(CoverageCodecError::InvalidEntityIdentity { .. })
         ));
 
         let mut invalid_length = bytes.clone();
         invalid_length[17..25].copy_from_slice(&u64::MAX.to_be_bytes());
         assert!(matches!(
             entity_coverage_from_bytes(&invalid_length),
-            Err(EntityCoverageSerdeError::InvalidLength { .. })
+            Err(CoverageCodecError::InvalidLength { .. })
         ));
 
         let mut invalid_string = bytes.clone();
         invalid_string[25] = 0xff;
         assert!(matches!(
             entity_coverage_from_bytes(&invalid_string),
-            Err(EntityCoverageSerdeError::InvalidString { .. })
+            Err(CoverageCodecError::InvalidEntityUtf8 { .. })
         ));
 
         let mut unknown_type = bytes;
         unknown_type[16] = u8::MAX;
         assert!(matches!(
             entity_coverage_from_bytes(&unknown_type),
-            Err(EntityCoverageSerdeError::UnknownValueType { tag: u8::MAX })
+            Err(CoverageCodecError::UnknownEntityValueTag { tag: u8::MAX, .. })
         ));
     }
 
@@ -715,7 +718,7 @@ mod tests {
 
         assert!(matches!(
             entity_coverage_from_bytes(&bytes),
-            Err(EntityCoverageSerdeError::DuplicateIdentity { .. })
+            Err(CoverageCodecError::DuplicateEntityIdentity { .. })
         ));
     }
 
@@ -729,14 +732,14 @@ mod tests {
         malformed_nested[26..34].copy_from_slice(&1u64.to_be_bytes());
         assert!(matches!(
             entity_coverage_from_bytes(&malformed_nested),
-            Err(EntityCoverageSerdeError::MalformedCoverage { .. })
+            Err(CoverageCodecError::MalformedNestedCoverage { .. })
         ));
 
         let mut trailing = bytes;
         trailing.push(0);
         assert!(matches!(
             entity_coverage_from_bytes(&trailing),
-            Err(EntityCoverageSerdeError::TrailingBytes)
+            Err(CoverageCodecError::TrailingBytes { .. })
         ));
     }
 
@@ -746,7 +749,8 @@ mod tests {
         assert_eq!(global_empty, vec![0; 8]);
         assert!(matches!(
             entity_coverage_from_bytes(&global_empty),
-            Err(EntityCoverageSerdeError::InvalidMagic) | Err(EntityCoverageSerdeError::Truncated)
+            Err(CoverageCodecError::InvalidEntityCoverageMagic { .. })
+                | Err(CoverageCodecError::TruncatedPayload { .. })
         ));
 
         let global_extremes: Coverage = [0, u64::MAX].into_iter().collect();

@@ -22,15 +22,14 @@
 
 use std::path::Path;
 
-use snafu::{ResultExt, Snafu};
+use snafu::{Backtrace, Snafu};
 
 use crate::{
     coverage::layout::CoverageLayoutError,
     coverage::{
         Coverage, EntityCoverage,
         serde::{
-            CoverageSerdeError, EntityCoverageSerdeError, coverage_from_bytes, coverage_to_bytes,
-            entity_coverage_from_bytes,
+            CoverageCodecError, coverage_from_bytes, coverage_to_bytes, entity_coverage_from_bytes,
         },
     },
     metadata::schema_compat::SchemaCompatibilityError,
@@ -43,44 +42,42 @@ use crate::{
 /// storage, and file I/O. Callers should inspect the variant to determine
 /// the nature of the failure and how to recover.
 #[derive(Debug, Snafu)]
-pub enum CoverageError {
+pub enum CoverageSidecarError {
     /// Layout validation error (e.g., invalid coverage ID or path).
-    #[snafu(display("{source}"))]
+    #[snafu(context(false), display("Coverage sidecar layout error: {source}"))]
     Layout {
         /// The underlying layout error.
         source: CoverageLayoutError,
+        /// Backtrace captured at the sidecar boundary.
+        backtrace: Backtrace,
     },
 
-    /// Serialization or deserialization error.
-    #[snafu(display("{source}"))]
-    Serde {
-        /// The underlying serde error.
-        source: CoverageSerdeError,
-    },
-
-    /// Entity-scoped coverage serialization or deserialization error.
-    #[snafu(display("{source}"))]
-    EntitySerde {
-        /// The underlying entity coverage codec error.
-        source: EntityCoverageSerdeError,
+    /// Coverage serialization or deserialization failed.
+    #[snafu(context(false), display("Coverage sidecar codec error: {source}"))]
+    Codec {
+        /// The underlying coverage codec error.
+        #[snafu(source, backtrace)]
+        source: CoverageCodecError,
     },
 
     /// An entity identity does not match the table's configured schema.
-    #[snafu(display("Entity coverage identity does not match the table schema: {source}"))]
+    #[snafu(
+        context(false),
+        display("Entity coverage identity does not match the table schema: {source}")
+    )]
     EntityIdentitySchema {
         /// Identity arity or scalar-type mismatch.
-        source: SchemaCompatibilityError,
-    },
-
-    /// Coverage sidecar file was not found at the expected path.
-    #[snafu(display("Coverage sidecar not found: {path}"))]
-    NotFound {
-        /// The path where the sidecar was expected.
-        path: String,
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured at the sidecar boundary.
+        backtrace: Backtrace,
     },
 
     /// Storage I/O error (read, write, or metadata operations).
-    #[snafu(display("Storage error while reading/writing coverage sidecar: {source}"))]
+    #[snafu(
+        context(false),
+        display("Storage error while accessing coverage sidecar: {source}")
+    )]
     Storage {
         /// The underlying storage error.
         #[snafu(source, backtrace)]
@@ -88,7 +85,7 @@ pub enum CoverageError {
     },
 }
 
-impl CoverageError {
+impl CoverageSidecarError {
     pub(crate) fn storage_cleanup_failed(&self) -> bool {
         matches!(
             self,
@@ -119,18 +116,16 @@ impl CoverageError {
 ///
 /// # Errors
 ///
-/// Returns [`CoverageError`] if:
-/// - Serialization of the coverage fails ([`CoverageError::Serde`]).
-/// - Storage I/O fails ([`CoverageError::Storage`]).
+/// Returns [`CoverageSidecarError`] if:
+/// - Serialization of the coverage fails ([`CoverageSidecarError::Codec`]).
+/// - Storage I/O fails ([`CoverageSidecarError::Storage`]).
 pub async fn write_coverage_sidecar_atomic(
     location: &TableLocation,
     rel_path: &Path,
     cov: &Coverage,
-) -> Result<(), CoverageError> {
-    let bytes = coverage_to_bytes(cov).context(SerdeSnafu)?;
-    storage::write_atomic(location.as_ref(), rel_path, &bytes)
-        .await
-        .context(StorageSnafu)?;
+) -> Result<(), CoverageSidecarError> {
+    let bytes = coverage_to_bytes(cov)?;
+    storage::write_atomic(location.as_ref(), rel_path, &bytes).await?;
     Ok(())
 }
 
@@ -154,19 +149,17 @@ pub async fn write_coverage_sidecar_atomic(
 ///
 /// # Errors
 ///
-/// Returns [`CoverageError`] if:
-/// - Serialization of the coverage fails ([`CoverageError::Serde`]).
+/// Returns [`CoverageSidecarError`] if:
+/// - Serialization of the coverage fails ([`CoverageSidecarError::Codec`]).
 /// - The file already exists (storage layer dependent).
-/// - Storage I/O fails for other reasons ([`CoverageError::Storage`]).
+/// - Storage I/O fails for other reasons ([`CoverageSidecarError::Storage`]).
 pub async fn write_coverage_sidecar_new(
     location: &TableLocation,
     rel_path: &Path,
     cov: &Coverage,
-) -> Result<(), CoverageError> {
-    let bytes = coverage_to_bytes(cov).context(SerdeSnafu)?;
-    storage::write_new(location.as_ref(), rel_path, &bytes)
-        .await
-        .context(StorageSnafu)?;
+) -> Result<(), CoverageSidecarError> {
+    let bytes = coverage_to_bytes(cov)?;
+    storage::write_new(location.as_ref(), rel_path, &bytes).await?;
     Ok(())
 }
 
@@ -174,25 +167,23 @@ pub async fn write_coverage_sidecar_new(
 ///
 /// # Errors
 ///
-/// Returns [`CoverageError::Storage`] when the storage layer rejects the write,
+/// Returns [`CoverageSidecarError::Storage`] when the storage layer rejects the write,
 /// including when the file already exists. Callers must not assume that an
 /// existing file belongs to the current write attempt.
 pub async fn write_coverage_sidecar_new_bytes(
     location: &TableLocation,
     rel_path: &Path,
     bytes: &[u8],
-) -> Result<(), CoverageError> {
-    storage::write_new(location.as_ref(), rel_path, bytes)
-        .await
-        .context(StorageSnafu)?;
+) -> Result<(), CoverageSidecarError> {
+    storage::write_new(location.as_ref(), rel_path, bytes).await?;
     Ok(())
 }
 
 /// Read a coverage bitmap from a sidecar file.
 ///
 /// Reads and deserializes a [`Coverage`] instance from a sidecar file at `rel_path`
-/// within the table storage. If the file is not found, returns a [`CoverageError::NotFound`]
-/// error. If deserialization fails, returns a [`CoverageError::Serde`] error.
+/// within the table storage. Missing files remain [`StorageError::NotFound`]
+/// sources inside [`CoverageSidecarError::Storage`].
 ///
 /// # Arguments
 ///
@@ -206,47 +197,44 @@ pub async fn write_coverage_sidecar_new_bytes(
 ///
 /// # Errors
 ///
-/// Returns [`CoverageError`] if:
-/// - The file does not exist ([`CoverageError::NotFound`]).
-/// - Deserialization of the coverage fails ([`CoverageError::Serde`]).
-/// - Storage I/O fails for other reasons ([`CoverageError::Storage`]).
+/// Returns [`CoverageSidecarError`] if:
+/// - The file does not exist ([`CoverageSidecarError::Storage`]).
+/// - Deserialization of the coverage fails ([`CoverageSidecarError::Codec`]).
+/// - Storage I/O fails ([`CoverageSidecarError::Storage`]).
 pub async fn read_coverage_sidecar(
     location: &TableLocation,
     rel_path: &Path,
-) -> Result<Coverage, CoverageError> {
-    match storage::read_all_bytes(location.as_ref(), rel_path).await {
-        Ok(bytes) => coverage_from_bytes(&bytes).context(SerdeSnafu),
-        Err(StorageError::NotFound { path, .. }) => Err(CoverageError::NotFound { path }),
-        Err(e) => Err(CoverageError::Storage { source: e }),
-    }
+) -> Result<Coverage, CoverageSidecarError> {
+    let bytes = storage::read_all_bytes(location.as_ref(), rel_path).await?;
+    Ok(coverage_from_bytes(&bytes)?)
 }
 
 /// Read entity-scoped coverage from a sidecar file.
 ///
 /// # Errors
 ///
-/// Returns [`CoverageError`] when storage or entity coverage decoding fails.
+/// Returns [`CoverageSidecarError`] when storage or entity coverage decoding fails.
 pub async fn read_entity_coverage_sidecar(
     location: &TableLocation,
     rel_path: &Path,
-) -> Result<EntityCoverage, CoverageError> {
-    match storage::read_all_bytes(location.as_ref(), rel_path).await {
-        Ok(bytes) => entity_coverage_from_bytes(&bytes)
-            .map_err(|source| CoverageError::EntitySerde { source }),
-        Err(StorageError::NotFound { path, .. }) => Err(CoverageError::NotFound { path }),
-        Err(source) => Err(CoverageError::Storage { source }),
-    }
+) -> Result<EntityCoverage, CoverageSidecarError> {
+    let bytes = storage::read_all_bytes(location.as_ref(), rel_path).await?;
+    Ok(entity_coverage_from_bytes(&bytes)?)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{error::Error as _, io};
+
+    use snafu::ErrorCompat;
+
     use super::*;
     use crate::{
         coverage::{
             EntityIdentity,
             serde::{coverage_from_bytes, entity_coverage_to_bytes},
         },
-        storage::StorageLocation,
+        storage::{StorageBackendError, StorageLocation},
     };
     use tempfile::TempDir;
 
@@ -254,6 +242,22 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let loc = TableLocation::local(tmp.path());
         (tmp, loc)
+    }
+
+    fn storage_source(error: &CoverageSidecarError) -> &StorageError {
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageError>())
+            .expect("storage source")
+    }
+
+    fn filesystem_source(error: &StorageError) -> &io::Error {
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageBackendError>())
+            .and_then(|source| source.source())
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .expect("filesystem source")
     }
 
     #[tokio::test]
@@ -296,7 +300,7 @@ mod tests {
             .expect_err("second write should fail");
 
         match err {
-            CoverageError::Storage {
+            CoverageSidecarError::Storage {
                 source: StorageError::AlreadyExists { .. },
                 ..
             } => {}
@@ -343,7 +347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_sidecar_missing_returns_not_found() {
+    async fn read_sidecar_missing_preserves_storage_not_found() {
         let (_tmp, loc) = temp_location();
         let rel = Path::new("_coverage/table/missing.roar");
 
@@ -351,16 +355,20 @@ mod tests {
             .await
             .expect_err("should be missing");
 
-        match err {
-            CoverageError::NotFound { path } => {
-                assert!(path.contains("missing.roar"));
-            }
-            _ => panic!("expected NotFound error"),
-        }
+        let sidecar_backtrace = ErrorCompat::backtrace(&err).expect("sidecar backtrace");
+        let storage = storage_source(&err);
+        let storage_backtrace = ErrorCompat::backtrace(storage).expect("storage backtrace");
+
+        assert!(matches!(
+            storage,
+            StorageError::NotFound { path, .. } if path.contains("missing.roar")
+        ));
+        assert_eq!(filesystem_source(storage).kind(), io::ErrorKind::NotFound);
+        assert!(std::ptr::eq(sidecar_backtrace, storage_backtrace));
     }
 
     #[tokio::test]
-    async fn read_sidecar_corrupt_bytes_returns_serde_error() {
+    async fn read_sidecar_corrupt_bytes_returns_codec_error() {
         let (tmp, loc) = temp_location();
         let rel = Path::new("_coverage/table/corrupt.roar");
 
@@ -375,11 +383,51 @@ mod tests {
             .await
             .expect_err("should fail to deserialize");
 
-        match err {
-            CoverageError::Serde { .. } => {}
-            _ => panic!("expected Serde error"),
-        }
+        let sidecar_backtrace = ErrorCompat::backtrace(&err).expect("sidecar backtrace");
+        let codec = err
+            .source()
+            .and_then(|source| source.downcast_ref::<CoverageCodecError>())
+            .expect("codec source");
+        let codec_backtrace = ErrorCompat::backtrace(codec).expect("codec backtrace");
+
+        assert!(matches!(
+            codec,
+            CoverageCodecError::BitmapDeserialization { .. }
+        ));
+        assert!(codec.source().is_some());
+        assert!(std::ptr::eq(sidecar_backtrace, codec_backtrace));
 
         drop(tmp); // ensure tempdir not optimized away
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_sidecar_permission_denied_remains_a_storage_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_tmp, loc) = temp_location();
+        let rel = Path::new("_coverage/table/denied.roar");
+        let absolute = match loc.as_ref() {
+            StorageLocation::Local(root) => root.join(rel),
+        };
+        std::fs::create_dir_all(absolute.parent().unwrap()).expect("create dirs");
+        std::fs::write(&absolute, coverage_to_bytes(&Coverage::empty()).unwrap())
+            .expect("write sidecar");
+        let original_permissions = std::fs::metadata(&absolute).unwrap().permissions();
+        let mut denied_permissions = original_permissions.clone();
+        denied_permissions.set_mode(0o0);
+        std::fs::set_permissions(&absolute, denied_permissions).expect("deny reads");
+
+        let error = read_coverage_sidecar(&loc, rel)
+            .await
+            .expect_err("read must be denied");
+        std::fs::set_permissions(&absolute, original_permissions).expect("restore permissions");
+
+        let storage = storage_source(&error);
+        assert!(matches!(storage, StorageError::OtherIo { .. }));
+        assert_eq!(
+            filesystem_source(storage).kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

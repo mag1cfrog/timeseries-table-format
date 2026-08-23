@@ -15,7 +15,7 @@ use crate::{
     coverage::{
         EntityIdentity, IndexIntervalId,
         index_interval::{IndexInterval, IndexIntervalMappingError},
-        io::CoverageError,
+        io::CoverageSidecarError,
     },
     formats::parquet::{EntityRewriteError, SegmentCoverageError},
     metadata::{
@@ -360,9 +360,9 @@ pub enum TableError {
     /// Coverage sidecar read/write or computation error.
     #[snafu(display("Coverage sidecar error: {source}"))]
     CoverageSidecar {
-        /// Underlying Coverage error.
+        /// Underlying coverage sidecar error.
         #[snafu(source, backtrace)]
-        source: CoverageError,
+        source: CoverageSidecarError,
     },
 
     /// Appending would overlap existing ordered-index intervals.
@@ -433,9 +433,9 @@ pub enum TableError {
         path: String,
         /// Path to the coverage sidecar file that failed to read.
         coverage_path: String,
-        /// Underlying coverage error (boxed to keep the variant size small).
-        #[snafu(source(from(CoverageError, Box::new)), backtrace)]
-        source: Box<CoverageError>,
+        /// Underlying coverage sidecar error (boxed to keep the variant size small).
+        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
+        source: Box<CoverageSidecarError>,
     },
 
     /// Table state is missing a coverage snapshot pointer when required.
