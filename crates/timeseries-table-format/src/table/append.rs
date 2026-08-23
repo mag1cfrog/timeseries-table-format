@@ -429,7 +429,7 @@ impl TimeSeriesTable {
                 return IndexIntervalOverlapSnafu {
                     segment_path: relative_path.to_string(),
                     overlap_count,
-                    example_index_interval_id: Some(example_index_interval_id),
+                    example_index_interval_id,
                     example_index_interval,
                 }
                 .fail();

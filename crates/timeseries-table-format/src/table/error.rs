@@ -374,8 +374,8 @@ pub enum TableError {
         segment_path: String,
         /// Number of overlapping index intervals.
         overlap_count: u64,
-        /// Internal index interval ID for the example interval, when available.
-        example_index_interval_id: Option<IndexIntervalId>,
+        /// Internal index interval ID for the example interval.
+        example_index_interval_id: IndexIntervalId,
         /// Example logical ordered-index interval.
         example_index_interval: IndexInterval,
     },

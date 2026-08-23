@@ -324,7 +324,7 @@ use crate::{
 };
 
 impl TimeSeriesTable {
-    fn index_interval_id_range_for_index_range<S, E>(
+    fn interval_ids_for_query_range<S, E>(
         &self,
         start: S,
         end: E,
@@ -372,7 +372,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         self.ensure_global_coverage_query()?;
-        let range = self.index_interval_id_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.coverage_ratio(&range))
     }
@@ -418,7 +418,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         let identity = self.resolve_entity_identity(entity)?;
-        let range = self.index_interval_id_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let coverage = self.load_table_entity_snapshot_coverage_readonly().await?;
         Ok(coverage
             .get(&identity)
@@ -454,7 +454,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         self.ensure_global_coverage_query()?;
-        let range = self.index_interval_id_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let cov = self.load_table_snapshot_coverage_readonly().await?;
         Ok(cov.max_gap_len(&range))
     }
@@ -482,7 +482,7 @@ impl TimeSeriesTable {
         E: Into<IndexValue>,
     {
         let identity = self.resolve_entity_identity(entity)?;
-        let range = self.index_interval_id_range_for_index_range(start, end)?;
+        let range = self.interval_ids_for_query_range(start, end)?;
         let coverage = self.load_table_entity_snapshot_coverage_readonly().await?;
         Ok(coverage.get(&identity).map_or_else(
             || Coverage::range_cardinality(&range),
@@ -1210,7 +1210,7 @@ mod tests {
         let ts = utc_datetime(2024, 1, 1, 0, 0, 0);
 
         let err = table
-            .index_interval_id_range_for_index_range(ts, ts)
+            .interval_ids_for_query_range(ts, ts)
             .expect_err("start >= end should be invalid");
         assert!(matches!(err, TableError::InvalidRange { .. }));
         Ok(())
@@ -1222,7 +1222,7 @@ mod tests {
         let start = ts_from_secs(0);
         let end = ts_from_secs(180); // covers the first three one-minute intervals
 
-        let range = table.index_interval_id_range_for_index_range(start, end)?;
+        let range = table.interval_ids_for_query_range(start, end)?;
         assert_eq!(range, 0x8000_0000_0000_0000..=0x8000_0000_0000_0002);
         Ok(())
     }

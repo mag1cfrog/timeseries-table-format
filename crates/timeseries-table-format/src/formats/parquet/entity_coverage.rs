@@ -1082,7 +1082,7 @@ mod tests {
             column: "value".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::Int64 {
-                index_granularity: NonZeroU64::new(10).expect("nonzero index_interval_id width"),
+                index_granularity: NonZeroU64::new(10).expect("nonzero index granularity"),
             },
         };
 
@@ -1119,7 +1119,7 @@ mod tests {
             column: "value".to_string(),
             entity_columns: vec!["entity".to_string()],
             kind: IndexKind::UInt64 {
-                index_granularity: NonZeroU64::new(10).expect("nonzero index_interval_id width"),
+                index_granularity: NonZeroU64::new(10).expect("nonzero index granularity"),
             },
         };
 

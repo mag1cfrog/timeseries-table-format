@@ -504,7 +504,7 @@ mod tests {
                             "entity_columns": ["symbol"],
                             "kind": {
                                 "type": "timestamp",
-                                "index_granularity": {"Minutes": 1}
+                                "bucket": {"Minutes": 1}
                             }
                         }},
                         "logical_schema": null,

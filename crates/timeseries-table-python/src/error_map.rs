@@ -79,7 +79,7 @@ fn coverage_overlap_error_to_py(
     msg: String,
     segment_path: String,
     overlap_count: u128,
-    example_index_interval_id: Option<u64>,
+    example_index_interval_id: u64,
     example_index_interval: IndexInterval,
     example_entity_identity: Option<(&[String], &[EntityValue])>,
 ) -> PyErr {
@@ -170,7 +170,7 @@ pub(crate) fn table_error_to_py(
             msg,
             segment_path,
             overlap_count,
-            Some(example_index_interval_id),
+            example_index_interval_id,
             example_index_interval,
             Some((entity_columns, example_identity.components())),
         ),
