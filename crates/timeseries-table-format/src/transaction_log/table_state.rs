@@ -169,7 +169,12 @@ impl TransactionLogStore {
                         segments.remove(&path);
                     }
                     LogAction::UpdateTableMeta(delta) => {
-                        // v0.1: full replacement of TableMeta
+                        if let Some(previous) = &table_meta {
+                            previous
+                                .ensure_valid_transition_to(&delta)
+                                .map_err(CommitError::from)?;
+                        }
+                        // Full replacement of TableMeta.
                         table_meta = Some(delta);
                     }
                     LogAction::UpdateTableCoverage {
@@ -191,6 +196,11 @@ impl TransactionLogStore {
             current_version,
             backtrace: snafu::Backtrace::capture(),
         })?;
+        // ponytail: replay requires writer compatibility until every mutating
+        // entry point has its own gate; then this can become a read check.
+        table_meta
+            .ensure_write_compatible()
+            .map_err(CommitError::from)?;
 
         if let TableKind::TimeSeries(index) = &table_meta.kind {
             index
@@ -531,10 +541,61 @@ mod tests {
             .expect_err("version 6 should be rejected");
         assert!(matches!(
             err,
-            CommitError::UnsupportedProtocolVersion {
-                expected: TABLE_PROTOCOL_VERSION,
-                found: 6,
+            CommitError::Protocol {
+                source: TableProtocolError::UnsupportedVersion {
+                    expected: TABLE_PROTOCOL_VERSION,
+                    found: 6,
+                },
+                ..
             }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_conservatively_requires_writer_compatibility() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.required_writer_features
+            .insert("future_writer".to_string());
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
+        let error = store.rebuild_table_state().await.unwrap_err();
+        assert!(matches!(
+            error,
+            CommitError::Protocol {
+                source: TableProtocolError::UnsupportedWriterFeatures { features },
+                ..
+            } if features == ["future_writer"]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_removed_protocol_features() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut initial = sample_table_meta();
+        initial
+            .required_reader_features
+            .insert("future_reader".to_string());
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(initial.clone())])
+            .await?;
+
+        initial.required_reader_features.clear();
+        store
+            .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(initial)])
+            .await?;
+
+        let error = store.rebuild_table_state().await.unwrap_err();
+        assert!(matches!(
+            error,
+            CommitError::Protocol {
+                source: TableProtocolError::ReaderFeaturesRemoved { features },
+                ..
+            } if features == ["future_reader"]
         ));
         Ok(())
     }

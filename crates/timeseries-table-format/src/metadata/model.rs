@@ -11,6 +11,6 @@ pub use crate::metadata::{
     table_metadata::{
         IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
         ParseTimeIndexGranularityError, TABLE_PROTOCOL_VERSION, TableArrowSchemaError, TableKind,
-        TableMeta, TableMetaDelta, TimeIndexGranularity, validate_index_range,
+        TableMeta, TableMetaDelta, TableProtocolError, TimeIndexGranularity, validate_index_range,
     },
 };

@@ -54,7 +54,8 @@ pub mod transaction_log;
 pub use metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
 pub use metadata::table_metadata::{
     IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
-    ParseTimeIndexGranularityError, TableMeta, TimeIndexGranularity, validate_index_range,
+    ParseTimeIndexGranularityError, TableMeta, TableProtocolError, TimeIndexGranularity,
+    validate_index_range,
 };
 pub use storage::TableLocation;
 pub use table::{

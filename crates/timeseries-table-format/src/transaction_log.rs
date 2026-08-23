@@ -71,7 +71,8 @@ pub mod table_state;
 mod log_integration_tests;
 
 pub use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TimeIndexGranularity,
+    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TableProtocolError,
+    TimeIndexGranularity,
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
@@ -113,13 +114,14 @@ pub enum CommitError {
         source: StorageError,
     },
 
-    /// Table metadata uses a protocol version this client cannot interpret.
-    #[snafu(display("Unsupported table protocol version: expected {expected}, found {found}"))]
-    UnsupportedProtocolVersion {
-        /// The only table protocol version this client supports.
-        expected: u32,
-        /// Version found in persisted table metadata.
-        found: u64,
+    /// The table protocol is incompatible with this operation.
+    #[snafu(context(false), display("Table protocol error: {source}"))]
+    Protocol {
+        /// Complete table protocol failure.
+        #[snafu(source)]
+        source: crate::metadata::table_metadata::TableProtocolError,
+        /// Backtrace captured at the transaction-log boundary.
+        backtrace: Backtrace,
     },
 
     /// A commit payload could not be decoded from JSON.

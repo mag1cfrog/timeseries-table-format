@@ -100,7 +100,7 @@ mod tests {
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, assert_no_event,
             captured_span, make_basic_table_meta,
         },
-        transaction_log::{LogAction, TransactionLogStore},
+        transaction_log::{LogAction, TableProtocolError, TransactionLogStore},
     };
     use tempfile::TempDir;
 
@@ -178,9 +178,12 @@ mod tests {
                     .expect_err("unsupported protocol must fail"),
                 TableError::Open {
                     source: OpenTableError::Commit {
-                        source: CommitError::UnsupportedProtocolVersion {
-                            expected: TABLE_PROTOCOL_VERSION,
-                            found: actual,
+                        source: CommitError::Protocol {
+                            source: TableProtocolError::UnsupportedVersion {
+                                expected: TABLE_PROTOCOL_VERSION,
+                                found: actual,
+                            },
+                            ..
                         }
                     }
                 } if actual == u64::from(found)

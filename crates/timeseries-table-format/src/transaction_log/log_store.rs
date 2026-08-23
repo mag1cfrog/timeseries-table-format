@@ -104,10 +104,10 @@ impl TransactionLogStore {
             })
             .find(|&found| found != u64::from(TABLE_PROTOCOL_VERSION))
         {
-            return Err(CommitError::UnsupportedProtocolVersion {
+            return Err(CommitError::from(TableProtocolError::UnsupportedVersion {
                 expected: TABLE_PROTOCOL_VERSION,
                 found,
-            });
+            }));
         }
 
         let commit =
