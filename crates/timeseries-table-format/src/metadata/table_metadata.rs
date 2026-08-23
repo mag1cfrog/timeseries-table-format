@@ -4,7 +4,13 @@
 //! `LogAction::UpdateTableMeta`, including table kind, logical schema, and the
 //! time index specification. Future evolutions can extend these types without
 //! touching the storage/reader code paths.
-use std::{cmp::Ordering, collections::HashSet, fmt, num::NonZeroU64, str::FromStr};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fmt,
+    num::NonZeroU64,
+    str::FromStr,
+};
 
 use arrow::datatypes::SchemaRef;
 use chrono::{DateTime, Utc};
@@ -13,10 +19,15 @@ use snafu::{Backtrace, prelude::*};
 
 use crate::metadata::logical_schema::{LogicalSchema, LogicalToArrowSchemaError};
 
-/// Current table metadata / log format version written by new tables.
+/// Current table protocol version written by new tables.
 ///
-/// Bumped when persisted table semantics require version-aware decoding.
-pub const TABLE_FORMAT_VERSION: u32 = 7;
+/// This changes only when the core metadata or commit-log envelope can no
+/// longer be decoded under the current protocol. Optional capabilities are
+/// declared separately in the reader and writer feature sets.
+pub const TABLE_PROTOCOL_VERSION: u32 = 7;
+
+const SUPPORTED_READER_FEATURES: &[&str] = &[];
+const SUPPORTED_WRITER_FEATURES: &[&str] = &[];
 
 /// The high-level "kind" of table.
 ///
@@ -38,6 +49,7 @@ pub enum TableKind {
 /// This describes the table kind, a logical schema (optional in v0.1), and
 /// basic bookkeeping fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "RawTableMeta")]
 pub struct TableMeta {
     /// Table kind: TimeSeries or Generic.
     pub(crate) kind: TableKind,
@@ -51,10 +63,129 @@ pub struct TableMeta {
     /// Creation timestamp of the table, stored as RFC3339 UTC.
     pub(crate) created_at: DateTime<Utc>,
 
-    /// Format version for future evolution of the log/table format.
+    /// Version of the core metadata and commit-log protocol.
     ///
-    /// Writers set this to [`TABLE_FORMAT_VERSION`].
-    pub(crate) format_version: u32,
+    /// Writers set this to [`TABLE_PROTOCOL_VERSION`].
+    pub(crate) protocol_version: u32,
+
+    /// Features a client must support to read this table.
+    pub(crate) required_reader_features: BTreeSet<String>,
+
+    /// Features a client must support to write this table.
+    pub(crate) required_writer_features: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+struct RawTableMeta {
+    kind: TableKind,
+    logical_schema: Option<LogicalSchema>,
+    created_at: DateTime<Utc>,
+    protocol_version: u32,
+    #[serde(deserialize_with = "deserialize_required_features")]
+    required_reader_features: BTreeSet<String>,
+    #[serde(deserialize_with = "deserialize_required_features")]
+    required_writer_features: BTreeSet<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl TryFrom<RawTableMeta> for TableMeta {
+    type Error = String;
+
+    fn try_from(raw: RawTableMeta) -> Result<Self, Self::Error> {
+        if raw.extra.contains_key("format_version") {
+            return Err("legacy field 'format_version' is not valid protocol-v7 metadata".into());
+        }
+
+        Ok(Self {
+            kind: raw.kind,
+            logical_schema: raw.logical_schema,
+            created_at: raw.created_at,
+            protocol_version: raw.protocol_version,
+            required_reader_features: raw.required_reader_features,
+            required_writer_features: raw.required_writer_features,
+        })
+    }
+}
+
+fn deserialize_required_features<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let features = Vec::<String>::deserialize(deserializer)?;
+    let mut unique = BTreeSet::new();
+    for feature in features {
+        if !is_valid_feature_name(&feature) {
+            return Err(D::Error::custom(format!(
+                "invalid table feature {feature:?}; expected [a-z][a-z0-9_]*"
+            )));
+        }
+        if !unique.insert(feature.clone()) {
+            return Err(D::Error::custom(format!(
+                "duplicate table feature {feature:?}"
+            )));
+        }
+    }
+    Ok(unique)
+}
+
+fn is_valid_feature_name(feature: &str) -> bool {
+    let mut bytes = feature.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// A table protocol requirement or transition is not supported.
+#[derive(Debug, Snafu, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TableProtocolError {
+    /// The table uses a core protocol version this client cannot decode.
+    #[snafu(display("unsupported table protocol version: expected {expected}, found {found}"))]
+    UnsupportedVersion {
+        /// Core protocol version supported by this client.
+        expected: u32,
+        /// Core protocol version required by the table.
+        found: u64,
+    },
+
+    /// The table requires reader features this client does not support.
+    #[snafu(display("unsupported table reader features: {features:?}"))]
+    UnsupportedReaderFeatures {
+        /// Unsupported feature identifiers in canonical order.
+        features: Vec<String>,
+    },
+
+    /// The table requires writer features this client does not support.
+    #[snafu(display("unsupported table writer features: {features:?}"))]
+    UnsupportedWriterFeatures {
+        /// Unsupported feature identifiers in canonical order.
+        features: Vec<String>,
+    },
+
+    /// A metadata update removed previously required reader features.
+    #[snafu(display("table metadata removed required reader features: {features:?}"))]
+    ReaderFeaturesRemoved {
+        /// Removed feature identifiers in canonical order.
+        features: Vec<String>,
+    },
+
+    /// A metadata update removed previously required writer features.
+    #[snafu(display("table metadata removed required writer features: {features:?}"))]
+    WriterFeaturesRemoved {
+        /// Removed feature identifiers in canonical order.
+        features: Vec<String>,
+    },
+
+    /// A metadata update decreased the core protocol version.
+    #[snafu(display("table metadata decreased protocol version from {previous} to {next}"))]
+    ProtocolVersionDecreased {
+        /// Protocol version before the metadata update.
+        previous: u32,
+        /// Protocol version after the metadata update.
+        next: u32,
+    },
 }
 
 /// Errors encountered while retrieving or converting a table's logical schema.
@@ -93,15 +224,100 @@ impl TableMeta {
         self.created_at
     }
 
-    /// Returns the on-disk table metadata format version.
-    pub fn format_version(&self) -> u32 {
-        self.format_version
+    /// Returns the on-disk table protocol version.
+    pub fn protocol_version(&self) -> u32 {
+        self.protocol_version
+    }
+
+    /// Returns the features a client must support to read the table.
+    pub fn required_reader_features(&self) -> &BTreeSet<String> {
+        &self.required_reader_features
+    }
+
+    /// Returns the features a client must support to write the table.
+    pub fn required_writer_features(&self) -> &BTreeSet<String> {
+        &self.required_writer_features
+    }
+
+    pub(crate) fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
+        self.ensure_write_compatible_with(SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES)
+    }
+
+    fn ensure_read_compatible_with(
+        &self,
+        supported_reader_features: &[&str],
+    ) -> Result<(), TableProtocolError> {
+        if self.protocol_version != TABLE_PROTOCOL_VERSION {
+            return Err(TableProtocolError::UnsupportedVersion {
+                expected: TABLE_PROTOCOL_VERSION,
+                found: u64::from(self.protocol_version),
+            });
+        }
+
+        let unsupported =
+            unsupported_features(&self.required_reader_features, supported_reader_features);
+        if !unsupported.is_empty() {
+            return Err(TableProtocolError::UnsupportedReaderFeatures {
+                features: unsupported,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_write_compatible_with(
+        &self,
+        supported_reader_features: &[&str],
+        supported_writer_features: &[&str],
+    ) -> Result<(), TableProtocolError> {
+        self.ensure_read_compatible_with(supported_reader_features)?;
+
+        let unsupported =
+            unsupported_features(&self.required_writer_features, supported_writer_features);
+        if !unsupported.is_empty() {
+            return Err(TableProtocolError::UnsupportedWriterFeatures {
+                features: unsupported,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_valid_transition_to(&self, next: &Self) -> Result<(), TableProtocolError> {
+        if next.protocol_version < self.protocol_version {
+            return Err(TableProtocolError::ProtocolVersionDecreased {
+                previous: self.protocol_version,
+                next: next.protocol_version,
+            });
+        }
+
+        let removed_reader_features = self
+            .required_reader_features
+            .difference(&next.required_reader_features)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !removed_reader_features.is_empty() {
+            return Err(TableProtocolError::ReaderFeaturesRemoved {
+                features: removed_reader_features,
+            });
+        }
+
+        let removed_writer_features = self
+            .required_writer_features
+            .difference(&next.required_writer_features)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !removed_writer_features.is_empty() {
+            return Err(TableProtocolError::WriterFeaturesRemoved {
+                features: removed_writer_features,
+            });
+        }
+        Ok(())
     }
 
     /// Convenience constructor for a time-series table.
     ///
     /// - Fills `created_at` with `Utc::now()`.
-    /// - Fills `format_version` with `TABLE_FORMAT_VERSION`.
+    /// - Fills `protocol_version` with `TABLE_PROTOCOL_VERSION`.
+    /// - Starts with no required reader or writer features.
     /// - Leaves `logical_schema` as `None`; it will be adopted from the
     ///   first appended segment in v0.1.
     pub fn new_time_series(index: IndexSpec) -> Self {
@@ -109,7 +325,9 @@ impl TableMeta {
             kind: TableKind::TimeSeries(index),
             logical_schema: None,
             created_at: Utc::now(),
-            format_version: TABLE_FORMAT_VERSION,
+            protocol_version: TABLE_PROTOCOL_VERSION,
+            required_reader_features: BTreeSet::new(),
+            required_writer_features: BTreeSet::new(),
         }
     }
 
@@ -119,7 +337,9 @@ impl TableMeta {
             kind: TableKind::TimeSeries(index),
             logical_schema: Some(logical_schema),
             created_at: Utc::now(),
-            format_version: TABLE_FORMAT_VERSION,
+            protocol_version: TABLE_PROTOCOL_VERSION,
+            required_reader_features: BTreeSet::new(),
+            required_writer_features: BTreeSet::new(),
         }
     }
 
@@ -135,6 +355,14 @@ impl TableMeta {
 
         logical.to_arrow_schema_ref().context(ConversionSnafu)
     }
+}
+
+fn unsupported_features(required: &BTreeSet<String>, supported: &[&str]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|feature| !supported.contains(&feature.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// For v0.1, a `TableMetaDelta` is just a full replacement of [`TableMeta`].
@@ -614,6 +842,171 @@ mod tests {
                 timezone: None,
             },
         }
+    }
+
+    #[test]
+    fn table_meta_baseline_protocol_json_is_stable() {
+        let mut meta = TableMeta::new_time_series(sample_time_index_spec());
+        meta.created_at = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap();
+
+        assert_eq!(
+            serde_json::to_value(meta).unwrap(),
+            serde_json::json!({
+                "kind": {
+                    "TimeSeries": {
+                        "column": "ts",
+                        "entity_columns": ["symbol"],
+                        "kind": {
+                            "type": "timestamp",
+                            "index_granularity": {"Minutes": 1}
+                        }
+                    }
+                },
+                "logical_schema": null,
+                "created_at": "2025-01-01T00:00:00Z",
+                "protocol_version": 7,
+                "required_reader_features": [],
+                "required_writer_features": []
+            })
+        );
+    }
+
+    #[test]
+    fn table_meta_protocol_fields_roundtrip_canonically() {
+        let mut meta = TableMeta::new_time_series(sample_time_index_spec());
+        meta.required_reader_features.insert("z_reader".to_string());
+        meta.required_reader_features.insert("a_reader".to_string());
+        meta.required_writer_features.insert("writer_2".to_string());
+
+        let mut json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["protocol_version"], TABLE_PROTOCOL_VERSION);
+        assert_eq!(
+            json["required_reader_features"],
+            serde_json::json!(["a_reader", "z_reader"])
+        );
+        assert_eq!(
+            json["required_writer_features"],
+            serde_json::json!(["writer_2"])
+        );
+        assert!(json.get("format_version").is_none());
+
+        json["future_field"] = serde_json::json!({"ignored": true});
+        let decoded: TableMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn table_meta_requires_valid_unique_feature_lists() {
+        let valid =
+            serde_json::to_value(TableMeta::new_time_series(sample_time_index_spec())).unwrap();
+        let invalid_lists = [
+            serde_json::Value::Null,
+            serde_json::json!(["duplicate", "duplicate"]),
+            serde_json::json!(["Uppercase"]),
+            serde_json::json!([""]),
+        ];
+
+        for invalid in invalid_lists {
+            let mut json = valid.clone();
+            json["required_reader_features"] = invalid;
+            assert!(serde_json::from_value::<TableMeta>(json).is_err());
+        }
+
+        for field in ["required_reader_features", "required_writer_features"] {
+            let mut json = valid.clone();
+            json.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<TableMeta>(json).is_err());
+        }
+    }
+
+    #[test]
+    fn table_meta_rejects_legacy_format_version_field() {
+        let mut json =
+            serde_json::to_value(TableMeta::new_time_series(sample_time_index_spec())).unwrap();
+        json["format_version"] = serde_json::json!(6);
+
+        let error = serde_json::from_value::<TableMeta>(json).unwrap_err();
+        assert!(error.to_string().contains("legacy field 'format_version'"));
+    }
+
+    #[test]
+    fn table_protocol_compatibility_is_operation_specific() {
+        let mut meta = TableMeta::new_time_series(sample_time_index_spec());
+        meta.required_reader_features
+            .extend(["reader_a".to_string(), "reader_b".to_string()]);
+        meta.required_writer_features.insert("writer_a".to_string());
+
+        assert!(
+            meta.ensure_read_compatible_with(&["reader_a", "reader_b"])
+                .is_ok()
+        );
+        assert_eq!(
+            meta.ensure_read_compatible_with(&["reader_b"]),
+            Err(TableProtocolError::UnsupportedReaderFeatures {
+                features: vec!["reader_a".to_string()],
+            })
+        );
+        assert_eq!(
+            meta.ensure_write_compatible_with(&["reader_a", "reader_b"], &[]),
+            Err(TableProtocolError::UnsupportedWriterFeatures {
+                features: vec!["writer_a".to_string()],
+            })
+        );
+        assert!(
+            meta.ensure_write_compatible_with(&["reader_a", "reader_b"], &["writer_a"])
+                .is_ok()
+        );
+        assert_eq!(
+            meta.ensure_write_compatible(),
+            Err(TableProtocolError::UnsupportedReaderFeatures {
+                features: vec!["reader_a".to_string(), "reader_b".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn table_protocol_transition_requirements_are_monotonic() {
+        let mut previous = TableMeta::new_time_series(sample_time_index_spec());
+        previous
+            .required_reader_features
+            .extend(["reader_a".to_string(), "reader_b".to_string()]);
+        previous
+            .required_writer_features
+            .insert("writer_a".to_string());
+
+        let mut additive = previous.clone();
+        additive
+            .required_writer_features
+            .insert("writer_b".to_string());
+        assert!(previous.ensure_valid_transition_to(&additive).is_ok());
+
+        let mut removed = previous.clone();
+        removed.required_reader_features.clear();
+        assert_eq!(
+            previous.ensure_valid_transition_to(&removed),
+            Err(TableProtocolError::ReaderFeaturesRemoved {
+                features: vec!["reader_a".to_string(), "reader_b".to_string()],
+            })
+        );
+
+        let mut removed = previous.clone();
+        removed.required_writer_features.clear();
+        assert_eq!(
+            previous.ensure_valid_transition_to(&removed),
+            Err(TableProtocolError::WriterFeaturesRemoved {
+                features: vec!["writer_a".to_string()],
+            })
+        );
+
+        let mut decreased = previous.clone();
+        decreased.protocol_version -= 1;
+        assert_eq!(
+            previous.ensure_valid_transition_to(&decreased),
+            Err(TableProtocolError::ProtocolVersionDecreased {
+                previous: TABLE_PROTOCOL_VERSION,
+                next: TABLE_PROTOCOL_VERSION - 1,
+            })
+        );
     }
 
     #[test]

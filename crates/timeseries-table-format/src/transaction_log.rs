@@ -71,7 +71,8 @@ pub mod table_state;
 mod log_integration_tests;
 
 pub use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TimeIndexGranularity,
+    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TableProtocolError,
+    TimeIndexGranularity,
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
@@ -113,13 +114,14 @@ pub enum CommitError {
         source: StorageError,
     },
 
-    /// Table metadata uses a format version this reader cannot interpret.
-    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
-    UnsupportedFormatVersion {
-        /// The only table format version this reader supports.
-        expected: u32,
-        /// Version found in persisted table metadata.
-        found: u64,
+    /// The table protocol is incompatible with this operation.
+    #[snafu(context(false), display("Table protocol error: {source}"))]
+    Protocol {
+        /// Complete table protocol failure.
+        #[snafu(source)]
+        source: crate::metadata::table_metadata::TableProtocolError,
+        /// Backtrace captured at the transaction-log boundary.
+        backtrace: Backtrace,
     },
 
     /// A commit payload could not be decoded from JSON.
@@ -345,7 +347,7 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
         LogicalTimestampUnit,
     };
-    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
+    use crate::metadata::table_metadata::TABLE_PROTOCOL_VERSION;
     use crate::transaction_log::*;
 
     use chrono::{DateTime, TimeZone, Utc};
@@ -401,7 +403,9 @@ mod tests {
                 .expect("valid logical schema"),
             ),
             created_at: ts0,
-            format_version: TABLE_FORMAT_VERSION,
+            protocol_version: TABLE_PROTOCOL_VERSION,
+            required_reader_features: Default::default(),
+            required_writer_features: Default::default(),
         };
 
         let seg_meta = SegmentMeta {
@@ -429,7 +433,9 @@ mod tests {
 
         // Serialize to JSON.
         let json = serde_json::to_string_pretty(&commit).expect("serialize commit");
-        assert!(json.contains(&format!("\"format_version\": {TABLE_FORMAT_VERSION}")));
+        assert!(json.contains(&format!("\"protocol_version\": {TABLE_PROTOCOL_VERSION}")));
+        assert!(json.contains("\"required_reader_features\": []"));
+        assert!(json.contains("\"required_writer_features\": []"));
         // println!("{json}");
 
         // Deserialize back.

@@ -10,7 +10,7 @@ pub use crate::metadata::{
     segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
     table_metadata::{
         IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
-        ParseTimeIndexGranularityError, TABLE_FORMAT_VERSION, TableArrowSchemaError, TableKind,
-        TableMeta, TableMetaDelta, TimeIndexGranularity, validate_index_range,
+        ParseTimeIndexGranularityError, TABLE_PROTOCOL_VERSION, TableArrowSchemaError, TableKind,
+        TableMeta, TableMetaDelta, TableProtocolError, TimeIndexGranularity, validate_index_range,
     },
 };

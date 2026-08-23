@@ -5,11 +5,13 @@ use snafu::{Backtrace, Snafu};
 use crate::{
     metadata::{
         schema_compat::{SchemaCompatibilityError, ensure_index_spec_matches_schema},
-        table_metadata::{IndexSpecError, TABLE_FORMAT_VERSION},
+        table_metadata::IndexSpecError,
     },
     storage::{StorageError, TableLocation},
     table::{TableError, TimeSeriesTable},
-    transaction_log::{CommitError, LogAction, TableKind, TableMeta, TransactionLogStore},
+    transaction_log::{
+        CommitError, LogAction, TableKind, TableMeta, TableProtocolError, TransactionLogStore,
+    },
 };
 
 /// Errors owned by a table creation operation.
@@ -17,13 +19,14 @@ use crate::{
 #[snafu(module, visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum CreateTableError {
-    /// The caller requested an unsupported table format version.
-    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
-    UnsupportedFormatVersion {
-        /// Format version supported by this writer.
-        expected: u32,
-        /// Format version supplied by the caller.
-        found: u32,
+    /// The requested metadata is incompatible with this writer.
+    #[snafu(context(false), display("Table protocol error: {source}"))]
+    Protocol {
+        /// Complete table protocol failure.
+        #[snafu(source)]
+        source: TableProtocolError,
+        /// Backtrace captured at the table-creation boundary.
+        backtrace: Backtrace,
     },
 
     /// The supplied metadata does not describe a time-series table.
@@ -103,12 +106,9 @@ impl TimeSeriesTable {
         table_meta: TableMeta,
     ) -> Result<Self, TableError> {
         let result: Result<Self, CreateTableError> = async {
-            if table_meta.format_version() != TABLE_FORMAT_VERSION {
-                return Err(CreateTableError::UnsupportedFormatVersion {
-                    expected: TABLE_FORMAT_VERSION,
-                    found: table_meta.format_version(),
-                });
-            }
+            table_meta
+                .ensure_write_compatible()
+                .map_err(CreateTableError::from)?;
 
             let index = match &table_meta.kind {
                 TableKind::TimeSeries(index) => index.clone(),
@@ -180,6 +180,7 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::{
+        metadata::table_metadata::TABLE_PROTOCOL_VERSION,
         storage::{StorageLocation, layout},
         table::test_util::{
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, captured_span,
@@ -240,8 +241,8 @@ mod tests {
 
         assert_eq!(table.state().version, 1);
         assert_eq!(
-            table.state().table_meta.format_version(),
-            TABLE_FORMAT_VERSION
+            table.state().table_meta.protocol_version(),
+            TABLE_PROTOCOL_VERSION
         );
         assert!(table.state().segments.is_empty());
         let StorageLocation::Local(root) = table.location().storage();
@@ -260,22 +261,42 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
-        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+        for found in [TABLE_PROTOCOL_VERSION - 1, TABLE_PROTOCOL_VERSION + 1] {
             let mut meta = make_basic_table_meta();
-            meta.format_version = found;
+            meta.protocol_version = found;
             let error = TimeSeriesTable::create(location.clone(), meta)
                 .await
-                .expect_err("unsupported format version must fail");
+                .expect_err("unsupported protocol version must fail");
             assert!(matches!(
                 error,
                 TableError::Create {
-                    source: CreateTableError::UnsupportedFormatVersion {
-                        expected: TABLE_FORMAT_VERSION,
-                        found: actual,
+                    source: CreateTableError::Protocol {
+                        source: TableProtocolError::UnsupportedVersion {
+                            expected: TABLE_PROTOCOL_VERSION,
+                            found: actual,
+                        },
+                        ..
                     }
-                } if actual == found
+                } if actual == u64::from(found)
             ));
         }
+
+        let mut unsupported = make_basic_table_meta();
+        unsupported
+            .required_writer_features
+            .insert("future_writer".to_string());
+        let error = TimeSeriesTable::create(location.clone(), unsupported)
+            .await
+            .expect_err("unsupported writer feature must fail");
+        assert!(matches!(
+            error,
+            TableError::Create {
+                source: CreateTableError::Protocol {
+                    source: TableProtocolError::UnsupportedWriterFeatures { features },
+                    ..
+                }
+            } if features == ["future_writer"]
+        ));
 
         let mut invalid_index = make_basic_table_meta();
         let TableKind::TimeSeries(index) = &mut invalid_index.kind else {

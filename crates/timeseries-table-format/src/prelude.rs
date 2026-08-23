@@ -9,5 +9,6 @@ pub use crate::{
     IndexSpecError, IndexValue, IndexValueError, IntoRecordBatchReader, LogicalDataType,
     LogicalField, LogicalSchema, OpenTableError, OptimizeError, OptimizeReport,
     ParseTimeIndexGranularityError, ScanError, TableError, TableLocation, TableMeta,
-    TableStateAccessError, TimeIndexGranularity, TimeSeriesTable, validate_index_range,
+    TableProtocolError, TableStateAccessError, TimeIndexGranularity, TimeSeriesTable,
+    validate_index_range,
 };

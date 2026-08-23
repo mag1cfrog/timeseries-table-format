@@ -12,7 +12,7 @@ use crate::metadata::logical_schema::{
 };
 use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
 use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeIndexGranularity,
+    IndexKind, IndexSpec, TABLE_PROTOCOL_VERSION, TableKind, TableMeta, TimeIndexGranularity,
 };
 use crate::storage::{StorageError, TableLocation, layout};
 use crate::transaction_log::{CommitError, LogAction, TransactionLogStore};
@@ -597,9 +597,9 @@ async fn update_table_meta_last_one_wins() -> TestResult {
         }
         _ => panic!("expected TimeSeries"),
     }
-    // Format version is constant in v0.1; this test focuses on "last one wins" for
+    // Protocol version is constant; this test focuses on "last one wins" for
     // the index spec and related fields. We still sanity-check the version value.
-    assert_eq!(state.table_meta.format_version(), TABLE_FORMAT_VERSION);
+    assert_eq!(state.table_meta.protocol_version(), TABLE_PROTOCOL_VERSION);
 
     Ok(())
 }

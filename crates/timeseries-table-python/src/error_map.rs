@@ -321,7 +321,7 @@ mod tests {
     use timeseries_table_format::{
         coverage::index_interval::{index_interval_for_id, index_interval_id_for_value},
         storage::StorageLocation,
-        transaction_log::{IndexKind, IndexValue},
+        transaction_log::{IndexKind, IndexValue, TableProtocolError},
     };
 
     fn init_python() {
@@ -364,10 +364,10 @@ mod tests {
 
         Python::attach(|py| {
             let error = TableError::from(TableStateAccessError::Commit {
-                source: CommitError::UnsupportedFormatVersion {
+                source: CommitError::from(TableProtocolError::UnsupportedVersion {
                     expected: 1,
                     found: 2,
-                },
+                }),
             });
             let python_error = table_error_to_py(py, error, &[]);
 

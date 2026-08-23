@@ -3,7 +3,7 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeIndexGranularity,
+    IndexKind, IndexSpec, TABLE_PROTOCOL_VERSION, TableKind, TableMeta, TimeIndexGranularity,
 };
 use crate::storage::StorageLocation;
 use arrow::array::{
@@ -204,7 +204,8 @@ impl<S: Subscriber> Layer<S> for TraceCapture {
 
     fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
         let mut captured = self.0.lock().expect("capture lock");
-        // ponytail: captures are tiny; add an active-span index if tests create thousands of spans.
+        // Captures are tiny; add an active-span index only if tests create
+        // thousands of spans.
         if let Some(span) = captured
             .spans
             .iter_mut()
@@ -291,7 +292,9 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
         kind: TableKind::TimeSeries(index),
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: TABLE_FORMAT_VERSION,
+        protocol_version: TABLE_PROTOCOL_VERSION,
+        required_reader_features: Default::default(),
+        required_writer_features: Default::default(),
     }
 }
 
@@ -689,7 +692,9 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
         kind: TableKind::TimeSeries(index),
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: TABLE_FORMAT_VERSION,
+        protocol_version: TABLE_PROTOCOL_VERSION,
+        required_reader_features: Default::default(),
+        required_writer_features: Default::default(),
     }
 }
 
