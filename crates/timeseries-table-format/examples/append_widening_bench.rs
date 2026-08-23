@@ -21,7 +21,9 @@ use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 use serde::{Deserialize, Serialize};
 use timeseries_table_format::{
-    metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaError},
+    metadata::logical_schema::{
+        LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
+    },
     metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta},
     storage::TableLocation,
     table::{TimeSeriesTable, append::AppendRequest},
@@ -283,7 +285,7 @@ fn incoming_schema() -> SchemaRef {
     ]))
 }
 
-fn registered_logical_schema() -> Result<LogicalSchema, LogicalSchemaError> {
+fn registered_logical_schema() -> Result<LogicalSchema, LogicalSchemaValidationError> {
     LogicalSchema::new(vec![
         LogicalField {
             name: INDEX_COLUMN.to_string(),

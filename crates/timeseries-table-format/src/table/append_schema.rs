@@ -34,9 +34,11 @@ impl AppendSchemaNormalizer {
         incoming_schema: &Schema,
         registered_schema: &LogicalSchema,
     ) -> SchemaResult<Self> {
-        let output_schema = registered_schema
-            .to_arrow_schema_ref()
-            .map_err(|source| SchemaCompatibilityError::RegisteredSchemaConversion { source })?;
+        let output_schema = registered_schema.to_arrow_schema_ref().map_err(|source| {
+            SchemaCompatibilityError::RegisteredSchemaConversion {
+                source: Box::new(source),
+            }
+        })?;
         let mut incoming_by_name = HashMap::with_capacity(incoming_schema.fields().len());
 
         for (index, field) in incoming_schema.fields().iter().enumerate() {
