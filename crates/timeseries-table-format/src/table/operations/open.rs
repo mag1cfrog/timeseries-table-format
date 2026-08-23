@@ -11,6 +11,7 @@ use crate::{
 /// Errors owned by a table open operation.
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum OpenTableError {
     /// The table location contains no commits.
     #[snafu(display("Cannot open table with no commits"))]

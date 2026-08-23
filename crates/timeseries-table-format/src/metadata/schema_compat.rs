@@ -19,6 +19,7 @@ use crate::{
 
 /// Errors raised when a segment's schema is not compatible with the table.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum SchemaCompatibilityError {
     /// The table does not yet have a canonical logical schema.
     ///

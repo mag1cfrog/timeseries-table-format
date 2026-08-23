@@ -146,6 +146,7 @@ impl SegmentMeta {
 /// errors should be wrapped at the IO boundary (for example, in
 /// `transaction_log::segments::SegmentError`).
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum SegmentMetaError {
     /// Persisted segment bounds violate the table's ordered-index domain.
     #[snafu(display("Invalid ordered-index bounds in segment at {path}: {source}"))]

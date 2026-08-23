@@ -84,6 +84,7 @@ use crate::storage::StorageError;
 
 /// Errors that can occur while reading or writing the commit log.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum CommitError {
     /// The caller's expected_version does not match the CURRENT pointer.
     #[snafu(display("Commit conflict: expected version {expected}, but CURRENT is {found}"))]

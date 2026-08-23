@@ -24,6 +24,7 @@ pub const COVERAGE_EXT: &str = "roar";
 
 /// Errors that can occur during coverage layout operations.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum CoverageLayoutError {
     /// Returned when an invalid coverage ID is provided.
     #[snafu(display("Invalid coverage id: {coverage_id}"))]

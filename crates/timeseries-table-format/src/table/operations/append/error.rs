@@ -22,6 +22,7 @@ use crate::{
 /// Errors owned by an append operation.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum AppendError {
     /// An Arrow input reader or batch normalization failed.
     #[snafu(display("Arrow input error: {source}"))]

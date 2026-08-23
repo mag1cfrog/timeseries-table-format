@@ -115,6 +115,7 @@ impl EntityIdentity {
 
 /// Invalid entity identity construction.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
+#[non_exhaustive]
 pub enum EntityIdentityError {
     /// An entity-aware table requires at least one identity component.
     #[snafu(display("entity identity must contain at least one component"))]

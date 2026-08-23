@@ -13,6 +13,7 @@ use crate::{
 /// Errors from table coverage queries and read-only coverage recovery.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
+#[non_exhaustive]
 pub enum CoverageQueryError {
     /// The requested half-open ordered-index range is invalid.
     #[snafu(display("Invalid coverage query range: {source}"))]

@@ -48,6 +48,7 @@ type SegmentScanStream =
 /// Errors from planning or lazily executing a table scan.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum ScanError {
     /// The requested half-open ordered-index range is invalid.
     #[snafu(display("Invalid scan range: {source}"))]

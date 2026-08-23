@@ -14,6 +14,7 @@ use super::operations::{
 /// conflicts on optimistic concurrency control).
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum TableError {
     /// A table creation operation failed.
     #[snafu(context(false), display("Table creation failed: {source}"))]

@@ -24,6 +24,7 @@ use crate::{
 /// Errors owned by an entity-layout optimization operation.
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum OptimizeError {
     /// Entity-layout optimization requires at least one entity column.
     #[snafu(display(

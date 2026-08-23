@@ -79,6 +79,7 @@ pub struct StagedEntityRewrite {
 
 /// Failure while staging a mixed segment rewrite.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum EntityRewriteError {
     /// The committed source or table metadata violates the rewrite contract.
     #[snafu(display("Invalid mixed-segment rewrite input: {reason}"))]

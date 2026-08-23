@@ -10,6 +10,7 @@ use crate::{
 /// Errors owned by table state reads and refreshes.
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum TableStateAccessError {
     /// Latest metadata no longer describes a time-series table.
     #[snafu(display("Latest table kind is {kind:?}, expected a time-series table"))]

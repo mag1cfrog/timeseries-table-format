@@ -42,6 +42,7 @@ use crate::{
 /// storage, and file I/O. Callers should inspect the variant to determine
 /// the nature of the failure and how to recover.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum CoverageSidecarError {
     /// Layout validation error (e.g., invalid coverage ID or path).
     #[snafu(context(false), display("Coverage sidecar layout error: {source}"))]

@@ -58,6 +58,7 @@ const ENTITY_VALUE_UINT64: u8 = 4;
 
 /// Errors from the global and entity-aware coverage codecs.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum CoverageCodecError {
     /// I/O error during serialization of a coverage bitmap.
     #[snafu(display("Failed to serialize roaring bitmap: {source}"))]

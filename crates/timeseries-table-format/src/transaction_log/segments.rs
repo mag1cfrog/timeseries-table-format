@@ -17,6 +17,7 @@ pub use crate::metadata::segments::{
 
 /// Errors while reading or validating one segment.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum SegmentError {
     /// The segment file is missing.
     #[snafu(display("Segment file not found: {path}"))]

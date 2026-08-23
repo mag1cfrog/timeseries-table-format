@@ -59,6 +59,7 @@ use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 /// Errors at any stage are captured here with context about the segment path,
 /// column name, and raw values involved.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum SegmentCoverageError {
     /// Storage layer failed to read the segment file at the given path.
     ///
