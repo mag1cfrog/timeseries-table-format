@@ -75,10 +75,6 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
 
         CommitError::Storage { source } => storage_error_to_py(py, source),
 
-        CommitError::AmbiguousOutcome { .. } | CommitError::UnsupportedFormatVersion { .. } => {
-            TimeseriesTableError::new_err(msg)
-        }
-
         _ => TimeseriesTableError::new_err(msg),
     }
 }
@@ -360,6 +356,27 @@ mod tests {
             assert!(table_error_to_py(py, schema, &[]).is_instance_of::<SchemaMismatchError>(py));
         });
         assert!(attached.is_some());
+    }
+
+    #[test]
+    fn unclassified_commit_errors_use_the_generic_python_exception() {
+        init_python();
+
+        Python::attach(|py| {
+            let error = TableError::from(TableStateAccessError::Commit {
+                source: CommitError::UnsupportedFormatVersion {
+                    expected: 1,
+                    found: 2,
+                },
+            });
+            let python_error = table_error_to_py(py, error, &[]);
+
+            assert!(
+                python_error
+                    .get_type(py)
+                    .is(py.get_type::<TimeseriesTableError>())
+            );
+        });
     }
 
     #[test]
