@@ -11,7 +11,7 @@ use timeseries_table_format::{
     coverage::{EntityIdentity, EntityValue, index_interval::IndexInterval},
     formats::parquet::SegmentCoverageError,
     storage::StorageError as CoreStorageError,
-    table::{AppendError, TableError},
+    table::{AppendError, ScanError, TableError},
     transaction_log::CommitError,
 };
 
@@ -226,6 +226,10 @@ pub(crate) fn table_error_to_py(
 
     match err {
         TableError::Storage { source } => storage_error_to_py(py, source),
+
+        TableError::Scan {
+            source: ScanError::Storage { source, .. },
+        } => storage_error_to_py(py, *source),
 
         TableError::TransactionLog { source } => commit_error_to_py(py, source),
 

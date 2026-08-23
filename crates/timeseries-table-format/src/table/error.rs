@@ -6,8 +6,7 @@
 //! re-exporting everything at the crate root. Keep new variants here to ensure
 //! consistent user-facing messages and to avoid scattering selectors.
 
-use arrow::{datatypes::DataType, error::ArrowError};
-use chrono::{DateTime, Utc};
+use arrow::error::ArrowError;
 use parquet::errors::ParquetError;
 use snafu::{Backtrace, prelude::*};
 
@@ -262,6 +261,8 @@ pub enum AppendError {
     },
 }
 
+use super::scan::ScanError;
+
 /// Errors from high-level time-series table operations.
 ///
 /// Each variant carries enough context for callers to surface actionable
@@ -276,6 +277,14 @@ pub enum TableError {
         /// Complete append-owned failure.
         #[snafu(source, backtrace)]
         source: AppendError,
+    },
+
+    /// A table scan failed during planning or lazy execution.
+    #[snafu(display("Table scan failed: {source}"))]
+    Scan {
+        /// Complete scan operation error.
+        #[snafu(source, backtrace)]
+        source: ScanError,
     },
 
     /// Any error coming from the transaction log / commit machinery
@@ -439,63 +448,6 @@ pub enum TableError {
     UnexpectedEntityIdentityColumn {
         /// Unknown entity column name.
         column: String,
-    },
-
-    /// Parquet read/IO error during scanning or schema extraction.
-    #[snafu(display("Parquet read error for segment {path}: {source}"))]
-    ParquetRead {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Underlying Parquet error raised during read or schema extraction.
-        source: ParquetError,
-    },
-
-    /// Arrow compute or conversion error while materializing or filtering batches.
-    #[snafu(display("Arrow error while filtering column {column} in segment {path}: {source}"))]
-    Arrow {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Configured time column being filtered.
-        column: String,
-        /// Underlying Arrow error raised during batch conversion or filtering.
-        source: ArrowError,
-    },
-
-    /// Segment is missing the configured ordered-index column required for scans.
-    #[snafu(display("Missing ordered-index column {column} in segment {path}"))]
-    MissingIndexColumn {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Name of the expected ordered-index column that was not found.
-        column: String,
-    },
-
-    /// Ordered-index column has an Arrow type that disagrees with the table index.
-    #[snafu(display(
-        "Ordered-index column {column} in segment {path} has Arrow type {datatype:?}, expected {expected}"
-    ))]
-    IndexColumnTypeMismatch {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Name of the ordered-index column with the mismatched type.
-        column: String,
-        /// Registered ordered-index domain.
-        expected: &'static str,
-        /// Arrow data type encountered for the ordered-index column.
-        datatype: DataType,
-    },
-
-    /// Converting a timestamp to the requested unit would overflow `i64`.
-    #[snafu(display(
-        "Timestamp conversion overflow for column {column} in segment {path} (value: {timestamp})"
-    ))]
-    TimeConversionOverflow {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Name of the time column being converted.
-        column: String,
-        /// The timestamp value that could not be represented as i64 nanos.
-        timestamp: DateTime<Utc>,
     },
 
     /// Table coverage pointer uses a different ordered-index descriptor.
