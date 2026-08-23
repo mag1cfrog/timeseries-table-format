@@ -12,7 +12,7 @@ use crate::{
     },
     formats::parquet::SegmentCoverageError,
     metadata::{
-        index::IndexKind, logical_schema::ArrowToLogicalSchemaError, protocol::TableProtocolError,
+        logical_schema::ArrowToLogicalSchemaError, protocol::TableProtocolError,
         schema_compat::SchemaCompatibilityError,
     },
     storage::StorageError,
@@ -182,19 +182,6 @@ pub enum AppendError {
     ExistingSegmentMissingCoverageMetadata {
         /// Canonical segment path missing coverage metadata.
         segment_path: String,
-    },
-
-    /// A table coverage snapshot describes a different ordered index.
-    #[snafu(display(
-        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    CoverageSnapshotIndexKindMismatch {
-        /// Index descriptor defined by table metadata.
-        expected: IndexKind,
-        /// Index descriptor recorded by the snapshot pointer.
-        actual: IndexKind,
-        /// Log version where the mismatching pointer was recorded.
-        pointer_version: u64,
     },
 
     /// Reading one existing segment's coverage sidecar during recovery failed.

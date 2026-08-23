@@ -5,7 +5,7 @@ use crate::{
         EntityIdentityError, index_interval::IndexIntervalMappingError, io::CoverageSidecarError,
     },
     metadata::{
-        index::{IndexKind, IndexValueError},
+        index::IndexValueError,
         schema_compat::SchemaCompatibilityError,
     },
 };
@@ -91,21 +91,6 @@ pub enum CoverageQueryError {
     UnexpectedEntityIdentityColumn {
         /// Unknown entity column name.
         column: String,
-        /// Backtrace captured at the coverage query boundary.
-        backtrace: Box<Backtrace>,
-    },
-
-    /// The table coverage pointer uses a different ordered-index descriptor.
-    #[snafu(display(
-        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    TableCoverageIndexKindMismatch {
-        /// Index descriptor defined by table metadata.
-        expected: IndexKind,
-        /// Index descriptor recorded in the table coverage pointer.
-        actual: IndexKind,
-        /// Log version where the mismatching pointer was recorded.
-        pointer_version: u64,
         /// Backtrace captured at the coverage query boundary.
         backtrace: Box<Backtrace>,
     },
