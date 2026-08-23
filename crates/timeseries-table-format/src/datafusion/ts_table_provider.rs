@@ -189,10 +189,10 @@ impl TsTableProvider {
 
         let sz = file_size(self.table.location().storage(), Path::new(&seg.path))
             .await
-            .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "missing Segment.file_size and failed to stat file: {} ({})",
-                    seg.path, e
+            .map_err(|source| {
+                df_external(source).context(format!(
+                    "missing segment file size; failed to inspect {}",
+                    seg.path
                 ))
             })?;
         Ok(sz)

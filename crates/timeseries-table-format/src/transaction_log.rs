@@ -80,7 +80,13 @@ pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};
 
-use crate::storage::StorageError;
+use crate::{
+    metadata::{
+        schema_compat::SchemaCompatibilityError, segments::SegmentMetaError,
+        table_metadata::IndexSpecError,
+    },
+    storage::StorageError,
+};
 
 /// Errors that can occur while reading or writing the commit log.
 #[derive(Debug, Snafu)]
@@ -116,6 +122,198 @@ pub enum CommitError {
         found: u64,
     },
 
+    /// A commit payload could not be decoded from JSON.
+    #[snafu(display("Failed to deserialize commit {version}: {source}"))]
+    CommitDeserialization {
+        /// Commit version being decoded.
+        version: u64,
+        /// JSON decoding failure.
+        source: serde_json::Error,
+        /// Backtrace captured at the transaction-log boundary.
+        backtrace: Backtrace,
+    },
+
+    /// A commit payload could not be encoded as JSON.
+    #[snafu(display("Failed to serialize commit {version}: {source}"))]
+    CommitSerialization {
+        /// Commit version being encoded.
+        version: u64,
+        /// JSON encoding failure.
+        source: serde_json::Error,
+        /// Backtrace captured at the transaction-log boundary.
+        backtrace: Backtrace,
+    },
+
+    /// The CURRENT pointer is not an unsigned transaction-log version.
+    #[snafu(display("CURRENT has invalid content {contents:?}: {source}"))]
+    CurrentVersionParse {
+        /// Invalid trimmed CURRENT contents.
+        contents: String,
+        /// Integer parsing failure.
+        source: std::num::ParseIntError,
+        /// Backtrace captured at the transaction-log boundary.
+        backtrace: Backtrace,
+    },
+
+    /// A persisted table-relative path is invalid.
+    #[snafu(display("Invalid persisted {description} {path:?}: {source}"))]
+    InvalidPersistedPath {
+        /// Kind of persisted path being validated.
+        description: String,
+        /// Rejected persisted path.
+        path: String,
+        /// Structured path validation failure.
+        #[snafu(source(from(StorageError, Box::new)), backtrace)]
+        source: Box<StorageError>,
+    },
+
+    /// A persisted ordered-index specification is invalid.
+    #[snafu(display("Invalid persisted ordered-index specification: {source}"))]
+    InvalidIndexSpec {
+        /// Ordered-index validation failure.
+        source: IndexSpecError,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// Persisted table schema and ordered-index metadata are incompatible.
+    #[snafu(display("Persisted table schema is incompatible with its ordered index: {source}"))]
+    TableSchemaCompatibility {
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// A persisted single-entity segment identity is incompatible with the table schema.
+    #[snafu(display("Invalid single-entity identity in segment at {path}: {source}"))]
+    SegmentEntityIdentitySchema {
+        /// Persisted segment path.
+        path: String,
+        /// Complete entity identity compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// Persisted segment metadata violates its registered ordered-index domain.
+    #[snafu(display("Invalid persisted segment metadata: {source}"))]
+    SegmentMetadata {
+        /// Complete segment metadata validation failure.
+        #[snafu(source(from(SegmentMetaError, Box::new)))]
+        source: Box<SegmentMetaError>,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// A normalized persisted path differs from its stored representation.
+    #[snafu(display(
+        "Non-canonical persisted {description} {path:?}; canonical form is {canonical:?}"
+    ))]
+    NonCanonicalPersistedPath {
+        /// Kind of persisted path being validated.
+        description: String,
+        /// Persisted path as stored.
+        path: String,
+        /// Canonical table-relative representation.
+        canonical: String,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Box<Backtrace>,
+    },
+
+    /// Rebuilding table state was requested before the first commit.
+    #[snafu(display("Cannot rebuild table state because CURRENT is 0"))]
+    UninitializedTableState {
+        /// Backtrace captured at the state rebuild boundary.
+        backtrace: Backtrace,
+    },
+
+    /// A commit file name and its payload disagree on the version.
+    #[snafu(display("Commit version mismatch: expected {expected}, found {found} in the payload"))]
+    CommitVersionMismatch {
+        /// Version selected by the commit file name.
+        expected: u64,
+        /// Version stored in the payload.
+        found: u64,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// More than one live AddSegment action uses the same path.
+    #[snafu(display("Duplicate live segment path: {path}"))]
+    DuplicateLiveSegmentPath {
+        /// Repeated live segment path.
+        path: String,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// No table metadata was found while replaying the selected commits.
+    #[snafu(display("No table metadata found in commits up to version {current_version}"))]
+    MissingTableMetadata {
+        /// Latest commit version included in the replay.
+        current_version: u64,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// A persisted coverage pointer describes a different ordered index.
+    #[snafu(display(
+        "Table coverage index kind does not match the table index: expected {expected:?}, found {actual:?} in pointer from version {pointer_version}"
+    ))]
+    CoverageIndexKindMismatch {
+        /// Ordered-index kind from table metadata.
+        expected: IndexKind,
+        /// Ordered-index kind stored in the coverage pointer.
+        actual: IndexKind,
+        /// Commit version that supplied the pointer.
+        pointer_version: u64,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Box<Backtrace>,
+    },
+
+    /// Persisted segments exist without the logical schema needed to validate them.
+    #[snafu(display("Persisted segments require a logical schema"))]
+    MissingLogicalSchemaForSegments {
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// A persisted segment entity layout is incompatible with the table metadata.
+    #[snafu(display(
+        "Invalid entity layout in segment at {path}: table has {entity_column_count} entity columns, layout is {layout:?}"
+    ))]
+    InvalidSegmentEntityLayout {
+        /// Persisted segment path.
+        path: String,
+        /// Number of entity columns configured by the table.
+        entity_column_count: usize,
+        /// Rejected persisted layout.
+        layout: SegmentEntityLayout,
+        /// Backtrace captured while rebuilding table state.
+        backtrace: Backtrace,
+    },
+
+    /// Incrementing the transaction-log version would overflow `u64`.
+    #[snafu(display("Transaction-log version overflow at {current_version}"))]
+    VersionOverflow {
+        /// Current version that cannot be incremented.
+        current_version: u64,
+        /// Backtrace captured at the version calculation boundary.
+        backtrace: Backtrace,
+    },
+
+    /// The CURRENT pointer contains no version.
+    #[snafu(display("CURRENT has empty content at {path}"))]
+    EmptyCurrentPointer {
+        /// Table-relative CURRENT path.
+        path: String,
+        /// Backtrace captured at the transaction-log boundary.
+        backtrace: Backtrace,
+    },
+
     /// A commit operation failed and its newly-created commit file may remain.
     #[snafu(display(
         "Commit outcome is ambiguous at {commit_path}: {operation_error}; failed to remove the commit file: {cleanup_error}"
@@ -124,29 +322,18 @@ pub enum CommitError {
         /// Path of the commit file that may remain unpublished.
         commit_path: String,
         /// Write, sync, or publish failure that triggered cleanup.
-        #[snafu(source)]
+        #[snafu(source, backtrace)]
         operation_error: Box<StorageError>,
         /// Failure encountered while removing the unpublished commit file.
         cleanup_error: Box<StorageError>,
-        /// Backtrace for debugging.
-        backtrace: Backtrace,
-    },
-
-    /// The log or CURRENT file is in an unexpected / malformed state.
-    #[snafu(display("Corrupt log state: {msg}"))]
-    CorruptState {
-        /// A description of the corrupt state.
-        msg: String,
-        /// Backtrace for debugging.
-        backtrace: Backtrace,
     },
 }
 
 pub(crate) fn checked_next_version(expected: u64) -> Result<u64, CommitError> {
     expected
         .checked_add(1)
-        .ok_or_else(|| CommitError::CorruptState {
-            msg: "version counter overflow".to_string(),
+        .ok_or_else(|| CommitError::VersionOverflow {
+            current_version: expected,
             backtrace: Backtrace::capture(),
         })
 }

@@ -1608,9 +1608,12 @@ mod tests {
             error,
             TableError::Append {
                 source: AppendError::Commit {
-                    source: CommitError::CorruptState { ref msg, .. }
+                    source: CommitError::VersionOverflow {
+                        current_version: u64::MAX,
+                        ..
+                    }
                 }
-            } if msg == "version counter overflow"
+            }
         ));
         assert_eq!(observations.schema_calls.get(), 0);
         assert_eq!(observations.next_calls.get(), 0);

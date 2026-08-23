@@ -9,7 +9,6 @@ use parquet::arrow::{
     ARROW_SCHEMA_META_KEY, async_reader::AsyncFileReader, parquet_to_arrow_schema,
 };
 use parquet::basic::{LogicalType, Repetition, TimeUnit, Type as PhysicalType};
-use parquet::errors::ParquetError;
 use parquet::file::metadata::FileMetaData;
 use parquet::schema::types::{SchemaDescriptor, Type};
 use snafu::Backtrace;
@@ -581,9 +580,9 @@ fn logical_schema_from_parquet_metadata(
             backtrace: Backtrace::capture(),
         })?;
     LogicalSchema::try_from_arrow_schema(&arrow_schema).map_err(|source| {
-        SegmentMetaError::ParquetRead {
+        SegmentMetaError::ArrowToLogicalSchema {
             path: path.to_string(),
-            source: ParquetError::ArrowError(source.to_string()),
+            source: Box::new(source),
             backtrace: Backtrace::capture(),
         }
     })

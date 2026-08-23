@@ -80,6 +80,18 @@ pub enum OptimizeError {
         source: Box<CoverageSidecarError>,
     },
 
+    /// A staged replacement path failed table-relative storage validation.
+    #[snafu(display("Invalid {description} path {path:?}: {source}"))]
+    InvalidStagedPath {
+        /// Role of the rejected path in the staged replacement.
+        description: &'static str,
+        /// Rejected table-relative path.
+        path: String,
+        /// Complete storage path validation failure.
+        #[snafu(source(from(StorageError, Box::new)), backtrace)]
+        source: Box<StorageError>,
+    },
+
     /// A staged optimization plan violated an atomic publication invariant.
     #[snafu(display("Invalid staged entity-layout optimization plan: {reason}"))]
     InvalidStagedPlan {
@@ -204,9 +216,14 @@ fn invalid_plan(reason: impl Into<String>) -> OptimizeError {
     }
 }
 
-fn ensure_canonical(path: &str, description: &str) -> Result<(), OptimizeError> {
-    let (canonical, _) = normalize_relative_storage_path(Path::new(path))
-        .map_err(|error| invalid_plan(format!("invalid {description} path {path:?}: {error}")))?;
+fn ensure_canonical(path: &str, description: &'static str) -> Result<(), OptimizeError> {
+    let (canonical, _) = normalize_relative_storage_path(Path::new(path)).map_err(|source| {
+        OptimizeError::InvalidStagedPath {
+            description,
+            path: path.to_string(),
+            source: Box::new(source),
+        }
+    })?;
     if canonical != path {
         return Err(invalid_plan(format!(
             "{description} path {path:?} is not canonical; expected {canonical:?}"
@@ -596,6 +613,8 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use crate::table::AppendError;
     use std::{
@@ -605,6 +624,7 @@ mod tests {
 
     use arrow::datatypes::TimeUnit;
     use futures::StreamExt;
+    use snafu::ErrorCompat;
     use tempfile::TempDir;
 
     use crate::{
@@ -790,6 +810,23 @@ mod tests {
             paths(&forward),
             ["data/a.parquet", "data/b.parquet", "data/later.parquet"]
         );
+    }
+
+    #[test]
+    fn invalid_staged_path_preserves_storage_source_and_backtrace() {
+        let error = ensure_canonical("../outside.parquet", "replacement data")
+            .expect_err("parent traversal must fail");
+        let storage = error
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<StorageError>>())
+            .map(Box::as_ref)
+            .expect("storage source");
+
+        assert!(matches!(error, OptimizeError::InvalidStagedPath { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("optimization backtrace"),
+            ErrorCompat::backtrace(storage).expect("storage backtrace")
+        ));
     }
 
     #[tokio::test]

@@ -73,7 +73,6 @@ impl TransactionLogStore {
                 commit_path: commit_rel.display().to_string(),
                 operation_error: Box::new(publish_error),
                 cleanup_error: Box::new(cleanup_error),
-                backtrace: Backtrace::capture(),
             },
         }
     }
@@ -81,14 +80,15 @@ impl TransactionLogStore {
     /// Load a single commit by version.
     ///
     /// - On storage-layer failures, returns `CommitError::Storage`.
-    /// - On JSON parse failures, returns `CommitError::CorruptState`.
+    /// - On JSON parse failures, returns [`CommitError::CommitDeserialization`].
     pub async fn load_commit(&self, version: u64) -> Result<Commit, CommitError> {
         let rel = Self::commit_rel_path(version);
         let json = self.read_to_string_rel(&rel).await?;
 
         let value: serde_json::Value =
-            serde_json::from_str(&json).map_err(|e| CommitError::CorruptState {
-                msg: format!("failed to parse commit {version}: {e}"),
+            serde_json::from_str(&json).map_err(|source| CommitError::CommitDeserialization {
+                version,
+                source,
                 backtrace: Backtrace::capture(),
             })?;
 
@@ -110,10 +110,12 @@ impl TransactionLogStore {
             });
         }
 
-        let commit = serde_json::from_value(value).map_err(|e| CommitError::CorruptState {
-            msg: format!("failed to parse commit {version}: {e}"),
-            backtrace: Backtrace::capture(),
-        })?;
+        let commit =
+            serde_json::from_value(value).map_err(|source| CommitError::CommitDeserialization {
+                version,
+                source,
+                backtrace: Backtrace::capture(),
+            })?;
 
         Ok(commit)
     }
@@ -122,7 +124,7 @@ impl TransactionLogStore {
     ///
     /// Behavior:
     /// - If CURRENT does not exist, treat as a fresh table and return 0.
-    /// - If CURRENT contains invalid or empty content, return CorruptState.
+    /// - If CURRENT contains invalid or empty content, return a typed pointer error.
     pub async fn load_current_version(&self) -> Result<u64, CommitError> {
         let rel = storage::layout::current_rel_path();
 
@@ -134,17 +136,19 @@ impl TransactionLogStore {
 
         let trimmed = contents.trim();
         if trimmed.is_empty() {
-            return CorruptStateSnafu {
-                msg: format!("CURRENT has empty content at {rel:?}",),
-            }
-            .fail();
-        }
-        let version = trimmed
-            .parse::<u64>()
-            .map_err(|e| CommitError::CorruptState {
-                msg: format!("CURRENT has invalid content {trimmed:?}: {e}"),
+            return Err(CommitError::EmptyCurrentPointer {
+                path: rel.display().to_string(),
                 backtrace: Backtrace::capture(),
-            })?;
+            });
+        }
+        let version =
+            trimmed
+                .parse::<u64>()
+                .map_err(|source| CommitError::CurrentVersionParse {
+                    contents: trimmed.to_string(),
+                    source,
+                    backtrace: Backtrace::capture(),
+                })?;
 
         Ok(version)
     }
@@ -271,8 +275,9 @@ impl TransactionLogStore {
             Err(error) => {
                 span.record("failure_stage", "serialization");
                 span.record("outcome", "failed");
-                return Err(CommitError::CorruptState {
-                    msg: format!("failed to serialize commit {version}: {error}"),
+                return Err(CommitError::CommitSerialization {
+                    version,
+                    source: error,
                     backtrace: Backtrace::capture(),
                 });
             }
@@ -301,7 +306,6 @@ impl TransactionLogStore {
                     commit_path: commit_rel.display().to_string(),
                     operation_error,
                     cleanup_error,
-                    backtrace: Backtrace::capture(),
                 });
             }
             Err(source @ StorageError::AlreadyExists { .. }) => {
@@ -356,6 +360,8 @@ impl TransactionLogStore {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use crate::storage::layout;
     use crate::table::test_util::TraceCapture;
@@ -439,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_current_version_returns_corrupt_state_for_empty_file() -> TestResult {
+    async fn load_current_version_returns_empty_pointer_error() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
         let log_dir = tmp.path().join(layout::log_rel_dir());
@@ -450,13 +456,13 @@ mod tests {
         let result = store.load_current_version().await;
 
         assert!(result.is_err());
-        let err = result.expect_err("expected CorruptState");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        let err = result.expect_err("expected EmptyCurrentPointer");
+        assert!(matches!(err, CommitError::EmptyCurrentPointer { .. }));
         Ok(())
     }
 
     #[tokio::test]
-    async fn load_current_version_returns_corrupt_state_for_invalid_content() -> TestResult {
+    async fn load_current_version_preserves_invalid_integer_source() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
         let log_dir = tmp.path().join(layout::log_rel_dir());
@@ -467,8 +473,34 @@ mod tests {
         let result = store.load_current_version().await;
 
         assert!(result.is_err());
-        let err = result.expect_err("expected CorruptState");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        let err = result.expect_err("expected CurrentVersionParse");
+        assert!(matches!(err, CommitError::CurrentVersionParse { .. }));
+        assert!(
+            err.source()
+                .is_some_and(|source| source.is::<std::num::ParseIntError>())
+        );
+        assert!(snafu::ErrorCompat::backtrace(&err).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_commit_preserves_json_source() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
+        tokio::fs::create_dir_all(commit_path.parent().expect("commit parent")).await?;
+        tokio::fs::write(&commit_path, "{ invalid json").await?;
+
+        let err = store
+            .load_commit(1)
+            .await
+            .expect_err("invalid JSON must fail");
+
+        assert!(matches!(err, CommitError::CommitDeserialization { .. }));
+        assert!(
+            err.source()
+                .is_some_and(|source| source.is::<serde_json::Error>())
+        );
+        assert!(snafu::ErrorCompat::backtrace(&err).is_some());
         Ok(())
     }
 
@@ -485,7 +517,7 @@ mod tests {
             .await
             .expect_err("invalid CURRENT should fail");
 
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(matches!(err, CommitError::CurrentVersionParse { .. }));
         assert_commit_span(
             &capture,
             &[
@@ -515,7 +547,7 @@ mod tests {
             .await
             .expect_err("version overflow should fail");
 
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(matches!(err, CommitError::VersionOverflow { .. }));
         assert_commit_span(
             &capture,
             &[
@@ -826,8 +858,31 @@ mod tests {
             .rollback_unpublished_commit(&commit_rel, publish_error)
             .await;
         let message = err.to_string();
+        let (operation_error, cleanup_error) = match &err {
+            CommitError::AmbiguousOutcome {
+                operation_error,
+                cleanup_error,
+                ..
+            } => (operation_error, cleanup_error),
+            other => panic!("unexpected commit error: {other:?}"),
+        };
+        let primary = err
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<StorageError>>())
+            .map(Box::as_ref)
+            .expect("primary storage source");
 
         assert!(matches!(err, CommitError::AmbiguousOutcome { .. }));
+        assert!(std::ptr::eq(primary, operation_error.as_ref()));
+        assert!(matches!(primary, StorageError::NotFound { .. }));
+        assert!(matches!(
+            cleanup_error.as_ref(),
+            StorageError::OtherIo { .. }
+        ));
+        assert!(std::ptr::eq(
+            snafu::ErrorCompat::backtrace(&err).expect("commit backtrace"),
+            snafu::ErrorCompat::backtrace(primary).expect("storage backtrace")
+        ));
         assert!(message.contains("missing-current.tmp"));
         assert!(message.contains(&commit_rel.display().to_string()));
         Ok(())

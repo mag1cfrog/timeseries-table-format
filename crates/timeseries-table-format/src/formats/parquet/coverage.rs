@@ -88,6 +88,17 @@ pub enum SegmentCoverageError {
         backtrace: Backtrace,
     },
 
+    /// A parallel row-group scan task failed before returning its typed result.
+    #[snafu(display("Row-group scan task failed for segment at {path}: {source}"))]
+    RowGroupTask {
+        /// Segment path being scanned.
+        path: String,
+        /// Tokio task failure, including panic or cancellation details.
+        source: tokio::task::JoinError,
+        /// Backtrace captured while joining the row-group task.
+        backtrace: Backtrace,
+    },
+
     /// The registered ordered-index column is missing or incompatible.
     #[snafu(transparent)]
     OrderedIndexColumn {
@@ -457,9 +468,9 @@ pub async fn compute_segment_coverage(
 
     let mut merged = RoaringTreemap::new();
     while let Some(result) = tasks.join_next().await {
-        let bitmap = result.map_err(|source| SegmentCoverageError::ParquetRead {
+        let bitmap = result.map_err(|source| SegmentCoverageError::RowGroupTask {
             path: path.clone(),
-            source: ParquetError::General(format!("row-group scan task failed: {source}")),
+            source,
             backtrace: Backtrace::capture(),
         })??;
         if !merged.is_disjoint(&bitmap)

@@ -236,7 +236,7 @@ mod tests {
                 .expect_err("corrupt commit must fail"),
             TableError::StateAccess {
                 source: TableStateAccessError::Commit {
-                    source: CommitError::CorruptState { .. }
+                    source: CommitError::CommitDeserialization { .. }
                 }
             }
         ));

@@ -11,13 +11,10 @@ use arrow_array::{
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
 };
 use futures::{Stream, StreamExt};
-use parquet::{
-    arrow::{
-        ProjectionMask,
-        arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
-        async_reader::ParquetRecordBatchStreamBuilder,
-    },
-    errors::ParquetError,
+use parquet::arrow::{
+    ProjectionMask,
+    arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
+    async_reader::ParquetRecordBatchStreamBuilder,
 };
 use roaring::RoaringTreemap;
 use snafu::Backtrace;
@@ -390,9 +387,9 @@ pub async fn compute_segment_entity_coverage(
 
     let mut merged = EntityCoverage::empty();
     while let Some(result) = tasks.join_next().await {
-        let coverage = result.map_err(|source| SegmentCoverageError::ParquetRead {
+        let coverage = result.map_err(|source| SegmentCoverageError::RowGroupTask {
             path: path.clone(),
-            source: ParquetError::General(format!("row-group scan task failed: {source}")),
+            source,
             backtrace: Backtrace::capture(),
         })??;
         if let Some((identity, index_interval_id)) =

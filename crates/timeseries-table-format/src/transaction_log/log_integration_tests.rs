@@ -342,9 +342,9 @@ async fn conflict_on_subsequent_version() -> TestResult {
 // Robustness Tests - Corrupt/Missing State
 // =============================================================================
 
-/// Test: Corrupt CURRENT file (non-numeric content) returns CorruptState.
+/// Test: Corrupt CURRENT file preserves its integer parsing failure.
 #[tokio::test]
-async fn corrupt_current_file_returns_corrupt_state() -> TestResult {
+async fn corrupt_current_file_returns_parse_error() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
     // Create corrupt CURRENT file
@@ -355,16 +355,16 @@ async fn corrupt_current_file_returns_corrupt_state() -> TestResult {
 
     let result = store.load_current_version().await;
     assert!(
-        matches!(result, Err(CommitError::CorruptState { .. })),
-        "expected CorruptState, got: {result:?}"
+        matches!(result, Err(CommitError::CurrentVersionParse { .. })),
+        "expected CurrentVersionParse, got: {result:?}"
     );
 
     Ok(())
 }
 
-/// Test: Empty CURRENT file returns CorruptState.
+/// Test: Empty CURRENT file returns a typed pointer error.
 #[tokio::test]
-async fn empty_current_file_returns_corrupt_state() -> TestResult {
+async fn empty_current_file_returns_empty_pointer_error() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
     let log_dir = tmp.path().join(layout::log_rel_dir());
@@ -374,16 +374,16 @@ async fn empty_current_file_returns_corrupt_state() -> TestResult {
 
     let result = store.load_current_version().await;
     assert!(
-        matches!(result, Err(CommitError::CorruptState { .. })),
-        "expected CorruptState, got: {result:?}"
+        matches!(result, Err(CommitError::EmptyCurrentPointer { .. })),
+        "expected EmptyCurrentPointer, got: {result:?}"
     );
 
     Ok(())
 }
 
-/// Test: Corrupt commit file (invalid JSON) returns CorruptState on load_commit.
+/// Test: Corrupt commit file preserves its JSON decoding failure.
 #[tokio::test]
-async fn corrupt_commit_file_returns_corrupt_state() -> TestResult {
+async fn corrupt_commit_file_returns_deserialization_error() -> TestResult {
     let (tmp, store) = create_test_log_store();
 
     let meta = sample_table_meta();
@@ -397,18 +397,18 @@ async fn corrupt_commit_file_returns_corrupt_state() -> TestResult {
     let commit_path = tmp.path().join(layout::commit_rel_path(1));
     tokio::fs::write(&commit_path, "{ invalid json }}}").await?;
 
-    // load_commit should fail with CorruptState
+    // load_commit should fail with the typed JSON source.
     let result = store.load_commit(1).await;
     assert!(
-        matches!(result, Err(CommitError::CorruptState { .. })),
-        "expected CorruptState, got: {result:?}"
+        matches!(result, Err(CommitError::CommitDeserialization { .. })),
+        "expected CommitDeserialization, got: {result:?}"
     );
 
     // rebuild_table_state should also fail
     let result = store.rebuild_table_state().await;
     assert!(
-        matches!(result, Err(CommitError::CorruptState { .. })),
-        "expected CorruptState, got: {result:?}"
+        matches!(result, Err(CommitError::CommitDeserialization { .. })),
+        "expected CommitDeserialization, got: {result:?}"
     );
 
     Ok(())
@@ -510,23 +510,23 @@ async fn missing_intermediate_commit_fails_rebuild() -> TestResult {
     Ok(())
 }
 
-/// Test: rebuild_table_state on empty table (CURRENT == 0) returns CorruptState.
+/// Test: rebuilding an empty table returns an uninitialized-state error.
 #[tokio::test]
-async fn rebuild_on_empty_table_returns_corrupt_state() -> TestResult {
+async fn rebuild_on_empty_table_returns_uninitialized_state() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
     let result = store.rebuild_table_state().await;
     assert!(
-        matches!(result, Err(CommitError::CorruptState { .. })),
-        "expected CorruptState for empty table, got: {result:?}"
+        matches!(result, Err(CommitError::UninitializedTableState { .. })),
+        "expected UninitializedTableState for empty table, got: {result:?}"
     );
 
     Ok(())
 }
 
-/// Test: Table with commits but no UpdateTableMeta action returns CorruptState.
+/// Test: Commits without UpdateTableMeta return a typed metadata error.
 #[tokio::test]
-async fn rebuild_without_table_meta_returns_corrupt_state() -> TestResult {
+async fn rebuild_without_table_meta_returns_missing_metadata() -> TestResult {
     let (_tmp, store) = create_test_log_store();
 
     // Commit only AddSegment, no UpdateTableMeta
@@ -536,8 +536,8 @@ async fn rebuild_without_table_meta_returns_corrupt_state() -> TestResult {
 
     let result = store.rebuild_table_state().await;
     assert!(
-        matches!(result, Err(CommitError::CorruptState { .. })),
-        "expected CorruptState for missing TableMeta, got: {result:?}"
+        matches!(result, Err(CommitError::MissingTableMetadata { .. })),
+        "expected MissingTableMetadata, got: {result:?}"
     );
 
     Ok(())
@@ -606,7 +606,7 @@ async fn update_table_meta_last_one_wins() -> TestResult {
 
 /// Test: replay rejects a second live segment with the same path.
 #[tokio::test]
-async fn duplicate_live_segment_path_is_corrupt_state() -> TestResult {
+async fn duplicate_live_segment_path_is_rejected() -> TestResult {
     let (_tmp, store) = create_test_log_store();
     let meta = sample_table_meta();
     let seg = sample_segment("seg-001", 0);
@@ -632,7 +632,7 @@ async fn duplicate_live_segment_path_is_corrupt_state() -> TestResult {
         .expect_err("duplicate live path must be corrupt");
     assert!(matches!(
         err,
-        CommitError::CorruptState { ref msg, .. } if msg.contains(&seg.path)
+        CommitError::DuplicateLiveSegmentPath { ref path, .. } if path == &seg.path
     ));
 
     Ok(())

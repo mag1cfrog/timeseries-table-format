@@ -12,7 +12,7 @@ use snafu::{Backtrace, prelude::*};
 use crate::{
     coverage::EntityIdentity,
     metadata::{
-        logical_schema::LogicalSchemaValidationError,
+        logical_schema::{ArrowToLogicalSchemaError, LogicalSchemaValidationError},
         table_metadata::{IndexKind, IndexValue, IndexValueError},
     },
 };
@@ -175,6 +175,17 @@ pub enum SegmentMetaError {
         backtrace: Backtrace,
     },
 
+    /// A parallel row-group inspection task failed before returning its typed result.
+    #[snafu(display("Row-group inspection task failed for segment at {path}: {source}"))]
+    RowGroupTask {
+        /// Segment path being inspected.
+        path: String,
+        /// Tokio task failure, including panic or cancellation details.
+        source: tokio::task::JoinError,
+        /// Backtrace captured while joining the row-group task.
+        backtrace: Backtrace,
+    },
+
     /// The registered ordered-index column is missing or incompatible.
     #[snafu(transparent)]
     OrderedIndexColumn {
@@ -216,6 +227,18 @@ pub enum SegmentMetaError {
         /// Underlying logical schema error that triggered this failure.
         #[snafu(source(from(LogicalSchemaValidationError, Box::new)))]
         source: Box<LogicalSchemaValidationError>,
+        /// Backtrace captured with segment path context.
+        backtrace: Backtrace,
+    },
+
+    /// An embedded Arrow schema cannot be represented by the logical schema model.
+    #[snafu(display("Invalid Arrow schema derived from Parquet at {path}: {source}"))]
+    ArrowToLogicalSchema {
+        /// Segment path containing the embedded Arrow schema.
+        path: String,
+        /// Exact Arrow-to-logical conversion failure.
+        #[snafu(source(from(ArrowToLogicalSchemaError, Box::new)))]
+        source: Box<ArrowToLogicalSchemaError>,
         /// Backtrace captured with segment path context.
         backtrace: Backtrace,
     },

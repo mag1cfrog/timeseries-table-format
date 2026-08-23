@@ -75,9 +75,9 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
 
         CommitError::Storage { source } => storage_error_to_py(py, source),
 
-        CommitError::AmbiguousOutcome { .. }
-        | CommitError::UnsupportedFormatVersion { .. }
-        | CommitError::CorruptState { .. } => TimeseriesTableError::new_err(msg),
+        CommitError::AmbiguousOutcome { .. } | CommitError::UnsupportedFormatVersion { .. } => {
+            TimeseriesTableError::new_err(msg)
+        }
 
         _ => TimeseriesTableError::new_err(msg),
     }

@@ -35,9 +35,12 @@ use crate::{
     },
     metadata::{
         logical_schema::LogicalSchema,
-        schema_compat::{ensure_index_spec_matches_schema, ensure_schema_fields_match_by_name},
-        segments::{FileFormat, SegmentEntityLayout, SegmentMeta},
-        table_metadata::IndexSpec,
+        schema_compat::{
+            SchemaCompatibilityError, ensure_index_spec_matches_schema,
+            ensure_schema_fields_match_by_name,
+        },
+        segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
+        table_metadata::{IndexSpec, IndexSpecError},
     },
     storage::{
         OutputSink, StorageError, TableLocation, normalize_relative_storage_path,
@@ -96,6 +99,59 @@ pub enum EntityRewriteError {
         /// Failed output invariant.
         reason: String,
         /// Backtrace captured at the failed rewrite invariant.
+        backtrace: Backtrace,
+    },
+
+    /// A source or sidecar path failed table-relative storage validation.
+    #[snafu(display("Invalid {description} path {path:?}: {source}"))]
+    InvalidPath {
+        /// Role of the rejected path in the rewrite.
+        description: &'static str,
+        /// Rejected path.
+        path: String,
+        /// Structured storage path validation failure.
+        #[snafu(source(from(StorageError, Box::new)), backtrace)]
+        source: Box<StorageError>,
+    },
+
+    /// The rewrite received an invalid ordered-index specification.
+    #[snafu(display("Invalid rewrite ordered-index specification: {source}"))]
+    IndexSpecValidation {
+        /// Complete ordered-index validation failure.
+        source: IndexSpecError,
+        /// Backtrace captured at the rewrite boundary.
+        backtrace: Backtrace,
+    },
+
+    /// The table schema is incompatible with its ordered-index specification.
+    #[snafu(display("Rewrite table schema validation failed: {source}"))]
+    TableSchemaValidation {
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured at the rewrite boundary.
+        backtrace: Backtrace,
+    },
+
+    /// A source or replacement segment schema is incompatible with the table schema.
+    #[snafu(display("Rewrite segment schema validation failed for {path}: {source}"))]
+    SegmentSchemaValidation {
+        /// Source or staged replacement path.
+        path: String,
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured at the rewrite boundary.
+        backtrace: Backtrace,
+    },
+
+    /// Persisted source segment metadata violates the registered ordered-index domain.
+    #[snafu(display("Invalid rewrite source metadata: {source}"))]
+    SegmentMetadataValidation {
+        /// Complete segment metadata validation failure.
+        #[snafu(source(from(SegmentMetaError, Box::new)))]
+        source: Box<SegmentMetaError>,
+        /// Backtrace captured at the rewrite boundary.
         backtrace: Backtrace,
     },
 
@@ -205,9 +261,14 @@ fn invalid_output(reason: impl Into<String>) -> EntityRewriteError {
     }
 }
 
-fn canonical_path(path: &str, description: &str) -> Result<(), EntityRewriteError> {
-    let (canonical, _) = normalize_relative_storage_path(Path::new(path))
-        .map_err(|error| invalid_input(format!("invalid {description} path {path:?}: {error}")))?;
+fn canonical_path(path: &str, description: &'static str) -> Result<(), EntityRewriteError> {
+    let (canonical, _) = normalize_relative_storage_path(Path::new(path)).map_err(|source| {
+        EntityRewriteError::InvalidPath {
+            description,
+            path: path.to_string(),
+            source: Box::new(source),
+        }
+    })?;
     if canonical != path {
         return Err(invalid_input(format!(
             "{description} path {path:?} is not canonical; expected {canonical:?}"
@@ -341,9 +402,16 @@ async fn validate_source(
 ) -> Result<EntityCoverage, EntityRewriteError> {
     index
         .validate()
-        .map_err(|error| invalid_input(format!("invalid ordered index: {error}")))?;
-    ensure_index_spec_matches_schema(table_schema, index)
-        .map_err(|error| invalid_input(format!("ordered index does not match schema: {error}")))?;
+        .map_err(|source| EntityRewriteError::IndexSpecValidation {
+            source,
+            backtrace: Backtrace::capture(),
+        })?;
+    ensure_index_spec_matches_schema(table_schema, index).map_err(|source| {
+        EntityRewriteError::TableSchemaValidation {
+            source: Box::new(source),
+            backtrace: Backtrace::capture(),
+        }
+    })?;
     if index.entity_columns.is_empty() {
         return Err(invalid_input("table has no entity columns"));
     }
@@ -357,9 +425,12 @@ async fn validate_source(
         )));
     }
     canonical_path(&source.path, "source segment")?;
-    source
-        .validate_bounds(&index.kind)
-        .map_err(|error| invalid_input(error.to_string()))?;
+    source.validate_bounds(&index.kind).map_err(|source| {
+        EntityRewriteError::SegmentMetadataValidation {
+            source: Box::new(source),
+            backtrace: Backtrace::capture(),
+        }
+    })?;
     let coverage_path = source
         .coverage_path
         .as_deref()
@@ -370,9 +441,11 @@ async fn validate_source(
         .await
         .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
     ensure_schema_fields_match_by_name(table_schema, &source_schema, index).map_err(|error| {
-        invalid_input(format!(
-            "source schema is incompatible with the committed table schema: {error}"
-        ))
+        EntityRewriteError::SegmentSchemaValidation {
+            path: source.path.clone(),
+            source: Box::new(error),
+            backtrace: Backtrace::capture(),
+        }
     })?;
 
     let (actual_meta, _) = segment_meta_from_parquet(location, Path::new(&source.path), index)
@@ -465,10 +538,10 @@ async fn rewrite_inner(
             .await
             .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
         ensure_schema_fields_match_by_name(table_schema, &output_schema, index).map_err(
-            |error| {
-                invalid_output(format!(
-                    "replacement {data_path} changed the committed schema: {error}"
-                ))
+            |source| EntityRewriteError::SegmentSchemaValidation {
+                path: data_path.clone(),
+                source: Box::new(source),
+                backtrace: Backtrace::capture(),
             },
         )?;
         let (mut meta, _) = segment_meta_from_parquet(location, Path::new(&data_path), index)
@@ -503,8 +576,14 @@ async fn rewrite_inner(
             &segment_entity_coverage_id_v1(index, &coverage_bytes),
             &attempt_id,
         );
-        let coverage_path = segment_coverage_key(&coverage_id)
-            .map_err(|error| invalid_output(error.to_string()))?;
+        let coverage_path = segment_coverage_key(&coverage_id).map_err(|source| {
+            EntityRewriteError::CoverageSidecar {
+                source: CoverageSidecarError::Layout {
+                    source,
+                    backtrace: Backtrace::capture(),
+                },
+            }
+        })?;
         let sidecar_write =
             write_coverage_sidecar_new_bytes(location, Path::new(&coverage_path), &coverage_bytes)
                 .await;
@@ -623,6 +702,8 @@ pub async fn rewrite_mixed_parquet_segment(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use std::{collections::BTreeMap, fs::File, sync::Arc};
 
@@ -635,6 +716,7 @@ mod tests {
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::file::properties::WriterProperties;
+    use snafu::ErrorCompat;
     use tempfile::TempDir;
 
     use crate::{
@@ -647,6 +729,23 @@ mod tests {
     };
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn invalid_rewrite_path_preserves_storage_source_and_backtrace() {
+        let error = canonical_path("../outside.parquet", "source segment")
+            .expect_err("parent traversal must fail");
+        let storage = error
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<StorageError>>())
+            .map(Box::as_ref)
+            .expect("storage source");
+
+        assert!(matches!(error, EntityRewriteError::InvalidPath { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("rewrite backtrace"),
+            ErrorCompat::backtrace(storage).expect("storage backtrace")
+        ));
+    }
 
     fn read_rows(path: &Path) -> TestResult<Vec<(i64, String, f64)>> {
         let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?.build()?;
@@ -1360,7 +1459,10 @@ mod tests {
         )
         .await
         .expect_err("schema mismatch must be rejected");
-        assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
+        assert!(matches!(
+            error,
+            EntityRewriteError::SegmentSchemaValidation { .. }
+        ));
         assert_nothing_staged(&fixture);
         Ok(())
     }
