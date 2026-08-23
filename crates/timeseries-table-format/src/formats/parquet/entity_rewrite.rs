@@ -514,8 +514,8 @@ async fn rewrite_inner(
     let mut rows_read = 0u64;
     let mut rows_written = 0u64;
 
-    // ponytail: one writer and one source scan per identity bound handles and
-    // memory; batch identities only if repeated scan cost becomes material.
+    // Processing one identity at a time bounds the handle count and memory use.
+    // Batch identities only if repeated scan cost becomes material.
     for (ordinal, (identity, expected_coverage)) in source_coverage.iter().enumerate() {
         let data_path = format!("data/_staged/entity-rewrite/{attempt_id}/{ordinal:010}.parquet");
         let (identity_rows_read, identity_rows_written) = stage_identity_data(

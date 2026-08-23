@@ -204,7 +204,8 @@ impl<S: Subscriber> Layer<S> for TraceCapture {
 
     fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
         let mut captured = self.0.lock().expect("capture lock");
-        // ponytail: captures are tiny; add an active-span index if tests create thousands of spans.
+        // Captures are tiny; add an active-span index only if tests create
+        // thousands of spans.
         if let Some(span) = captured
             .spans
             .iter_mut()

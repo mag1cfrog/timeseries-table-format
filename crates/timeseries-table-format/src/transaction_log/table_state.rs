@@ -196,8 +196,8 @@ impl TransactionLogStore {
             current_version,
             backtrace: snafu::Backtrace::capture(),
         })?;
-        // ponytail: replay requires writer compatibility until every mutating
-        // entry point has its own gate; then this can become a read check.
+        // TODO(#399): Switch replay to reader compatibility after every
+        // mutating entry point has its own writer-compatibility gate.
         table_meta
             .ensure_write_compatible()
             .map_err(CommitError::from)?;
@@ -541,6 +541,34 @@ mod tests {
             .expect_err("version 6 should be rejected");
         assert!(matches!(
             err,
+            CommitError::Protocol {
+                source: TableProtocolError::UnsupportedVersion {
+                    expected: TABLE_PROTOCOL_VERSION,
+                    found: 6,
+                },
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_persisted_protocol_downgrade() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let meta = sample_table_meta();
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+
+        let mut downgraded = meta;
+        downgraded.protocol_version -= 1;
+        store
+            .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(downgraded)])
+            .await?;
+
+        let error = store.rebuild_table_state().await.unwrap_err();
+        assert!(matches!(
+            error,
             CommitError::Protocol {
                 source: TableProtocolError::UnsupportedVersion {
                     expected: TABLE_PROTOCOL_VERSION,

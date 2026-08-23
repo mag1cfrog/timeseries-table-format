@@ -845,6 +845,33 @@ mod tests {
     }
 
     #[test]
+    fn table_meta_baseline_protocol_json_is_stable() {
+        let mut meta = TableMeta::new_time_series(sample_time_index_spec());
+        meta.created_at = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap();
+
+        assert_eq!(
+            serde_json::to_value(meta).unwrap(),
+            serde_json::json!({
+                "kind": {
+                    "TimeSeries": {
+                        "column": "ts",
+                        "entity_columns": ["symbol"],
+                        "kind": {
+                            "type": "timestamp",
+                            "index_granularity": {"Minutes": 1}
+                        }
+                    }
+                },
+                "logical_schema": null,
+                "created_at": "2025-01-01T00:00:00Z",
+                "protocol_version": 7,
+                "required_reader_features": [],
+                "required_writer_features": []
+            })
+        );
+    }
+
+    #[test]
     fn table_meta_protocol_fields_roundtrip_canonically() {
         let mut meta = TableMeta::new_time_series(sample_time_index_spec());
         meta.required_reader_features.insert("z_reader".to_string());
