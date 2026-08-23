@@ -261,7 +261,7 @@ pub enum AppendError {
     },
 }
 
-use super::scan::ScanError;
+use super::{coverage::CoverageQueryError, scan::ScanError};
 
 /// Errors from high-level time-series table operations.
 ///
@@ -285,6 +285,14 @@ pub enum TableError {
         /// Complete scan operation error.
         #[snafu(source, backtrace)]
         source: ScanError,
+    },
+
+    /// A table coverage query failed.
+    #[snafu(display("Table coverage query failed: {source}"))]
+    CoverageQuery {
+        /// Complete coverage query operation error.
+        #[snafu(source, backtrace)]
+        source: CoverageQueryError,
     },
 
     /// Any error coming from the transaction log / commit machinery

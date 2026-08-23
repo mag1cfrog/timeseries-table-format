@@ -8,10 +8,12 @@ use crate::exceptions::{
     SchemaMismatchError, StorageError, TimeseriesTableError,
 };
 use timeseries_table_format::{
-    coverage::{EntityIdentity, EntityValue, index_interval::IndexInterval},
+    coverage::{
+        EntityIdentity, EntityValue, index_interval::IndexInterval, io::CoverageSidecarError,
+    },
     formats::parquet::SegmentCoverageError,
     storage::StorageError as CoreStorageError,
-    table::{AppendError, ScanError, TableError},
+    table::{AppendError, CoverageQueryError, ScanError, TableError},
     transaction_log::CommitError,
 };
 
@@ -230,6 +232,20 @@ pub(crate) fn table_error_to_py(
         TableError::Scan {
             source: ScanError::Storage { source, .. },
         } => storage_error_to_py(py, *source),
+
+        TableError::CoverageQuery {
+            source:
+                CoverageQueryError::CoverageSidecar { source, .. }
+                | CoverageQueryError::SegmentCoverageSidecarRead { source, .. },
+        } => match *source {
+            CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
+            CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
+            _ => TimeseriesTableError::new_err(msg),
+        },
+
+        TableError::CoverageQuery {
+            source: CoverageQueryError::SchemaCompatibility { .. },
+        } => SchemaMismatchError::new_err(msg),
 
         TableError::TransactionLog { source } => commit_error_to_py(py, source),
 

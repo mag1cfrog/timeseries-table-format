@@ -7,7 +7,13 @@
 //! - Falling back to unioning segment coverage sidecars when the snapshot
 //!   pointer is missing or unreadable (strict vs recovery modes).
 
+mod error;
+
+pub use error::CoverageQueryError;
+
 use std::{collections::BTreeMap, path::Path};
+
+use snafu::{Backtrace, OptionExt, ResultExt};
 
 use crate::{
     coverage::{
@@ -19,33 +25,34 @@ use crate::{
     transaction_log::table_state::TableCoveragePointer,
 };
 
+use self::error as query_error;
 use super::{
     TimeSeriesTable,
     error::{AppendError, TableError},
 };
 
-pub(crate) trait CoverageSnapshotLoadError: Sized {
-    fn existing_segment_missing_coverage_metadata(segment_path: String) -> Self;
+pub(crate) trait CoverageRecoveryError: Sized {
+    fn missing_segment_coverage_path(segment_path: String) -> Self;
 
-    fn existing_segment_coverage_sidecar_read(
+    fn segment_coverage_read_failed(
         segment_path: String,
         coverage_path: String,
         source: CoverageSidecarError,
     ) -> Self;
 
-    fn snapshot_index_kind_mismatch(
+    fn coverage_index_mismatch(
         expected: IndexKind,
         actual: IndexKind,
         pointer_version: u64,
     ) -> Self;
 }
 
-impl CoverageSnapshotLoadError for AppendError {
-    fn existing_segment_missing_coverage_metadata(segment_path: String) -> Self {
+impl CoverageRecoveryError for AppendError {
+    fn missing_segment_coverage_path(segment_path: String) -> Self {
         Self::ExistingSegmentMissingCoverageMetadata { segment_path }
     }
 
-    fn existing_segment_coverage_sidecar_read(
+    fn segment_coverage_read_failed(
         segment_path: String,
         coverage_path: String,
         source: CoverageSidecarError,
@@ -57,7 +64,7 @@ impl CoverageSnapshotLoadError for AppendError {
         }
     }
 
-    fn snapshot_index_kind_mismatch(
+    fn coverage_index_mismatch(
         expected: IndexKind,
         actual: IndexKind,
         pointer_version: u64,
@@ -70,24 +77,27 @@ impl CoverageSnapshotLoadError for AppendError {
     }
 }
 
-impl CoverageSnapshotLoadError for TableError {
-    fn existing_segment_missing_coverage_metadata(path: String) -> Self {
-        Self::ExistingSegmentMissingCoverage { path }
+impl CoverageRecoveryError for CoverageQueryError {
+    fn missing_segment_coverage_path(segment_path: String) -> Self {
+        Self::ExistingSegmentMissingCoverageMetadata {
+            segment_path,
+            backtrace: Box::new(Backtrace::capture()),
+        }
     }
 
-    fn existing_segment_coverage_sidecar_read(
-        path: String,
+    fn segment_coverage_read_failed(
+        segment_path: String,
         coverage_path: String,
         source: CoverageSidecarError,
     ) -> Self {
         Self::SegmentCoverageSidecarRead {
-            path,
+            segment_path,
             coverage_path,
             source: Box::new(source),
         }
     }
 
-    fn snapshot_index_kind_mismatch(
+    fn coverage_index_mismatch(
         expected: IndexKind,
         actual: IndexKind,
         pointer_version: u64,
@@ -96,6 +106,7 @@ impl CoverageSnapshotLoadError for TableError {
             expected,
             actual,
             pointer_version,
+            backtrace: Box::new(Backtrace::capture()),
         }
     }
 }
@@ -114,36 +125,39 @@ fn ensure_entity_coverage_identity_schema(
 }
 
 impl TimeSeriesTable {
-    fn ensure_global_coverage_query(&self) -> Result<(), TableError> {
+    fn ensure_global_coverage_query(&self) -> Result<(), CoverageQueryError> {
         if self.index_spec().entity_columns.is_empty() {
             Ok(())
         } else {
-            Err(TableError::EntityIdentityRequired {
+            query_error::EntityIdentityRequiredSnafu {
                 entity_columns: self.index_spec().entity_columns.clone(),
-            })
+            }
+            .fail()
         }
     }
 
     fn resolve_entity_identity(
         &self,
         components: &[(&str, EntityValue)],
-    ) -> Result<EntityIdentity, TableError> {
+    ) -> Result<EntityIdentity, CoverageQueryError> {
         let entity_columns = &self.index_spec().entity_columns;
         if entity_columns.is_empty() {
-            return Err(TableError::EntityIdentityNotConfigured);
+            return query_error::EntityIdentityNotConfiguredSnafu.fail();
         }
 
         let mut provided = BTreeMap::new();
         for (column, value) in components {
             if !entity_columns.iter().any(|expected| expected == *column) {
-                return Err(TableError::UnexpectedEntityIdentityColumn {
+                return query_error::UnexpectedEntityIdentityColumnSnafu {
                     column: (*column).to_string(),
-                });
+                }
+                .fail();
             }
             if provided.insert(*column, value).is_some() {
-                return Err(TableError::DuplicateEntityIdentityColumn {
+                return query_error::DuplicateEntityIdentityColumnSnafu {
                     column: (*column).to_string(),
-                });
+                }
+                .fail();
             }
         }
 
@@ -153,25 +167,22 @@ impl TimeSeriesTable {
                 provided
                     .get(column.as_str())
                     .map(|value| (**value).clone())
-                    .ok_or_else(|| TableError::MissingEntityIdentityColumn {
+                    .context(query_error::MissingEntityIdentityColumnSnafu {
                         column: column.clone(),
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let identity = EntityIdentity::try_new(ordered)
-            .map_err(|_| TableError::EntityIdentityNotConfigured)?;
-        let schema = self.state().table_meta.logical_schema.as_ref().ok_or(
-            TableError::MissingCanonicalSchema {
-                version: self.state().version,
-            },
-        )?;
+        let identity =
+            EntityIdentity::try_new(ordered).context(query_error::InvalidEntityIdentitySnafu)?;
+        let schema = require_table_schema(&self.state().table_meta)
+            .context(query_error::SchemaCompatibilitySnafu)?;
         ensure_entity_identity_matches_schema(schema, self.index_spec(), &identity)
-            .map_err(|source| TableError::SchemaCompatibility { source })?;
+            .context(query_error::SchemaCompatibilitySnafu)?;
         Ok(identity)
     }
 
-    async fn read_validated_entity_coverage_sidecar(
+    async fn read_and_validate_entity_coverage_sidecar(
         &self,
         path: &Path,
     ) -> Result<EntityCoverage, CoverageSidecarError> {
@@ -184,9 +195,9 @@ impl TimeSeriesTable {
     ///
     /// This is used as a fallback when the table snapshot coverage is missing or
     /// unreadable. Requires every segment to have a `coverage_path`.
-    pub(crate) async fn recover_table_coverage_from_segments<E>(&self) -> Result<Coverage, E>
+    pub(crate) async fn recover_global_coverage_from_segments<E>(&self) -> Result<Coverage, E>
     where
-        E: CoverageSnapshotLoadError,
+        E: CoverageRecoveryError,
     {
         let mut acc = Coverage::empty();
 
@@ -194,16 +205,12 @@ impl TimeSeriesTable {
             let path = seg
                 .coverage_path
                 .as_ref()
-                .ok_or_else(|| E::existing_segment_missing_coverage_metadata(seg.path.clone()))?;
+                .ok_or_else(|| E::missing_segment_coverage_path(seg.path.clone()))?;
 
             let cov = read_coverage_sidecar(self.location(), Path::new(path))
                 .await
                 .map_err(|source| {
-                    E::existing_segment_coverage_sidecar_read(
-                        seg.path.clone(),
-                        path.clone(),
-                        source,
-                    )
+                    E::segment_coverage_read_failed(seg.path.clone(), path.clone(), source)
                 })?;
 
             // Prefer an in-place union to avoid repeated allocations.
@@ -213,11 +220,9 @@ impl TimeSeriesTable {
         Ok(acc)
     }
 
-    pub(crate) async fn recover_table_entity_coverage_from_segments<E>(
-        &self,
-    ) -> Result<EntityCoverage, E>
+    pub(crate) async fn recover_entity_coverage_from_segments<E>(&self) -> Result<EntityCoverage, E>
     where
-        E: CoverageSnapshotLoadError,
+        E: CoverageRecoveryError,
     {
         let mut acc = EntityCoverage::empty();
 
@@ -225,17 +230,13 @@ impl TimeSeriesTable {
             let path = seg
                 .coverage_path
                 .as_ref()
-                .ok_or_else(|| E::existing_segment_missing_coverage_metadata(seg.path.clone()))?;
+                .ok_or_else(|| E::missing_segment_coverage_path(seg.path.clone()))?;
 
             let coverage = self
-                .read_validated_entity_coverage_sidecar(Path::new(path))
+                .read_and_validate_entity_coverage_sidecar(Path::new(path))
                 .await
                 .map_err(|source| {
-                    E::existing_segment_coverage_sidecar_read(
-                        seg.path.clone(),
-                        path.clone(),
-                        source,
-                    )
+                    E::segment_coverage_read_failed(seg.path.clone(), path.clone(), source)
                 })?;
             acc.union_inplace(&coverage);
         }
@@ -243,19 +244,40 @@ impl TimeSeriesTable {
         Ok(acc)
     }
 
-    fn ensure_table_coverage_index_matches<E>(&self, ptr: &TableCoveragePointer) -> Result<(), E>
+    fn validate_coverage_pointer_index_kind<E>(&self, ptr: &TableCoveragePointer) -> Result<(), E>
     where
-        E: CoverageSnapshotLoadError,
+        E: CoverageRecoveryError,
     {
         let expected = self.index_spec().kind.clone();
         if ptr.index_kind != expected {
-            return Err(E::snapshot_index_kind_mismatch(
+            return Err(E::coverage_index_mismatch(
                 expected,
                 ptr.index_kind.clone(),
                 ptr.version,
             ));
         }
         Ok(())
+    }
+
+    async fn load_global_coverage_snapshot_for_query(
+        &self,
+    ) -> Result<Coverage, CoverageQueryError> {
+        match &self.state().table_coverage {
+            None => {
+                if self.state().segments.is_empty() {
+                    return Ok(Coverage::empty());
+                }
+                query_error::MissingTableCoveragePointerSnafu.fail()
+            }
+            Some(ptr) => {
+                self.validate_coverage_pointer_index_kind::<CoverageQueryError>(ptr)?;
+                read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
+                    .await
+                    .context(query_error::CoverageSnapshotReadSnafu {
+                        coverage_path: ptr.coverage_path.clone(),
+                    })
+            }
+        }
     }
 
     /// Load table coverage using the snapshot pointer only.
@@ -265,22 +287,10 @@ impl TimeSeriesTable {
     ///   - Else: returns MissingTableCoveragePointer (strict mode).
     /// - If snapshot exists but is missing/corrupt: returns the snapshot read error.
     pub async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
-        match &self.state().table_coverage {
-            None => {
-                if self.state().segments.is_empty() {
-                    return Ok(Coverage::empty());
-                }
-                Err(TableError::MissingTableCoveragePointer)
-            }
-            Some(ptr) => {
-                self.ensure_table_coverage_index_matches::<TableError>(ptr)?;
-                read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
-                    .await
-                    .map_err(|source| TableError::CoverageSidecar { source })
-            }
-        }
+        self.load_global_coverage_snapshot_for_query()
+            .await
+            .context(super::error::CoverageQuerySnafu)
     }
-
     /// Load table coverage for read paths (no writes).
     ///
     /// - If snapshot pointer is absent:
@@ -288,19 +298,19 @@ impl TimeSeriesTable {
     ///   - Else: recovers by unioning segment sidecars.
     /// - If snapshot pointer exists but snapshot is missing/corrupt:
     ///   - Recovers by unioning segment sidecars.
-    pub(crate) async fn load_table_snapshot_coverage_readonly<E>(&self) -> Result<Coverage, E>
+    pub(crate) async fn load_global_coverage_with_recovery<E>(&self) -> Result<Coverage, E>
     where
-        E: CoverageSnapshotLoadError,
+        E: CoverageRecoveryError,
     {
         match &self.state().table_coverage {
             None => {
                 if self.state().segments.is_empty() {
                     return Ok(Coverage::empty());
                 }
-                self.recover_table_coverage_from_segments::<E>().await
+                self.recover_global_coverage_from_segments::<E>().await
             }
             Some(ptr) => {
-                self.ensure_table_coverage_index_matches::<E>(ptr)?;
+                self.validate_coverage_pointer_index_kind::<E>(ptr)?;
 
                 match read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path)).await {
                     Ok(cov) => Ok(cov),
@@ -314,7 +324,7 @@ impl TimeSeriesTable {
                             recovery_source = "segment_sidecars",
                             "Failed to read table coverage snapshot; attempting read-only recovery from segment sidecars"
                         );
-                        let coverage = self.recover_table_coverage_from_segments::<E>().await?;
+                        let coverage = self.recover_global_coverage_from_segments::<E>().await?;
                         tracing::debug!(
                             name: "coverage.recover",
                             coverage_mode = "global",
@@ -332,24 +342,24 @@ impl TimeSeriesTable {
         }
     }
 
-    pub(crate) async fn load_table_entity_snapshot_coverage_readonly<E>(
+    pub(crate) async fn load_entity_coverage_with_recovery<E>(
         &self,
     ) -> Result<EntityCoverage, E>
     where
-        E: CoverageSnapshotLoadError,
+        E: CoverageRecoveryError,
     {
         match &self.state().table_coverage {
             None => {
                 if self.state().segments.is_empty() {
                     return Ok(EntityCoverage::empty());
                 }
-                self.recover_table_entity_coverage_from_segments::<E>()
+                self.recover_entity_coverage_from_segments::<E>()
                     .await
             }
             Some(ptr) => {
-                self.ensure_table_coverage_index_matches::<E>(ptr)?;
+                self.validate_coverage_pointer_index_kind::<E>(ptr)?;
                 match self
-                    .read_validated_entity_coverage_sidecar(Path::new(&ptr.coverage_path))
+                    .read_and_validate_entity_coverage_sidecar(Path::new(&ptr.coverage_path))
                     .await
                 {
                     Ok(coverage) => Ok(coverage),
@@ -363,9 +373,7 @@ impl TimeSeriesTable {
                             recovery_source = "segment_sidecars",
                             "Failed to read entity coverage snapshot; attempting read-only recovery from segment sidecars"
                         );
-                        let coverage = self
-                            .recover_table_entity_coverage_from_segments::<E>()
-                            .await?;
+                        let coverage = self.recover_entity_coverage_from_segments::<E>().await?;
                         tracing::debug!(
                             name: "coverage.recover",
                             coverage_mode = "entity",
@@ -382,7 +390,9 @@ impl TimeSeriesTable {
             }
         }
     }
+
 }
+
 // Coverage query APIs for TimeSeriesTable.
 //
 // These APIs:
@@ -391,13 +401,11 @@ impl TimeSeriesTable {
 // - reuse crate::coverage APIs (coverage_ratio, max_gap_len, last_window_at_or_before)
 use std::ops::RangeInclusive;
 
-use snafu::ResultExt;
-
 use crate::{
     coverage::IndexIntervalId,
     coverage::index_interval::{index_interval_id_for_exclusive_end, index_interval_id_range},
     metadata::table_metadata::{IndexValue, validate_index_range},
-    table::error::{IndexIntervalMappingSnafu, InvalidRangeSnafu},
+    table::error::CoverageQuerySnafu,
 };
 
 impl TimeSeriesTable {
@@ -405,16 +413,17 @@ impl TimeSeriesTable {
         &self,
         start: S,
         end: E,
-    ) -> Result<RangeInclusive<IndexIntervalId>, TableError>
+    ) -> Result<RangeInclusive<IndexIntervalId>, CoverageQueryError>
     where
         S: Into<IndexValue>,
         E: Into<IndexValue>,
     {
         let start = start.into();
         let end = end.into();
-        validate_index_range(&self.index_spec().kind, &start, &end).context(InvalidRangeSnafu)?;
+        validate_index_range(&self.index_spec().kind, &start, &end)
+            .context(query_error::InvalidRangeSnafu)?;
         index_interval_id_range(&self.index_spec().kind, &start, &end)
-            .context(IndexIntervalMappingSnafu)
+            .context(query_error::IndexIntervalMappingSnafu)
     }
 
     // ---- public query APIs ----
@@ -426,10 +435,12 @@ impl TimeSeriesTable {
     /// recovery from segments if needed.
     ///
     /// # Errors
-    /// Returns [`TableError::InvalidRange`] when the endpoints do not match the
-    /// table index or `start >= end`, [`TableError::EntityIdentityRequired`]
-    /// when the table has entity columns, and contextual coverage errors when
-    /// the snapshot cannot be loaded or mapped to index interval IDs.
+    /// Returns [`TableError::CoverageQuery`] containing
+    /// [`CoverageQueryError::InvalidRange`] when the endpoints do not match the
+    /// table index or `start >= end`, or
+    /// [`CoverageQueryError::EntityIdentityRequired`] when the table has entity
+    /// columns. Snapshot and interval mapping failures retain their typed
+    /// sources in the same operation error.
     ///
     /// # Examples
     /// ```
@@ -448,12 +459,16 @@ impl TimeSeriesTable {
         S: Into<IndexValue>,
         E: Into<IndexValue>,
     {
-        self.ensure_global_coverage_query()?;
-        let range = self.interval_ids_for_query_range(start, end)?;
-        let cov = self
-            .load_table_snapshot_coverage_readonly::<TableError>()
-            .await?;
-        Ok(cov.coverage_ratio(&range))
+        async {
+            self.ensure_global_coverage_query()?;
+            let range = self.interval_ids_for_query_range(start, end)?;
+            let cov = self
+                .load_global_coverage_with_recovery::<CoverageQueryError>()
+                .await?;
+            Ok(cov.coverage_ratio(&range))
+        }
+        .await
+        .context(CoverageQuerySnafu)
     }
 
     /// Coverage ratio in `[0.0, 1.0]` for one entity over `[start, end)`.
@@ -496,14 +511,18 @@ impl TimeSeriesTable {
         S: Into<IndexValue>,
         E: Into<IndexValue>,
     {
-        let identity = self.resolve_entity_identity(entity)?;
-        let range = self.interval_ids_for_query_range(start, end)?;
-        let coverage = self
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
-            .await?;
-        Ok(coverage
-            .get(&identity)
-            .map_or(0.0, |coverage| coverage.coverage_ratio(&range)))
+        async {
+            let identity = self.resolve_entity_identity(entity)?;
+            let range = self.interval_ids_for_query_range(start, end)?;
+            let coverage = self
+                .load_entity_coverage_with_recovery::<CoverageQueryError>()
+                .await?;
+            Ok(coverage
+                .get(&identity)
+                .map_or(0.0, |coverage| coverage.coverage_ratio(&range)))
+        }
+        .await
+        .context(CoverageQuerySnafu)
     }
 
     /// Maximum contiguous missing run length in index intervals for `[start, end)`.
@@ -512,10 +531,12 @@ impl TimeSeriesTable {
     /// entity columns.
     ///
     /// # Errors
-    /// Returns [`TableError::InvalidRange`] when the endpoints do not match the
-    /// table index or `start >= end`, [`TableError::EntityIdentityRequired`]
-    /// when the table has entity columns, and contextual coverage errors when
-    /// the snapshot cannot be loaded or mapped to index interval IDs.
+    /// Returns [`TableError::CoverageQuery`] containing
+    /// [`CoverageQueryError::InvalidRange`] when the endpoints do not match the
+    /// table index or `start >= end`, or
+    /// [`CoverageQueryError::EntityIdentityRequired`] when the table has entity
+    /// columns. Snapshot and interval mapping failures retain their typed
+    /// sources in the same operation error.
     ///
     /// # Examples
     /// ```
@@ -534,12 +555,16 @@ impl TimeSeriesTable {
         S: Into<IndexValue>,
         E: Into<IndexValue>,
     {
-        self.ensure_global_coverage_query()?;
-        let range = self.interval_ids_for_query_range(start, end)?;
-        let cov = self
-            .load_table_snapshot_coverage_readonly::<TableError>()
-            .await?;
-        Ok(cov.max_gap_len(&range))
+        async {
+            self.ensure_global_coverage_query()?;
+            let range = self.interval_ids_for_query_range(start, end)?;
+            let cov = self
+                .load_global_coverage_with_recovery::<CoverageQueryError>()
+                .await?;
+            Ok(cov.max_gap_len(&range))
+        }
+        .await
+        .context(CoverageQuerySnafu)
     }
 
     /// Maximum contiguous missing run length for one entity over `[start, end)`.
@@ -551,9 +576,10 @@ impl TimeSeriesTable {
     ///
     /// # Errors
     /// Returns a typed entity identity error for missing, duplicate, unexpected,
-    /// or unconfigured entity columns. It returns [`TableError::InvalidRange`]
-    /// for invalid half-open range endpoints and contextual coverage errors when
-    /// the snapshot cannot be loaded or mapped to index interval IDs.
+    /// or unconfigured entity columns. It returns
+    /// [`CoverageQueryError::InvalidRange`] inside [`TableError::CoverageQuery`]
+    /// for invalid half-open range endpoints and retains typed snapshot and
+    /// interval mapping sources in the same operation error.
     pub async fn max_gap_len_for_entity_range<S, E>(
         &self,
         entity: &[(&str, EntityValue)],
@@ -564,15 +590,19 @@ impl TimeSeriesTable {
         S: Into<IndexValue>,
         E: Into<IndexValue>,
     {
-        let identity = self.resolve_entity_identity(entity)?;
-        let range = self.interval_ids_for_query_range(start, end)?;
-        let coverage = self
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
-            .await?;
-        Ok(coverage.get(&identity).map_or_else(
-            || Coverage::range_cardinality(&range),
-            |c| c.max_gap_len(&range),
-        ))
+        async {
+            let identity = self.resolve_entity_identity(entity)?;
+            let range = self.interval_ids_for_query_range(start, end)?;
+            let coverage = self
+                .load_entity_coverage_with_recovery::<CoverageQueryError>()
+                .await?;
+            Ok(coverage.get(&identity).map_or_else(
+                || Coverage::range_cardinality(&range),
+                |c| c.max_gap_len(&range),
+            ))
+        }
+        .await
+        .context(CoverageQuerySnafu)
     }
 
     /// Return the last fully covered contiguous window of `window_len_intervals`
@@ -584,10 +614,11 @@ impl TimeSeriesTable {
     /// - This identity-free query is only valid for tables without configured entity columns.
     ///
     /// # Errors
-    /// Returns [`TableError::InvalidRange`] when `end` does not match the table
-    /// index, [`TableError::EntityIdentityRequired`] when the table has entity
-    /// columns, and contextual coverage errors when the endpoint cannot be
-    /// mapped to an index interval ID or the snapshot cannot be loaded.
+    /// Returns [`TableError::CoverageQuery`] containing
+    /// [`CoverageQueryError::InvalidRange`] when `end` does not match the table
+    /// index or [`CoverageQueryError::EntityIdentityRequired`] when the table
+    /// has entity columns. Endpoint mapping and snapshot failures retain their
+    /// typed sources in the same operation error.
     ///
     /// # Examples
     /// ```
@@ -608,21 +639,25 @@ impl TimeSeriesTable {
     where
         E: Into<IndexValue>,
     {
-        self.ensure_global_coverage_query()?;
-        let end = end.into();
-        end.validate_kind(&self.index_spec().kind)
-            .context(InvalidRangeSnafu)?;
-        if window_len_intervals == 0 {
-            return Ok(None);
-        }
+        async {
+            self.ensure_global_coverage_query()?;
+            let end = end.into();
+            end.validate_kind(&self.index_spec().kind)
+                .context(query_error::InvalidRangeSnafu)?;
+            if window_len_intervals == 0 {
+                return Ok(None);
+            }
 
-        let end_index_interval_id =
-            index_interval_id_for_exclusive_end(&self.index_spec().kind, &end)
-                .context(IndexIntervalMappingSnafu)?;
-        let cov = self
-            .load_table_snapshot_coverage_readonly::<TableError>()
-            .await?;
-        Ok(cov.last_window_at_or_before(end_index_interval_id, window_len_intervals))
+            let end_index_interval_id =
+                index_interval_id_for_exclusive_end(&self.index_spec().kind, &end)
+                    .context(query_error::IndexIntervalMappingSnafu)?;
+            let cov = self
+                .load_global_coverage_with_recovery::<CoverageQueryError>()
+                .await?;
+            Ok(cov.last_window_at_or_before(end_index_interval_id, window_len_intervals))
+        }
+        .await
+        .context(CoverageQuerySnafu)
     }
 
     /// Return one entity's last fully covered contiguous window ending before
@@ -635,9 +670,10 @@ impl TimeSeriesTable {
     ///
     /// # Errors
     /// Returns a typed entity identity error for missing, duplicate, unexpected,
-    /// or unconfigured entity columns. It returns [`TableError::InvalidRange`]
-    /// when `end` does not match the table index and contextual coverage errors
-    /// when the endpoint cannot be mapped or the snapshot cannot be loaded.
+    /// or unconfigured entity columns. It returns
+    /// [`CoverageQueryError::InvalidRange`] inside [`TableError::CoverageQuery`]
+    /// when `end` does not match the table index and retains typed endpoint
+    /// mapping and snapshot sources in the same operation error.
     pub async fn last_fully_covered_window_for_entity<E>(
         &self,
         entity: &[(&str, EntityValue)],
@@ -647,36 +683,44 @@ impl TimeSeriesTable {
     where
         E: Into<IndexValue>,
     {
-        let identity = self.resolve_entity_identity(entity)?;
-        let end = end.into();
-        end.validate_kind(&self.index_spec().kind)
-            .context(InvalidRangeSnafu)?;
-        if window_len_intervals == 0 {
-            return Ok(None);
-        }
+        async {
+            let identity = self.resolve_entity_identity(entity)?;
+            let end = end.into();
+            end.validate_kind(&self.index_spec().kind)
+                .context(query_error::InvalidRangeSnafu)?;
+            if window_len_intervals == 0 {
+                return Ok(None);
+            }
 
-        let end_index_interval_id =
-            index_interval_id_for_exclusive_end(&self.index_spec().kind, &end)
-                .context(IndexIntervalMappingSnafu)?;
-        let coverage = self
-            .load_table_entity_snapshot_coverage_readonly::<TableError>()
-            .await?;
-        Ok(coverage.get(&identity).and_then(|coverage| {
-            coverage.last_window_at_or_before(end_index_interval_id, window_len_intervals)
-        }))
+            let end_index_interval_id =
+                index_interval_id_for_exclusive_end(&self.index_spec().kind, &end)
+                    .context(query_error::IndexIntervalMappingSnafu)?;
+            let coverage = self
+                .load_entity_coverage_with_recovery::<CoverageQueryError>()
+                .await?;
+            Ok(coverage.get(&identity).and_then(|coverage| {
+                coverage.last_window_at_or_before(end_index_interval_id, window_len_intervals)
+            }))
+        }
+        .await
+        .context(CoverageQuerySnafu)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, num::NonZeroU64, path::Path};
+    use std::{collections::BTreeSet, error::Error as _, num::NonZeroU64, path::Path};
 
     use super::*;
     use crate::{
         coverage::{
             Coverage, EntityCoverage, EntityIdentity, EntityValue,
             index_interval::{IndexIntervalMappingError, index_interval_id_for_value},
-            io::{write_coverage_sidecar_atomic, write_coverage_sidecar_new_bytes},
+            io::{
+                CoverageSidecarError, write_coverage_sidecar_atomic,
+                write_coverage_sidecar_new_bytes,
+            },
+            serde::CoverageCodecError,
             serde::entity_coverage_to_bytes,
         },
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
@@ -684,7 +728,7 @@ mod tests {
         metadata::table_metadata::{
             IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeIndexGranularity,
         },
-        storage::TableLocation,
+        storage::{StorageError, TableLocation},
         table::test_util::{
             TestResult, TestRow, TraceCapture, append_parquet_fixture, make_basic_table_meta,
             make_int32_entity_table_meta, utc_datetime, write_int32_entity_parquet,
@@ -692,6 +736,7 @@ mod tests {
         },
     };
     use chrono::{DateTime, TimeZone, Utc};
+    use snafu::ErrorCompat;
     use tempfile::TempDir;
 
     type HelperResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -700,6 +745,21 @@ mod tests {
         Utc.timestamp_opt(secs, 0)
             .single()
             .expect("valid timestamp")
+    }
+
+    fn coverage_query_source(error: &TableError) -> &CoverageQueryError {
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<CoverageQueryError>())
+            .expect("coverage query source")
+    }
+
+    fn coverage_sidecar_source(error: &CoverageQueryError) -> &CoverageSidecarError {
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<CoverageSidecarError>>())
+            .map(Box::as_ref)
+            .expect("coverage sidecar source")
     }
 
     async fn make_table() -> HelperResult<(TempDir, TimeSeriesTable)> {
@@ -712,6 +772,116 @@ mod tests {
         index.entity_columns.clear();
         let table = TimeSeriesTable::create(location, meta).await?;
         Ok((tmp, table))
+    }
+
+    #[tokio::test]
+    async fn strict_snapshot_missing_preserves_storage_source_and_backtrace() -> TestResult {
+        let (_tmp, mut table) = make_table().await?;
+        let coverage_path = "_coverage/table/missing.roar";
+        table.state_mut().table_coverage = Some(TableCoveragePointer {
+            index_kind: table.index_spec().kind.clone(),
+            coverage_path: coverage_path.to_string(),
+            version: table.state().version,
+        });
+
+        let error = table
+            .load_table_coverage_snapshot_only()
+            .await
+            .expect_err("missing snapshot must fail");
+        let query = coverage_query_source(&error);
+        assert!(matches!(
+            query,
+            CoverageQueryError::CoverageSidecar { path, .. } if path == coverage_path
+        ));
+        let sidecar = coverage_sidecar_source(query);
+        let storage = sidecar
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageError>())
+            .expect("storage source");
+        assert!(matches!(storage, StorageError::NotFound { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(storage).expect("storage backtrace"),
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_snapshot_corruption_preserves_codec_source_and_backtrace() -> TestResult {
+        let (tmp, mut table) = make_table().await?;
+        let coverage_path = "_coverage/table/corrupt.roar";
+        let absolute = tmp.path().join(coverage_path);
+        std::fs::create_dir_all(absolute.parent().expect("coverage parent"))?;
+        std::fs::write(&absolute, b"not a bitmap")?;
+        table.state_mut().table_coverage = Some(TableCoveragePointer {
+            index_kind: table.index_spec().kind.clone(),
+            coverage_path: coverage_path.to_string(),
+            version: table.state().version,
+        });
+
+        let error = table
+            .load_table_coverage_snapshot_only()
+            .await
+            .expect_err("corrupt snapshot must fail");
+        let query = coverage_query_source(&error);
+        let sidecar = coverage_sidecar_source(query);
+        let codec = sidecar
+            .source()
+            .and_then(|source| source.downcast_ref::<CoverageCodecError>())
+            .expect("codec source");
+        assert!(matches!(
+            codec,
+            CoverageCodecError::BitmapDeserialization { .. }
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(codec).expect("codec backtrace"),
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn strict_snapshot_permission_denied_preserves_storage_source() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, mut table) = make_table().await?;
+        let coverage_path = "_coverage/table/denied.roar";
+        let absolute = tmp.path().join(coverage_path);
+        write_coverage_sidecar_atomic(
+            table.location(),
+            Path::new(coverage_path),
+            &Coverage::empty(),
+        )
+        .await?;
+        table.state_mut().table_coverage = Some(TableCoveragePointer {
+            index_kind: table.index_spec().kind.clone(),
+            coverage_path: coverage_path.to_string(),
+            version: table.state().version,
+        });
+        let original_permissions = std::fs::metadata(&absolute)?.permissions();
+        let mut denied_permissions = original_permissions.clone();
+        denied_permissions.set_mode(0o0);
+        std::fs::set_permissions(&absolute, denied_permissions)?;
+
+        let error = table
+            .load_table_coverage_snapshot_only()
+            .await
+            .expect_err("permission-denied snapshot must fail");
+        std::fs::set_permissions(&absolute, original_permissions)?;
+
+        let query = coverage_query_source(&error);
+        let sidecar = coverage_sidecar_source(query);
+        let storage = sidecar
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageError>())
+            .expect("storage source");
+        assert!(matches!(storage, StorageError::OtherIo { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(storage).expect("storage backtrace"),
+        ));
+        Ok(())
     }
 
     async fn table_with_index_coverage(
@@ -911,7 +1081,9 @@ mod tests {
         );
         assert!(matches!(
             table.coverage_ratio_for_range(start, end).await,
-            Err(TableError::EntityIdentityRequired { entity_columns })
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::EntityIdentityRequired { entity_columns, .. }
+            })
                 if entity_columns == ["symbol"]
         ));
         assert_eq!(table.state(), &state_before);
@@ -965,13 +1137,16 @@ mod tests {
                     end,
                 )
                 .await,
-            Err(TableError::SchemaCompatibility {
-                source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::SchemaCompatibility { source, .. }
+            }) if matches!(
+                source.as_ref(),
+                SchemaCompatibilityError::EntityIdentityTypeMismatch {
                     column,
                     expected: LogicalDataType::Int32,
                     actual: "int64",
-                },
-            }) if column == "device_id"
+                } if column == "device_id"
+            )
         ));
         assert!(matches!(
             table
@@ -981,13 +1156,16 @@ mod tests {
                     end,
                 )
                 .await,
-            Err(TableError::SchemaCompatibility {
-                source: SchemaCompatibilityError::EntityIdentityTypeMismatch {
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::SchemaCompatibility { source, .. }
+            }) if matches!(
+                source.as_ref(),
+                SchemaCompatibilityError::EntityIdentityTypeMismatch {
                     column,
                     expected: LogicalDataType::Int32,
                     actual: "utf8",
-                },
-            }) if column == "device_id"
+                } if column == "device_id"
+            )
         ));
         Ok(())
     }
@@ -1150,17 +1328,23 @@ mod tests {
 
         assert!(matches!(
             table.coverage_ratio_for_range(start, end).await,
-            Err(TableError::EntityIdentityRequired { entity_columns })
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::EntityIdentityRequired { entity_columns, .. }
+            })
                 if entity_columns == ["symbol"]
         ));
         assert!(matches!(
             table.max_gap_len_for_range(start, end).await,
-            Err(TableError::EntityIdentityRequired { entity_columns })
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::EntityIdentityRequired { entity_columns, .. }
+            })
                 if entity_columns == ["symbol"]
         ));
         assert!(matches!(
             table.last_fully_covered_window(end, 0).await,
-            Err(TableError::EntityIdentityRequired { entity_columns })
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::EntityIdentityRequired { entity_columns, .. }
+            })
                 if entity_columns == ["symbol"]
         ));
         assert_eq!(table.state(), &state_before);
@@ -1203,7 +1387,9 @@ mod tests {
             table
                 .coverage_ratio_for_entity_range(&[("venue", EntityValue::from("X"))], start, end)
                 .await,
-            Err(TableError::MissingEntityIdentityColumn { column }) if column == "symbol"
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::MissingEntityIdentityColumn { column, .. }
+            }) if column == "symbol"
         ));
         assert!(matches!(
             table
@@ -1216,7 +1402,9 @@ mod tests {
                     end,
                 )
                 .await,
-            Err(TableError::UnexpectedEntityIdentityColumn { column }) if column == "device"
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::UnexpectedEntityIdentityColumn { column, .. }
+            }) if column == "device"
         ));
         assert!(matches!(
             table
@@ -1230,7 +1418,9 @@ mod tests {
                     end,
                 )
                 .await,
-            Err(TableError::DuplicateEntityIdentityColumn { column }) if column == "symbol"
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::DuplicateEntityIdentityColumn { column, .. }
+            }) if column == "symbol"
         ));
 
         let (_tmp, global_table) = make_table().await?;
@@ -1238,7 +1428,9 @@ mod tests {
             global_table
                 .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end)
                 .await,
-            Err(TableError::EntityIdentityNotConfigured)
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::EntityIdentityNotConfigured { .. }
+            })
         ));
         Ok(())
     }
@@ -1304,7 +1496,7 @@ mod tests {
         let err = table
             .interval_ids_for_query_range(ts, ts)
             .expect_err("start >= end should be invalid");
-        assert!(matches!(err, TableError::InvalidRange { .. }));
+        assert!(matches!(err, CoverageQueryError::InvalidRange { .. }));
         Ok(())
     }
 
@@ -1585,7 +1777,9 @@ mod tests {
             .expect_err("missing segment coverage_path should bubble up");
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { path } if path == segment_path
+            TableError::CoverageQuery {
+                source: CoverageQueryError::ExistingSegmentMissingCoverage { path, .. }
+            } if path == segment_path
         ));
         Ok(())
     }
@@ -1610,8 +1804,11 @@ mod tests {
             .expect_err("mismatched index granularity should error");
 
         match err {
-            TableError::TableCoverageIndexKindMismatch {
-                expected, actual, ..
+            TableError::CoverageQuery {
+                source:
+                    CoverageQueryError::TableCoverageIndexKindMismatch {
+                        expected, actual, ..
+                    },
             } => {
                 assert_eq!(expected, table.index_spec().kind);
                 assert_eq!(actual, ptr.index_kind);
@@ -1699,39 +1896,61 @@ mod tests {
             .last_fully_covered_window(ts_from_secs(1), 1)
             .await
             .expect_err("endpoint domain must match the table index");
+        let query = coverage_query_source(&error);
         assert!(matches!(
-            error,
-            TableError::InvalidRange {
+            query,
+            CoverageQueryError::InvalidRange {
                 source: IndexValueError::KindMismatch {
                     expected: "uint64",
                     actual: "timestamp"
-                }
+                },
+                ..
             }
+        ));
+        assert!(matches!(
+            query.source(),
+            Some(source) if source.downcast_ref::<IndexValueError>().is_some()
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(query).expect("coverage query backtrace"),
         ));
 
         assert!(matches!(
             table.coverage_ratio_for_range(1u64, 1u64).await,
-            Err(TableError::InvalidRange {
-                source: IndexValueError::InvalidRange { .. }
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::InvalidRange {
+                    source: IndexValueError::InvalidRange { .. },
+                    ..
+                }
             })
         ));
         assert!(matches!(
             table.max_gap_len_for_range(2u64, 1u64).await,
-            Err(TableError::InvalidRange {
-                source: IndexValueError::InvalidRange { .. }
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::InvalidRange {
+                    source: IndexValueError::InvalidRange { .. },
+                    ..
+                }
             })
         ));
         assert!(matches!(
             table.coverage_ratio_for_range(0u64, 1i64).await,
-            Err(TableError::InvalidRange {
-                source: IndexValueError::KindMismatch { .. }
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::InvalidRange {
+                    source: IndexValueError::KindMismatch { .. },
+                    ..
+                }
             })
         ));
         assert_eq!(table.last_fully_covered_window(0u64, 0).await?, None);
         assert!(matches!(
             table.last_fully_covered_window(0u64, 1).await,
-            Err(TableError::IndexIntervalMapping {
-                source: IndexIntervalMappingError::RangeEndUnderflow { .. }
+            Err(TableError::CoverageQuery {
+                source: CoverageQueryError::IndexIntervalMapping {
+                    source: IndexIntervalMappingError::RangeEndUnderflow { .. },
+                    ..
+                }
             })
         ));
         Ok(())
@@ -1756,7 +1975,9 @@ mod tests {
             .expect_err("missing coverage_path should bubble up");
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { path } if path == segment_path
+            TableError::CoverageQuery {
+                source: CoverageQueryError::ExistingSegmentMissingCoverage { path, .. }
+            } if path == segment_path
         ));
         Ok(())
     }
