@@ -753,7 +753,7 @@ mod tests {
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::{
-        CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
+        CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity, segments::SegmentError,
     };
     use arrow::{
         array::{
@@ -766,6 +766,7 @@ mod tests {
     };
     use futures::{FutureExt, StreamExt};
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    use snafu::ErrorCompat;
     use std::cell::Cell;
     use std::collections::{BTreeMap, HashMap};
     use std::fs::File;
@@ -4337,6 +4338,139 @@ mod tests {
                 source: AppendError::CoverageSnapshotIndexKindMismatch { .. }
             }
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generated_segment_metadata_failure_preserves_source_cleans_data_and_allows_retry()
+    -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, timestamp_only_meta()).await?;
+        let state_before = table.state().clone();
+        let segment_path = "data/corrupt-generated.parquet";
+        tokio::fs::create_dir_all(tmp.path().join("data")).await?;
+        tokio::fs::write(tmp.path().join(segment_path), b"not parquet data").await?;
+
+        let mut data_guard = storage::FileCleanupGuard::new_disarmed(
+            table.location().as_ref(),
+            Path::new(segment_path),
+        )?;
+        data_guard.arm();
+        let source = table
+            .publish_generated_parquet_segment(segment_path, 2, &mut data_guard)
+            .await
+            .expect_err("corrupt generated Parquet must fail metadata loading");
+        let source = table
+            .rollback_created_artifacts(&[segment_path.to_string()], source)
+            .await;
+        data_guard.disarm();
+        let error = TableError::from(source);
+
+        assert!(matches!(
+            &error,
+            TableError::Append {
+                source: AppendError::SegmentMetadata { source, .. }
+            } if matches!(source.as_ref(), SegmentError::Metadata { .. })
+        ));
+        assert!(error.to_string().contains(segment_path));
+        assert!(ErrorCompat::backtrace(&error).is_some());
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(!tmp.path().join(segment_path).exists());
+        assert!(data_files(tmp.path())?.is_empty());
+        assert!(coverage_files(tmp.path())?.is_empty());
+
+        assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_missing_or_corrupt_segment_sidecar_preserves_source_and_rolls_back()
+    -> TestResult {
+        #[derive(Debug, Clone, Copy)]
+        enum Damage {
+            Missing,
+            Corrupt,
+        }
+
+        for damage in [Damage::Missing, Damage::Corrupt] {
+            let tmp = TempDir::new()?;
+            let location = TableLocation::local(tmp.path());
+            let mut table =
+                TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+            assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+
+            let (segment_path, coverage_path) = table
+                .state()
+                .segments
+                .values()
+                .next()
+                .map(|segment| {
+                    (
+                        segment.path.clone(),
+                        segment.coverage_path.clone().expect("coverage path"),
+                    )
+                })
+                .expect("committed segment");
+            let coverage_abs = tmp.path().join(&coverage_path);
+            let original_coverage = tokio::fs::read(&coverage_abs).await?;
+            match damage {
+                Damage::Missing => tokio::fs::remove_file(&coverage_abs).await?,
+                Damage::Corrupt => {
+                    tokio::fs::write(&coverage_abs, b"not a coverage sidecar").await?
+                }
+            }
+            table.state.table_coverage = None;
+
+            let state_before = table.state().clone();
+            let data_before = data_files(tmp.path())?;
+            let coverage_before = coverage_files(tmp.path())?;
+            let error = table
+                .append(timestamp_only_batch_starting_at_minute_offset(2, 1)?)
+                .await
+                .expect_err("damaged segment sidecar must fail append recovery");
+
+            let sidecar_source = match &error {
+                TableError::Append {
+                    source:
+                        AppendError::ExistingSegmentCoverageSidecarRead {
+                            segment_path: actual_segment_path,
+                            coverage_path: actual_coverage_path,
+                            source,
+                        },
+                } => {
+                    assert_eq!(actual_segment_path, &segment_path);
+                    assert_eq!(actual_coverage_path, &coverage_path);
+                    source.as_ref()
+                }
+                other => panic!("unexpected {damage:?} error: {other:?}"),
+            };
+            match damage {
+                Damage::Missing => assert!(matches!(
+                    sidecar_source,
+                    CoverageSidecarError::Storage {
+                        source: StorageError::NotFound { .. }
+                    }
+                )),
+                Damage::Corrupt => {
+                    assert!(matches!(sidecar_source, CoverageSidecarError::Codec { .. }))
+                }
+            }
+            assert!(ErrorCompat::backtrace(&error).is_some());
+            assert_eq!(table.state(), &state_before, "{damage:?}");
+            assert_eq!(data_files(tmp.path())?, data_before, "{damage:?}");
+            assert_eq!(coverage_files(tmp.path())?, coverage_before, "{damage:?}");
+
+            tokio::fs::write(&coverage_abs, &original_coverage).await?;
+            assert_eq!(
+                table
+                    .append(timestamp_only_batch_starting_at_minute_offset(2, 1)?)
+                    .await?,
+                3,
+                "{damage:?}"
+            );
+        }
         Ok(())
     }
 }
