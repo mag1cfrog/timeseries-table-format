@@ -758,6 +758,23 @@ mod tests {
             .expect("coverage sidecar source")
     }
 
+    fn single_segment_and_coverage_paths(table: &TimeSeriesTable) -> (String, String) {
+        assert_eq!(table.state().segments.len(), 1, "expected one segment");
+        let segment = table
+            .state()
+            .segments
+            .values()
+            .next()
+            .expect("segment present");
+        (
+            segment.path.clone(),
+            segment
+                .coverage_path
+                .clone()
+                .expect("segment coverage path"),
+        )
+    }
+
     async fn make_table() -> HelperResult<(TempDir, TimeSeriesTable)> {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
@@ -1805,6 +1822,76 @@ mod tests {
                     ..
                 }
             } if path == segment_path
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_missing_segment_sidecar_preserves_storage_source_and_backtrace() -> TestResult
+    {
+        let (tmp, mut table) = table_with_sparse_coverage().await?;
+        table.state_mut().table_coverage = None;
+        let (segment_path, coverage_path) = single_segment_and_coverage_paths(&table);
+        tokio::fs::remove_file(tmp.path().join(&coverage_path)).await?;
+
+        let error = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
+            .await
+            .expect_err("missing segment sidecar must fail recovery");
+        let query = coverage_query_source(&error);
+        assert!(matches!(
+            query,
+            CoverageQueryError::SegmentCoverageSidecarRead {
+                segment_path: actual_segment_path,
+                coverage_path: actual_coverage_path,
+                ..
+            } if actual_segment_path == &segment_path && actual_coverage_path == &coverage_path
+        ));
+        let sidecar = coverage_sidecar_source(query);
+        let storage = sidecar
+            .source()
+            .and_then(|source| source.downcast_ref::<StorageError>())
+            .expect("storage source");
+        assert!(matches!(storage, StorageError::NotFound { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(storage).expect("storage backtrace"),
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_corrupt_segment_sidecar_preserves_codec_source_and_backtrace() -> TestResult {
+        let (tmp, mut table) = table_with_sparse_coverage().await?;
+        table.state_mut().table_coverage = None;
+        let (segment_path, coverage_path) = single_segment_and_coverage_paths(&table);
+        tokio::fs::write(tmp.path().join(&coverage_path), b"not a coverage bitmap").await?;
+
+        let error = table
+            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
+            .await
+            .expect_err("corrupt segment sidecar must fail recovery");
+        let query = coverage_query_source(&error);
+        assert!(matches!(
+            query,
+            CoverageQueryError::SegmentCoverageSidecarRead {
+                segment_path: actual_segment_path,
+                coverage_path: actual_coverage_path,
+                ..
+            } if actual_segment_path == &segment_path && actual_coverage_path == &coverage_path
+        ));
+        let sidecar = coverage_sidecar_source(query);
+        let codec = sidecar
+            .source()
+            .and_then(|source| source.downcast_ref::<CoverageCodecError>())
+            .expect("codec source");
+        assert!(matches!(
+            codec,
+            CoverageCodecError::BitmapDeserialization { .. }
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(codec).expect("codec backtrace"),
         ));
         Ok(())
     }

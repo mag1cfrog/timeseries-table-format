@@ -298,6 +298,15 @@ mod tests {
                         }),
                     },
                 },
+                TableError::CoverageQuery {
+                    source: CoverageQueryError::SegmentCoverageSidecarRead {
+                        segment_path: "data/segment.parquet".to_string(),
+                        coverage_path: "_coverage/segments/missing.roar".to_string(),
+                        source: Box::new(CoverageSidecarError::Storage {
+                            source: invalid_location_error(),
+                        }),
+                    },
+                },
             ];
 
             for error in errors {
