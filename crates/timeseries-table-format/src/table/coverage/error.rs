@@ -112,31 +112,31 @@ pub enum CoverageQueryError {
     },
 
     /// Reading a table coverage snapshot sidecar failed.
-    #[snafu(display("Failed to read table coverage sidecar {path}: {source}"))]
-    CoverageSidecar {
+    #[snafu(display("Failed to read table coverage sidecar {coverage_path}: {source}"))]
+    CoverageSnapshotRead {
         /// Table-relative sidecar path.
-        path: String,
+        coverage_path: String,
         /// Complete sidecar error, including storage or codec detail.
         #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
         source: Box<CoverageSidecarError>,
     },
 
     /// An existing segment has no coverage sidecar path.
-    #[snafu(display("Existing segment {path} is missing coverage_path"))]
-    ExistingSegmentMissingCoverage {
+    #[snafu(display("Existing segment {segment_path} is missing coverage_path"))]
+    ExistingSegmentMissingCoverageMetadata {
         /// Canonical segment path missing a coverage path.
-        path: String,
+        segment_path: String,
         /// Backtrace captured at the coverage query boundary.
         backtrace: Box<Backtrace>,
     },
 
     /// Reading a segment sidecar failed during read-only recovery.
     #[snafu(display(
-        "Failed to recover table coverage from segment {path} sidecar {coverage_path}: {source}"
+        "Failed to recover table coverage from segment {segment_path} sidecar {coverage_path}: {source}"
     ))]
     SegmentCoverageSidecarRead {
         /// Canonical segment path.
-        path: String,
+        segment_path: String,
         /// Table-relative sidecar path.
         coverage_path: String,
         /// Complete sidecar error, including storage or codec detail.

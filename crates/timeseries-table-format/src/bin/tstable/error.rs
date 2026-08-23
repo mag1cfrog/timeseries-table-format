@@ -112,8 +112,8 @@ mod tests {
         let error = CliError::DataFusion {
             source: datafusion::error::DataFusionError::External(Box::new(
                 TableError::CoverageQuery {
-                    source: CoverageQueryError::CoverageSidecar {
-                        path: "_coverage/table/missing.roar".to_string(),
+                    source: CoverageQueryError::CoverageSnapshotRead {
+                        coverage_path: "_coverage/table/missing.roar".to_string(),
                         source: Box::new(CoverageSidecarError::Storage { source: storage }),
                     },
                 },
@@ -131,7 +131,10 @@ mod tests {
         assert!(matches!(
             table.source()
                 .and_then(|source| source.downcast_ref::<CoverageQueryError>()),
-            Some(CoverageQueryError::CoverageSidecar { path, .. })
+            Some(CoverageQueryError::CoverageSnapshotRead {
+                coverage_path: path,
+                ..
+            })
                 if path == "_coverage/table/missing.roar"
         ));
     }

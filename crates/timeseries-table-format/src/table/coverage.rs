@@ -291,6 +291,7 @@ impl TimeSeriesTable {
             .await
             .context(super::error::CoverageQuerySnafu)
     }
+
     /// Load table coverage for read paths (no writes).
     ///
     /// - If snapshot pointer is absent:
@@ -387,7 +388,6 @@ impl TimeSeriesTable {
             }
         }
     }
-
 }
 
 // Coverage query APIs for TimeSeriesTable.
@@ -787,7 +787,10 @@ mod tests {
         let query = coverage_query_source(&error);
         assert!(matches!(
             query,
-            CoverageQueryError::CoverageSidecar { path, .. } if path == coverage_path
+            CoverageQueryError::CoverageSnapshotRead {
+                coverage_path: path,
+                ..
+            } if path == coverage_path
         ));
         let sidecar = coverage_sidecar_source(query);
         let storage = sidecar
@@ -1024,8 +1027,8 @@ mod tests {
             .expect_err("segment identity type must match the table schema");
         assert!(matches!(
             recovery_error,
-            TableError::SegmentCoverageSidecarRead {
-                path,
+            CoverageQueryError::SegmentCoverageSidecarRead {
+                segment_path: path,
                 coverage_path,
                 source,
             } if path == committed_segment_path
@@ -1797,7 +1800,10 @@ mod tests {
         assert!(matches!(
             err,
             TableError::CoverageQuery {
-                source: CoverageQueryError::ExistingSegmentMissingCoverage { path, .. }
+                source: CoverageQueryError::ExistingSegmentMissingCoverageMetadata {
+                    segment_path: path,
+                    ..
+                }
             } if path == segment_path
         ));
         Ok(())
@@ -2024,7 +2030,10 @@ mod tests {
         assert!(matches!(
             err,
             TableError::CoverageQuery {
-                source: CoverageQueryError::ExistingSegmentMissingCoverage { path, .. }
+                source: CoverageQueryError::ExistingSegmentMissingCoverageMetadata {
+                    segment_path: path,
+                    ..
+                }
             } if path == segment_path
         ));
         Ok(())

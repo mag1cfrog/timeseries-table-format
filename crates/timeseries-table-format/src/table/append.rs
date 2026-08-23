@@ -3881,7 +3881,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { .. }
+            AppendError::ExistingSegmentMissingCoverageMetadata { .. }
         ));
         Ok(())
     }
@@ -3946,12 +3946,12 @@ mod tests {
             .expect_err("corrupt sidecar should error");
 
         match err {
-            TableError::SegmentCoverageSidecarRead {
-                path,
+            AppendError::ExistingSegmentCoverageSidecarRead {
+                segment_path,
                 coverage_path,
                 ..
             } => {
-                assert_eq!(path, corrupt_segment_path);
+                assert_eq!(segment_path, corrupt_segment_path);
                 assert_eq!(coverage_path, corrupt_cov_path);
             }
             other => panic!("unexpected error: {other:?}"),

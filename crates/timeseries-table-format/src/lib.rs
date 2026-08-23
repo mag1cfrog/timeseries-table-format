@@ -58,7 +58,7 @@ pub use metadata::table_metadata::{
 };
 pub use storage::TableLocation;
 pub use table::{
-    AppendError, OptimizeReport, TableError, TimeSeriesTable,
+    AppendError, CoverageQueryError, OptimizeReport, ScanError, TableError, TimeSeriesTable,
     append::{AppendRequest, IntoRecordBatchReader},
 };
 

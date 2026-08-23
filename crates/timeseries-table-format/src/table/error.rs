@@ -26,6 +26,8 @@ use crate::{
     transaction_log::{CommitError, TableKind, segments::SegmentError},
 };
 
+use super::{coverage::CoverageQueryError, scan::ScanError};
+
 /// Errors owned by an append operation.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -261,8 +263,6 @@ pub enum AppendError {
     },
 }
 
-use super::{coverage::CoverageQueryError, scan::ScanError};
-
 /// Errors from high-level time-series table operations.
 ///
 /// Each variant carries enough context for callers to surface actionable
@@ -381,13 +381,6 @@ pub enum TableError {
         source: IndexSpecError,
     },
 
-    /// An ordered value could not be mapped to its index interval ID.
-    #[snafu(display("Index interval mapping failed: {source}"))]
-    IndexIntervalMapping {
-        /// Domain, range, or index granularity failure.
-        source: IndexIntervalMappingError,
-    },
-
     /// Segment bounds cannot be ordered in one native index domain.
     #[snafu(display("Invalid segment ordered-index bounds: {source}"))]
     InvalidSegmentBounds {
@@ -417,60 +410,6 @@ pub enum TableError {
         source: StorageError,
     },
 
-    /// Ordered-index range validation failed.
-    #[snafu(display("Ordered-index range validation failed: {source}"))]
-    InvalidRange {
-        /// Domain, kind, or bound-order failure.
-        source: IndexValueError,
-    },
-
-    /// An identity-free coverage query was used on an entity-aware table.
-    #[snafu(display(
-        "Entity identity is required for coverage queries; configured entity columns: {entity_columns:?}"
-    ))]
-    EntityIdentityRequired {
-        /// Entity columns that require values from the caller.
-        entity_columns: Vec<String>,
-    },
-
-    /// An entity-aware coverage query was used on a table with global coverage.
-    #[snafu(display("Table has no configured entity columns"))]
-    EntityIdentityNotConfigured,
-
-    /// A required entity column has no caller-provided value.
-    #[snafu(display("Missing entity identity component for column {column}"))]
-    MissingEntityIdentityColumn {
-        /// Configured entity column missing from the caller input.
-        column: String,
-    },
-
-    /// Caller input repeats one entity column.
-    #[snafu(display("Duplicate entity identity component for column {column}"))]
-    DuplicateEntityIdentityColumn {
-        /// Repeated entity column name.
-        column: String,
-    },
-
-    /// Caller input contains a column that is not part of the entity identity.
-    #[snafu(display("Unexpected entity identity component for column {column}"))]
-    UnexpectedEntityIdentityColumn {
-        /// Unknown entity column name.
-        column: String,
-    },
-
-    /// Table coverage pointer uses a different ordered-index descriptor.
-    #[snafu(display(
-        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    TableCoverageIndexKindMismatch {
-        /// Index descriptor defined by table metadata.
-        expected: IndexKind,
-        /// Index descriptor recorded in the table coverage pointer.
-        actual: IndexKind,
-        /// Log version where the mismatching coverage pointer was recorded.
-        pointer_version: u64,
-    },
-
     /// Coverage sidecar read/write or computation error.
     #[snafu(display("Coverage sidecar error: {source}"))]
     CoverageSidecar {
@@ -478,35 +417,6 @@ pub enum TableError {
         #[snafu(source, backtrace)]
         source: CoverageSidecarError,
     },
-
-    /// Existing segment lacks a coverage_path when coverage is required.
-    #[snafu(display(
-        "Cannot append because existing segment {path} is missing coverage_path (required for coverage tracking)"
-    ))]
-    ExistingSegmentMissingCoverage {
-        /// Canonical segment path missing a coverage_path entry.
-        path: String,
-    },
-
-    /// Reading the per-segment coverage sidecar failed while rebuilding coverage.
-    #[snafu(display(
-        "Cannot recover table coverage: failed to read segment coverage sidecar for {path} at {coverage_path}: {source}"
-    ))]
-    SegmentCoverageSidecarRead {
-        /// Canonical path of the segment whose coverage sidecar could not be read.
-        path: String,
-        /// Path to the coverage sidecar file that failed to read.
-        coverage_path: String,
-        /// Underlying coverage sidecar error (boxed to keep the variant size small).
-        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
-        source: Box<CoverageSidecarError>,
-    },
-
-    /// Table state is missing a coverage snapshot pointer when required.
-    #[snafu(display(
-        "Cannot append because table has segments but no table coverage snapshot pointer in state"
-    ))]
-    MissingTableCoveragePointer,
 }
 
 #[cfg(test)]

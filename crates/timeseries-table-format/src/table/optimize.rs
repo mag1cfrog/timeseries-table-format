@@ -471,6 +471,7 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table::AppendError;
     use std::{
         collections::{BTreeSet, HashMap},
         path::{Path, PathBuf},

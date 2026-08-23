@@ -213,7 +213,7 @@ enum ScanBounds {
     UInt64(u64, u64),
 }
 
-fn to_bounds_i64(
+fn timestamp_bounds_for_field(
     field: &Field,
     path: &str,
     column: &str,
@@ -305,7 +305,8 @@ where
     let index_field = schema.field(index_idx).clone();
     let bounds = match (&start, &end, index_field.data_type()) {
         (IndexValue::Timestamp(start), IndexValue::Timestamp(end), DataType::Timestamp(_, _)) => {
-            let (start, end) = to_bounds_i64(&index_field, &path, index_column, *start, *end)?;
+            let (start, end) =
+                timestamp_bounds_for_field(&index_field, &path, index_column, *start, *end)?;
             ScanBounds::Timestamp(start, end)
         }
         (IndexValue::Int64(start), IndexValue::Int64(end), DataType::Int64) => {
@@ -1284,7 +1285,8 @@ mod tests {
         for (unit, start, end, expected) in cases {
             let field = Field::new("ts", DataType::Timestamp(unit, None), false);
             assert_eq!(
-                to_bounds_i64(&field, "data/segment.parquet", "ts", start, end).unwrap(),
+                timestamp_bounds_for_field(&field, "data/segment.parquet", "ts", start, end)
+                    .unwrap(),
                 expected
             );
         }
