@@ -1,9 +1,14 @@
 //! In-memory coverage and gap analysis over the 64-bit index interval ID domain.
 
 pub mod index_interval;
-pub mod io;
-pub mod layout;
-pub mod serde;
+pub(crate) mod io;
+pub(crate) mod layout;
+pub(crate) mod serde;
+
+pub use crate::formats::parquet::SegmentCoverageError;
+pub use io::CoverageSidecarError;
+pub use layout::CoverageLayoutError;
+pub use serde::CoverageCodecError;
 
 use std::{
     collections::{BTreeMap, btree_map},
@@ -115,6 +120,7 @@ impl EntityIdentity {
 
 /// Invalid entity identity construction.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
+#[non_exhaustive]
 pub enum EntityIdentityError {
     /// An entity-aware table requires at least one identity component.
     #[snafu(display("entity identity must contain at least one component"))]

@@ -43,7 +43,7 @@
 pub mod coverage;
 #[cfg(feature = "datafusion")]
 pub mod datafusion;
-pub mod formats;
+pub(crate) mod formats;
 pub mod metadata;
 /// Convenience prelude with the stable, supported surface.
 pub mod prelude;

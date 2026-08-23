@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -38,7 +38,7 @@ use timeseries_table_format::metadata::logical_schema::{
 };
 use timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError;
 use timeseries_table_format::metadata::segments::SegmentEntityLayout;
-use timeseries_table_format::storage::{TableLocation, layout};
+use timeseries_table_format::storage::TableLocation;
 use timeseries_table_format::table::{AppendError, TableError, TimeSeriesTable};
 use timeseries_table_format::transaction_log::{
     IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
@@ -46,6 +46,13 @@ use timeseries_table_format::transaction_log::{
 use timeseries_table_format::{AppendRequest, IntoRecordBatchReader};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+const SEGMENT_COVERAGE_DIR: &str = "_coverage/segments";
+const TABLE_SNAPSHOT_DIR: &str = "_coverage/table";
+
+fn transaction_log_commit_path(version: u64) -> PathBuf {
+    PathBuf::from(format!("_timeseries_log/{version:010}.json"))
+}
 
 async fn append_with_single_row_groups<S, SourceKind>(
     table: &mut TimeSeriesTable,
@@ -127,7 +134,7 @@ async fn append_fixture_preserving_parquet_layout(
     let (version, committed_path) = append_parquet_fixture(table, root, relative_path).await?;
     let committed_file = root.join(&committed_path);
     std::fs::copy(root.join(relative_path), &committed_file)?;
-    let commit_path = root.join(layout::commit_rel_path(version));
+    let commit_path = root.join(transaction_log_commit_path(version));
     let mut commit: serde_json::Value = serde_json::from_slice(&std::fs::read(&commit_path)?)?;
     let segment = commit["actions"]
         .as_array_mut()
@@ -457,7 +464,7 @@ fn write_segment(
 }
 
 async fn remove_committed_file_size(root: &Path, version: u64) -> TestResult {
-    let commit_path = root.join(layout::commit_rel_path(version));
+    let commit_path = root.join(transaction_log_commit_path(version));
     let mut commit: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
     let segment = commit["actions"]
@@ -1451,7 +1458,7 @@ async fn append_rejects_hostile_arrow_types_without_artifacts() -> TestResult {
         assert!(table.state().segments.is_empty(), "{case}");
         assert!(!tmp.path().join("data").exists(), "{case}");
         assert!(
-            !tmp.path().join(layout::commit_rel_path(2)).exists(),
+            !tmp.path().join(transaction_log_commit_path(2)).exists(),
             "{case}"
         );
 
@@ -1504,10 +1511,10 @@ async fn append_rejects_adversarial_source_boundaries_without_artifacts() -> Tes
         assert!(table.state().segments.is_empty(), "{case}");
         assert!(!tmp.path().join("data").exists(), "{case}");
         assert!(
-            !tmp.path().join(layout::commit_rel_path(2)).exists(),
+            !tmp.path().join(transaction_log_commit_path(2)).exists(),
             "{case}"
         );
-        for directory in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+        for directory in [SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR] {
             assert!(!tmp.path().join(directory).exists(), "{case}: {directory}");
         }
 

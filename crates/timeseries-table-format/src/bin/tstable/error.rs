@@ -99,7 +99,7 @@ mod tests {
     use std::error::Error as _;
 
     use timeseries_table_format::{
-        coverage::io::CoverageSidecarError,
+        coverage::CoverageSidecarError,
         storage::StorageLocation,
         table::{CoverageQueryError, TableError},
     };

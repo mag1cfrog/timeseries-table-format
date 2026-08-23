@@ -24,6 +24,7 @@ use crate::{
 /// Errors owned by an entity-layout optimization operation.
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum OptimizeError {
     /// Entity-layout optimization requires at least one entity column.
     #[snafu(display(
@@ -77,6 +78,18 @@ pub enum OptimizeError {
         /// Complete coverage sidecar failure.
         #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
         source: Box<CoverageSidecarError>,
+    },
+
+    /// A staged replacement path failed table-relative storage validation.
+    #[snafu(display("Invalid {description} path {path:?}: {source}"))]
+    InvalidStagedPath {
+        /// Role of the rejected path in the staged replacement.
+        description: &'static str,
+        /// Rejected table-relative path.
+        path: String,
+        /// Complete storage path validation failure.
+        #[snafu(source(from(StorageError, Box::new)), backtrace)]
+        source: Box<StorageError>,
     },
 
     /// A staged optimization plan violated an atomic publication invariant.
@@ -203,9 +216,14 @@ fn invalid_plan(reason: impl Into<String>) -> OptimizeError {
     }
 }
 
-fn ensure_canonical(path: &str, description: &str) -> Result<(), OptimizeError> {
-    let (canonical, _) = normalize_relative_storage_path(Path::new(path))
-        .map_err(|error| invalid_plan(format!("invalid {description} path {path:?}: {error}")))?;
+fn ensure_canonical(path: &str, description: &'static str) -> Result<(), OptimizeError> {
+    let (canonical, _) = normalize_relative_storage_path(Path::new(path)).map_err(|source| {
+        OptimizeError::InvalidStagedPath {
+            description,
+            path: path.to_string(),
+            source: Box::new(source),
+        }
+    })?;
     if canonical != path {
         return Err(invalid_plan(format!(
             "{description} path {path:?} is not canonical; expected {canonical:?}"
@@ -595,6 +613,8 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use crate::table::AppendError;
     use std::{
@@ -604,10 +624,15 @@ mod tests {
 
     use arrow::datatypes::TimeUnit;
     use futures::StreamExt;
+    use snafu::ErrorCompat;
     use tempfile::TempDir;
 
     use crate::{
-        coverage::{EntityIdentity, EntityValue, io::CoverageSidecarError},
+        coverage::{
+            EntityIdentity, EntityValue,
+            io::CoverageSidecarError,
+            layout::{SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR},
+        },
         formats::parquet::EntityRewriteError,
         metadata::{
             logical_schema::LogicalTimestampUnit,
@@ -675,7 +700,7 @@ mod tests {
 
     fn optimization_objects(root: &Path) -> std::io::Result<BTreeSet<PathBuf>> {
         let mut files = BTreeSet::new();
-        for relative in ["data/_staged", layout::SEGMENT_COVERAGE_DIR] {
+        for relative in ["data/_staged", SEGMENT_COVERAGE_DIR] {
             files.extend(files_below(&root.join(relative))?);
         }
         Ok(files)
@@ -785,6 +810,23 @@ mod tests {
             paths(&forward),
             ["data/a.parquet", "data/b.parquet", "data/later.parquet"]
         );
+    }
+
+    #[test]
+    fn invalid_staged_path_preserves_storage_source_and_backtrace() {
+        let error = ensure_canonical("../outside.parquet", "replacement data")
+            .expect_err("parent traversal must fail");
+        let storage = error
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<StorageError>>())
+            .map(Box::as_ref)
+            .expect("storage source");
+
+        assert!(matches!(error, OptimizeError::InvalidStagedPath { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("optimization backtrace"),
+            ErrorCompat::backtrace(storage).expect("storage backtrace")
+        ));
     }
 
     #[tokio::test]
@@ -1326,7 +1368,7 @@ mod tests {
         .await?;
         let paths = [
             "data/_staged/entity-rewrite/first.parquet".to_string(),
-            format!("{}/second.roar", layout::SEGMENT_COVERAGE_DIR),
+            format!("{SEGMENT_COVERAGE_DIR}/second.roar"),
         ];
         for path in &paths {
             let absolute = temp.path().join(path);
@@ -1384,7 +1426,7 @@ mod tests {
         let coverage_bytes = std::fs::read(temp.path().join(&coverage_pointer.coverage_path))
             .expect("table coverage bytes");
         let snapshot_files =
-            files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files");
+            files_below(&temp.path().join(TABLE_SNAPSHOT_DIR)).expect("snapshot files");
         let table_meta = table.state().table_meta.clone();
         let starting_version = table.state().version;
 
@@ -1420,7 +1462,7 @@ mod tests {
             coverage_bytes
         );
         assert_eq!(
-            files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files"),
+            files_below(&temp.path().join(TABLE_SNAPSHOT_DIR)).expect("snapshot files"),
             snapshot_files
         );
         for source in &sources {

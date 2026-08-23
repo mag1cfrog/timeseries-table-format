@@ -375,6 +375,7 @@ impl LogicalSchema {
 
 /// Errors that can occur while constructing or validating a logical schema.
 #[derive(Debug, Clone, Snafu, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LogicalSchemaValidationError {
     /// Duplicate column names are not allowed.
     #[snafu(display("Duplicate column name: {column}"))]
@@ -560,6 +561,7 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaV
 
 /// Errors encountered while converting a logical schema to Arrow.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum LogicalToArrowSchemaError {
     /// FixedBinary fields must declare a positive byte width.
     #[snafu(display(
@@ -623,6 +625,7 @@ pub enum LogicalToArrowSchemaError {
 
 /// Errors converting an Arrow schema into the table logical schema model.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum ArrowToLogicalSchemaError {
     /// An Arrow type cannot be represented exactly by the logical schema model.
     #[snafu(display(

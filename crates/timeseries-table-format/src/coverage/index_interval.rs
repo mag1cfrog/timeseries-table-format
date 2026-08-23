@@ -19,6 +19,7 @@ const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 /// Errors produced while mapping ordered values to index interval IDs.
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndexIntervalMappingError {
     /// The value or range does not match the registered index domain.
     #[snafu(display("Invalid ordered index value: {source}"))]

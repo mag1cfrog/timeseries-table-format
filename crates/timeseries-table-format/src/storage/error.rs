@@ -4,6 +4,7 @@ use snafu::{Backtrace, prelude::*};
 
 /// Errors returned by a concrete storage backend.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum StorageBackendError {
     /// Local filesystem operation failed.
     #[snafu(display("Filesystem error: {source}"))]
@@ -22,6 +23,7 @@ impl From<io::Error> for StorageBackendError {
 /// Errors that can occur during storage operations.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum StorageError {
     /// The specified path was not found.
     #[snafu(display("Path not found: {path}"))]

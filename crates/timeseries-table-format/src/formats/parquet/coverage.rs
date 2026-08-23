@@ -59,6 +59,7 @@ use super::{INSPECTION_BATCH_SIZE, resolve_rg_settings};
 /// Errors at any stage are captured here with context about the segment path,
 /// column name, and raw values involved.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum SegmentCoverageError {
     /// Storage layer failed to read the segment file at the given path.
     ///
@@ -84,6 +85,17 @@ pub enum SegmentCoverageError {
         #[snafu(source)]
         source: ParquetError,
         /// The backtrace at the time the error occurred.
+        backtrace: Backtrace,
+    },
+
+    /// A parallel row-group scan task failed before returning its typed result.
+    #[snafu(display("Row-group scan task failed for segment at {path}: {source}"))]
+    RowGroupTask {
+        /// Segment path being scanned.
+        path: String,
+        /// Tokio task failure, including panic or cancellation details.
+        source: tokio::task::JoinError,
+        /// Backtrace captured while joining the row-group task.
         backtrace: Backtrace,
     },
 
@@ -456,9 +468,9 @@ pub async fn compute_segment_coverage(
 
     let mut merged = RoaringTreemap::new();
     while let Some(result) = tasks.join_next().await {
-        let bitmap = result.map_err(|source| SegmentCoverageError::ParquetRead {
+        let bitmap = result.map_err(|source| SegmentCoverageError::RowGroupTask {
             path: path.clone(),
-            source: ParquetError::General(format!("row-group scan task failed: {source}")),
+            source,
             backtrace: Backtrace::capture(),
         })??;
         if !merged.is_disjoint(&bitmap)

@@ -9,15 +9,15 @@ use crate::exceptions::{
 };
 use timeseries_table_format::{
     coverage::{
-        EntityIdentity, EntityValue, index_interval::IndexInterval, io::CoverageSidecarError,
+        CoverageSidecarError, EntityIdentity, EntityValue, SegmentCoverageError,
+        index_interval::IndexInterval,
     },
-    formats::parquet::{EntityRewriteError, SegmentCoverageError},
     storage::StorageError as CoreStorageError,
     table::{
-        AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
-        ScanError, TableError, TableStateAccessError,
+        AppendError, CoverageQueryError, CreateTableError, EntityRewriteError, OpenTableError,
+        OptimizeError, ScanError, TableError, TableStateAccessError,
     },
-    transaction_log::{CommitError, segments::SegmentError},
+    transaction_log::{CommitError, SegmentError},
 };
 
 #[allow(dead_code)]
@@ -37,6 +37,7 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyEr
         CoreStorageError::AlreadyExists { path, .. } => Some(path.clone()),
         CoreStorageError::OtherIo { path, .. } => Some(path.clone()),
         CoreStorageError::CleanupFailed { path, .. } => Some(path.clone()),
+        _ => None,
     };
 
     let py_err = StorageError::new_err(msg);
@@ -74,9 +75,7 @@ fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
 
         CommitError::Storage { source } => storage_error_to_py(py, source),
 
-        CommitError::AmbiguousOutcome { .. }
-        | CommitError::UnsupportedFormatVersion { .. }
-        | CommitError::CorruptState { .. } => TimeseriesTableError::new_err(msg),
+        _ => TimeseriesTableError::new_err(msg),
     }
 }
 
@@ -296,10 +295,10 @@ pub(crate) fn table_error_to_py(
         TableError::Open { source } => open_error_to_py(py, source, msg),
         TableError::StateAccess { source } => state_access_error_to_py(py, source, msg),
         TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
-        TableError::Scan { source } => match source {
-            ScanError::Storage { source, .. } => storage_error_to_py(py, *source),
-            _ => TimeseriesTableError::new_err(msg),
-        },
+        TableError::Scan {
+            source: ScanError::Storage { source, .. },
+        } => storage_error_to_py(py, *source),
+        TableError::Scan { .. } => TimeseriesTableError::new_err(msg),
         TableError::CoverageQuery { source } => match source {
             CoverageQueryError::CoverageSnapshotRead { source, .. }
             | CoverageQueryError::SegmentCoverageSidecarRead { source, .. } => {
@@ -309,6 +308,7 @@ pub(crate) fn table_error_to_py(
             _ => TimeseriesTableError::new_err(msg),
         },
         TableError::Optimize { source } => optimize_error_to_py(py, source, msg),
+        _ => TimeseriesTableError::new_err(msg),
     }
 }
 
@@ -356,6 +356,27 @@ mod tests {
             assert!(table_error_to_py(py, schema, &[]).is_instance_of::<SchemaMismatchError>(py));
         });
         assert!(attached.is_some());
+    }
+
+    #[test]
+    fn unclassified_commit_errors_use_the_generic_python_exception() {
+        init_python();
+
+        Python::attach(|py| {
+            let error = TableError::from(TableStateAccessError::Commit {
+                source: CommitError::UnsupportedFormatVersion {
+                    expected: 1,
+                    found: 2,
+                },
+            });
+            let python_error = table_error_to_py(py, error, &[]);
+
+            assert!(
+                python_error
+                    .get_type(py)
+                    .is(py.get_type::<TimeseriesTableError>())
+            );
+        });
     }
 
     #[test]

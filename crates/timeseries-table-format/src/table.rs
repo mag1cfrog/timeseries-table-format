@@ -3,14 +3,14 @@
 //! This module is the canonical home for the user-facing [`TimeSeriesTable`]
 //! API.
 
-pub mod error;
+mod error;
 mod operations;
 
+pub use operations::append;
 pub use operations::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
     OptimizeReport, ScanError, TableStateAccessError,
 };
-pub use operations::{append, coverage, scan};
 
 #[cfg(test)]
 pub(crate) mod test_util;
@@ -28,6 +28,7 @@ use crate::{
     transaction_log::{IndexSpec, TableState, TransactionLogStore},
 };
 
+pub use crate::formats::parquet::EntityRewriteError;
 pub use error::TableError;
 
 /// Stream of Arrow RecordBatch values from a time-series scan.

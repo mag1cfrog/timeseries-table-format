@@ -349,11 +349,9 @@ async fn scan_index_row_groups(
     let mut bounds = None;
     let mut scanned_rows: u64 = 0;
     while let Some(result) = tasks.join_next().await {
-        let (task_bounds, rows) = result.map_err(|source| SegmentMetaError::ParquetRead {
+        let (task_bounds, rows) = result.map_err(|source| SegmentMetaError::RowGroupTask {
             path: path.to_string(),
-            source: parquet::errors::ParquetError::General(format!(
-                "row-group scan task failed: {source}"
-            )),
+            source,
             backtrace: Backtrace::capture(),
         })??;
         if let Some(task_bounds) = task_bounds {

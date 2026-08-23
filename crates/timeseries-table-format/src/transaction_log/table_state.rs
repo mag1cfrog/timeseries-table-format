@@ -41,20 +41,21 @@ fn validate_persisted_storage_path(path: &str, description: &str) -> Result<(), 
     let (canonical, _) = match normalize_relative_storage_path(Path::new(path)) {
         Ok(path) => path,
         Err(source) => {
-            return CorruptStateSnafu {
-                msg: format!("Invalid persisted {description} {path:?}: {source}"),
-            }
-            .fail();
+            return Err(CommitError::InvalidPersistedPath {
+                description: description.to_string(),
+                path: path.to_string(),
+                source: Box::new(source),
+            });
         }
     };
 
     if canonical != path {
-        return CorruptStateSnafu {
-            msg: format!(
-                "Non-canonical persisted {description} {path:?}; canonical form is {canonical:?}"
-            ),
-        }
-        .fail();
+        return Err(CommitError::NonCanonicalPersistedPath {
+            description: description.to_string(),
+            path: path.to_string(),
+            canonical,
+            backtrace: Box::new(snafu::Backtrace::capture()),
+        });
     }
 
     Ok(())
@@ -108,7 +109,8 @@ impl TransactionLogStore {
     /// Rebuild the current TableState by replaying all commits up to CURRENT.
     ///
     /// v0.1 behavior:
-    /// - If CURRENT == 0 (no commits), this returns CommitError::CorruptState.
+    /// - If CURRENT == 0 (no commits), this returns
+    ///   [`CommitError::UninitializedTableState`].
     /// - The first commit must include at least one UpdateTableMeta action
     ///   to bootstrap TableMeta; the last UpdateTableMeta wins.
     pub async fn rebuild_table_state(&self) -> Result<TableState, CommitError> {
@@ -118,11 +120,9 @@ impl TransactionLogStore {
         let current_version = self.load_current_version().await?;
 
         if current_version == 0 {
-            // v0.1: treat "no commits" as an uninitialized / corrupt table.
-            return CorruptStateSnafu {
-                msg: "Cannot rebuild TableState: CURRENT is 0 (no commits)".to_string(),
-            }
-            .fail();
+            return Err(CommitError::UninitializedTableState {
+                backtrace: snafu::Backtrace::capture(),
+            });
         }
 
         let mut table_meta: Option<TableMeta> = None;
@@ -137,13 +137,11 @@ impl TransactionLogStore {
 
             // Defensive: file name version should match payload
             if commit.version != v {
-                return CorruptStateSnafu {
-                    msg: format!(
-                        "Commit version mismatch: expected {v}, found {} in payload",
-                        commit.version
-                    ),
-                }
-                .fail();
+                return Err(CommitError::CommitVersionMismatch {
+                    expected: v,
+                    found: commit.version,
+                    backtrace: snafu::Backtrace::capture(),
+                });
             }
 
             for action in commit.actions {
@@ -157,10 +155,10 @@ impl TransactionLogStore {
                             )?;
                         }
                         if segments.contains_key(&meta.path) {
-                            return CorruptStateSnafu {
-                                msg: format!("Duplicate live segment path: {}", meta.path),
-                            }
-                            .fail();
+                            return Err(CommitError::DuplicateLiveSegmentPath {
+                                path: meta.path,
+                                backtrace: snafu::Backtrace::capture(),
+                            });
                         }
                         persisted_segment_layouts
                             .push((meta.path.clone(), meta.entity_layout.clone()));
@@ -189,42 +187,41 @@ impl TransactionLogStore {
             }
         }
 
-        let table_meta = table_meta.context(CorruptStateSnafu {
-            msg: format!("No TableMeta found in commits up to version {current_version}",),
+        let table_meta = table_meta.ok_or_else(|| CommitError::MissingTableMetadata {
+            current_version,
+            backtrace: snafu::Backtrace::capture(),
         })?;
 
         if let TableKind::TimeSeries(index) = &table_meta.kind {
             index
                 .validate()
-                .map_err(|source| CommitError::CorruptState {
-                    msg: format!("Invalid ordered index specification: {source}"),
+                .map_err(|source| CommitError::InvalidIndexSpec {
+                    source,
                     backtrace: snafu::Backtrace::capture(),
                 })?;
             if let Some(pointer) = &table_coverage
                 && pointer.index_kind != index.kind
             {
-                return CorruptStateSnafu {
-                    msg: format!(
-                        "Table coverage index kind does not match table index: expected {:?}, found {:?} in pointer from version {}",
-                        index.kind, pointer.index_kind, pointer.version
-                    ),
-                }
-                .fail();
+                return Err(CommitError::CoverageIndexKindMismatch {
+                    expected: index.kind.clone(),
+                    actual: pointer.index_kind.clone(),
+                    pointer_version: pointer.version,
+                    backtrace: Box::new(snafu::Backtrace::capture()),
+                });
             }
             let schema = table_meta.logical_schema.as_ref();
             if let Some(schema) = schema {
                 ensure_index_spec_matches_schema(schema, index).map_err(|source| {
-                    CommitError::CorruptState {
-                        msg: format!("Index specification does not match logical schema: {source}"),
+                    CommitError::TableSchemaCompatibility {
+                        source: Box::new(source),
                         backtrace: snafu::Backtrace::capture(),
                     }
                 })?;
             }
             if schema.is_none() && !persisted_segment_layouts.is_empty() {
-                return CorruptStateSnafu {
-                    msg: "Persisted segments require a logical schema".to_string(),
-                }
-                .fail();
+                return Err(CommitError::MissingLogicalSchemaForSegments {
+                    backtrace: snafu::Backtrace::capture(),
+                });
             }
             let entity_column_count = index.entity_columns.len();
             for (path, layout) in persisted_segment_layouts {
@@ -233,34 +230,32 @@ impl TransactionLogStore {
                     }
                     (SegmentEntityLayout::Single(identity), 1..) => {
                         let Some(schema) = schema else {
-                            return CorruptStateSnafu {
-                                msg: "Persisted segments require a logical schema".to_string(),
-                            }
-                            .fail();
+                            return Err(CommitError::MissingLogicalSchemaForSegments {
+                                backtrace: snafu::Backtrace::capture(),
+                            });
                         };
                         ensure_entity_identity_matches_schema(schema, index, identity).map_err(
-                            |source| CommitError::CorruptState {
-                                msg: format!(
-                                    "Invalid single-entity identity in segment at {path}: {source}"
-                                ),
+                            |source| CommitError::SegmentEntityIdentitySchema {
+                                path: path.clone(),
+                                source: Box::new(source),
                                 backtrace: snafu::Backtrace::capture(),
                             },
                         )?;
                     }
                     _ => {
-                        return CorruptStateSnafu {
-                            msg: format!(
-                                "Invalid entity layout in segment at {path}: table has {entity_column_count} entity columns, layout is {layout:?}"
-                            ),
-                        }
-                        .fail();
+                        return Err(CommitError::InvalidSegmentEntityLayout {
+                            path,
+                            entity_column_count,
+                            layout,
+                            backtrace: snafu::Backtrace::capture(),
+                        });
                     }
                 }
             }
             for segment in segments.values() {
                 segment.validate_bounds(&index.kind).map_err(|source| {
-                    CommitError::CorruptState {
-                        msg: source.to_string(),
+                    CommitError::SegmentMetadata {
+                        source: Box::new(source),
                         backtrace: snafu::Backtrace::capture(),
                     }
                 })?;
@@ -475,7 +470,7 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("expected error");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(matches!(err, CommitError::UninitializedTableState { .. }));
     }
 
     #[tokio::test]
@@ -491,7 +486,7 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("expected error");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(matches!(err, CommitError::MissingTableMetadata { .. }));
         Ok(())
     }
 
@@ -560,7 +555,7 @@ mod tests {
             .await?;
 
         let error = store.rebuild_table_state().await.unwrap_err();
-        assert!(matches!(error, CommitError::CorruptState { .. }));
+        assert!(matches!(error, CommitError::SegmentMetadata { .. }));
         assert!(error.to_string().contains("Invalid ordered-index bounds"));
         Ok(())
     }
@@ -612,7 +607,17 @@ mod tests {
                 .rebuild_table_state()
                 .await
                 .expect_err("inapplicable entity layout should be rejected");
-            assert!(matches!(error, CommitError::CorruptState { .. }));
+            if expected_message == "Invalid entity layout" {
+                assert!(matches!(
+                    error,
+                    CommitError::InvalidSegmentEntityLayout { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    CommitError::SegmentEntityIdentitySchema { .. }
+                ));
+            }
             assert!(error.to_string().contains(expected_message), "{error}");
         }
 
@@ -671,7 +676,10 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("persisted component type must match the logical schema");
-        assert!(matches!(error, CommitError::CorruptState { .. }));
+        assert!(matches!(
+            error,
+            CommitError::SegmentEntityIdentitySchema { .. }
+        ));
         assert!(
             error
                 .to_string()
@@ -703,7 +711,10 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("removed segment metadata should still be validated");
-        assert!(matches!(error, CommitError::CorruptState { .. }));
+        assert!(matches!(
+            error,
+            CommitError::InvalidSegmentEntityLayout { .. }
+        ));
         assert!(error.to_string().contains("Invalid entity layout"));
         Ok(())
     }
@@ -748,7 +759,7 @@ mod tests {
                 .rebuild_table_state()
                 .await
                 .expect_err("missing or malformed entity layout should be rejected");
-            assert!(matches!(error, CommitError::CorruptState { .. }));
+            assert!(matches!(error, CommitError::CommitDeserialization { .. }));
             assert!(error.to_string().contains(expected_message), "{error}");
         }
 
@@ -789,7 +800,11 @@ mod tests {
                     .rebuild_table_state()
                     .await
                     .expect_err("noncanonical segment action path should be rejected");
-                assert!(matches!(err, CommitError::CorruptState { .. }));
+                assert!(matches!(
+                    err,
+                    CommitError::InvalidPersistedPath { .. }
+                        | CommitError::NonCanonicalPersistedPath { .. }
+                ));
                 assert!(err.to_string().contains("segment path"), "{err}");
             }
         }
@@ -837,7 +852,11 @@ mod tests {
                     .rebuild_table_state()
                     .await
                     .expect_err("noncanonical coverage path should be rejected");
-                assert!(matches!(err, CommitError::CorruptState { .. }));
+                assert!(matches!(
+                    err,
+                    CommitError::InvalidPersistedPath { .. }
+                        | CommitError::NonCanonicalPersistedPath { .. }
+                ));
                 assert!(err.to_string().contains(description), "{err}");
             }
         }
@@ -867,7 +886,7 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("mismatched coverage index should be rejected during replay");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(matches!(err, CommitError::CoverageIndexKindMismatch { .. }));
         assert!(err.to_string().contains("Table coverage index kind"));
         Ok(())
     }
@@ -888,7 +907,7 @@ mod tests {
             .rebuild_table_state()
             .await
             .expect_err("expected error");
-        assert!(matches!(err, CommitError::CorruptState { .. }));
+        assert!(matches!(err, CommitError::CommitDeserialization { .. }));
         Ok(())
     }
 

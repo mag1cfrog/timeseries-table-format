@@ -59,6 +59,7 @@ pub struct TableMeta {
 
 /// Errors encountered while retrieving or converting a table's logical schema.
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum TableArrowSchemaError {
     /// The table metadata has not yet recorded a canonical logical schema.
     #[snafu(display("table has no canonical logical schema yet (logical_schema is None)"))]
@@ -145,6 +146,7 @@ pub type TableMetaDelta = TableMeta;
 
 /// Errors produced when parsing a human-friendly time index granularity (e.g. `1h`).
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseTimeIndexGranularityError {
     /// The spec string was empty or only whitespace.
     #[snafu(display("time index granularity is empty"))]
@@ -525,6 +527,7 @@ pub fn validate_index_range(
 
 /// Structural errors in an [`IndexSpec`].
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndexSpecError {
     /// The registered index column is empty.
     #[snafu(display("ordered index column is empty"))]
@@ -554,6 +557,7 @@ pub enum IndexSpecError {
 
 /// Domain and range errors for [`IndexValue`].
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndexValueError {
     /// Two values use different ordered domains.
     #[snafu(display("ordered index domain mismatch: left={left}, right={right}"))]

@@ -1,4 +1,9 @@
-//! Public error facade for high-level table operations.
+//! Top-level error facade for table operations.
+//!
+//! [`TableError`] adds only operation context. Each variant wraps the complete
+//! error owned by that operation and delegates its source and backtrace. Add
+//! detailed failures to the owning operation error rather than copying
+//! subsystem-specific variants into this facade.
 
 use snafu::prelude::*;
 
@@ -14,6 +19,7 @@ use super::operations::{
 /// conflicts on optimistic concurrency control).
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum TableError {
     /// A table creation operation failed.
     #[snafu(context(false), display("Table creation failed: {source}"))]
@@ -80,6 +86,7 @@ mod tests {
     use parquet::errors::ParquetError;
     use snafu::{Backtrace, ErrorCompat};
 
+    use crate::coverage::{CoverageCodecError, CoverageSidecarError};
     use crate::formats::parquet::EntityRewriteError;
     use crate::metadata::{
         schema_compat::SchemaCompatibilityError, table_metadata::IndexSpecError,
@@ -270,8 +277,8 @@ mod tests {
     #[test]
     fn state_access_facade_preserves_commit_source_and_backtrace() {
         let error = TableError::from(TableStateAccessError::Commit {
-            source: CommitError::CorruptState {
-                msg: "corrupt state".to_string(),
+            source: CommitError::MissingTableMetadata {
+                current_version: 7,
                 backtrace: Backtrace::capture(),
             },
         });
@@ -286,7 +293,7 @@ mod tests {
             .expect("commit source");
         let commit_backtrace = ErrorCompat::backtrace(commit).expect("commit backtrace");
 
-        assert!(matches!(commit, CommitError::CorruptState { .. }));
+        assert!(matches!(commit, CommitError::MissingTableMetadata { .. }));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(state_access).expect("state access backtrace"),
             commit_backtrace
@@ -294,6 +301,77 @@ mod tests {
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(&error).expect("table backtrace"),
             commit_backtrace
+        ));
+    }
+
+    #[test]
+    fn scan_facade_preserves_parquet_source_and_backtrace() {
+        let error = TableError::Scan {
+            source: ScanError::Parquet {
+                path: "data/segment.parquet".to_string(),
+                operation: "reading metadata",
+                source: Box::new(ParquetError::General("corrupt footer".to_string())),
+                backtrace: Box::new(Backtrace::capture()),
+            },
+        };
+
+        let scan = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ScanError>())
+            .expect("scan source");
+        let parquet = scan
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<ParquetError>>())
+            .map(Box::as_ref)
+            .expect("Parquet source");
+        let scan_backtrace = ErrorCompat::backtrace(scan).expect("scan backtrace");
+
+        assert!(matches!(parquet, ParquetError::General(message) if message == "corrupt footer"));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            scan_backtrace
+        ));
+    }
+
+    #[test]
+    fn coverage_facade_preserves_codec_source_and_backtrace() {
+        let error = TableError::CoverageQuery {
+            source: CoverageQueryError::CoverageSnapshotRead {
+                coverage_path: "coverage/table.coverage".to_string(),
+                source: Box::new(CoverageSidecarError::Codec {
+                    source: CoverageCodecError::InvalidEntityCoverageMagic {
+                        backtrace: Backtrace::capture(),
+                    },
+                }),
+            },
+        };
+
+        let coverage_query = error
+            .source()
+            .and_then(|source| source.downcast_ref::<CoverageQueryError>())
+            .expect("coverage query source");
+        let sidecar = coverage_query
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<CoverageSidecarError>>())
+            .map(Box::as_ref)
+            .expect("coverage sidecar source");
+        let codec = sidecar
+            .source()
+            .and_then(|source| source.downcast_ref::<CoverageCodecError>())
+            .expect("coverage codec source");
+        let codec_backtrace = ErrorCompat::backtrace(codec).expect("codec backtrace");
+
+        assert!(matches!(
+            codec,
+            CoverageCodecError::InvalidEntityCoverageMagic { .. }
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(coverage_query).expect("coverage query backtrace"),
+            codec_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            codec_backtrace
         ));
     }
 

@@ -14,15 +14,17 @@ use crate::coverage::EntityValue;
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::transaction_log::{SegmentEntityLayout, SegmentMeta};
 
+use super::df_external;
+
 pub(super) fn segment_pruning_statistics(
     schema: &SchemaRef,
     index: &IndexSpec,
     segments: &[&SegmentMeta],
 ) -> DFResult<PrunableStatistics> {
     let index_position = schema.index_of(&index.column).map_err(|source| {
-        DataFusionError::Plan(format!(
-            "ordered index column {} is missing from the Arrow schema: {source}",
-            index.column
+        DataFusionError::from(source).context(format!(
+            "ordered index column {} is missing from the Arrow schema",
+            index.column,
         ))
     })?;
     let index_type = schema.field(index_position).data_type();
@@ -32,8 +34,8 @@ pub(super) fn segment_pruning_statistics(
         .iter()
         .map(|column| {
             schema.index_of(column).map_err(|source| {
-                DataFusionError::Plan(format!(
-                    "entity column {column} is missing from the Arrow schema: {source}"
+                DataFusionError::from(source).context(format!(
+                    "entity column {column} is missing from the Arrow schema"
                 ))
             })
         })
@@ -43,8 +45,9 @@ pub(super) fn segment_pruning_statistics(
         .iter()
         .map(|segment| {
             segment.validate_bounds(&index.kind).map_err(|source| {
-                DataFusionError::Execution(format!(
-                    "cannot build segment pruning statistics: {source}"
+                df_external(source).context(format!(
+                    "cannot build pruning statistics for segment {}",
+                    segment.path
                 ))
             })?;
 
@@ -123,16 +126,10 @@ pub(super) fn prune_segments<'a>(
     let pruning_predicate = PruningPredicateBuilder::new()
         .with_file_schema(Arc::clone(schema))
         .try_build(Arc::clone(predicate))
-        .map_err(|source| {
-            DataFusionError::Execution(format!(
-                "cannot create segment metadata pruning predicate: {source}"
-            ))
-        })?;
-    let keep = pruning_predicate.prune(&statistics).map_err(|source| {
-        DataFusionError::Execution(format!(
-            "cannot evaluate segment metadata pruning predicate: {source}"
-        ))
-    })?;
+        .map_err(|source| source.context("cannot create segment metadata pruning predicate"))?;
+    let keep = pruning_predicate
+        .prune(&statistics)
+        .map_err(|source| source.context("cannot evaluate segment metadata pruning predicate"))?;
     if keep.len() != segments.len() {
         return Err(DataFusionError::Internal(format!(
             "segment pruning returned {} decisions for {} segments",
@@ -219,7 +216,7 @@ pub(super) fn timestamp_scalar(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
+    use std::{error::Error as _, num::NonZeroU64};
 
     use arrow::datatypes::{Field, Schema};
     use chrono::TimeZone;
@@ -229,6 +226,7 @@ mod tests {
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as PhysicalColumn, Literal};
 
     use crate::coverage::EntityIdentity;
+    use crate::metadata::segments::SegmentMetaError;
     use crate::metadata::table_metadata::TimeIndexGranularity;
     use crate::transaction_log::{FileFormat, SegmentEntityLayout};
 
@@ -835,6 +833,15 @@ mod tests {
                 .contains("data/wrong-domain.parquet")
         );
         assert!(segment_error.to_string().contains("expected int64"));
+        let external = segment_error
+            .source()
+            .and_then(|source| source.downcast_ref::<DataFusionError>())
+            .expect("contextual DataFusion source");
+        assert!(
+            external
+                .source()
+                .is_some_and(|source| source.is::<SegmentMetaError>())
+        );
 
         let reversed = segment(
             "data/reversed.parquet",

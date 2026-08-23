@@ -15,6 +15,7 @@ use crate::{
 /// Errors owned by a table creation operation.
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
+#[non_exhaustive]
 pub enum CreateTableError {
     /// The caller requested an unsupported table format version.
     #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
