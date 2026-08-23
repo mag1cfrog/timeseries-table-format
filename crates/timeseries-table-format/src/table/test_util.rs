@@ -68,6 +68,7 @@ pub(crate) struct TestRow {
 #[derive(Clone, Debug)]
 pub(crate) struct CapturedEvent {
     pub(crate) name: &'static str,
+    pub(crate) target: &'static str,
     pub(crate) level: tracing::Level,
     pub(crate) fields: BTreeMap<&'static str, String>,
 }
@@ -76,6 +77,7 @@ pub(crate) struct CapturedEvent {
 pub(crate) struct CapturedSpan {
     id: u64,
     pub(crate) name: &'static str,
+    pub(crate) target: &'static str,
     pub(crate) level: tracing::Level,
     pub(crate) fields: BTreeMap<&'static str, String>,
 }
@@ -194,6 +196,7 @@ impl<S: Subscriber> Layer<S> for TraceCapture {
             .push(CapturedSpan {
                 id: id.into_u64(),
                 name: attrs.metadata().name(),
+                target: attrs.metadata().target(),
                 level: *attrs.metadata().level(),
                 fields,
             });
@@ -221,6 +224,7 @@ impl<S: Subscriber> Layer<S> for TraceCapture {
             .events
             .push(CapturedEvent {
                 name: event.metadata().name(),
+                target: event.metadata().target(),
                 level: *event.metadata().level(),
                 fields,
             });

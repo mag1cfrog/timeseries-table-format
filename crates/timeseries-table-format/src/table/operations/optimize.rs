@@ -395,6 +395,7 @@ impl TimeSeriesTable {
     /// validation fails, the commit cannot be confirmed, or rollback fails.
     #[tracing::instrument(
         name = "table.optimize",
+        target = "timeseries_table_format::table::optimize",
         level = "debug",
         skip_all,
         fields(
@@ -563,6 +564,7 @@ impl TimeSeriesTable {
                     span.record("outcome", "succeeded");
                     tracing::info!(
                         name: "table.optimize",
+                        target: "timeseries_table_format::table::optimize",
                         starting_version = report.starting_version,
                         committed_version = report.committed_version,
                         candidate_source_segments = report.candidate_source_segments,
@@ -1031,6 +1033,7 @@ mod tests {
         assert_eq!(report.rows_written, 4);
         assert!(!report.no_op);
         let span = captured_optimize_span(&capture);
+        assert_eq!(span.target, "timeseries_table_format::table::optimize");
         assert_eq!(span.level, tracing::Level::DEBUG);
         for (field, expected) in [
             ("starting_version", report.starting_version.to_string()),
@@ -1060,6 +1063,7 @@ mod tests {
             .filter(|event| event.name == "table.optimize")
             .collect();
         assert_eq!(events.len(), 1, "expected one table.optimize event");
+        assert_eq!(events[0].target, "timeseries_table_format::table::optimize");
         assert_eq!(events[0].level, tracing::Level::INFO);
         for (field, expected) in [
             ("starting_version", report.starting_version.to_string()),

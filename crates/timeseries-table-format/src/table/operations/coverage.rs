@@ -315,6 +315,7 @@ impl TimeSeriesTable {
                     Err(snapshot_err) => {
                         tracing::warn!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "global",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -325,6 +326,7 @@ impl TimeSeriesTable {
                         let coverage = self.recover_global_coverage_from_segments::<E>().await?;
                         tracing::debug!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "global",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -361,6 +363,7 @@ impl TimeSeriesTable {
                     Err(snapshot_err) => {
                         tracing::warn!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "entity",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -371,6 +374,7 @@ impl TimeSeriesTable {
                         let coverage = self.recover_entity_coverage_from_segments::<E>().await?;
                         tracing::debug!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "entity",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -1641,6 +1645,11 @@ mod tests {
             .filter(|event| event.name == "coverage.recover")
             .collect();
         assert_eq!(recovery_events.len(), 2);
+        assert!(
+            recovery_events
+                .iter()
+                .all(|event| { event.target == "timeseries_table_format::table::coverage" })
+        );
 
         let warning = recovery_events
             .iter()

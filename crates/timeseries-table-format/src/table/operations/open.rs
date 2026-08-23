@@ -44,6 +44,7 @@ impl TimeSeriesTable {
     /// Open an existing time-series table at the given location.
     #[tracing::instrument(
         name = "table.open",
+        target = "timeseries_table_format::table",
         level = "debug",
         skip_all,
         fields(
@@ -96,7 +97,7 @@ mod tests {
         metadata::table_metadata::TABLE_FORMAT_VERSION,
         table::test_util::{
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, assert_no_event,
-            make_basic_table_meta,
+            captured_span, make_basic_table_meta,
         },
         transaction_log::{LogAction, TransactionLogStore},
     };
@@ -121,6 +122,10 @@ mod tests {
                 ("index_kind", Some("timestamp")),
                 ("outcome", Some("succeeded")),
             ],
+        );
+        assert_eq!(
+            captured_span(&capture, "table.open").target,
+            "timeseries_table_format::table"
         );
         assert_no_event(&capture, "table.open");
         assert_capture_excludes(&capture, &[&tmp.path().display().to_string()]);

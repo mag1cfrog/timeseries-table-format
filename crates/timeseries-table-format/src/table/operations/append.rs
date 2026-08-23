@@ -597,6 +597,7 @@ impl TimeSeriesTable {
         span.record("outcome", "succeeded");
         tracing::info!(
             name: "table.append",
+            target: "timeseries_table_format::table::append",
             expected_version,
             committed_version = new_version,
             row_count,
@@ -621,6 +622,7 @@ impl TimeSeriesTable {
     /// groups for only this append.
     #[tracing::instrument(
         name = "table.append",
+        target = "timeseries_table_format::table::append",
         level = "debug",
         skip_all,
         fields(
@@ -2239,6 +2241,10 @@ mod tests {
             source.as_ref(),
             CommitError::AmbiguousOutcome { .. }
         ));
+        assert_eq!(
+            captured_span(&capture, "table.append").target,
+            "timeseries_table_format::table::append"
+        );
         assert!(segment_path.starts_with("data/"));
         assert!(temp.path().join(&segment_path).is_file());
         assert_eq!(

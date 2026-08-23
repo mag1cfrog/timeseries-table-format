@@ -87,6 +87,7 @@ impl TimeSeriesTable {
     /// returned to the caller.
     #[tracing::instrument(
         name = "table.create",
+        target = "timeseries_table_format::table",
         level = "debug",
         skip_all,
         fields(
@@ -152,6 +153,7 @@ impl TimeSeriesTable {
             let table = Self { log, state, index };
             tracing::info!(
                 name: "table.create",
+                target: "timeseries_table_format::table",
                 starting_version = current_version,
                 committed_version = new_version,
                 index_kind = table.index.kind.name(),
@@ -179,7 +181,7 @@ mod tests {
     use crate::{
         storage::{StorageLocation, layout},
         table::test_util::{
-            TestResult, TraceCapture, assert_capture_excludes, assert_debug_span,
+            TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, captured_span,
             make_basic_table_meta,
         },
     };
@@ -204,12 +206,17 @@ mod tests {
                 ("outcome", Some("succeeded")),
             ],
         );
+        assert_eq!(
+            captured_span(&capture, "table.create").target,
+            "timeseries_table_format::table"
+        );
         let events: Vec<_> = capture
             .events()
             .into_iter()
             .filter(|event| event.name == "table.create")
             .collect();
         assert_eq!(events.len(), 1);
+        assert_eq!(events[0].target, "timeseries_table_format::table");
         assert_eq!(events[0].level, tracing::Level::INFO);
         for (field, expected) in [
             ("starting_version", "0"),

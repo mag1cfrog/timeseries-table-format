@@ -62,6 +62,7 @@ impl TimeSeriesTable {
     /// Refresh in-memory state if the transaction log has advanced.
     #[tracing::instrument(
         name = "table.refresh",
+        target = "timeseries_table_format::table",
         level = "debug",
         skip_all,
         fields(
@@ -123,7 +124,7 @@ mod tests {
         storage::{TableLocation, layout},
         table::test_util::{
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, assert_no_event,
-            make_basic_table_meta,
+            captured_span, make_basic_table_meta,
         },
         transaction_log::{IndexKind, LogAction, TimeIndexGranularity, TransactionLogStore},
     };
@@ -148,6 +149,10 @@ mod tests {
                 ("new_version", None),
                 ("outcome", Some("no_change")),
             ],
+        );
+        assert_eq!(
+            captured_span(&no_change_capture, "table.refresh").target,
+            "timeseries_table_format::table"
         );
 
         let mut updated_meta = meta;
