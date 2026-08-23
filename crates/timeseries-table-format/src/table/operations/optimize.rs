@@ -2,14 +2,126 @@
 
 use std::{collections::HashSet, path::Path};
 
+use snafu::{Backtrace, Snafu};
+
 use crate::{
-    coverage::{EntityCoverage, EntityIdentity, io::read_entity_coverage_sidecar},
-    formats::parquet::{StagedEntityRewrite, rewrite_mixed_parquet_segment},
-    metadata::{segments::SegmentEntityLayout, table_metadata::IndexValueError},
-    storage::{StorageLocation, normalize_relative_storage_path, remove_file_if_exists},
+    coverage::{
+        EntityCoverage, EntityIdentity,
+        io::{CoverageSidecarError, read_entity_coverage_sidecar},
+    },
+    formats::parquet::{EntityRewriteError, StagedEntityRewrite, rewrite_mixed_parquet_segment},
+    metadata::{
+        schema_compat::SchemaCompatibilityError, segments::SegmentEntityLayout,
+        table_metadata::IndexValueError,
+    },
+    storage::{
+        StorageError, StorageLocation, normalize_relative_storage_path, remove_file_if_exists,
+    },
     table::{TableError, TimeSeriesTable},
     transaction_log::{CommitError, LogAction, SegmentMeta, TableState},
 };
+
+/// Errors owned by an entity-layout optimization operation.
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+pub enum OptimizeError {
+    /// Entity-layout optimization requires at least one entity column.
+    #[snafu(display(
+        "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
+    ))]
+    NotApplicable {
+        /// User-facing table root.
+        table_root: String,
+    },
+
+    /// Staging replacements for one mixed segment failed.
+    #[snafu(context(false), display("Mixed-segment rewrite failed: {source}"))]
+    MixedSegmentRewrite {
+        /// Complete mixed-segment rewrite failure.
+        #[snafu(source(from(EntityRewriteError, Box::new)), backtrace)]
+        source: Box<EntityRewriteError>,
+    },
+
+    /// Live segment bounds cannot be ordered in one native index domain.
+    #[snafu(
+        context(false),
+        display("Invalid segment ordered-index bounds: {source}")
+    )]
+    InvalidSegmentBounds {
+        /// Complete bounds validation failure.
+        #[snafu(source)]
+        source: IndexValueError,
+        /// Backtrace captured because index value validation does not own one.
+        backtrace: Backtrace,
+    },
+
+    /// Optimization cannot use the table's canonical schema.
+    #[snafu(
+        context(false),
+        display("Optimization schema validation failed: {source}")
+    )]
+    SchemaValidation {
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured because schema compatibility errors do not own one.
+        backtrace: Backtrace,
+    },
+
+    /// A coverage sidecar required to validate a staged plan could not be read.
+    #[snafu(
+        context(false),
+        display("Optimization coverage sidecar error: {source}")
+    )]
+    CoverageSidecar {
+        /// Complete coverage sidecar failure.
+        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
+        source: Box<CoverageSidecarError>,
+    },
+
+    /// A staged optimization plan violated an atomic publication invariant.
+    #[snafu(display("Invalid staged entity-layout optimization plan: {reason}"))]
+    InvalidStagedPlan {
+        /// Failed plan invariant.
+        reason: String,
+        /// Backtrace captured at the failed internal invariant.
+        backtrace: Backtrace,
+    },
+
+    /// An optimization count could not be represented without wrapping.
+    #[snafu(display("Entity-layout optimization count overflow: {field}"))]
+    CountOverflow {
+        /// Report or version field that overflowed.
+        field: &'static str,
+        /// Backtrace captured at the failed internal arithmetic boundary.
+        backtrace: Backtrace,
+    },
+
+    /// Publishing the optimization transaction failed.
+    #[snafu(context(false), display("Optimization commit failed: {source}"))]
+    Commit {
+        /// Complete transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
+    },
+
+    /// Optimization failed and one or more owned staged objects could not be removed.
+    #[snafu(display(
+        "{source}; staged-object rollback also failed: [{}]",
+        cleanup_errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))]
+    Rollback {
+        /// Original optimization failure that triggered rollback.
+        #[snafu(source, backtrace)]
+        source: Box<OptimizeError>,
+        /// Typed cleanup failure for every staged object that could not be removed.
+        cleanup_errors: Vec<StorageError>,
+    },
+}
 
 /// Result of one entity-layout optimization operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,26 +179,31 @@ fn mixed_segment_candidates(state: &TableState) -> Result<Vec<SegmentMeta>, Inde
         .collect())
 }
 
-fn count(field: &'static str, value: usize) -> Result<u64, TableError> {
-    value
-        .try_into()
-        .map_err(|_| TableError::OptimizeCountOverflow { field })
+fn count(field: &'static str, value: usize) -> Result<u64, OptimizeError> {
+    value.try_into().map_err(|_| OptimizeError::CountOverflow {
+        field,
+        backtrace: Backtrace::capture(),
+    })
 }
 
-fn add(field: &'static str, total: &mut u64, value: u64) -> Result<(), TableError> {
+fn add(field: &'static str, total: &mut u64, value: u64) -> Result<(), OptimizeError> {
     *total = total
         .checked_add(value)
-        .ok_or(TableError::OptimizeCountOverflow { field })?;
+        .ok_or_else(|| OptimizeError::CountOverflow {
+            field,
+            backtrace: Backtrace::capture(),
+        })?;
     Ok(())
 }
 
-fn invalid_plan(reason: impl Into<String>) -> TableError {
-    TableError::OptimizeInvariant {
+fn invalid_plan(reason: impl Into<String>) -> OptimizeError {
+    OptimizeError::InvalidStagedPlan {
         reason: reason.into(),
+        backtrace: Backtrace::capture(),
     }
 }
 
-fn ensure_canonical(path: &str, description: &str) -> Result<(), TableError> {
+fn ensure_canonical(path: &str, description: &str) -> Result<(), OptimizeError> {
     let (canonical, _) = normalize_relative_storage_path(Path::new(path))
         .map_err(|error| invalid_plan(format!("invalid {description} path {path:?}: {error}")))?;
     if canonical != path {
@@ -101,7 +218,7 @@ async fn validate_staged_plan(
     table: &TimeSeriesTable,
     candidates: &[SegmentMeta],
     staged: &[StagedEntityRewrite],
-) -> Result<PlanCounts, TableError> {
+) -> Result<PlanCounts, OptimizeError> {
     if candidates.len() != staged.len() {
         return Err(invalid_plan(format!(
             "staged {} rewrites for {} candidates",
@@ -159,7 +276,7 @@ async fn validate_staged_plan(
         let candidate_coverage =
             read_entity_coverage_sidecar(table.location(), Path::new(source_coverage_path))
                 .await
-                .map_err(|source| TableError::CoverageSidecar { source })?;
+                .map_err(OptimizeError::from)?;
         let mut candidate_replacement_coverage = EntityCoverage::empty();
         let mut candidate_rows = 0u64;
 
@@ -246,20 +363,20 @@ impl TimeSeriesTable {
     async fn rollback_optimization(
         &self,
         staged_paths: &[String],
-        source: TableError,
-    ) -> TableError {
+        source: OptimizeError,
+    ) -> OptimizeError {
         let mut cleanup_errors = Vec::new();
         for path in staged_paths.iter().rev() {
             if let Err(error) =
                 remove_file_if_exists(self.location().as_ref(), Path::new(path)).await
             {
-                cleanup_errors.push(format!("{path}: {error}"));
+                cleanup_errors.push(error);
             }
         }
         if cleanup_errors.is_empty() {
             source
         } else {
-            TableError::OptimizeRollback {
+            OptimizeError::Rollback {
                 source: Box::new(source),
                 cleanup_errors,
             }
@@ -278,6 +395,7 @@ impl TimeSeriesTable {
     /// validation fails, the commit cannot be confirmed, or rollback fails.
     #[tracing::instrument(
         name = "table.optimize",
+        target = "timeseries_table_format::table::optimize",
         level = "debug",
         skip_all,
         fields(
@@ -293,17 +411,21 @@ impl TimeSeriesTable {
         )
     )]
     pub async fn optimize(&mut self) -> Result<OptimizeReport, TableError> {
-        let result: Result<OptimizeReport, TableError> = async {
+        let result: Result<OptimizeReport, OptimizeError> = async {
             if self.index.entity_columns.is_empty() {
                 let table_root = match self.location().as_ref() {
                     StorageLocation::Local(root) => root.display().to_string(),
                 };
-                return Err(TableError::OptimizeNotApplicable { table_root });
+                return Err(OptimizeError::NotApplicable { table_root });
             }
 
             let starting_version = self.state.version;
-            let candidates = mixed_segment_candidates(&self.state)
-                .map_err(|source| TableError::InvalidSegmentBounds { source })?;
+            let candidates = mixed_segment_candidates(&self.state).map_err(|source| {
+                OptimizeError::InvalidSegmentBounds {
+                    source,
+                    backtrace: Backtrace::capture(),
+                }
+            })?;
             tracing::Span::current().record("candidate_source_segments", candidates.len());
             if candidates.is_empty() {
                 return Ok(OptimizeReport::no_op(starting_version));
@@ -311,14 +433,16 @@ impl TimeSeriesTable {
             let committed_version =
                 starting_version
                     .checked_add(1)
-                    .ok_or(TableError::OptimizeCountOverflow {
+                    .ok_or_else(|| OptimizeError::CountOverflow {
                         field: "committed_version",
+                        backtrace: Backtrace::capture(),
                     })?;
-            let table_schema = self.state.table_meta.logical_schema.clone().ok_or(
-                TableError::MissingCanonicalSchema {
-                    version: starting_version,
-                },
-            )?;
+            let table_schema = self
+                .state
+                .table_meta
+                .logical_schema
+                .clone()
+                .ok_or_else(|| OptimizeError::from(SchemaCompatibilityError::MissingTableSchema))?;
 
             let mut staged = Vec::with_capacity(candidates.len());
             let mut staged_paths = Vec::new();
@@ -336,7 +460,7 @@ impl TimeSeriesTable {
                         staged.push(rewrite);
                     }
                     Err(source) => {
-                        let error = TableError::OptimizeRewrite { source };
+                        let error = OptimizeError::from(source);
                         return Err(self.rollback_optimization(&staged_paths, error).await);
                     }
                 }
@@ -377,10 +501,10 @@ impl TimeSeriesTable {
             {
                 Ok(version) => version,
                 Err(source @ CommitError::AmbiguousOutcome { .. }) => {
-                    return Err(TableError::TransactionLog { source });
+                    return Err(OptimizeError::from(source));
                 }
                 Err(source) => {
-                    let error = TableError::TransactionLog { source };
+                    let error = OptimizeError::from(source);
                     return Err(self.rollback_optimization(&staged_paths, error).await);
                 }
             };
@@ -440,6 +564,7 @@ impl TimeSeriesTable {
                     span.record("outcome", "succeeded");
                     tracing::info!(
                         name: "table.optimize",
+                        target: "timeseries_table_format::table::optimize",
                         starting_version = report.starting_version,
                         committed_version = report.committed_version,
                         candidate_source_segments = report.candidate_source_segments,
@@ -452,19 +577,19 @@ impl TimeSeriesTable {
                     );
                 }
             }
-            Err(TableError::TransactionLog {
+            Err(OptimizeError::Commit {
                 source: CommitError::AmbiguousOutcome { .. },
             }) => {
                 span.record("outcome", "ambiguous");
             }
-            Err(TableError::OptimizeRollback { .. }) => {
+            Err(OptimizeError::Rollback { .. }) => {
                 span.record("outcome", "cleanup_failed");
             }
             Err(_) => {
                 span.record("outcome", "failed");
             }
         }
-        result
+        result.map_err(TableError::from)
     }
 }
 
@@ -482,13 +607,14 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        coverage::{EntityIdentity, EntityValue},
+        coverage::{EntityIdentity, EntityValue, io::CoverageSidecarError},
+        formats::parquet::EntityRewriteError,
         metadata::{
             logical_schema::LogicalTimestampUnit,
             segments::{FileFormat, SegmentEntityLayout},
             table_metadata::IndexValue,
         },
-        storage::{TableLocation, layout},
+        storage::{StorageError, TableLocation, layout},
         table::test_util::{
             CapturedSpan, TraceCapture, append_parquet_fixture, make_int32_entity_table_meta,
             make_table_meta_with_unit, utc_datetime, write_arrow_parquet_with_unit,
@@ -716,7 +842,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::OptimizeNotApplicable { table_root }
+            TableError::Optimize {
+                source: OptimizeError::NotApplicable { table_root }
+            }
                 if table_root == temp.path().display().to_string()
         ));
         let span = captured_optimize_span(&capture);
@@ -731,6 +859,124 @@ mod tests {
         );
         assert_no_optimize_event(&capture);
         assert!(!temp.path().join("data/_staged").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optimize_rejects_missing_canonical_schema_before_staging() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        append_mixed_source(&mut table, temp.path(), "data/mixed.parquet", 0).await?;
+        table.state.table_meta.logical_schema = None;
+        let state_before = table.state().clone();
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+
+        let error = table
+            .optimize()
+            .await
+            .expect_err("missing canonical schema must fail");
+
+        assert!(matches!(
+            error,
+            TableError::Optimize {
+                source: OptimizeError::SchemaValidation { source, .. }
+            } if matches!(*source, SchemaCompatibilityError::MissingTableSchema)
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optimize_rejects_invalid_segment_bounds_before_staging() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        let source_path =
+            append_mixed_source(&mut table, temp.path(), "data/mixed.parquet", 0).await?;
+        table
+            .state
+            .segments
+            .get_mut(&source_path)
+            .expect("mixed source")
+            .index_max = IndexValue::Int64(1);
+        let state_before = table.state().clone();
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+
+        let error = table
+            .optimize()
+            .await
+            .expect_err("mixed ordered-index domains must fail");
+
+        assert!(matches!(
+            error,
+            TableError::Optimize {
+                source: OptimizeError::InvalidSegmentBounds {
+                    source: IndexValueError::DomainMismatch { .. },
+                    ..
+                }
+            }
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optimize_preserves_a_missing_source_coverage_error() -> Result<(), TableError> {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        let source_path =
+            append_mixed_source(&mut table, temp.path(), "data/mixed.parquet", 0).await?;
+        let coverage_path = table.state().segments[&source_path]
+            .coverage_path
+            .as_deref()
+            .expect("source coverage")
+            .to_string();
+        std::fs::remove_file(temp.path().join(&coverage_path)).expect("remove source coverage");
+        let state_before = table.state().clone();
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+
+        let error = table
+            .optimize()
+            .await
+            .expect_err("missing source coverage must fail");
+
+        assert!(matches!(
+            error,
+            TableError::Optimize {
+                source: OptimizeError::MixedSegmentRewrite { source }
+            } if matches!(
+                *source,
+                EntityRewriteError::CoverageSidecar {
+                    source: CoverageSidecarError::Storage {
+                        source: StorageError::NotFound { .. }
+                    }
+                }
+            )
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
         Ok(())
     }
 
@@ -787,6 +1033,7 @@ mod tests {
         assert_eq!(report.rows_written, 4);
         assert!(!report.no_op);
         let span = captured_optimize_span(&capture);
+        assert_eq!(span.target, "timeseries_table_format::table::optimize");
         assert_eq!(span.level, tracing::Level::DEBUG);
         for (field, expected) in [
             ("starting_version", report.starting_version.to_string()),
@@ -816,6 +1063,7 @@ mod tests {
             .filter(|event| event.name == "table.optimize")
             .collect();
         assert_eq!(events.len(), 1, "expected one table.optimize event");
+        assert_eq!(events[0].target, "timeseries_table_format::table::optimize");
         assert_eq!(events[0].level, tracing::Level::INFO);
         for (field, expected) in [
             ("starting_version", report.starting_version.to_string()),
@@ -949,7 +1197,12 @@ mod tests {
 
         let error = table.optimize().await.expect_err("later staging must fail");
 
-        assert!(matches!(error, TableError::OptimizeRewrite { .. }));
+        assert!(matches!(
+            error,
+            TableError::Optimize {
+                source: OptimizeError::MixedSegmentRewrite { .. }
+            }
+        ));
         assert_eq!(table.state(), &state_before);
         assert_eq!(
             optimization_objects(temp.path()).expect("optimization objects"),
@@ -983,8 +1236,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::TransactionLog {
-                source: CommitError::Conflict { .. }
+            TableError::Optimize {
+                source: OptimizeError::Commit {
+                    source: CommitError::Conflict { .. }
+                }
             }
         ));
         assert_eq!(table.state(), &state_before);
@@ -1028,8 +1283,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::TransactionLog {
-                source: CommitError::AmbiguousOutcome { .. }
+            TableError::Optimize {
+                source: OptimizeError::Commit {
+                    source: CommitError::AmbiguousOutcome { .. }
+                }
             }
         ));
         let span = captured_optimize_span(&capture);
@@ -1086,13 +1343,13 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::OptimizeRollback {
+            OptimizeError::Rollback {
                 source,
                 cleanup_errors,
-            } if matches!(*source, TableError::OptimizeInvariant { .. })
+            } if matches!(*source, OptimizeError::InvalidStagedPlan { .. })
                 && cleanup_errors.len() == 2
-                && cleanup_errors[0].contains("second.roar")
-                && cleanup_errors[1].contains("first.parquet")
+                && cleanup_errors[0].to_string().contains("second.roar")
+                && cleanup_errors[1].to_string().contains("first.parquet")
         ));
         assert!(message.contains("primary failure"));
         assert!(paths.iter().all(|path| temp.path().join(path).exists()));
@@ -1248,8 +1505,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::OptimizeCountOverflow {
-                field: "rows_written"
+            OptimizeError::CountOverflow {
+                field: "rows_written",
+                ..
             }
         ));
         assert_eq!(total, u64::MAX);
@@ -1274,8 +1532,11 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::OptimizeCountOverflow {
-                field: "committed_version"
+            TableError::Optimize {
+                source: OptimizeError::CountOverflow {
+                    field: "committed_version",
+                    ..
+                }
             }
         ));
         assert_eq!(table.state().version, u64::MAX);

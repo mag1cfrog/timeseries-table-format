@@ -193,84 +193,78 @@ impl TransactionLogStore {
             msg: format!("No TableMeta found in commits up to version {current_version}",),
         })?;
 
-        let index = match &table_meta.kind {
-            TableKind::TimeSeries(index) => index,
-            TableKind::Generic => {
+        if let TableKind::TimeSeries(index) = &table_meta.kind {
+            index
+                .validate()
+                .map_err(|source| CommitError::CorruptState {
+                    msg: format!("Invalid ordered index specification: {source}"),
+                    backtrace: snafu::Backtrace::capture(),
+                })?;
+            if let Some(pointer) = &table_coverage
+                && pointer.index_kind != index.kind
+            {
                 return CorruptStateSnafu {
-                    msg: "Generic tables are not supported by the current format".to_string(),
+                    msg: format!(
+                        "Table coverage index kind does not match table index: expected {:?}, found {:?} in pointer from version {}",
+                        index.kind, pointer.index_kind, pointer.version
+                    ),
                 }
                 .fail();
             }
-        };
-        index
-            .validate()
-            .map_err(|source| CommitError::CorruptState {
-                msg: format!("Invalid ordered index specification: {source}"),
-                backtrace: snafu::Backtrace::capture(),
-            })?;
-        if let Some(pointer) = &table_coverage
-            && pointer.index_kind != index.kind
-        {
-            return CorruptStateSnafu {
-                msg: format!(
-                    "Table coverage index kind does not match table index: expected {:?}, found {:?} in pointer from version {}",
-                    index.kind, pointer.index_kind, pointer.version
-                ),
+            let schema = table_meta.logical_schema.as_ref();
+            if let Some(schema) = schema {
+                ensure_index_spec_matches_schema(schema, index).map_err(|source| {
+                    CommitError::CorruptState {
+                        msg: format!("Index specification does not match logical schema: {source}"),
+                        backtrace: snafu::Backtrace::capture(),
+                    }
+                })?;
             }
-            .fail();
-        }
-        let schema = table_meta.logical_schema.as_ref();
-        if let Some(schema) = schema {
-            ensure_index_spec_matches_schema(schema, index).map_err(|source| {
-                CommitError::CorruptState {
-                    msg: format!("Index specification does not match logical schema: {source}"),
-                    backtrace: snafu::Backtrace::capture(),
+            if schema.is_none() && !persisted_segment_layouts.is_empty() {
+                return CorruptStateSnafu {
+                    msg: "Persisted segments require a logical schema".to_string(),
                 }
-            })?;
-        }
-        if schema.is_none() && !persisted_segment_layouts.is_empty() {
-            return CorruptStateSnafu {
-                msg: "Persisted segments require a logical schema".to_string(),
+                .fail();
             }
-            .fail();
-        }
-        let entity_column_count = index.entity_columns.len();
-        for (path, layout) in persisted_segment_layouts {
-            match (&layout, entity_column_count) {
-                (SegmentEntityLayout::NotApplicable, 0) | (SegmentEntityLayout::Mixed, 1..) => {}
-                (SegmentEntityLayout::Single(identity), 1..) => {
-                    let Some(schema) = schema else {
+            let entity_column_count = index.entity_columns.len();
+            for (path, layout) in persisted_segment_layouts {
+                match (&layout, entity_column_count) {
+                    (SegmentEntityLayout::NotApplicable, 0) | (SegmentEntityLayout::Mixed, 1..) => {
+                    }
+                    (SegmentEntityLayout::Single(identity), 1..) => {
+                        let Some(schema) = schema else {
+                            return CorruptStateSnafu {
+                                msg: "Persisted segments require a logical schema".to_string(),
+                            }
+                            .fail();
+                        };
+                        ensure_entity_identity_matches_schema(schema, index, identity).map_err(
+                            |source| CommitError::CorruptState {
+                                msg: format!(
+                                    "Invalid single-entity identity in segment at {path}: {source}"
+                                ),
+                                backtrace: snafu::Backtrace::capture(),
+                            },
+                        )?;
+                    }
+                    _ => {
                         return CorruptStateSnafu {
-                            msg: "Persisted segments require a logical schema".to_string(),
+                            msg: format!(
+                                "Invalid entity layout in segment at {path}: table has {entity_column_count} entity columns, layout is {layout:?}"
+                            ),
                         }
                         .fail();
-                    };
-                    ensure_entity_identity_matches_schema(schema, index, identity).map_err(
-                        |source| CommitError::CorruptState {
-                            msg: format!(
-                                "Invalid single-entity identity in segment at {path}: {source}"
-                            ),
-                            backtrace: snafu::Backtrace::capture(),
-                        },
-                    )?;
-                }
-                _ => {
-                    return CorruptStateSnafu {
-                        msg: format!(
-                            "Invalid entity layout in segment at {path}: table has {entity_column_count} entity columns, layout is {layout:?}"
-                        ),
                     }
-                    .fail();
                 }
             }
-        }
-        for segment in segments.values() {
-            segment
-                .validate_bounds(&index.kind)
-                .map_err(|source| CommitError::CorruptState {
-                    msg: source.to_string(),
-                    backtrace: snafu::Backtrace::capture(),
+            for segment in segments.values() {
+                segment.validate_bounds(&index.kind).map_err(|source| {
+                    CommitError::CorruptState {
+                        msg: source.to_string(),
+                        backtrace: snafu::Backtrace::capture(),
+                    }
                 })?;
+            }
         }
 
         Ok(TableState {
@@ -455,6 +449,21 @@ mod tests {
         assert_eq!(state.table_meta, meta);
         assert!(state.segments.contains_key(&seg2.path));
         assert!(!state.segments.contains_key(&seg1.path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_leaves_table_kind_validation_to_callers() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.kind = TableKind::Generic;
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+
+        let state = store.rebuild_table_state().await?;
+
+        assert_eq!(state.table_meta, meta);
         Ok(())
     }
 

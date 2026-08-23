@@ -68,6 +68,7 @@ pub(crate) struct TestRow {
 #[derive(Clone, Debug)]
 pub(crate) struct CapturedEvent {
     pub(crate) name: &'static str,
+    pub(crate) target: &'static str,
     pub(crate) level: tracing::Level,
     pub(crate) fields: BTreeMap<&'static str, String>,
 }
@@ -76,6 +77,7 @@ pub(crate) struct CapturedEvent {
 pub(crate) struct CapturedSpan {
     id: u64,
     pub(crate) name: &'static str,
+    pub(crate) target: &'static str,
     pub(crate) level: tracing::Level,
     pub(crate) fields: BTreeMap<&'static str, String>,
 }
@@ -112,6 +114,61 @@ impl TraceCapture {
     }
 }
 
+pub(crate) fn captured_span(capture: &TraceCapture, name: &str) -> CapturedSpan {
+    let mut spans: Vec<_> = capture
+        .spans()
+        .into_iter()
+        .filter(|span| span.name == name)
+        .collect();
+    assert_eq!(spans.len(), 1, "expected one {name} span");
+    spans.pop().expect("captured span")
+}
+
+pub(crate) fn assert_debug_span(
+    capture: &TraceCapture,
+    name: &str,
+    expected_fields: &[(&str, Option<&str>)],
+) {
+    let span = captured_span(capture, name);
+    assert_eq!(span.level, tracing::Level::DEBUG);
+    for (field, expected) in expected_fields {
+        assert_eq!(
+            span.fields.get(*field).map(String::as_str),
+            *expected,
+            "unexpected {name}.{field}"
+        );
+    }
+}
+
+pub(crate) fn assert_no_event(capture: &TraceCapture, name: &str) {
+    assert!(!capture.events().iter().any(|event| event.name == name));
+}
+
+pub(crate) fn assert_capture_excludes(capture: &TraceCapture, forbidden: &[&str]) {
+    let values = capture
+        .spans()
+        .into_iter()
+        .flat_map(|span| span.fields.into_values())
+        .chain(
+            capture
+                .events()
+                .into_iter()
+                .flat_map(|event| event.fields.into_values()),
+        );
+    for value in values {
+        for forbidden in forbidden
+            .iter()
+            .copied()
+            .chain(["LogicalSchema", "RecordBatch"])
+        {
+            assert!(
+                !value.contains(forbidden),
+                "diagnostic value contains sensitive data '{forbidden}': {value}"
+            );
+        }
+    }
+}
+
 struct FieldCapture<'a>(&'a mut BTreeMap<&'static str, String>);
 
 impl Visit for FieldCapture<'_> {
@@ -139,6 +196,7 @@ impl<S: Subscriber> Layer<S> for TraceCapture {
             .push(CapturedSpan {
                 id: id.into_u64(),
                 name: attrs.metadata().name(),
+                target: attrs.metadata().target(),
                 level: *attrs.metadata().level(),
                 fields,
             });
@@ -166,6 +224,7 @@ impl<S: Subscriber> Layer<S> for TraceCapture {
             .events
             .push(CapturedEvent {
                 name: event.metadata().name(),
+                target: event.metadata().target(),
                 level: *event.metadata().level(),
                 fields,
             });

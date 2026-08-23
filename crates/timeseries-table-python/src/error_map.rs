@@ -11,10 +11,13 @@ use timeseries_table_format::{
     coverage::{
         EntityIdentity, EntityValue, index_interval::IndexInterval, io::CoverageSidecarError,
     },
-    formats::parquet::SegmentCoverageError,
+    formats::parquet::{EntityRewriteError, SegmentCoverageError},
     storage::StorageError as CoreStorageError,
-    table::{AppendError, CoverageQueryError, ScanError, TableError},
-    transaction_log::CommitError,
+    table::{
+        AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
+        ScanError, TableError, TableStateAccessError,
+    },
+    transaction_log::{CommitError, segments::SegmentError},
 };
 
 #[allow(dead_code)]
@@ -218,6 +221,68 @@ fn append_error_to_py(
     }
 }
 
+fn coverage_sidecar_error_to_py(py: Python<'_>, err: CoverageSidecarError, msg: String) -> PyErr {
+    match err {
+        CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
+        CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn entity_rewrite_error_to_py(py: Python<'_>, err: EntityRewriteError, msg: String) -> PyErr {
+    match err {
+        EntityRewriteError::Cleanup { source, .. } => entity_rewrite_error_to_py(py, *source, msg),
+        EntityRewriteError::SegmentInspection {
+            source: SegmentError::MissingFile { source, .. } | SegmentError::Storage { source, .. },
+        }
+        | EntityRewriteError::CoverageInspection {
+            source: SegmentCoverageError::Storage { source, .. },
+        }
+        | EntityRewriteError::Storage { source } => storage_error_to_py(py, source),
+        EntityRewriteError::CoverageSidecar { source } => {
+            coverage_sidecar_error_to_py(py, source, msg)
+        }
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn optimize_error_to_py(py: Python<'_>, err: OptimizeError, msg: String) -> PyErr {
+    match err {
+        OptimizeError::Rollback { source, .. } => optimize_error_to_py(py, *source, msg),
+        OptimizeError::MixedSegmentRewrite { source } => {
+            entity_rewrite_error_to_py(py, *source, msg)
+        }
+        OptimizeError::SchemaValidation { .. } => SchemaMismatchError::new_err(msg),
+        OptimizeError::CoverageSidecar { source } => coverage_sidecar_error_to_py(py, *source, msg),
+        OptimizeError::Commit { source } => commit_error_to_py(py, source),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn create_error_to_py(py: Python<'_>, err: CreateTableError, msg: String) -> PyErr {
+    match err {
+        CreateTableError::Storage { source } => storage_error_to_py(py, source),
+        CreateTableError::Commit { source } => commit_error_to_py(py, source),
+        CreateTableError::SchemaValidation { .. } => SchemaMismatchError::new_err(msg),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn open_error_to_py(py: Python<'_>, err: OpenTableError, msg: String) -> PyErr {
+    match err {
+        OpenTableError::Storage { source } => storage_error_to_py(py, source),
+        OpenTableError::Commit { source } => commit_error_to_py(py, source),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn state_access_error_to_py(py: Python<'_>, err: TableStateAccessError, msg: String) -> PyErr {
+    match err {
+        TableStateAccessError::Commit { source } => commit_error_to_py(py, source),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn table_error_to_py(
     py: Python<'_>,
@@ -227,33 +292,23 @@ pub(crate) fn table_error_to_py(
     let msg = err.to_string();
 
     match err {
-        TableError::Storage { source } => storage_error_to_py(py, source),
-
-        TableError::Scan {
-            source: ScanError::Storage { source, .. },
-        } => storage_error_to_py(py, *source),
-
-        TableError::CoverageQuery {
-            source:
-                CoverageQueryError::CoverageSnapshotRead { source, .. }
-                | CoverageQueryError::SegmentCoverageSidecarRead { source, .. },
-        } => match *source {
-            CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
-            CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
+        TableError::Create { source } => create_error_to_py(py, source, msg),
+        TableError::Open { source } => open_error_to_py(py, source, msg),
+        TableError::StateAccess { source } => state_access_error_to_py(py, source, msg),
+        TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
+        TableError::Scan { source } => match source {
+            ScanError::Storage { source, .. } => storage_error_to_py(py, *source),
             _ => TimeseriesTableError::new_err(msg),
         },
-
-        TableError::CoverageQuery {
-            source: CoverageQueryError::SchemaCompatibility { .. },
-        } => SchemaMismatchError::new_err(msg),
-
-        TableError::TransactionLog { source } => commit_error_to_py(py, source),
-
-        TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
-
-        TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),
-
-        _ => TimeseriesTableError::new_err(err.to_string()),
+        TableError::CoverageQuery { source } => match source {
+            CoverageQueryError::CoverageSnapshotRead { source, .. }
+            | CoverageQueryError::SegmentCoverageSidecarRead { source, .. } => {
+                coverage_sidecar_error_to_py(py, *source, msg)
+            }
+            CoverageQueryError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(msg),
+            _ => TimeseriesTableError::new_err(msg),
+        },
+        TableError::Optimize { source } => optimize_error_to_py(py, source, msg),
     }
 }
 
@@ -276,6 +331,31 @@ mod tests {
 
     fn invalid_location_error() -> CoreStorageError {
         StorageLocation::parse("").expect_err("empty storage location must fail")
+    }
+
+    #[test]
+    fn lifecycle_errors_preserve_python_exception_categories() {
+        init_python();
+
+        let attached = Python::try_attach(|py| {
+            let storage = TableError::from(OpenTableError::Storage {
+                source: invalid_location_error(),
+            });
+            assert!(table_error_to_py(py, storage, &[]).is_instance_of::<StorageError>(py));
+
+            let state_storage = TableError::from(TableStateAccessError::Commit {
+                source: CommitError::Storage {
+                    source: invalid_location_error(),
+                },
+            });
+            assert!(table_error_to_py(py, state_storage, &[]).is_instance_of::<StorageError>(py));
+
+            let schema = TableError::from(CreateTableError::from(
+                timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError::MissingTableSchema,
+            ));
+            assert!(table_error_to_py(py, schema, &[]).is_instance_of::<SchemaMismatchError>(py));
+        });
+        assert!(attached.is_some());
     }
 
     #[test]
@@ -359,6 +439,32 @@ mod tests {
                     .expect("integer conflict_count"),
                 1
             );
+        });
+    }
+
+    #[test]
+    fn optimize_commit_and_rollback_preserve_storage_python_categories() {
+        init_python();
+        let commit = TableError::from(OptimizeError::Commit {
+            source: CommitError::Storage {
+                source: invalid_location_error(),
+            },
+        });
+        let rollback = TableError::from(OptimizeError::Rollback {
+            source: Box::new(OptimizeError::MixedSegmentRewrite {
+                source: Box::new(EntityRewriteError::Storage {
+                    source: invalid_location_error(),
+                }),
+            }),
+            cleanup_errors: vec![invalid_location_error()],
+        });
+
+        Python::attach(|py| {
+            let commit = table_error_to_py(py, commit, &[]);
+            assert!(commit.is_instance_of::<StorageError>(py));
+
+            let rollback = table_error_to_py(py, rollback, &[]);
+            assert!(rollback.is_instance_of::<StorageError>(py));
         });
     }
 }

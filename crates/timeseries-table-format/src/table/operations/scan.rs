@@ -36,10 +36,9 @@ use crate::metadata::{
     table_metadata::{IndexValue, IndexValueError, validate_index_range},
 };
 use crate::storage::{self, TableLocation};
+use crate::table::error::ScanSnafu;
+use crate::table::{TableError, TimeSeriesScan, TimeSeriesTable};
 use crate::transaction_log::TableState;
-
-use super::error::{ScanSnafu, TableError};
-use super::{TimeSeriesScan, TimeSeriesTable};
 
 const SCAN_BATCH_SIZE: usize = 8_192;
 

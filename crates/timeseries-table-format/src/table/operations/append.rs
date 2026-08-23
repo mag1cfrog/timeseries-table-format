@@ -8,6 +8,10 @@
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
+mod error;
+
+pub use error::AppendError;
+
 use std::{marker::PhantomData, path::Path, sync::Arc};
 
 use arrow::{
@@ -42,19 +46,17 @@ use crate::{
         segments::SegmentEntityLayout,
     },
     storage,
+    table::{TableError, TimeSeriesTable},
     transaction_log::{
         LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
     },
 };
 
-use super::{
-    TimeSeriesTable,
-    append_schema::AppendSchemaNormalizer,
-    error::{
-        AppendError, ArrowInputSnafu, ArrowToLogicalSchemaSnafu,
-        GeneratedSegmentSchemaCompatibilitySnafu, ParquetWriteSnafu, TableError,
-    },
+use self::error::{
+    ArrowInputSnafu, ArrowToLogicalSchemaSnafu, GeneratedSegmentSchemaCompatibilitySnafu,
+    ParquetWriteSnafu,
 };
+use super::append_schema::AppendSchemaNormalizer;
 
 fn classify_entity_layout(
     segment_path: &str,
@@ -595,6 +597,7 @@ impl TimeSeriesTable {
         span.record("outcome", "succeeded");
         tracing::info!(
             name: "table.append",
+            target: "timeseries_table_format::table::append",
             expected_version,
             committed_version = new_version,
             row_count,
@@ -619,6 +622,7 @@ impl TimeSeriesTable {
     /// groups for only this append.
     #[tracing::instrument(
         name = "table.append",
+        target = "timeseries_table_format::table::append",
         level = "debug",
         skip_all,
         fields(
@@ -737,7 +741,6 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_util::*;
     use super::*;
     use crate::coverage::io::{
         CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar,
@@ -752,6 +755,7 @@ mod tests {
     use crate::metadata::table_metadata::IndexValue;
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
+    use crate::table::test_util::*;
     use crate::transaction_log::{
         CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity, segments::SegmentError,
     };
@@ -2237,6 +2241,10 @@ mod tests {
             source.as_ref(),
             CommitError::AmbiguousOutcome { .. }
         ));
+        assert_eq!(
+            captured_span(&capture, "table.append").target,
+            "timeseries_table_format::table::append"
+        );
         assert!(segment_path.starts_with("data/"));
         assert!(temp.path().join(&segment_path).is_file());
         assert_eq!(

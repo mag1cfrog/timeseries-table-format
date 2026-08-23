@@ -60,7 +60,8 @@ Log actions:
 
 ### Open
 `TimeSeriesTable::open` rebuilds `TableState` from the log and extracts
-`IndexSpec`. Empty logs return `TableError::EmptyTable`.
+`IndexSpec`. Empty logs return `TableError::Open` containing
+`OpenTableError::EmptyTable`.
 
 ### Append (Arrow to Parquet)
 1. Validate the Arrow reader schema before consuming batches or creating output.

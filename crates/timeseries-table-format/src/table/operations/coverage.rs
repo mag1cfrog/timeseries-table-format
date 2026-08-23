@@ -22,14 +22,11 @@ use crate::{
     },
     metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
     metadata::table_metadata::IndexKind,
+    table::{AppendError, TableError, TimeSeriesTable},
     transaction_log::table_state::TableCoveragePointer,
 };
 
 use self::error as query_error;
-use super::{
-    TimeSeriesTable,
-    error::{AppendError, TableError},
-};
 
 pub(crate) trait CoverageRecoveryError: Sized {
     fn missing_segment_coverage_path(segment_path: String) -> Self;
@@ -289,7 +286,7 @@ impl TimeSeriesTable {
     pub async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
         self.load_global_coverage_snapshot_for_query()
             .await
-            .context(super::error::CoverageQuerySnafu)
+            .context(crate::table::error::CoverageQuerySnafu)
     }
 
     /// Load table coverage for read paths (no writes).
@@ -318,6 +315,7 @@ impl TimeSeriesTable {
                     Err(snapshot_err) => {
                         tracing::warn!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "global",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -328,6 +326,7 @@ impl TimeSeriesTable {
                         let coverage = self.recover_global_coverage_from_segments::<E>().await?;
                         tracing::debug!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "global",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -364,6 +363,7 @@ impl TimeSeriesTable {
                     Err(snapshot_err) => {
                         tracing::warn!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "entity",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -374,6 +374,7 @@ impl TimeSeriesTable {
                         let coverage = self.recover_entity_coverage_from_segments::<E>().await?;
                         tracing::debug!(
                             name: "coverage.recover",
+                            target: "timeseries_table_format::table::coverage",
                             coverage_mode = "entity",
                             snapshot_version = ptr.version,
                             coverage_path = %ptr.coverage_path,
@@ -1644,6 +1645,11 @@ mod tests {
             .filter(|event| event.name == "coverage.recover")
             .collect();
         assert_eq!(recovery_events.len(), 2);
+        assert!(
+            recovery_events
+                .iter()
+                .all(|event| { event.target == "timeseries_table_format::table::coverage" })
+        );
 
         let warning = recovery_events
             .iter()
