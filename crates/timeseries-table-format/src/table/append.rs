@@ -25,7 +25,7 @@ use crate::{
     coverage::{
         EntityCoverage,
         index_interval::index_interval_for_id,
-        io::write_coverage_sidecar_new_bytes,
+        io::{CoverageSidecarError, write_coverage_sidecar_new_bytes},
         layout::{
             coverage_file_id_for_attempt, segment_coverage_id_v2, segment_coverage_key,
             segment_entity_coverage_id_v1, table_coverage_id_v2, table_entity_coverage_id_v1,
@@ -43,7 +43,7 @@ use crate::{
     },
     storage,
     transaction_log::{
-        CommitError, LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
+        LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
     },
 };
 
@@ -51,32 +51,28 @@ use super::{
     TimeSeriesTable,
     append_schema::AppendSchemaNormalizer,
     error::{
-        AppendParquetSnafu, AppendSourceSnafu, EmptySegmentEntityCoverageSnafu,
-        EntityIndexIntervalOverlapSnafu, EntityWithoutIndexCoverageSnafu,
-        ExistingSegmentMissingCoverageSnafu, IndexIntervalMappingSnafu, IndexIntervalOverlapSnafu,
-        MissingCanonicalSchemaSnafu, SchemaCompatibilitySnafu, SegmentMetaSnafu,
-        SegmentSchemaCompatibilitySnafu, StorageSnafu, TableError,
+        AppendError, ArrowInputSnafu, ArrowToLogicalSchemaSnafu,
+        GeneratedSegmentSchemaCompatibilitySnafu, ParquetWriteSnafu, TableError,
     },
 };
 
 fn classify_entity_layout(
     segment_path: &str,
     coverage: &EntityCoverage,
-) -> Result<SegmentEntityLayout, TableError> {
+) -> Result<SegmentEntityLayout, AppendError> {
     let first_identity = coverage
         .iter()
         .next()
         .map(|(identity, _)| identity)
-        .context(EmptySegmentEntityCoverageSnafu {
+        .ok_or_else(|| AppendError::EmptySegmentEntityCoverage {
             segment_path: segment_path.to_string(),
         })?;
 
     if let Some((identity, _)) = coverage.iter().find(|(_, coverage)| coverage.is_empty()) {
-        return EntityWithoutIndexCoverageSnafu {
+        return Err(AppendError::EntityWithoutIndexCoverage {
             segment_path: segment_path.to_string(),
             identity: identity.clone(),
-        }
-        .fail();
+        });
     }
 
     Ok(if coverage.identity_count() == 1 {
@@ -86,13 +82,12 @@ fn classify_entity_layout(
     })
 }
 
-fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), TableError> {
+fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), AppendError> {
     for seg in state.segments.values() {
         if seg.coverage_path.is_none() {
-            return ExistingSegmentMissingCoverageSnafu {
-                path: seg.path.clone(),
-            }
-            .fail();
+            return Err(AppendError::ExistingSegmentMissingCoverageMetadata {
+                segment_path: seg.path.clone(),
+            });
         }
     }
 
@@ -103,10 +98,9 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
     if let Err(error) = result {
         let outcome = if matches!(
             error,
-            TableError::AppendCommitAmbiguous { .. }
-                | TableError::TransactionLog {
-                    source: CommitError::AmbiguousOutcome { .. },
-                }
+            TableError::Append {
+                source: AppendError::CommitAmbiguous { .. }
+            }
         ) {
             "ambiguous"
         } else {
@@ -139,7 +133,7 @@ pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
     }
 
     /// Convert this source without collecting its batches.
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError>;
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError>;
 }
 
 /// One Arrow source plus physical settings for a single append.
@@ -195,7 +189,7 @@ where
             .or_else(|| self.source.effective_max_rows_per_row_group())
     }
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         self.source.into_record_batch_reader()
     }
 }
@@ -206,7 +200,7 @@ where
 {
     type Reader = R;
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         Ok(self)
     }
 }
@@ -214,7 +208,7 @@ where
 impl IntoRecordBatchReader<ArrowRecordBatch> for ArrowRecordBatch {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         let schema = self.schema();
         Ok(Box::new(RecordBatchIterator::new(
             std::iter::once(Ok(self)),
@@ -226,11 +220,11 @@ impl IntoRecordBatchReader<ArrowRecordBatch> for ArrowRecordBatch {
 impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     type Reader = Box<dyn RecordBatchReader + Send>;
 
-    fn into_record_batch_reader(self) -> Result<Self::Reader, TableError> {
+    fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
         let schema = self
             .first()
             .map(ArrowRecordBatch::schema)
-            .ok_or(TableError::EmptyAppendSource)?;
+            .ok_or(AppendError::EmptyInput)?;
         Ok(Box::new(RecordBatchIterator::new(
             self.into_iter().map(Ok::<_, ArrowError>),
             schema,
@@ -241,15 +235,14 @@ impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
 fn ensure_batch_matches_reader_schema(
     reader_schema: &SchemaRef,
     batch: &ArrowRecordBatch,
-) -> Result<(), TableError> {
+) -> Result<(), AppendError> {
     if batch.schema() == *reader_schema {
         Ok(())
     } else {
-        Err(TableError::AppendSource {
-            source: ArrowError::SchemaError(
-                "record batch schema does not match its reader schema".to_string(),
-            ),
-        })
+        Err(ArrowError::SchemaError(
+            "record batch schema does not match its reader schema".to_string(),
+        ))
+        .context(ArrowInputSnafu)
     }
 }
 
@@ -257,22 +250,28 @@ impl TimeSeriesTable {
     async fn rollback_created_artifacts(
         &self,
         created_paths: &[String],
-        source: TableError,
-    ) -> TableError {
-        let mut cleanup_errors = Vec::new();
+        source: AppendError,
+    ) -> AppendError {
+        let (source, mut cleanup_errors) = match source {
+            AppendError::Rollback {
+                source,
+                cleanup_errors,
+            } => (source, cleanup_errors),
+            source => (Box::new(source), Vec::new()),
+        };
         for path in created_paths.iter().rev() {
             if let Err(error) =
                 storage::remove_file_if_exists(self.location().as_ref(), Path::new(path)).await
             {
-                cleanup_errors.push(format!("{path}: {error}"));
+                cleanup_errors.push(error);
             }
         }
 
         if cleanup_errors.is_empty() {
-            source
+            *source
         } else {
-            TableError::AppendRollback {
-                source: Box::new(source),
+            AppendError::Rollback {
+                source,
                 cleanup_errors,
             }
         }
@@ -281,33 +280,30 @@ impl TimeSeriesTable {
     fn build_append_schema_normalizer(
         &self,
         incoming_schema: SchemaRef,
-    ) -> Result<AppendSchemaNormalizer, TableError> {
+    ) -> Result<AppendSchemaNormalizer, AppendError> {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         match self.state.table_meta.logical_schema.as_ref() {
             None if self.state.version == 1 => {
-                let incoming_logical_schema = LogicalSchema::try_from_arrow_schema(
-                    incoming_schema.as_ref(),
-                )
-                .map_err(|source| TableError::AppendSource {
-                    source: ArrowError::SchemaError(source.to_string()),
-                })?;
+                let incoming_logical_schema =
+                    LogicalSchema::try_from_arrow_schema(incoming_schema.as_ref())
+                        .context(ArrowToLogicalSchemaSnafu)?;
                 ensure_index_spec_matches_schema(&incoming_logical_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)?;
+                    .map_err(AppendError::from)?;
                 Ok(AppendSchemaNormalizer::without_conversion(incoming_schema))
             }
-            None => MissingCanonicalSchemaSnafu {
+            None => Err(AppendError::MissingCanonicalTableSchema {
                 version: self.state.version,
-            }
-            .fail(),
+            }),
             Some(table_schema) => {
                 ensure_index_spec_matches_schema(table_schema, &self.index)
-                    .context(SchemaCompatibilitySnafu)?;
-                AppendSchemaNormalizer::for_registered_schema(
+                    .map_err(AppendError::from)?;
+                let normalizer = AppendSchemaNormalizer::for_registered_schema(
                     incoming_schema.as_ref(),
                     table_schema,
                 )
-                .context(SchemaCompatibilitySnafu)
+                .map_err(AppendError::from)?;
+                Ok(normalizer)
             }
         }
     }
@@ -317,7 +313,7 @@ impl TimeSeriesTable {
         relative_path: &str,
         next_version: u64,
         owned_data_guard: &mut storage::FileCleanupGuard,
-    ) -> Result<u64, TableError> {
+    ) -> Result<u64, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
 
@@ -328,7 +324,7 @@ impl TimeSeriesTable {
         let (mut segment_meta, _) =
             segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
-                .context(SegmentMetaSnafu)?;
+                .map_err(AppendError::from)?;
         let row_count = segment_meta.row_count;
         let span = tracing::Span::current();
         span.record("row_count", row_count);
@@ -338,10 +334,10 @@ impl TimeSeriesTable {
 
         let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
-            .context(SegmentMetaSnafu)?;
+            .map_err(AppendError::from)?;
         ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
-            SegmentSchemaCompatibilitySnafu {
-                path: relative_path.to_string(),
+            GeneratedSegmentSchemaCompatibilitySnafu {
+                segment_path: relative_path.to_string(),
             },
         )?;
 
@@ -361,15 +357,14 @@ impl TimeSeriesTable {
                 Some(updated_meta)
             }
             None => {
-                return MissingCanonicalSchemaSnafu {
+                return Err(AppendError::MissingCanonicalTableSchema {
                     version: expected_version,
-                }
-                .fail();
+                });
             }
             Some(table_schema) => {
                 ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
-                    .context(SegmentSchemaCompatibilitySnafu {
-                        path: relative_path.to_string(),
+                    .context(GeneratedSegmentSchemaCompatibilitySnafu {
+                        segment_path: relative_path.to_string(),
                     })?;
                 None
             }
@@ -379,12 +374,14 @@ impl TimeSeriesTable {
 
         // 3-5) Load, compute, and compare coverage using the entity-column mode.
         let (seg_cov_bytes, new_snap_cov_bytes, entity_layout) = if has_entity_columns {
-            let table_cov = self.load_table_entity_snapshot_coverage_readonly().await?;
+            let table_cov = self
+                .load_table_entity_snapshot_coverage_readonly::<AppendError>()
+                .await?;
 
             let segment_cov =
                 compute_segment_entity_coverage(self.location(), rel_path, &self.index)
                     .await
-                    .map_err(TableError::from)?;
+                    .map_err(AppendError::from)?;
             let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
 
             if let Some((identity, index_interval_id)) =
@@ -392,61 +389,53 @@ impl TimeSeriesTable {
             {
                 let example_index_interval =
                     index_interval_for_id(&self.index.kind, index_interval_id)
-                        .context(IndexIntervalMappingSnafu)?;
-                return EntityIndexIntervalOverlapSnafu {
+                        .map_err(AppendError::from)?;
+                return Err(AppendError::PersistedIndexIntervalOverlap {
                     segment_path: relative_path.to_string(),
                     overlap_count: segment_cov.intersection_cardinality(&table_cov),
-                    example_identity: identity.clone(),
+                    example_identity: Some(identity.clone()),
                     example_index_interval_id: index_interval_id,
-                    example_index_interval,
-                }
-                .fail();
+                    example_index_interval: Box::new(example_index_interval),
+                });
             }
 
-            let seg_bytes = entity_coverage_to_bytes(&segment_cov).map_err(|source| {
-                TableError::CoverageSidecar {
-                    source: source.into(),
-                }
-            })?;
-            let snapshot_bytes =
-                entity_coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
-                    TableError::CoverageSidecar {
-                        source: source.into(),
-                    }
-                })?;
+            let seg_bytes = entity_coverage_to_bytes(&segment_cov)
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
+            let snapshot_bytes = entity_coverage_to_bytes(&table_cov.union(&segment_cov))
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
             (seg_bytes, snapshot_bytes, entity_layout)
         } else {
-            let table_cov = self.load_table_snapshot_coverage_readonly().await?;
+            let table_cov = self
+                .load_table_snapshot_coverage_readonly::<AppendError>()
+                .await?;
 
             let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
                 .await
-                .map_err(TableError::from)?;
+                .map_err(AppendError::from)?;
 
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
             if let Some(example_index_interval_id) = overlap.present().iter().next() {
                 let example_index_interval =
                     index_interval_for_id(&self.index.kind, example_index_interval_id)
-                        .context(IndexIntervalMappingSnafu)?;
-                return IndexIntervalOverlapSnafu {
+                        .map_err(AppendError::from)?;
+                return Err(AppendError::PersistedIndexIntervalOverlap {
                     segment_path: relative_path.to_string(),
-                    overlap_count,
+                    overlap_count: u128::from(overlap_count),
+                    example_identity: None,
                     example_index_interval_id,
-                    example_index_interval,
-                }
-                .fail();
+                    example_index_interval: Box::new(example_index_interval),
+                });
             }
 
-            let seg_bytes =
-                coverage_to_bytes(&segment_cov).map_err(|source| TableError::CoverageSidecar {
-                    source: source.into(),
-                })?;
-            let snapshot_bytes =
-                coverage_to_bytes(&table_cov.union(&segment_cov)).map_err(|source| {
-                    TableError::CoverageSidecar {
-                        source: source.into(),
-                    }
-                })?;
+            let seg_bytes = coverage_to_bytes(&segment_cov)
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
+            let snapshot_bytes = coverage_to_bytes(&table_cov.union(&segment_cov))
+                .map_err(CoverageSidecarError::from)
+                .map_err(AppendError::from)?;
             (
                 seg_bytes,
                 snapshot_bytes,
@@ -468,11 +457,9 @@ impl TimeSeriesTable {
             segment_coverage_id_v2(&self.index, &seg_cov_bytes)
         };
         let segment_file_id = coverage_file_id_for_attempt(&segment_content_id, &attempt_id);
-        let seg_cov_path = segment_coverage_key(&segment_file_id).map_err(|source| {
-            TableError::CoverageSidecar {
-                source: source.into(),
-            }
-        })?;
+        let seg_cov_path = segment_coverage_key(&segment_file_id)
+            .map_err(CoverageSidecarError::from)
+            .map_err(AppendError::from)?;
 
         let snapshot_content_id = if has_entity_columns {
             table_entity_coverage_id_v1(&self.index, &new_snap_cov_bytes)
@@ -480,19 +467,16 @@ impl TimeSeriesTable {
             table_coverage_id_v2(&self.index, &new_snap_cov_bytes)
         };
         let snapshot_file_id = coverage_file_id_for_attempt(&snapshot_content_id, &attempt_id);
-        let snapshot_path =
-            table_snapshot_key(next_version, &snapshot_file_id).map_err(|source| {
-                TableError::CoverageSidecar {
-                    source: source.into(),
-                }
-            })?;
+        let snapshot_path = table_snapshot_key(next_version, &snapshot_file_id)
+            .map_err(CoverageSidecarError::from)
+            .map_err(AppendError::from)?;
 
         let mut created_sidecars = Vec::new();
         let mut segment_sidecar_guard = storage::FileCleanupGuard::new_disarmed(
             self.location().as_ref(),
             Path::new(&seg_cov_path),
         )
-        .context(StorageSnafu)?;
+        .map_err(AppendError::from)?;
         if let Err(source) = write_coverage_sidecar_new_bytes(
             self.location(),
             Path::new(&seg_cov_path),
@@ -504,10 +488,7 @@ impl TimeSeriesTable {
                 created_sidecars.push(seg_cov_path.clone());
             }
             let error = self
-                .rollback_created_artifacts(
-                    &created_sidecars,
-                    TableError::CoverageSidecar { source },
-                )
+                .rollback_created_artifacts(&created_sidecars, AppendError::from(source))
                 .await;
             return Err(error);
         }
@@ -518,7 +499,7 @@ impl TimeSeriesTable {
             self.location().as_ref(),
             Path::new(&snapshot_path),
         )
-        .context(StorageSnafu)?;
+        .map_err(AppendError::from)?;
         if let Err(source) = write_coverage_sidecar_new_bytes(
             self.location(),
             Path::new(&snapshot_path),
@@ -529,7 +510,7 @@ impl TimeSeriesTable {
             if source.storage_cleanup_failed() {
                 created_sidecars.push(snapshot_path.clone());
             }
-            let error = TableError::CoverageSidecar { source };
+            let error = AppendError::from(source);
             let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
                 .await;
@@ -565,10 +546,13 @@ impl TimeSeriesTable {
         {
             Ok(version) => version,
             Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
-                return Err(TableError::TransactionLog { source });
+                return Err(AppendError::CommitAmbiguous {
+                    segment_path: relative_path.to_string(),
+                    source: Box::new(source),
+                });
             }
             Err(source) => {
-                let error = TableError::TransactionLog { source };
+                let error = AppendError::from(source);
                 let error = self
                     .rollback_created_artifacts(&created_sidecars, error)
                     .await;
@@ -651,15 +635,15 @@ impl TimeSeriesTable {
     where
         S: IntoRecordBatchReader<SourceKind>,
     {
-        let result = async {
+        let append_result: Result<u64, AppendError> = async {
             let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
-                return Err(TableError::InvalidMaxRowsPerRowGroup {
+                return Err(AppendError::InvalidMaxRowsPerRowGroup {
                     max_rows_per_row_group: 0,
                 });
             }
-            let next_version = checked_next_version(self.state.version)
-                .map_err(|source| TableError::TransactionLog { source })?;
+            let next_version =
+                checked_next_version(self.state.version).map_err(AppendError::from)?;
             let mut reader = source.into_record_batch_reader()?;
             let incoming_schema = reader.schema();
             let schema_normalizer =
@@ -667,14 +651,14 @@ impl TimeSeriesTable {
             let output_schema = Arc::clone(schema_normalizer.output_schema());
 
             let first_batch = loop {
-                let Some(batch) = reader.next().transpose().context(AppendSourceSnafu)? else {
-                    return Err(TableError::EmptyAppendSource);
+                let Some(batch) = reader.next().transpose().context(ArrowInputSnafu)? else {
+                    return Err(AppendError::EmptyInput);
                 };
                 ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                 if batch.num_rows() != 0 {
                     break schema_normalizer
                         .normalize_batch(&batch)
-                        .context(AppendSourceSnafu)?;
+                        .context(ArrowInputSnafu)?;
                 }
                 tokio::task::yield_now().await;
             };
@@ -685,11 +669,11 @@ impl TimeSeriesTable {
                 self.location().as_ref(),
                 Path::new(&relative_path),
             )
-            .context(StorageSnafu)?;
+            .map_err(AppendError::from)?;
             let sink =
                 storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
                     .await
-                    .context(StorageSnafu)?;
+                    .map_err(AppendError::from)?;
             let write_result = async {
                 let writer_properties = max_rows_per_row_group.map(|max_rows| {
                     WriterProperties::builder()
@@ -698,26 +682,26 @@ impl TimeSeriesTable {
                 });
                 let mut writer =
                     ParquetArrowWriter::try_new(sink, output_schema, writer_properties)
-                        .context(AppendParquetSnafu)?;
-                writer.write(&first_batch).context(AppendParquetSnafu)?;
+                        .context(ParquetWriteSnafu)?;
+                writer.write(&first_batch).context(ParquetWriteSnafu)?;
                 drop(first_batch);
                 tokio::task::yield_now().await;
 
                 for batch in reader {
-                    let batch = batch.context(AppendSourceSnafu)?;
+                    let batch = batch.context(ArrowInputSnafu)?;
                     ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                     if batch.num_rows() != 0 {
                         let batch = schema_normalizer
                             .normalize_batch(&batch)
-                            .context(AppendSourceSnafu)?;
-                        writer.write(&batch).context(AppendParquetSnafu)?;
+                            .context(ArrowInputSnafu)?;
+                        writer.write(&batch).context(ParquetWriteSnafu)?;
                     }
                     drop(batch);
                     tokio::task::yield_now().await;
                 }
 
-                let sink = writer.into_inner().context(AppendParquetSnafu)?;
-                sink.finish().await.context(StorageSnafu)
+                let sink = writer.into_inner().context(ParquetWriteSnafu)?;
+                sink.finish().await.map_err(AppendError::from)
             }
             .await;
             if let Err(source) = write_result {
@@ -734,12 +718,7 @@ impl TimeSeriesTable {
                 .await
             {
                 Ok(version) => Ok(version),
-                Err(TableError::TransactionLog {
-                    source: source @ CommitError::AmbiguousOutcome { .. },
-                }) => Err(TableError::AppendCommitAmbiguous {
-                    segment_path: relative_path,
-                    source,
-                }),
+                Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
                 Err(source) => {
                     let error = self
                         .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
@@ -750,6 +729,7 @@ impl TimeSeriesTable {
             }
         }
         .await;
+        let result = append_result.map_err(TableError::from);
         record_append_failure(&result);
         result
     }
@@ -764,6 +744,7 @@ mod tests {
     };
     use crate::coverage::serde::entity_coverage_from_bytes;
     use crate::coverage::{EntityCoverage, EntityIdentity, EntityValue};
+    use crate::formats::parquet::SegmentCoverageError;
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
@@ -772,7 +753,7 @@ mod tests {
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::transaction_log::{
-        CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
+        CommitError, IndexKind, IndexSpec, TableMeta, TimeIndexGranularity, segments::SegmentError,
     };
     use arrow::{
         array::{
@@ -785,6 +766,7 @@ mod tests {
     };
     use futures::{FutureExt, StreamExt};
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    use snafu::ErrorCompat;
     use std::cell::Cell;
     use std::collections::{BTreeMap, HashMap};
     use std::fs::File;
@@ -1092,7 +1074,12 @@ mod tests {
             .await
             .expect_err("incompatible declared schema must fail");
 
-        assert!(matches!(error, TableError::SchemaCompatibility { .. }));
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::SchemaValidation { .. }
+            }
+        ));
         assert!(error.to_string().contains(expected_column));
         assert!(observations.schema_calls.get() > 0);
         assert_eq!(observations.next_calls.get(), 0);
@@ -1122,8 +1109,8 @@ mod tests {
 
         assert!(matches!(
             table.append(reader).await,
-            Err(TableError::AppendSource {
-                source: ArrowError::SchemaError(_)
+            Err(TableError::Append {
+                source: AppendError::ArrowToLogicalSchema { .. }
             })
         ));
         assert_eq!(observations.next_calls.get(), 0);
@@ -1179,7 +1166,9 @@ mod tests {
             .expect_err("widened entity and index coverage must still reject overlap");
         assert!(matches!(
             overlap,
-            TableError::EntityIndexIntervalOverlap { .. }
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap { .. }
+            }
         ));
         assert_eq!(table.state(), &state_before_overlap);
         assert_eq!(data_files(temp.path())?, data_before_overlap);
@@ -1371,7 +1360,12 @@ mod tests {
             .await
             .expect_err("source failure must abort widened append");
 
-        assert!(matches!(error, TableError::AppendSource { .. }));
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::ArrowInput { .. }
+            }
+        ));
         assert!(!observations.previous_batch_alive.get());
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
@@ -1438,7 +1432,7 @@ mod tests {
     #[test]
     fn into_record_batch_reader_rejects_schema_less_vec() {
         let result = Vec::<RecordBatch>::new().into_record_batch_reader();
-        assert!(matches!(result, Err(TableError::EmptyAppendSource)));
+        assert!(matches!(result, Err(AppendError::EmptyInput)));
     }
 
     #[tokio::test]
@@ -1502,8 +1496,10 @@ mod tests {
 
         assert!(matches!(
             table.append(request).await,
-            Err(TableError::InvalidMaxRowsPerRowGroup {
-                max_rows_per_row_group: 0
+            Err(TableError::Append {
+                source: AppendError::InvalidMaxRowsPerRowGroup {
+                    max_rows_per_row_group: 0
+                }
             })
         ));
         assert_eq!(observations.schema_calls.get(), 0);
@@ -1572,8 +1568,10 @@ mod tests {
             table
                 .append(AppendRequest::new(reader).max_rows_per_row_group(0))
                 .await,
-            Err(TableError::InvalidMaxRowsPerRowGroup {
-                max_rows_per_row_group: 0
+            Err(TableError::Append {
+                source: AppendError::InvalidMaxRowsPerRowGroup {
+                    max_rows_per_row_group: 0
+                }
             })
         ));
         assert_eq!(observations.schema_calls.get(), 0);
@@ -1603,8 +1601,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::TransactionLog {
-                source: CommitError::CorruptState { ref msg, .. }
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::CorruptState { ref msg, .. }
+                }
             } if msg == "version counter overflow"
         ));
         assert_eq!(observations.schema_calls.get(), 0);
@@ -1750,12 +1750,16 @@ mod tests {
 
         assert!(matches!(
             table.append(vec![zero.clone(), zero]).await,
-            Err(TableError::EmptyAppendSource)
+            Err(TableError::Append {
+                source: AppendError::EmptyInput
+            })
         ));
         let empty = RecordBatchIterator::new(Vec::<Result<RecordBatch, ArrowError>>::new(), schema);
         assert!(matches!(
             table.append(empty).await,
-            Err(TableError::EmptyAppendSource)
+            Err(TableError::Append {
+                source: AppendError::EmptyInput
+            })
         ));
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
@@ -1797,7 +1801,12 @@ mod tests {
             };
             let error = result.expect_err("later batch must fail the append");
             assert!(
-                matches!(error, TableError::AppendSource { .. }),
+                matches!(
+                    error,
+                    TableError::Append {
+                        source: AppendError::ArrowInput { .. }
+                    }
+                ),
                 "configured={configured}, source_error={source_error}"
             );
             assert_eq!(
@@ -1858,10 +1867,23 @@ mod tests {
                 panic!("{stage:?} writer failure was not injected");
             };
             if matches!(stage, Stage::Finish) {
-                assert!(matches!(error, TableError::Storage { .. }), "{stage:?}");
+                assert!(
+                    matches!(
+                        error,
+                        TableError::Append {
+                            source: AppendError::Storage { .. }
+                        }
+                    ),
+                    "{stage:?}"
+                );
             } else {
                 assert!(
-                    matches!(error, TableError::AppendParquet { .. }),
+                    matches!(
+                        error,
+                        TableError::Append {
+                            source: AppendError::ParquetWrite { .. }
+                        }
+                    ),
                     "{stage:?}: {error}"
                 );
             }
@@ -1978,10 +2000,12 @@ mod tests {
             .expect_err("second simultaneous writer must lose commit 2");
         assert!(matches!(
             loser_error,
-            TableError::TransactionLog {
-                source: CommitError::Storage {
-                    source: StorageError::AlreadyExists { .. },
-                },
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::Storage {
+                        source: StorageError::AlreadyExists { .. },
+                    },
+                }
             }
         ));
         assert_eq!(loser.state(), &loser_state_before);
@@ -2046,27 +2070,30 @@ mod tests {
             .append(timestamp_only_batch(1)?)
             .await
             .expect_err("writer and cleanup failures must fail append");
-        let TableError::AppendRollback {
-            source,
-            cleanup_errors,
+        let TableError::Append {
+            source:
+                AppendError::Rollback {
+                    source,
+                    cleanup_errors,
+                },
         } = error
         else {
             panic!("unexpected error: {error}");
         };
-        assert!(matches!(*source, TableError::AppendParquet { .. }));
+        assert!(matches!(*source, AppendError::ParquetWrite { .. }));
         assert_eq!(cleanup_errors.len(), 1);
         let remaining = std::fs::read_dir(&data_dir)?.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(remaining.len(), 1);
         let remaining_path = remaining[0].path();
-        assert!(
-            cleanup_errors[0].contains(
-                remaining_path
-                    .file_name()
-                    .expect("remaining data filename")
-                    .to_str()
-                    .expect("UTF-8 data filename")
-            )
-        );
+        let remaining_name = remaining_path
+            .file_name()
+            .expect("remaining data filename")
+            .to_str()
+            .expect("UTF-8 data filename");
+        assert!(matches!(
+            &cleanup_errors[0],
+            StorageError::OtherIo { path, .. } if path.ends_with(remaining_name)
+        ));
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
@@ -2090,11 +2117,14 @@ mod tests {
 
             assert!(matches!(
                 error,
-                TableError::CoverageSidecar {
-                    source: CoverageSidecarError::Storage {
+                TableError::Append {
+                    source: AppendError::CoverageSidecar { source }
+                } if matches!(
+                    source.as_ref(),
+                    CoverageSidecarError::Storage {
                         source: StorageError::CleanupFailed { .. }
                     }
-                }
+                )
             ));
             assert_eq!(table.state().version, 1, "{sidecar_dir}");
             assert!(table.state().segments.is_empty(), "{sidecar_dir}");
@@ -2139,11 +2169,13 @@ mod tests {
 
         assert!(matches!(
             &error,
-            TableError::TransactionLog {
-                source: CommitError::Conflict {
-                    expected: 1,
-                    found: 2,
-                    ..
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::Conflict {
+                        expected: 1,
+                        found: 2,
+                        ..
+                    }
                 }
             }
         ));
@@ -2190,15 +2222,21 @@ mod tests {
             )
             .await
             .expect_err("failed commit cleanup must be ambiguous");
-        let TableError::AppendCommitAmbiguous {
-            segment_path,
-            source,
+        let TableError::Append {
+            source:
+                AppendError::CommitAmbiguous {
+                    segment_path,
+                    source,
+                },
         } = error
         else {
             panic!("unexpected error: {error}");
         };
 
-        assert!(matches!(source, CommitError::AmbiguousOutcome { .. }));
+        assert!(matches!(
+            source.as_ref(),
+            CommitError::AmbiguousOutcome { .. }
+        ));
         assert!(segment_path.starts_with("data/"));
         assert!(temp.path().join(&segment_path).is_file());
         assert_eq!(
@@ -2252,6 +2290,24 @@ mod tests {
             .expect_err("conflict cleanup failures must be reported");
         let message = error.to_string();
 
+        let (source, cleanup_errors) = match &error {
+            TableError::Append {
+                source:
+                    AppendError::Rollback {
+                        source,
+                        cleanup_errors,
+                    },
+            } => (source, cleanup_errors),
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(matches!(
+            source.as_ref(),
+            AppendError::Commit {
+                source: CommitError::Conflict { .. }
+            }
+        ));
+        assert_eq!(cleanup_errors.len(), 3);
+
         assert!(message.contains("Commit conflict"));
         let data_after = data_files(temp.path())?;
         assert_eq!(data_after.len(), data_before.len() + 1);
@@ -2269,13 +2325,21 @@ mod tests {
                 .map(|path| temp.path().join(path)),
         );
         for path in failed_paths {
+            let filename = path
+                .file_name()
+                .expect("failed cleanup filename")
+                .to_str()
+                .expect("UTF-8 cleanup filename");
             assert!(
-                message.contains(
-                    path.file_name()
-                        .expect("failed cleanup filename")
-                        .to_str()
-                        .expect("UTF-8 cleanup filename")
-                ),
+                cleanup_errors.iter().any(|error| matches!(
+                    error,
+                    StorageError::OtherIo { path, .. } if path.ends_with(filename)
+                )),
+                "missing typed cleanup failure for {}",
+                path.display()
+            );
+            assert!(
+                message.contains(filename),
                 "missing cleanup diagnostic for {}",
                 path.display()
             );
@@ -2296,7 +2360,9 @@ mod tests {
 
         assert!(matches!(
             table.append(input_batch(vec![1])?).await,
-            Err(TableError::SchemaCompatibility { .. })
+            Err(TableError::Append {
+                source: AppendError::SchemaValidation { .. }
+            })
         ));
         assert_eq!(table.state().version, 1);
         assert!(!temp.path().join("data").exists());
@@ -2316,7 +2382,9 @@ mod tests {
             table
                 .append(AppendRequest::new(batch).max_rows_per_row_group(1))
                 .await,
-            Err(TableError::EntityIndexIntervalOverlap { .. })
+            Err(TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap { .. }
+            })
         ));
         assert_eq!(table.state().version, 2);
         assert_eq!(
@@ -2548,7 +2616,7 @@ mod tests {
     fn entity_layout_classification_rejects_empty_coverage() {
         assert!(matches!(
             classify_entity_layout("data/empty.parquet", &EntityCoverage::empty()),
-            Err(TableError::EmptySegmentEntityCoverage { segment_path })
+            Err(AppendError::EmptySegmentEntityCoverage { segment_path })
                 if segment_path == "data/empty.parquet"
         ));
     }
@@ -2571,21 +2639,26 @@ mod tests {
 
         let message = error.to_string();
         match error {
-            TableError::DuplicateIndexInterval {
-                segment_path,
-                example_identity: None,
-                example_index_interval,
-            } => {
-                assert!(segment_path.starts_with("data/"));
-                assert!(segment_path.ends_with(".parquet"));
-                assert!(message.contains(&segment_path));
-                assert!(message.contains("Duplicate ordered-index interval"));
-                assert!(message.contains("ordered-index interval"));
-                assert_eq!(
-                    example_index_interval.to_string(),
-                    "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
-                );
-            }
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
+            } => match *source {
+                SegmentCoverageError::DuplicateIndexInterval {
+                    path: segment_path,
+                    example_identity: None,
+                    example_index_interval,
+                } => {
+                    assert!(segment_path.starts_with("data/"));
+                    assert!(segment_path.ends_with(".parquet"));
+                    assert!(message.contains(&segment_path));
+                    assert!(message.contains("Duplicate ordered-index interval"));
+                    assert!(message.contains("ordered-index interval"));
+                    assert_eq!(
+                        example_index_interval.to_string(),
+                        "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+                    );
+                }
+                other => panic!("expected duplicate interval source, got {other:?}"),
+            },
             other => panic!("expected duplicate interval error, got {other:?}"),
         }
         assert_eq!(table.state(), &state_before);
@@ -2623,12 +2696,16 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::DuplicateIndexInterval {
-                example_identity: None,
-                example_index_interval,
-                ..
-            } if example_index_interval.to_string()
-                == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
+            } if matches!(source.as_ref(),
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: None,
+                    example_index_interval,
+                    ..
+                } if example_index_interval.to_string()
+                    == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
+            )
         ));
         assert_eq!(table.state(), &state_before);
         assert!(data_files(temp.path())?.is_empty());
@@ -2678,11 +2755,15 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::DuplicateIndexInterval {
-                example_identity: Some(example_identity),
-                ..
-            } if example_identity.components()
-                == [EntityValue::from("A"), EntityValue::from("Z")]
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
+            } if matches!(source.as_ref(),
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: Some(example_identity),
+                    ..
+                } if example_identity.components()
+                    == [EntityValue::from("A"), EntityValue::from("Z")]
+            )
         ));
         assert_eq!(table.state(), &state_before);
         Ok(())
@@ -2718,13 +2799,17 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::DuplicateIndexInterval {
-                example_identity: Some(example_identity),
-                example_index_interval,
-                ..
-            } if example_identity == expected_identity
-                && example_index_interval.to_string()
-                    == "[1970-01-01T00:01:00Z, 1970-01-01T00:02:00Z)"
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage { source, .. },
+            } if matches!(source.as_ref(),
+                SegmentCoverageError::DuplicateIndexInterval {
+                    example_identity: Some(example_identity),
+                    example_index_interval,
+                    ..
+                } if example_identity == &expected_identity
+                    && example_index_interval.to_string()
+                        == "[1970-01-01T00:01:00Z, 1970-01-01T00:02:00Z)"
+            )
         ));
         assert_eq!(table.state(), &state_before);
         assert_eq!(table.log.load_current_version().await?, 2);
@@ -2863,9 +2948,12 @@ mod tests {
             .expect_err("negative index interval overlap must fail");
         assert!(matches!(
             &overlap_error,
-            TableError::IndexIntervalOverlap {
-                example_index_interval,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    example_identity: None,
+                    example_index_interval,
+                    ..
+                }
             } if example_index_interval.to_string() == "[-20, -10)"
         ));
         assert!(
@@ -2884,7 +2972,9 @@ mod tests {
             append_parquet_fixture(&mut table, mismatch_path)
                 .await
                 .expect_err("later schema mismatch must fail"),
-            TableError::SchemaCompatibility { .. }
+            TableError::Append {
+                source: AppendError::SchemaValidation { .. }
+            }
         ));
         assert_eq!(table.state, state_before);
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -2963,9 +3053,12 @@ mod tests {
             .expect_err("large uint64 index interval overlap must fail");
         assert!(matches!(
             overlap_error,
-            TableError::IndexIntervalOverlap {
-                example_index_interval,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    example_identity: None,
+                    example_index_interval,
+                    ..
+                }
             } if example_index_interval.to_string()
                 == "[18446744073709551610, 18446744073709551615]"
         ));
@@ -2996,16 +3089,21 @@ mod tests {
 
         assert!(
             matches!(
-            error,
-            TableError::SchemaCompatibility {
-                source:
+                error,
+                TableError::Append {
+                    source: AppendError::SchemaValidation {
+                        ref source,
+                        ..
+                    }
+                } if matches!(
+                    source.as_ref(),
                     crate::metadata::schema_compat::SchemaCompatibilityError::IndexKindMismatch {
                         expected: "uint64",
                         actual: LogicalDataType::Int64,
                         ..
                     }
-            }
-        ),
+                )
+            ),
             "unexpected error: {error:?}"
         );
         assert_eq!(table.state, state_before);
@@ -3154,19 +3252,23 @@ mod tests {
             .expect_err("same typed identity and index interval must overlap");
         assert!(matches!(
             error,
-            TableError::EntityIndexIntervalOverlap {
-                overlap_count: 1,
-                example_identity,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    overlap_count: 1,
+                    example_identity: Some(example_identity),
+                    ..
+                }
             } if example_identity == negative_identity
         ));
 
-        let snapshot = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let snapshot = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state(), table.state());
         assert_eq!(
             reopened
-                .recover_table_entity_coverage_from_segments()
+                .recover_table_entity_coverage_from_segments::<TableError>()
                 .await?,
             snapshot
         );
@@ -3242,10 +3344,12 @@ mod tests {
             .expect_err("matching composite identity and index interval must overlap");
         assert!(matches!(
             error,
-            TableError::EntityIndexIntervalOverlap {
-                overlap_count: 1,
-                example_identity,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    overlap_count: 1,
+                    example_identity: Some(example_identity),
+                    ..
+                }
             } if example_identity.components()
                 == [EntityValue::from("A"), EntityValue::from("X")]
         ));
@@ -3276,7 +3380,9 @@ mod tests {
             .expect_err("identity without index coverage must be rejected");
 
         match error {
-            TableError::EntityWithoutIndexCoverage { identity, .. } => {
+            TableError::Append {
+                source: AppendError::EntityWithoutIndexCoverage { identity, .. },
+            } => {
                 assert_eq!(identity.components(), [EntityValue::from("B")]);
             }
             other => panic!("unexpected error: {other:?}"),
@@ -3324,13 +3430,18 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::SchemaCompatibility {
-                source:
-                    crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
-                        column,
-                        actual: LogicalDataType::Bool,
-                    }
-            } if column == "device_id"
+            TableError::Append {
+                source: AppendError::SchemaValidation {
+                    ref source,
+                    ..
+                }
+            } if matches!(
+                source.as_ref(),
+                crate::metadata::schema_compat::SchemaCompatibilityError::UnsupportedEntityColumnType {
+                    column,
+                    actual: LogicalDataType::Bool,
+                } if column == "device_id"
+            )
         ));
         assert_eq!(table.state, state_before);
         assert!(coverage_files(tmp.path())?.is_empty());
@@ -3397,7 +3508,9 @@ mod tests {
                 .values()
                 .all(|segment| segment.coverage_path.is_some())
         );
-        let expected_snapshot = table.recover_table_entity_coverage_from_segments().await?;
+        let expected_snapshot = table
+            .recover_table_entity_coverage_from_segments::<TableError>()
+            .await?;
 
         let ptr = table
             .state
@@ -3478,12 +3591,14 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::EntityIndexIntervalOverlap {
-                overlap_count: 3,
-                example_identity,
-                example_index_interval_id: 0x8000_0000_0000_0000,
-                example_index_interval,
-                ..
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap {
+                    overlap_count: 3,
+                    example_identity: Some(example_identity),
+                    example_index_interval_id: 0x8000_0000_0000_0000,
+                    example_index_interval,
+                    ..
+                }
             } if example_identity.components() == [EntityValue::from("A")]
                 && example_index_interval.to_string()
                     == "[1970-01-01T00:00:00Z, 1970-01-01T00:01:00Z)"
@@ -3536,7 +3651,7 @@ mod tests {
         assert_eq!(ptr.index_kind, reopened.index_spec().kind);
 
         let expected = reopened
-            .recover_table_entity_coverage_from_segments()
+            .recover_table_entity_coverage_from_segments::<TableError>()
             .await?;
 
         let snapshot_cov =
@@ -3591,7 +3706,9 @@ mod tests {
 
         tokio::fs::remove_file(&snapshot_abs).await?;
 
-        let recovered = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let recovered = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
 
         let mut expected = EntityCoverage::empty();
         for seg in state.segments.values() {
@@ -3649,7 +3766,9 @@ mod tests {
 
         tokio::fs::write(&snapshot_abs, b"garbage").await?;
 
-        let recovered = table.load_table_entity_snapshot_coverage_readonly().await?;
+        let recovered = table
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
+            .await?;
 
         let mut expected = EntityCoverage::empty();
         for seg in state.segments.values() {
@@ -3706,7 +3825,12 @@ mod tests {
         let err = append_parquet_fixture(&mut table, overlapping)
             .await
             .expect_err("overlap must be rejected");
-        assert!(matches!(err, TableError::EntityIndexIntervalOverlap { .. }));
+        assert!(matches!(
+            err,
+            TableError::Append {
+                source: AppendError::PersistedIndexIntervalOverlap { .. }
+            }
+        ));
         assert_eq!(tokio::fs::read(snapshot_abs).await?, b"garbage");
         Ok(())
     }
@@ -3751,7 +3875,7 @@ mod tests {
         table.state = state;
 
         let err = table
-            .load_table_entity_snapshot_coverage_readonly()
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
             .await
             .expect_err("missing coverage_path should error");
 
@@ -3817,7 +3941,7 @@ mod tests {
         tokio::fs::write(&corrupt_abs, b"not a coverage bitmap").await?;
 
         let err = table
-            .load_table_entity_snapshot_coverage_readonly()
+            .load_table_entity_snapshot_coverage_readonly::<TableError>()
             .await
             .expect_err("corrupt sidecar should error");
 
@@ -3876,7 +4000,9 @@ mod tests {
             .expect_err("expected conflict due to stale version");
 
         match err {
-            TableError::TransactionLog { source } => {
+            TableError::Append {
+                source: AppendError::Commit { source },
+            } => {
                 assert!(matches!(
                     source,
                     CommitError::Conflict {
@@ -3926,8 +4052,10 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::TransactionLog {
-                source: CommitError::Conflict { .. }
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::Conflict { .. }
+                }
             }
         ));
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -3959,10 +4087,12 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                TableError::AppendCommitAmbiguous {
-                    source: CommitError::AmbiguousOutcome { .. },
-                    ..
-                }
+                TableError::Append {
+                    source: AppendError::CommitAmbiguous {
+                        source,
+                        ..
+                    }
+                } if matches!(source.as_ref(), CommitError::AmbiguousOutcome { .. })
             ),
             "unexpected error: {err:?}"
         );
@@ -3990,28 +4120,37 @@ mod tests {
                 &table.index.kind,
                 &IndexValue::Timestamp(utc_datetime(1970, 1, 1, 0, 0, 0)),
             )?;
-        let source = TableError::EntityIndexIntervalOverlap {
+        let source = AppendError::PersistedIndexIntervalOverlap {
             segment_path: "data/failed.parquet".to_string(),
             overlap_count: 1,
-            example_identity: EntityIdentity::try_new(vec!["A".into()])?,
+            example_identity: Some(EntityIdentity::try_new(vec!["A".into()])?),
             example_index_interval_id,
-            example_index_interval: index_interval_for_id(
+            example_index_interval: Box::new(index_interval_for_id(
                 &table.index.kind,
                 example_index_interval_id,
-            )?,
+            )?),
         };
         let err = table.rollback_created_artifacts(&sidecars, source).await;
         let message = err.to_string();
 
         assert!(matches!(
             err,
-            TableError::AppendRollback {
+            AppendError::Rollback {
                 source,
                 cleanup_errors,
-            } if matches!(*source, TableError::EntityIndexIntervalOverlap { .. })
+            } if matches!(
+                *source,
+                AppendError::PersistedIndexIntervalOverlap { .. }
+            )
                 && cleanup_errors.len() == 2
-                && cleanup_errors[0].contains("second-stuck.roar")
-                && cleanup_errors[1].contains("first-stuck.roar")
+                && matches!(
+                    &cleanup_errors[0],
+                    StorageError::OtherIo { path, .. } if path.ends_with("second-stuck.roar")
+                )
+                && matches!(
+                    &cleanup_errors[1],
+                    StorageError::OtherIo { path, .. } if path.ends_with("first-stuck.roar")
+                )
         ));
         assert!(message.contains("data/failed.parquet"));
         assert!(message.contains("first-stuck.roar"));
@@ -4068,7 +4207,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::ExistingSegmentMissingCoverage { .. }
+            TableError::Append {
+                source: AppendError::ExistingSegmentMissingCoverageMetadata { .. }
+            }
         ));
         Ok(())
     }
@@ -4193,8 +4334,143 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::TableCoverageIndexKindMismatch { .. }
+            TableError::Append {
+                source: AppendError::CoverageSnapshotIndexKindMismatch { .. }
+            }
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generated_segment_metadata_failure_preserves_source_cleans_data_and_allows_retry()
+    -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location, timestamp_only_meta()).await?;
+        let state_before = table.state().clone();
+        let segment_path = "data/corrupt-generated.parquet";
+        tokio::fs::create_dir_all(tmp.path().join("data")).await?;
+        tokio::fs::write(tmp.path().join(segment_path), b"not parquet data").await?;
+
+        let mut data_guard = storage::FileCleanupGuard::new_disarmed(
+            table.location().as_ref(),
+            Path::new(segment_path),
+        )?;
+        data_guard.arm();
+        let source = table
+            .publish_generated_parquet_segment(segment_path, 2, &mut data_guard)
+            .await
+            .expect_err("corrupt generated Parquet must fail metadata loading");
+        let source = table
+            .rollback_created_artifacts(&[segment_path.to_string()], source)
+            .await;
+        data_guard.disarm();
+        let error = TableError::from(source);
+
+        assert!(matches!(
+            &error,
+            TableError::Append {
+                source: AppendError::SegmentMetadata { source, .. }
+            } if matches!(source.as_ref(), SegmentError::Metadata { .. })
+        ));
+        assert!(error.to_string().contains(segment_path));
+        assert!(ErrorCompat::backtrace(&error).is_some());
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.log.load_current_version().await?, 1);
+        assert!(!tmp.path().join(segment_path).exists());
+        assert!(data_files(tmp.path())?.is_empty());
+        assert!(coverage_files(tmp.path())?.is_empty());
+
+        assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_missing_or_corrupt_segment_sidecar_preserves_source_and_rolls_back()
+    -> TestResult {
+        #[derive(Debug, Clone, Copy)]
+        enum Damage {
+            Missing,
+            Corrupt,
+        }
+
+        for damage in [Damage::Missing, Damage::Corrupt] {
+            let tmp = TempDir::new()?;
+            let location = TableLocation::local(tmp.path());
+            let mut table =
+                TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+            assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+
+            let (segment_path, coverage_path) = table
+                .state()
+                .segments
+                .values()
+                .next()
+                .map(|segment| {
+                    (
+                        segment.path.clone(),
+                        segment.coverage_path.clone().expect("coverage path"),
+                    )
+                })
+                .expect("committed segment");
+            let coverage_abs = tmp.path().join(&coverage_path);
+            let original_coverage = tokio::fs::read(&coverage_abs).await?;
+            match damage {
+                Damage::Missing => tokio::fs::remove_file(&coverage_abs).await?,
+                Damage::Corrupt => {
+                    tokio::fs::write(&coverage_abs, b"not a coverage sidecar").await?
+                }
+            }
+            table.state.table_coverage = None;
+
+            let state_before = table.state().clone();
+            let data_before = data_files(tmp.path())?;
+            let coverage_before = coverage_files(tmp.path())?;
+            let error = table
+                .append(timestamp_only_batch_starting_at_minute_offset(2, 1)?)
+                .await
+                .expect_err("damaged segment sidecar must fail append recovery");
+
+            let sidecar_source = match &error {
+                TableError::Append {
+                    source:
+                        AppendError::ExistingSegmentCoverageSidecarRead {
+                            segment_path: actual_segment_path,
+                            coverage_path: actual_coverage_path,
+                            source,
+                        },
+                } => {
+                    assert_eq!(actual_segment_path, &segment_path);
+                    assert_eq!(actual_coverage_path, &coverage_path);
+                    source.as_ref()
+                }
+                other => panic!("unexpected {damage:?} error: {other:?}"),
+            };
+            match damage {
+                Damage::Missing => assert!(matches!(
+                    sidecar_source,
+                    CoverageSidecarError::Storage {
+                        source: StorageError::NotFound { .. }
+                    }
+                )),
+                Damage::Corrupt => {
+                    assert!(matches!(sidecar_source, CoverageSidecarError::Codec { .. }))
+                }
+            }
+            assert!(ErrorCompat::backtrace(&error).is_some());
+            assert_eq!(table.state(), &state_before, "{damage:?}");
+            assert_eq!(data_files(tmp.path())?, data_before, "{damage:?}");
+            assert_eq!(coverage_files(tmp.path())?, coverage_before, "{damage:?}");
+
+            tokio::fs::write(&coverage_abs, &original_coverage).await?;
+            assert_eq!(
+                table
+                    .append(timestamp_only_batch_starting_at_minute_offset(2, 1)?)
+                    .await?,
+                3,
+                "{damage:?}"
+            );
+        }
         Ok(())
     }
 }

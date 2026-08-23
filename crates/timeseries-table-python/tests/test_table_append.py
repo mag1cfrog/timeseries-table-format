@@ -219,7 +219,7 @@ def test_append_empty_reader_does_not_commit_or_create_data(tmp_path):
     source = pa.RecordBatchReader.from_batches(batch.schema, [])
 
     with pytest.raises(
-        ttf.TimeseriesTableError, match="empty Arrow batch source"
+        ttf.TimeseriesTableError, match="Cannot append an empty Arrow input"
     ) as excinfo:
         table.append(source)
 

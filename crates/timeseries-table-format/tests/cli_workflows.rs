@@ -1042,7 +1042,7 @@ fn cli_append_late_decode_failure_leaves_no_partial_append()
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Arrow batch source error"));
+    assert!(stderr.contains("Arrow input error"));
     assert!(stderr.contains(&source.display().to_string()));
     assert!(stderr.contains(&table_root.display().to_string()));
     assert_eq!(std::fs::read(&source)?, source_before);

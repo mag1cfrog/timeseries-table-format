@@ -21,7 +21,7 @@ use timeseries_table_format::{
     },
     metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
     storage::TableLocation,
-    table::{TableError, TimeSeriesTable},
+    table::{AppendError, TableError, TimeSeriesTable},
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -119,7 +119,12 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .append(open_parquet_batches(tmp.path().join(rel_overlap))?)
         .await
         .expect_err("overlapping append should fail");
-    assert!(matches!(err, TableError::EntityIndexIntervalOverlap { .. }));
+    assert!(matches!(
+        err,
+        TableError::Append {
+            source: AppendError::PersistedIndexIntervalOverlap { .. }
+        }
+    ));
 
     let snapshot_after =
         read_entity_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
