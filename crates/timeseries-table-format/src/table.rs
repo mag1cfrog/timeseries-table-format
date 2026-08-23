@@ -1,7 +1,7 @@
 //! High-level time-series table abstraction.
 //!
 //! This module is the canonical home for the user-facing [`TimeSeriesTable`]
-//! API. Operation implementations live under [`operations`].
+//! API.
 
 pub mod error;
 mod operations;
