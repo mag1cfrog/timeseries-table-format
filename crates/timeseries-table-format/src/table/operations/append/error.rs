@@ -12,8 +12,9 @@ use crate::{
     },
     formats::parquet::SegmentCoverageError,
     metadata::{
-        logical_schema::ArrowToLogicalSchemaError, schema_compat::SchemaCompatibilityError,
-        table_metadata::IndexKind,
+        logical_schema::ArrowToLogicalSchemaError,
+        schema_compat::SchemaCompatibilityError,
+        table_metadata::{IndexKind, TableProtocolError},
     },
     storage::StorageError,
     transaction_log::{CommitError, segments::SegmentError},
@@ -24,6 +25,16 @@ use crate::{
 #[snafu(visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum AppendError {
+    /// The table protocol does not permit this client to append.
+    #[snafu(context(false), display("Table protocol error: {source}"))]
+    Protocol {
+        /// Complete table protocol failure.
+        #[snafu(source)]
+        source: TableProtocolError,
+        /// Backtrace captured at the append boundary.
+        backtrace: Backtrace,
+    },
+
     /// An Arrow input reader or batch normalization failed.
     #[snafu(display("Arrow input error: {source}"))]
     ArrowInput {

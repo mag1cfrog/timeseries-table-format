@@ -640,6 +640,11 @@ impl TimeSeriesTable {
         S: IntoRecordBatchReader<SourceKind>,
     {
         let append_result: Result<u64, AppendError> = async {
+            self.state
+                .table_meta
+                .ensure_write_compatible()
+                .map_err(AppendError::from)?;
+
             let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
                 return Err(AppendError::InvalidMaxRowsPerRowGroup {
@@ -753,7 +758,7 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
     use crate::metadata::segments::SegmentEntityLayout;
-    use crate::metadata::table_metadata::IndexValue;
+    use crate::metadata::table_metadata::{IndexValue, TableProtocolError};
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::table::test_util::*;
@@ -1121,6 +1126,45 @@ mod tests {
         assert_eq!(observations.next_calls.get(), 0);
         assert_eq!(table.state().version, 1);
         assert!(!temp.path().join("data").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_unsupported_writer_features_before_input_or_artifacts() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        table
+            .state
+            .table_meta
+            .required_writer_features
+            .insert("future_writer".to_string());
+        let state_before = table.state().clone();
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+
+        let error = table
+            .append(reader)
+            .await
+            .expect_err("unsupported writer feature must reject append");
+
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::Protocol {
+                    source: TableProtocolError::UnsupportedWriterFeatures { features },
+                    ..
+                }
+            } if features == ["future_writer"]
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.current_version().await?, 1);
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 

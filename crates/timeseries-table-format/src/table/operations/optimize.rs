@@ -11,8 +11,9 @@ use crate::{
     },
     formats::parquet::{EntityRewriteError, StagedEntityRewrite, rewrite_mixed_parquet_segment},
     metadata::{
-        schema_compat::SchemaCompatibilityError, segments::SegmentEntityLayout,
-        table_metadata::IndexValueError,
+        schema_compat::SchemaCompatibilityError,
+        segments::SegmentEntityLayout,
+        table_metadata::{IndexValueError, TableProtocolError},
     },
     storage::{
         StorageError, StorageLocation, normalize_relative_storage_path, remove_file_if_exists,
@@ -26,6 +27,16 @@ use crate::{
 #[snafu(module, visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum OptimizeError {
+    /// The table protocol does not permit this client to optimize.
+    #[snafu(context(false), display("Table protocol error: {source}"))]
+    Protocol {
+        /// Complete table protocol failure.
+        #[snafu(source)]
+        source: TableProtocolError,
+        /// Backtrace captured at the optimization boundary.
+        backtrace: Backtrace,
+    },
+
     /// Entity-layout optimization requires at least one entity column.
     #[snafu(display(
         "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
@@ -430,6 +441,11 @@ impl TimeSeriesTable {
     )]
     pub async fn optimize(&mut self) -> Result<OptimizeReport, TableError> {
         let result: Result<OptimizeReport, OptimizeError> = async {
+            self.state
+                .table_meta
+                .ensure_write_compatible()
+                .map_err(OptimizeError::from)?;
+
             if self.index.entity_columns.is_empty() {
                 let table_root = match self.location().as_ref() {
                     StorageLocation::Local(root) => root.display().to_string(),
@@ -637,7 +653,7 @@ mod tests {
         metadata::{
             logical_schema::LogicalTimestampUnit,
             segments::{FileFormat, SegmentEntityLayout},
-            table_metadata::IndexValue,
+            table_metadata::{IndexValue, TableProtocolError},
         },
         storage::{StorageError, TableLocation, layout},
         table::test_util::{
@@ -862,6 +878,47 @@ mod tests {
         assert!(!temp.path().join("data/_staged").exists());
         let reopened = TimeSeriesTable::open(TableLocation::local(temp.path())).await?;
         assert_eq!(reopened.state().version, starting_version);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optimize_rejects_unsupported_writer_features_before_staging() -> Result<(), TableError>
+    {
+        let temp = TempDir::new().expect("temp directory");
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        table
+            .state
+            .table_meta
+            .required_writer_features
+            .insert("future_writer".to_string());
+        let state_before = table.state().clone();
+        let objects_before = optimization_objects(temp.path()).expect("optimization objects");
+
+        let error = table
+            .optimize()
+            .await
+            .expect_err("unsupported writer feature must reject optimize");
+
+        assert!(matches!(
+            error,
+            TableError::Optimize {
+                source: OptimizeError::Protocol {
+                    source: TableProtocolError::UnsupportedWriterFeatures { features },
+                    ..
+                }
+            } if features == ["future_writer"]
+        ));
+        assert_eq!(table.state(), &state_before);
+        assert_eq!(table.current_version().await?, 1);
+        assert_eq!(
+            optimization_objects(temp.path()).expect("optimization objects"),
+            objects_before
+        );
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
     }
 
