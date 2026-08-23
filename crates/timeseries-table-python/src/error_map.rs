@@ -25,7 +25,7 @@ pub(crate) fn datafusion_error_to_py(
     DataFusionError::new_err(err.to_string())
 }
 
-fn new_storage_py_error(py: Python<'_>, err: &CoreStorageError) -> PyErr {
+pub(crate) fn storage_error_to_py(py: Python<'_>, err: &CoreStorageError) -> PyErr {
     let msg = err.to_string();
 
     let path_attr = match err {
@@ -237,7 +237,7 @@ pub(crate) fn table_error_to_py(
     }
 
     if let Some(storage) = find_error_in_source_chain::<CoreStorageError>(root, |_| true) {
-        return new_storage_py_error(py, storage);
+        return storage_error_to_py(py, storage);
     }
 
     TimeseriesTableError::new_err(msg)
@@ -276,8 +276,10 @@ mod tests {
         init_python();
 
         let attached = Python::try_attach(|py| {
-            let storage = TableError::from(OpenTableError::Storage {
-                source: invalid_location_error(),
+            let storage = TableError::from(OpenTableError::Commit {
+                source: CommitError::Storage {
+                    source: invalid_location_error(),
+                },
             });
             assert!(table_error_to_py(py, storage, &[]).is_instance_of::<StorageError>(py));
 

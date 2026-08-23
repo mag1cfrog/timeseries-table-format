@@ -42,7 +42,7 @@ mod _native {
         datafusion::TsTableProvider, table::OptimizeReport as CoreOptimizeReport,
     };
 
-    use crate::error_map::datafusion_error_to_py;
+    use crate::error_map::{datafusion_error_to_py, storage_error_to_py};
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;
     use crate::{
         exceptions::{
@@ -169,26 +169,45 @@ mod _native {
         ))
     }
 
-    fn table_error_to_py_with_root(
+    fn py_error_with_table_root(
         py: Python<'_>,
         table_root: &str,
-        entity_columns: &[String],
-        err: timeseries_table_format::table::TableError,
+        message: String,
+        py_err: PyErr,
     ) -> PyErr {
-        let base_msg = err.to_string();
-        let py_err = crate::error_map::table_error_to_py(py, err, entity_columns);
         let exc = py_err.value(py);
 
         if let Err(e) = exc.setattr("table_root", table_root.to_string()) {
             return e;
         }
 
-        let msg = format!("{base_msg} (table_root={table_root})");
+        let msg = format!("{message} (table_root={table_root})");
         if let Err(e) = exc.setattr("args", (msg,)) {
             return e;
         }
 
         py_err
+    }
+
+    fn table_error_to_py_with_root(
+        py: Python<'_>,
+        table_root: &str,
+        entity_columns: &[String],
+        err: timeseries_table_format::table::TableError,
+    ) -> PyErr {
+        let message = err.to_string();
+        let py_err = crate::error_map::table_error_to_py(py, err, entity_columns);
+        py_error_with_table_root(py, table_root, message, py_err)
+    }
+
+    fn storage_error_to_py_with_root(
+        py: Python<'_>,
+        table_root: &str,
+        err: timeseries_table_format::storage::StorageError,
+    ) -> PyErr {
+        let message = err.to_string();
+        let py_err = storage_error_to_py(py, &err);
+        py_error_with_table_root(py, table_root, message, py_err)
     }
 
     /// Own the imported stream behind callbacks that always provide an error message.
@@ -738,11 +757,14 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
             table_root: String,
         ) -> PyResult<()> {
             use timeseries_table_format::storage::TableLocation;
-            use timeseries_table_format::table::{OpenTableError, TableError, TimeSeriesTable};
+            use timeseries_table_format::table::TimeSeriesTable;
 
             if name.is_empty() {
                 return Err(PyValueError::new_err("name must be non-empty"));
             }
+
+            let location = TableLocation::parse(&table_root)
+                .map_err(|err| storage_error_to_py_with_root(py, &table_root, err))?;
 
             let name_for_df = name.clone();
 
@@ -759,11 +781,6 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
                 self.rt.as_ref(),
                 async move {
                     // 1) IO: open table (async)
-                    let location = TableLocation::parse(&table_root)
-                        .map_err(OpenTableError::from)
-                        .map_err(TableError::from)
-                        .map_err(RegisterTsTableError::Table)?;
-
                     let table = TimeSeriesTable::open(location)
                         .await
                         .map_err(RegisterTsTableError::Table)?;
@@ -1478,7 +1495,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             use std::num::NonZeroU64;
             use timeseries_table_format::storage::TableLocation;
-            use timeseries_table_format::table::{CreateTableError, TableError};
+            use timeseries_table_format::table::TableError;
             use timeseries_table_format::transaction_log::{
                 IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
             };
@@ -1583,18 +1600,16 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             };
             let meta = TableMeta::new_time_series(index);
 
-            let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = table_root.clone();
+            let location = TableLocation::parse(&table_root)
+                .map_err(|err| storage_error_to_py_with_root(py, &table_root_for_err, err))?;
+            let rt = tokio_runner::global_runtime()?;
 
             let table_root_for_err_cp = table_root_for_err.clone();
             let inner = tokio_runner::run_blocking_map_err(
                 py,
                 rt.as_ref(),
                 async move {
-                    let location = TableLocation::parse(&table_root)
-                        .map_err(CreateTableError::from)
-                        .map_err(TableError::from)?;
-
                     let table =
                         timeseries_table_format::table::TimeSeriesTable::create(location, meta)
                             .await?;
@@ -1620,23 +1635,18 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         fn open(_cls: &Bound<'_, PyType>, py: Python<'_>, table_root: String) -> PyResult<Self> {
             use crate::tokio_runner;
 
-            use timeseries_table_format::{
-                storage::TableLocation,
-                table::{OpenTableError, TableError},
-            };
+            use timeseries_table_format::{storage::TableLocation, table::TableError};
 
-            let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = table_root.clone();
+            let location = TableLocation::parse(&table_root)
+                .map_err(|err| storage_error_to_py_with_root(py, &table_root_for_err, err))?;
+            let rt = tokio_runner::global_runtime()?;
             let table_root_for_err_cp = table_root_for_err.clone();
 
             let inner = tokio_runner::run_blocking_map_err(
                 py,
                 rt.as_ref(),
                 async move {
-                    let location = TableLocation::parse(&table_root)
-                        .map_err(OpenTableError::from)
-                        .map_err(TableError::from)?;
-
                     let table =
                         timeseries_table_format::table::TimeSeriesTable::open(location).await?;
 

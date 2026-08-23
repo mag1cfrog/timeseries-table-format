@@ -7,7 +7,7 @@ use crate::{
         index::IndexSpecError,
         schema_compat::{SchemaCompatibilityError, ensure_index_spec_matches_schema},
     },
-    storage::{StorageError, TableLocation},
+    storage::TableLocation,
     table::{TableError, TimeSeriesTable},
     transaction_log::{
         CommitError, LogAction, TableKind, TableMeta, TableProtocolError, TransactionLogStore,
@@ -62,14 +62,6 @@ pub enum CreateTableError {
     AlreadyExists {
         /// Existing transaction log version.
         current_version: u64,
-    },
-
-    /// Resolving or accessing the requested table location failed.
-    #[snafu(context(false), display("Table storage error: {source}"))]
-    Storage {
-        /// Complete storage failure.
-        #[snafu(source, backtrace)]
-        source: StorageError,
     },
 
     /// Accessing or publishing the transaction log failed.

@@ -107,6 +107,15 @@ def test_register_tstable_invalid_root_raises(tmp_path, make_root):
     assert getattr(excinfo.value, "table_root", None) == str(root)
 
 
+def test_register_tstable_rejects_unsupported_scheme_with_root():
+    root = "s3://bucket/path"
+
+    with pytest.raises(ttf.StorageError) as excinfo:
+        ttf.Session().register_tstable("prices", root)
+
+    assert getattr(excinfo.value, "table_root", None) == root
+
+
 def test_register_tstable_succeeds_and_replaces_with_different_root(tmp_path):
     root1 = tmp_path / "table1"
     root2 = tmp_path / "table2"
