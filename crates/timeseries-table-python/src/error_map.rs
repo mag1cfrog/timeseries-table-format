@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use pyo3::{
     Bound, PyErr, PyResult, Python,
     types::{PyAny, PyAnyMethods, PyDict, PyDictMethods},
@@ -8,16 +10,11 @@ use crate::exceptions::{
     SchemaMismatchError, StorageError, TimeseriesTableError,
 };
 use timeseries_table_format::{
-    coverage::{
-        CoverageSidecarError, EntityIdentity, EntityValue, SegmentCoverageError,
-        index_interval::IndexInterval,
-    },
+    coverage::{EntityIdentity, EntityValue, SegmentCoverageError, index_interval::IndexInterval},
+    metadata::schema_compat::SchemaCompatibilityError,
     storage::StorageError as CoreStorageError,
-    table::{
-        AppendError, CoverageQueryError, CreateTableError, EntityRewriteError, OpenTableError,
-        OptimizeError, ScanError, TableError, TableStateAccessError,
-    },
-    transaction_log::{CommitError, SegmentError},
+    table::{AppendError, TableError},
+    transaction_log::CommitError,
 };
 
 #[allow(dead_code)]
@@ -28,15 +25,14 @@ pub(crate) fn datafusion_error_to_py(
     DataFusionError::new_err(err.to_string())
 }
 
-#[allow(dead_code)]
-pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyErr {
+fn new_storage_py_error(py: Python<'_>, err: &CoreStorageError) -> PyErr {
     let msg = err.to_string();
 
-    let path_attr: Option<String> = match &err {
-        CoreStorageError::NotFound { path, .. } => Some(path.clone()),
-        CoreStorageError::AlreadyExists { path, .. } => Some(path.clone()),
-        CoreStorageError::OtherIo { path, .. } => Some(path.clone()),
-        CoreStorageError::CleanupFailed { path, .. } => Some(path.clone()),
+    let path_attr = match err {
+        CoreStorageError::NotFound { path, .. }
+        | CoreStorageError::AlreadyExists { path, .. }
+        | CoreStorageError::OtherIo { path, .. }
+        | CoreStorageError::CleanupFailed { path, .. } => Some(path.as_str()),
         _ => None,
     };
 
@@ -52,38 +48,25 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: CoreStorageError) -> PyEr
     py_err
 }
 
-#[allow(dead_code)]
-fn commit_error_to_py(py: Python<'_>, err: CommitError) -> PyErr {
-    let msg = err.to_string();
+fn new_conflict_py_error(py: Python<'_>, msg: String, expected: u64, found: u64) -> PyErr {
+    let py_err = ConflictError::new_err(msg);
+    let exc = py_err.value(py);
 
-    match err {
-        CommitError::Conflict {
-            expected, found, ..
-        } => {
-            let py_err = ConflictError::new_err(msg);
-            let exc = py_err.value(py);
-
-            if let Err(e) = exc.setattr("expected", expected) {
-                return e;
-            }
-            if let Err(e) = exc.setattr("found", found) {
-                return e;
-            }
-
-            py_err
-        }
-
-        CommitError::Storage { source } => storage_error_to_py(py, source),
-
-        _ => TimeseriesTableError::new_err(msg),
+    if let Err(e) = exc.setattr("expected", expected) {
+        return e;
     }
+    if let Err(e) = exc.setattr("found", found) {
+        return e;
+    }
+
+    py_err
 }
 
 fn set_index_interval_error_attributes(
     py: Python<'_>,
     exc: &Bound<'_, PyAny>,
-    segment_path: String,
-    example_index_interval: IndexInterval,
+    segment_path: &str,
+    example_index_interval: &IndexInterval,
     entity_columns: &[String],
     example_identity: Option<&EntityIdentity>,
 ) -> PyResult<()> {
@@ -115,12 +98,12 @@ fn set_index_interval_error_attributes(
     Ok(())
 }
 
-fn index_interval_overlap_error_to_py(
+fn new_index_interval_overlap_py_error(
     py: Python<'_>,
     msg: String,
-    segment_path: String,
+    segment_path: &str,
     conflict_count: u128,
-    example_index_interval: IndexInterval,
+    example_index_interval: &IndexInterval,
     entity_columns: &[String],
     example_identity: Option<&EntityIdentity>,
 ) -> PyErr {
@@ -144,11 +127,11 @@ fn index_interval_overlap_error_to_py(
     py_err
 }
 
-fn duplicate_index_interval_error_to_py(
+fn new_duplicate_index_interval_py_error(
     py: Python<'_>,
     msg: String,
-    segment_path: String,
-    example_index_interval: IndexInterval,
+    segment_path: &str,
+    example_index_interval: &IndexInterval,
     entity_columns: &[String],
     example_identity: Option<&EntityIdentity>,
 ) -> PyErr {
@@ -169,117 +152,28 @@ fn duplicate_index_interval_error_to_py(
     py_err
 }
 
-fn append_error_to_py(
-    py: Python<'_>,
-    err: AppendError,
-    entity_columns: &[String],
-    msg: String,
-) -> PyErr {
-    match err {
-        AppendError::Rollback { source, .. } => {
-            append_error_to_py(py, *source, entity_columns, msg)
-        }
-        AppendError::Storage { source } => storage_error_to_py(py, source),
-        AppendError::Commit { source } => commit_error_to_py(py, source),
-        AppendError::CommitAmbiguous { source, .. } => commit_error_to_py(py, *source),
-        AppendError::GeneratedSegmentCoverage { source, .. } => match *source {
-            SegmentCoverageError::DuplicateIndexInterval {
-                path,
-                example_identity,
-                example_index_interval,
-            } => duplicate_index_interval_error_to_py(
-                py,
-                msg,
-                path,
-                example_index_interval,
-                entity_columns,
-                example_identity.as_ref(),
-            ),
-            _ => TimeseriesTableError::new_err(msg),
-        },
-        AppendError::PersistedIndexIntervalOverlap {
-            segment_path,
-            overlap_count,
-            example_identity,
-            example_index_interval_id: _,
-            example_index_interval,
-        } => index_interval_overlap_error_to_py(
-            py,
-            msg,
-            segment_path,
-            overlap_count,
-            *example_index_interval,
-            entity_columns,
-            example_identity.as_ref(),
-        ),
-        AppendError::SchemaValidation { .. }
-        | AppendError::GeneratedSegmentSchemaCompatibility { .. } => {
-            SchemaMismatchError::new_err(msg)
-        }
-        _ => TimeseriesTableError::new_err(msg),
-    }
-}
+fn find_error_in_source_chain<'a, E>(
+    root: &'a (dyn Error + 'static),
+    mut predicate: impl FnMut(&E) -> bool,
+) -> Option<&'a E>
+where
+    E: Error + 'static,
+{
+    let mut current = Some(root);
 
-fn coverage_sidecar_error_to_py(py: Python<'_>, err: CoverageSidecarError, msg: String) -> PyErr {
-    match err {
-        CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
-        CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
-        _ => TimeseriesTableError::new_err(msg),
-    }
-}
-
-fn entity_rewrite_error_to_py(py: Python<'_>, err: EntityRewriteError, msg: String) -> PyErr {
-    match err {
-        EntityRewriteError::Cleanup { source, .. } => entity_rewrite_error_to_py(py, *source, msg),
-        EntityRewriteError::SegmentInspection {
-            source: SegmentError::MissingFile { source, .. } | SegmentError::Storage { source, .. },
+    while let Some(error) = current {
+        let candidate = error
+            .downcast_ref::<E>()
+            .or_else(|| error.downcast_ref::<Box<E>>().map(|boxed| boxed.as_ref()));
+        if let Some(candidate) = candidate
+            && predicate(candidate)
+        {
+            return Some(candidate);
         }
-        | EntityRewriteError::CoverageInspection {
-            source: SegmentCoverageError::Storage { source, .. },
-        }
-        | EntityRewriteError::Storage { source } => storage_error_to_py(py, source),
-        EntityRewriteError::CoverageSidecar { source } => {
-            coverage_sidecar_error_to_py(py, source, msg)
-        }
-        _ => TimeseriesTableError::new_err(msg),
+        current = error.source();
     }
-}
 
-fn optimize_error_to_py(py: Python<'_>, err: OptimizeError, msg: String) -> PyErr {
-    match err {
-        OptimizeError::Rollback { source, .. } => optimize_error_to_py(py, *source, msg),
-        OptimizeError::MixedSegmentRewrite { source } => {
-            entity_rewrite_error_to_py(py, *source, msg)
-        }
-        OptimizeError::SchemaValidation { .. } => SchemaMismatchError::new_err(msg),
-        OptimizeError::CoverageSidecar { source } => coverage_sidecar_error_to_py(py, *source, msg),
-        OptimizeError::Commit { source } => commit_error_to_py(py, source),
-        _ => TimeseriesTableError::new_err(msg),
-    }
-}
-
-fn create_error_to_py(py: Python<'_>, err: CreateTableError, msg: String) -> PyErr {
-    match err {
-        CreateTableError::Storage { source } => storage_error_to_py(py, source),
-        CreateTableError::Commit { source } => commit_error_to_py(py, source),
-        CreateTableError::SchemaValidation { .. } => SchemaMismatchError::new_err(msg),
-        _ => TimeseriesTableError::new_err(msg),
-    }
-}
-
-fn open_error_to_py(py: Python<'_>, err: OpenTableError, msg: String) -> PyErr {
-    match err {
-        OpenTableError::Storage { source } => storage_error_to_py(py, source),
-        OpenTableError::Commit { source } => commit_error_to_py(py, source),
-        _ => TimeseriesTableError::new_err(msg),
-    }
-}
-
-fn state_access_error_to_py(py: Python<'_>, err: TableStateAccessError, msg: String) -> PyErr {
-    match err {
-        TableStateAccessError::Commit { source } => commit_error_to_py(py, source),
-        _ => TimeseriesTableError::new_err(msg),
-    }
+    None
 }
 
 #[allow(dead_code)]
@@ -289,27 +183,64 @@ pub(crate) fn table_error_to_py(
     entity_columns: &[String],
 ) -> PyErr {
     let msg = err.to_string();
+    let root = &err as &(dyn Error + 'static);
 
-    match err {
-        TableError::Create { source } => create_error_to_py(py, source, msg),
-        TableError::Open { source } => open_error_to_py(py, source, msg),
-        TableError::StateAccess { source } => state_access_error_to_py(py, source, msg),
-        TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
-        TableError::Scan {
-            source: ScanError::Storage { source, .. },
-        } => storage_error_to_py(py, *source),
-        TableError::Scan { .. } => TimeseriesTableError::new_err(msg),
-        TableError::CoverageQuery { source } => match source {
-            CoverageQueryError::CoverageSnapshotRead { source, .. }
-            | CoverageQueryError::SegmentCoverageSidecarRead { source, .. } => {
-                coverage_sidecar_error_to_py(py, *source, msg)
-            }
-            CoverageQueryError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(msg),
-            _ => TimeseriesTableError::new_err(msg),
+    if let Some(
+        conflict @ CommitError::Conflict {
+            expected, found, ..
         },
-        TableError::Optimize { source } => optimize_error_to_py(py, source, msg),
-        _ => TimeseriesTableError::new_err(msg),
+    ) = find_error_in_source_chain::<CommitError>(root, |error| {
+        matches!(error, CommitError::Conflict { .. })
+    }) {
+        return new_conflict_py_error(py, conflict.to_string(), *expected, *found);
     }
+
+    if let Some(AppendError::PersistedIndexIntervalOverlap {
+        segment_path,
+        overlap_count,
+        example_identity,
+        example_index_interval,
+        ..
+    }) = find_error_in_source_chain::<AppendError>(root, |error| {
+        matches!(error, AppendError::PersistedIndexIntervalOverlap { .. })
+    }) {
+        return new_index_interval_overlap_py_error(
+            py,
+            msg,
+            segment_path,
+            *overlap_count,
+            example_index_interval,
+            entity_columns,
+            example_identity.as_ref(),
+        );
+    }
+
+    if let Some(SegmentCoverageError::DuplicateIndexInterval {
+        path,
+        example_identity,
+        example_index_interval,
+    }) = find_error_in_source_chain::<SegmentCoverageError>(root, |error| {
+        matches!(error, SegmentCoverageError::DuplicateIndexInterval { .. })
+    }) {
+        return new_duplicate_index_interval_py_error(
+            py,
+            msg,
+            path,
+            example_index_interval,
+            entity_columns,
+            example_identity.as_ref(),
+        );
+    }
+
+    if find_error_in_source_chain::<SchemaCompatibilityError>(root, |_| true).is_some() {
+        return SchemaMismatchError::new_err(msg);
+    }
+
+    if let Some(storage) = find_error_in_source_chain::<CoreStorageError>(root, |_| true) {
+        return new_storage_py_error(py, storage);
+    }
+
+    TimeseriesTableError::new_err(msg)
 }
 
 #[cfg(test)]
@@ -319,9 +250,16 @@ mod tests {
     use super::*;
     use pyo3::types::PyAnyMethods;
     use timeseries_table_format::{
-        coverage::index_interval::{index_interval_for_id, index_interval_id_for_value},
+        coverage::{
+            CoverageSidecarError,
+            index_interval::{index_interval_for_id, index_interval_id_for_value},
+        },
         storage::StorageLocation,
-        transaction_log::{IndexKind, IndexValue, TableProtocolError},
+        table::{
+            CoverageQueryError, CreateTableError, EntityRewriteError, OpenTableError,
+            OptimizeError, ScanError, TableStateAccessError,
+        },
+        transaction_log::{IndexKind, IndexValue, SegmentError, TableProtocolError},
     };
 
     fn init_python() {
@@ -423,6 +361,42 @@ mod tests {
             }
         });
         assert!(attached.is_some());
+    }
+
+    #[test]
+    fn append_nested_storage_errors_map_to_storage_error() {
+        init_python();
+
+        let errors = [
+            TableError::from(AppendError::SegmentMetadata {
+                source: Box::new(SegmentError::from(invalid_location_error())),
+            }),
+            TableError::from(AppendError::GeneratedSegmentCoverage {
+                source: Box::new(SegmentCoverageError::Storage {
+                    path: "data/segment.parquet".to_string(),
+                    source: invalid_location_error(),
+                }),
+            }),
+            TableError::from(AppendError::CoverageSidecar {
+                source: Box::new(CoverageSidecarError::Storage {
+                    source: invalid_location_error(),
+                }),
+            }),
+            TableError::from(AppendError::ExistingSegmentCoverageSidecarRead {
+                segment_path: "data/segment.parquet".to_string(),
+                coverage_path: "_coverage/segments/missing.roar".to_string(),
+                source: Box::new(CoverageSidecarError::Storage {
+                    source: invalid_location_error(),
+                }),
+            }),
+        ];
+
+        Python::attach(|py| {
+            for error in errors {
+                let python_error = table_error_to_py(py, error, &[]);
+                assert!(python_error.is_instance_of::<StorageError>(py));
+            }
+        });
     }
 
     #[test]
