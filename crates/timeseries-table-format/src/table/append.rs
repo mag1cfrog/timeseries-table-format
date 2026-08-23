@@ -43,7 +43,7 @@ use crate::{
     },
     storage,
     transaction_log::{
-        CommitError, LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
+        LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
     },
 };
 
@@ -52,7 +52,7 @@ use super::{
     append_schema::AppendSchemaNormalizer,
     error::{
         AppendError, ArrowInputSnafu, ArrowToLogicalSchemaSnafu,
-        GeneratedSegmentSchemaCompatibilitySnafu, ParquetWriteSnafu, StorageSnafu, TableError,
+        GeneratedSegmentSchemaCompatibilitySnafu, ParquetWriteSnafu, TableError,
     },
 };
 
@@ -98,10 +98,9 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
     if let Err(error) = result {
         let outcome = if matches!(
             error,
-            TableError::AppendCommitAmbiguous { .. }
-                | TableError::TransactionLog {
-                    source: CommitError::AmbiguousOutcome { .. },
-                }
+            TableError::Append {
+                source: AppendError::CommitAmbiguous { .. }
+            }
         ) {
             "ambiguous"
         } else {
@@ -251,22 +250,28 @@ impl TimeSeriesTable {
     async fn rollback_created_artifacts(
         &self,
         created_paths: &[String],
-        source: TableError,
-    ) -> TableError {
-        let mut cleanup_errors = Vec::new();
+        source: AppendError,
+    ) -> AppendError {
+        let (source, mut cleanup_errors) = match source {
+            AppendError::Rollback {
+                source,
+                cleanup_errors,
+            } => (source, cleanup_errors),
+            source => (Box::new(source), Vec::new()),
+        };
         for path in created_paths.iter().rev() {
             if let Err(error) =
                 storage::remove_file_if_exists(self.location().as_ref(), Path::new(path)).await
             {
-                cleanup_errors.push(format!("{path}: {error}"));
+                cleanup_errors.push(error);
             }
         }
 
         if cleanup_errors.is_empty() {
-            source
+            *source
         } else {
-            TableError::AppendRollback {
-                source: Box::new(source),
+            AppendError::Rollback {
+                source,
                 cleanup_errors,
             }
         }
@@ -275,7 +280,7 @@ impl TimeSeriesTable {
     fn build_append_schema_normalizer(
         &self,
         incoming_schema: SchemaRef,
-    ) -> Result<AppendSchemaNormalizer, TableError> {
+    ) -> Result<AppendSchemaNormalizer, AppendError> {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         match self.state.table_meta.logical_schema.as_ref() {
@@ -289,8 +294,7 @@ impl TimeSeriesTable {
             }
             None => Err(AppendError::MissingCanonicalTableSchema {
                 version: self.state.version,
-            }
-            .into()),
+            }),
             Some(table_schema) => {
                 ensure_index_spec_matches_schema(table_schema, &self.index)
                     .map_err(AppendError::from)?;
@@ -309,7 +313,7 @@ impl TimeSeriesTable {
         relative_path: &str,
         next_version: u64,
         owned_data_guard: &mut storage::FileCleanupGuard,
-    ) -> Result<u64, TableError> {
+    ) -> Result<u64, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
 
@@ -355,8 +359,7 @@ impl TimeSeriesTable {
             None => {
                 return Err(AppendError::MissingCanonicalTableSchema {
                     version: expected_version,
-                }
-                .into());
+                });
             }
             Some(table_schema) => {
                 ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
@@ -393,8 +396,7 @@ impl TimeSeriesTable {
                     example_identity: Some(identity.clone()),
                     example_index_interval_id: index_interval_id,
                     example_index_interval: Box::new(example_index_interval),
-                }
-                .into());
+                });
             }
 
             let seg_bytes = entity_coverage_to_bytes(&segment_cov)
@@ -425,8 +427,7 @@ impl TimeSeriesTable {
                     example_identity: None,
                     example_index_interval_id,
                     example_index_interval: Box::new(example_index_interval),
-                }
-                .into());
+                });
             }
 
             let seg_bytes = coverage_to_bytes(&segment_cov)
@@ -475,7 +476,7 @@ impl TimeSeriesTable {
             self.location().as_ref(),
             Path::new(&seg_cov_path),
         )
-        .context(StorageSnafu)?;
+        .map_err(AppendError::from)?;
         if let Err(source) = write_coverage_sidecar_new_bytes(
             self.location(),
             Path::new(&seg_cov_path),
@@ -487,7 +488,7 @@ impl TimeSeriesTable {
                 created_sidecars.push(seg_cov_path.clone());
             }
             let error = self
-                .rollback_created_artifacts(&created_sidecars, AppendError::from(source).into())
+                .rollback_created_artifacts(&created_sidecars, AppendError::from(source))
                 .await;
             return Err(error);
         }
@@ -498,7 +499,7 @@ impl TimeSeriesTable {
             self.location().as_ref(),
             Path::new(&snapshot_path),
         )
-        .context(StorageSnafu)?;
+        .map_err(AppendError::from)?;
         if let Err(source) = write_coverage_sidecar_new_bytes(
             self.location(),
             Path::new(&snapshot_path),
@@ -509,7 +510,7 @@ impl TimeSeriesTable {
             if source.storage_cleanup_failed() {
                 created_sidecars.push(snapshot_path.clone());
             }
-            let error = AppendError::from(source).into();
+            let error = AppendError::from(source);
             let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
                 .await;
@@ -545,10 +546,13 @@ impl TimeSeriesTable {
         {
             Ok(version) => version,
             Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
-                return Err(TableError::TransactionLog { source });
+                return Err(AppendError::CommitAmbiguous {
+                    segment_path: relative_path.to_string(),
+                    source: Box::new(source),
+                });
             }
             Err(source) => {
-                let error = TableError::TransactionLog { source };
+                let error = AppendError::from(source);
                 let error = self
                     .rollback_created_artifacts(&created_sidecars, error)
                     .await;
@@ -631,16 +635,15 @@ impl TimeSeriesTable {
     where
         S: IntoRecordBatchReader<SourceKind>,
     {
-        let result = async {
+        let append_result: Result<u64, AppendError> = async {
             let max_rows_per_row_group = source.effective_max_rows_per_row_group();
             if max_rows_per_row_group == Some(0) {
                 return Err(AppendError::InvalidMaxRowsPerRowGroup {
                     max_rows_per_row_group: 0,
-                }
-                .into());
+                });
             }
-            let next_version = checked_next_version(self.state.version)
-                .map_err(|source| TableError::TransactionLog { source })?;
+            let next_version =
+                checked_next_version(self.state.version).map_err(AppendError::from)?;
             let mut reader = source.into_record_batch_reader()?;
             let incoming_schema = reader.schema();
             let schema_normalizer =
@@ -649,7 +652,7 @@ impl TimeSeriesTable {
 
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(ArrowInputSnafu)? else {
-                    return Err(AppendError::EmptyInput.into());
+                    return Err(AppendError::EmptyInput);
                 };
                 ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                 if batch.num_rows() != 0 {
@@ -666,11 +669,11 @@ impl TimeSeriesTable {
                 self.location().as_ref(),
                 Path::new(&relative_path),
             )
-            .context(StorageSnafu)?;
+            .map_err(AppendError::from)?;
             let sink =
                 storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
                     .await
-                    .context(StorageSnafu)?;
+                    .map_err(AppendError::from)?;
             let write_result = async {
                 let writer_properties = max_rows_per_row_group.map(|max_rows| {
                     WriterProperties::builder()
@@ -698,7 +701,7 @@ impl TimeSeriesTable {
                 }
 
                 let sink = writer.into_inner().context(ParquetWriteSnafu)?;
-                sink.finish().await.context(StorageSnafu)
+                sink.finish().await.map_err(AppendError::from)
             }
             .await;
             if let Err(source) = write_result {
@@ -715,12 +718,7 @@ impl TimeSeriesTable {
                 .await
             {
                 Ok(version) => Ok(version),
-                Err(TableError::TransactionLog {
-                    source: source @ CommitError::AmbiguousOutcome { .. },
-                }) => Err(TableError::AppendCommitAmbiguous {
-                    segment_path: relative_path,
-                    source,
-                }),
+                Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
                 Err(source) => {
                     let error = self
                         .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
@@ -731,6 +729,7 @@ impl TimeSeriesTable {
             }
         }
         .await;
+        let result = append_result.map_err(TableError::from);
         record_append_failure(&result);
         result
     }
@@ -1601,8 +1600,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            TableError::TransactionLog {
-                source: CommitError::CorruptState { ref msg, .. }
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::CorruptState { ref msg, .. }
+                }
             } if msg == "version counter overflow"
         ));
         assert_eq!(observations.schema_calls.get(), 0);
@@ -1865,7 +1866,15 @@ mod tests {
                 panic!("{stage:?} writer failure was not injected");
             };
             if matches!(stage, Stage::Finish) {
-                assert!(matches!(error, TableError::Storage { .. }), "{stage:?}");
+                assert!(
+                    matches!(
+                        error,
+                        TableError::Append {
+                            source: AppendError::Storage { .. }
+                        }
+                    ),
+                    "{stage:?}"
+                );
             } else {
                 assert!(
                     matches!(
@@ -1990,10 +1999,12 @@ mod tests {
             .expect_err("second simultaneous writer must lose commit 2");
         assert!(matches!(
             loser_error,
-            TableError::TransactionLog {
-                source: CommitError::Storage {
-                    source: StorageError::AlreadyExists { .. },
-                },
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::Storage {
+                        source: StorageError::AlreadyExists { .. },
+                    },
+                }
             }
         ));
         assert_eq!(loser.state(), &loser_state_before);
@@ -2058,32 +2069,30 @@ mod tests {
             .append(timestamp_only_batch(1)?)
             .await
             .expect_err("writer and cleanup failures must fail append");
-        let TableError::AppendRollback {
-            source,
-            cleanup_errors,
+        let TableError::Append {
+            source:
+                AppendError::Rollback {
+                    source,
+                    cleanup_errors,
+                },
         } = error
         else {
             panic!("unexpected error: {error}");
         };
-        assert!(matches!(
-            *source,
-            TableError::Append {
-                source: AppendError::ParquetWrite { .. }
-            }
-        ));
+        assert!(matches!(*source, AppendError::ParquetWrite { .. }));
         assert_eq!(cleanup_errors.len(), 1);
         let remaining = std::fs::read_dir(&data_dir)?.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(remaining.len(), 1);
         let remaining_path = remaining[0].path();
-        assert!(
-            cleanup_errors[0].contains(
-                remaining_path
-                    .file_name()
-                    .expect("remaining data filename")
-                    .to_str()
-                    .expect("UTF-8 data filename")
-            )
-        );
+        let remaining_name = remaining_path
+            .file_name()
+            .expect("remaining data filename")
+            .to_str()
+            .expect("UTF-8 data filename");
+        assert!(matches!(
+            &cleanup_errors[0],
+            StorageError::OtherIo { path, .. } if path.ends_with(remaining_name)
+        ));
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
@@ -2159,11 +2168,13 @@ mod tests {
 
         assert!(matches!(
             &error,
-            TableError::TransactionLog {
-                source: CommitError::Conflict {
-                    expected: 1,
-                    found: 2,
-                    ..
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::Conflict {
+                        expected: 1,
+                        found: 2,
+                        ..
+                    }
                 }
             }
         ));
@@ -2210,15 +2221,21 @@ mod tests {
             )
             .await
             .expect_err("failed commit cleanup must be ambiguous");
-        let TableError::AppendCommitAmbiguous {
-            segment_path,
-            source,
+        let TableError::Append {
+            source:
+                AppendError::CommitAmbiguous {
+                    segment_path,
+                    source,
+                },
         } = error
         else {
             panic!("unexpected error: {error}");
         };
 
-        assert!(matches!(source, CommitError::AmbiguousOutcome { .. }));
+        assert!(matches!(
+            source.as_ref(),
+            CommitError::AmbiguousOutcome { .. }
+        ));
         assert!(segment_path.starts_with("data/"));
         assert!(temp.path().join(&segment_path).is_file());
         assert_eq!(
@@ -2272,6 +2289,24 @@ mod tests {
             .expect_err("conflict cleanup failures must be reported");
         let message = error.to_string();
 
+        let (source, cleanup_errors) = match &error {
+            TableError::Append {
+                source:
+                    AppendError::Rollback {
+                        source,
+                        cleanup_errors,
+                    },
+            } => (source, cleanup_errors),
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(matches!(
+            source.as_ref(),
+            AppendError::Commit {
+                source: CommitError::Conflict { .. }
+            }
+        ));
+        assert_eq!(cleanup_errors.len(), 3);
+
         assert!(message.contains("Commit conflict"));
         let data_after = data_files(temp.path())?;
         assert_eq!(data_after.len(), data_before.len() + 1);
@@ -2289,13 +2324,21 @@ mod tests {
                 .map(|path| temp.path().join(path)),
         );
         for path in failed_paths {
+            let filename = path
+                .file_name()
+                .expect("failed cleanup filename")
+                .to_str()
+                .expect("UTF-8 cleanup filename");
             assert!(
-                message.contains(
-                    path.file_name()
-                        .expect("failed cleanup filename")
-                        .to_str()
-                        .expect("UTF-8 cleanup filename")
-                ),
+                cleanup_errors.iter().any(|error| matches!(
+                    error,
+                    StorageError::OtherIo { path, .. } if path.ends_with(filename)
+                )),
+                "missing typed cleanup failure for {}",
+                path.display()
+            );
+            assert!(
+                message.contains(filename),
                 "missing cleanup diagnostic for {}",
                 path.display()
             );
@@ -3950,7 +3993,9 @@ mod tests {
             .expect_err("expected conflict due to stale version");
 
         match err {
-            TableError::TransactionLog { source } => {
+            TableError::Append {
+                source: AppendError::Commit { source },
+            } => {
                 assert!(matches!(
                     source,
                     CommitError::Conflict {
@@ -4000,8 +4045,10 @@ mod tests {
 
         assert!(matches!(
             err,
-            TableError::TransactionLog {
-                source: CommitError::Conflict { .. }
+            TableError::Append {
+                source: AppendError::Commit {
+                    source: CommitError::Conflict { .. }
+                }
             }
         ));
         assert_eq!(coverage_files(tmp.path())?, coverage_before);
@@ -4033,10 +4080,12 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                TableError::AppendCommitAmbiguous {
-                    source: CommitError::AmbiguousOutcome { .. },
-                    ..
-                }
+                TableError::Append {
+                    source: AppendError::CommitAmbiguous {
+                        source,
+                        ..
+                    }
+                } if matches!(source.as_ref(), CommitError::AmbiguousOutcome { .. })
             ),
             "unexpected error: {err:?}"
         );
@@ -4073,25 +4122,28 @@ mod tests {
                 &table.index.kind,
                 example_index_interval_id,
             )?),
-        }
-        .into();
+        };
         let err = table.rollback_created_artifacts(&sidecars, source).await;
         let message = err.to_string();
 
         assert!(matches!(
             err,
-            TableError::AppendRollback {
+            AppendError::Rollback {
                 source,
                 cleanup_errors,
             } if matches!(
                 *source,
-                TableError::Append {
-                    source: AppendError::PersistedIndexIntervalOverlap { .. }
-                }
+                AppendError::PersistedIndexIntervalOverlap { .. }
             )
                 && cleanup_errors.len() == 2
-                && cleanup_errors[0].contains("second-stuck.roar")
-                && cleanup_errors[1].contains("first-stuck.roar")
+                && matches!(
+                    &cleanup_errors[0],
+                    StorageError::OtherIo { path, .. } if path.ends_with("second-stuck.roar")
+                )
+                && matches!(
+                    &cleanup_errors[1],
+                    StorageError::OtherIo { path, .. } if path.ends_with("first-stuck.roar")
+                )
         ));
         assert!(message.contains("data/failed.parquet"));
         assert!(message.contains("first-stuck.roar"));

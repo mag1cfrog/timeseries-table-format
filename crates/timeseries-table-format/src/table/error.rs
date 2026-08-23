@@ -210,6 +210,44 @@ pub enum AppendError {
         #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
         source: Box<CoverageSidecarError>,
     },
+
+    /// Direct storage access for an append artifact failed.
+    #[snafu(context(false), display("Append storage error: {source}"))]
+    Storage {
+        /// Complete storage failure.
+        #[snafu(source, backtrace)]
+        source: StorageError,
+    },
+
+    /// Publishing the append transaction failed with a definite outcome.
+    #[snafu(context(false), display("Append commit error: {source}"))]
+    Commit {
+        /// Complete transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
+    },
+
+    /// The append transaction may have committed, so its artifacts were preserved.
+    #[snafu(display(
+        "Append commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
+    ))]
+    CommitAmbiguous {
+        /// Generated table-relative Parquet path that was preserved.
+        segment_path: String,
+        /// Ambiguous transaction-log failure.
+        #[snafu(source(from(CommitError, Box::new)), backtrace)]
+        source: Box<CommitError>,
+    },
+
+    /// Append failed and one or more attempt-owned artifacts could not be removed.
+    #[snafu(display("Append failed: {source}; artifact rollback also failed: {cleanup_errors:?}"))]
+    Rollback {
+        /// Original append failure that triggered rollback.
+        #[snafu(source, backtrace)]
+        source: Box<AppendError>,
+        /// Typed cleanup failure for every artifact that could not be removed.
+        cleanup_errors: Vec<StorageError>,
+    },
 }
 
 /// Errors from high-level time-series table operations.
@@ -278,29 +316,6 @@ pub enum TableError {
         source: Box<TableError>,
         /// Every private path whose cleanup failed.
         cleanup_errors: Vec<String>,
-    },
-
-    /// Append failed and one or more attempt-owned artifacts could not be removed.
-    #[snafu(display("Append failed: {source}; artifact rollback also failed: {cleanup_errors:?}"))]
-    AppendRollback {
-        /// Original append failure that triggered rollback.
-        #[snafu(source)]
-        source: Box<TableError>,
-        /// Cleanup failures, including each affected attempt-owned path.
-        cleanup_errors: Vec<String>,
-    },
-
-    /// A streaming append may have committed, so its generated data path must
-    /// be preserved until the caller resolves the transaction outcome.
-    #[snafu(display(
-        "Append commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
-    ))]
-    AppendCommitAmbiguous {
-        /// Generated table-relative Parquet path that was preserved.
-        segment_path: String,
-        /// Ambiguous transaction-log failure.
-        #[snafu(source, backtrace)]
-        source: CommitError,
     },
 
     /// Attempting to open a table that has no commits at all (CURRENT == 0).

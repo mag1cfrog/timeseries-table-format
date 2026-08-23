@@ -174,9 +174,19 @@ pub(crate) fn table_error_to_py(
     let msg = err.to_string();
 
     match err {
-        TableError::Storage { source } => storage_error_to_py(py, source),
+        TableError::Storage { source }
+        | TableError::Append {
+            source: AppendError::Storage { source },
+        } => storage_error_to_py(py, source),
 
-        TableError::TransactionLog { source } => commit_error_to_py(py, source),
+        TableError::TransactionLog { source }
+        | TableError::Append {
+            source: AppendError::Commit { source },
+        } => commit_error_to_py(py, source),
+
+        TableError::Append {
+            source: AppendError::CommitAmbiguous { source, .. },
+        } => commit_error_to_py(py, *source),
 
         TableError::Append {
             source: AppendError::GeneratedSegmentCoverage { source },
