@@ -12,9 +12,7 @@ use snafu::prelude::*;
 use crate::{
     coverage::{EntityIdentity, EntityValue},
     metadata::{
-        logical_schema::{
-            ArrowSchemaConversionError, LogicalDataType, LogicalField, LogicalSchema,
-        },
+        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalToArrowSchemaError},
         table_metadata::{IndexKind, IndexSpec, TableMeta},
     },
 };
@@ -144,8 +142,8 @@ pub enum SchemaCompatibilityError {
     #[snafu(display("Registered table schema cannot be converted to Arrow: {source}"))]
     RegisteredSchemaConversion {
         /// The logical-to-Arrow conversion failure.
-        #[snafu(source(from(ArrowSchemaConversionError, Box::new)), backtrace)]
-        source: Box<ArrowSchemaConversionError>,
+        #[snafu(source(from(LogicalToArrowSchemaError, Box::new)), backtrace)]
+        source: Box<LogicalToArrowSchemaError>,
     },
 
     /// Column exists in both schemas, but the logical type / nullability differ.

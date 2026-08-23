@@ -52,7 +52,7 @@ pub struct LogicalField {
 }
 
 impl LogicalField {
-    fn to_arrow_field_ref(&self, path: &str) -> Result<FieldRef, ArrowSchemaConversionError> {
+    fn to_arrow_field_ref(&self, path: &str) -> Result<FieldRef, LogicalToArrowSchemaError> {
         let dt = self.data_type.to_arrow_datatype(path)?;
         Ok(Arc::new(Field::new(self.name.clone(), dt, self.nullable)))
     }
@@ -147,7 +147,7 @@ pub enum LogicalDataType {
 }
 
 impl LogicalDataType {
-    fn to_arrow_datatype(&self, column: &str) -> Result<DataType, ArrowSchemaConversionError> {
+    fn to_arrow_datatype(&self, column: &str) -> Result<DataType, LogicalToArrowSchemaError> {
         Ok(match self {
             LogicalDataType::Bool => DataType::Boolean,
             LogicalDataType::Int32 => DataType::Int32,
@@ -354,8 +354,8 @@ impl LogicalSchema {
     /// Convert this logical schema to an owned Arrow [`Schema`].
     ///
     /// Fails if any column uses a logical type that cannot be represented in
-    /// Arrow (see [`ArrowSchemaConversionError`]).
-    pub fn to_arrow_schema(&self) -> Result<Schema, ArrowSchemaConversionError> {
+    /// Arrow (see [`LogicalToArrowSchemaError`]).
+    pub fn to_arrow_schema(&self) -> Result<Schema, LogicalToArrowSchemaError> {
         let mut fields = Vec::with_capacity(self.columns.len());
         for c in &self.columns {
             let fref = c.to_arrow_field_ref(&c.name)?;
@@ -368,7 +368,7 @@ impl LogicalSchema {
     /// Convert this logical schema to a shared Arrow [`SchemaRef`].
     ///
     /// This is a convenience wrapper around [`Self::to_arrow_schema`].
-    pub fn to_arrow_schema_ref(&self) -> Result<SchemaRef, ArrowSchemaConversionError> {
+    pub fn to_arrow_schema_ref(&self) -> Result<SchemaRef, LogicalToArrowSchemaError> {
         Ok(Arc::new(self.to_arrow_schema()?))
     }
 }
@@ -560,7 +560,7 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaV
 
 /// Errors encountered while converting a logical schema to Arrow.
 #[derive(Debug, Snafu)]
-pub enum ArrowSchemaConversionError {
+pub enum LogicalToArrowSchemaError {
     /// FixedBinary fields must declare a positive byte width.
     #[snafu(display(
         "invalid FixedBinary byte_width for column '{column}': {byte_width} (must be > 0)"
@@ -977,7 +977,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                ArrowSchemaConversionError::Int96Unsupported { column, .. }
+                LogicalToArrowSchemaError::Int96Unsupported { column, .. }
                     if column == "legacy_ts"
             ),
             "unexpected error: {err:?}"
@@ -1092,7 +1092,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                ArrowSchemaConversionError::OtherTypeUnsupported { column, name, .. }
+                LogicalToArrowSchemaError::OtherTypeUnsupported { column, name, .. }
                     if column == "opaque" && name == "parquet::Map"
             ),
             "unexpected error: {err:?}"
@@ -1177,7 +1177,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                ArrowSchemaConversionError::DecimalInvalid { column, precision, scale, .. }
+                LogicalToArrowSchemaError::DecimalInvalid { column, precision, scale, .. }
                     if column == "dec_too_large" && *precision == 77 && *scale == 0
             ),
             "unexpected error: {err:?}"
@@ -1204,7 +1204,7 @@ mod tests {
             assert!(
                 matches!(
                     &err,
-                    ArrowSchemaConversionError::DecimalInvalid {
+                    LogicalToArrowSchemaError::DecimalInvalid {
                         column,
                         precision: p,
                         scale: s,

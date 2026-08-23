@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::{Backtrace, prelude::*};
 
-use crate::metadata::logical_schema::{ArrowSchemaConversionError, LogicalSchema};
+use crate::metadata::logical_schema::{LogicalSchema, LogicalToArrowSchemaError};
 
 /// Current table metadata / log format version written by new tables.
 ///
@@ -72,7 +72,7 @@ pub enum TableArrowSchemaError {
     Conversion {
         /// Underlying conversion error.
         #[snafu(source, backtrace)]
-        source: ArrowSchemaConversionError,
+        source: LogicalToArrowSchemaError,
     },
 }
 
@@ -797,14 +797,14 @@ mod tests {
         let table_backtrace = ErrorCompat::backtrace(&err).expect("table schema backtrace");
         let conversion = err
             .source()
-            .and_then(|source| source.downcast_ref::<ArrowSchemaConversionError>())
+            .and_then(|source| source.downcast_ref::<LogicalToArrowSchemaError>())
             .expect("Arrow conversion source");
         let conversion_backtrace =
             ErrorCompat::backtrace(conversion).expect("conversion backtrace");
 
         assert!(matches!(
             conversion,
-            ArrowSchemaConversionError::Int96Unsupported { column, .. }
+            LogicalToArrowSchemaError::Int96Unsupported { column, .. }
                 if column == "legacy_ts"
         ));
         assert!(std::ptr::eq(table_backtrace, conversion_backtrace));
