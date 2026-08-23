@@ -2,16 +2,6 @@
 
 use snafu::prelude::*;
 
-use crate::{
-    coverage::io::CoverageSidecarError,
-    metadata::{
-        schema_compat::SchemaCompatibilityError,
-        table_metadata::{IndexSpecError, IndexValueError},
-    },
-    storage::StorageError,
-    transaction_log::{CommitError, TableKind},
-};
-
 use super::operations::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError, ScanError,
     TableStateAccessError,
@@ -73,92 +63,12 @@ pub enum TableError {
         source: CoverageQueryError,
     },
 
-    /// Any error coming from the transaction log / commit machinery
-    /// (for example, OCC conflicts, storage failures, or corrupt commits).
-    #[snafu(display("Transaction log error: {source}"))]
-    TransactionLog {
-        /// Underlying transaction log / commit error.
-        #[snafu(source, backtrace)]
-        source: CommitError,
-    },
-
     /// An entity-layout optimization operation failed.
     #[snafu(context(false), display("Entity-layout optimization failed: {source}"))]
     Optimize {
         /// Complete optimization-owned failure.
         #[snafu(source, backtrace)]
         source: OptimizeError,
-    },
-
-    /// Attempting to open a table that has no commits at all (CURRENT == 0).
-    #[snafu(display("Cannot open table with no commits (CURRENT version is 0)"))]
-    EmptyTable,
-
-    /// The underlying table is not a time-series table (TableKind mismatch).
-    #[snafu(display("Table kind is {kind:?}, expected TableKind::TimeSeries"))]
-    NotTimeSeries {
-        /// The actual kind of the underlying table that was discovered.
-        kind: TableKind,
-    },
-
-    /// Attempting to create a table with an unsupported metadata format version.
-    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
-    UnsupportedFormatVersion {
-        /// Format version supported by this writer.
-        expected: u32,
-        /// Format version supplied by the caller.
-        found: u32,
-    },
-
-    /// Attempt to create a table where commits already exist (idempotency guard for create).
-    #[snafu(display("Table already exists; current transaction log version is {current_version}"))]
-    AlreadyExists {
-        /// Current transaction log version that indicates the table already exists.
-        current_version: u64,
-    },
-
-    /// The ordered-index specification is structurally invalid.
-    #[snafu(display("Invalid ordered index specification: {source}"))]
-    IndexSpec {
-        /// Structural or index granularity failure.
-        source: IndexSpecError,
-    },
-
-    /// Segment bounds cannot be ordered in one native index domain.
-    #[snafu(display("Invalid segment ordered-index bounds: {source}"))]
-    InvalidSegmentBounds {
-        /// Domain or bound-order failure.
-        source: IndexValueError,
-    },
-
-    /// Schema compatibility validation failed.
-    #[snafu(display("Schema compatibility error: {source}"))]
-    SchemaCompatibility {
-        /// Underlying schema compatibility error.
-        #[snafu(source)]
-        source: SchemaCompatibilityError,
-    },
-
-    /// Table state lacks a canonical logical schema.
-    #[snafu(display("Table has no logical_schema at version {version}"))]
-    MissingCanonicalSchema {
-        /// The transaction log version missing a canonical logical schema.
-        version: u64,
-    },
-
-    /// Storage error while accessing table data (read/write failure at the storage layer).
-    #[snafu(display("Storage error while accessing table data: {source}"))]
-    Storage {
-        /// Underlying storage error while reading or writing table data.
-        source: StorageError,
-    },
-
-    /// Coverage sidecar read/write or computation error.
-    #[snafu(display("Coverage sidecar error: {source}"))]
-    CoverageSidecar {
-        /// Underlying coverage sidecar error.
-        #[snafu(source, backtrace)]
-        source: CoverageSidecarError,
     },
 }
 
@@ -171,6 +81,11 @@ mod tests {
     use snafu::{Backtrace, ErrorCompat};
 
     use crate::formats::parquet::EntityRewriteError;
+    use crate::metadata::{
+        schema_compat::SchemaCompatibilityError, table_metadata::IndexSpecError,
+    };
+    use crate::storage::StorageError;
+    use crate::transaction_log::CommitError;
 
     use super::*;
 

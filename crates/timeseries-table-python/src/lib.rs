@@ -738,7 +738,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
             table_root: String,
         ) -> PyResult<()> {
             use timeseries_table_format::storage::TableLocation;
-            use timeseries_table_format::table::{TableError, TimeSeriesTable};
+            use timeseries_table_format::table::{OpenTableError, TableError, TimeSeriesTable};
 
             if name.is_empty() {
                 return Err(PyValueError::new_err("name must be non-empty"));
@@ -760,7 +760,8 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
                 async move {
                     // 1) IO: open table (async)
                     let location = TableLocation::parse(&table_root)
-                        .map_err(|e| TableError::Storage { source: e })
+                        .map_err(OpenTableError::from)
+                        .map_err(TableError::from)
                         .map_err(RegisterTsTableError::Table)?;
 
                     let table = TimeSeriesTable::open(location)
@@ -1477,7 +1478,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
             use std::num::NonZeroU64;
             use timeseries_table_format::storage::TableLocation;
-            use timeseries_table_format::table::TableError;
+            use timeseries_table_format::table::{CreateTableError, TableError};
             use timeseries_table_format::transaction_log::{
                 IndexKind, IndexSpec, TableMeta, TimeIndexGranularity,
             };
@@ -1591,7 +1592,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 rt.as_ref(),
                 async move {
                     let location = TableLocation::parse(&table_root)
-                        .map_err(|e| TableError::Storage { source: e })?;
+                        .map_err(CreateTableError::from)
+                        .map_err(TableError::from)?;
 
                     let table =
                         timeseries_table_format::table::TimeSeriesTable::create(location, meta)
@@ -1618,7 +1620,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         fn open(_cls: &Bound<'_, PyType>, py: Python<'_>, table_root: String) -> PyResult<Self> {
             use crate::tokio_runner;
 
-            use timeseries_table_format::{storage::TableLocation, table::TableError};
+            use timeseries_table_format::{
+                storage::TableLocation,
+                table::{OpenTableError, TableError},
+            };
 
             let rt = tokio_runner::global_runtime()?;
             let table_root_for_err = table_root.clone();
@@ -1629,7 +1634,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 rt.as_ref(),
                 async move {
                     let location = TableLocation::parse(&table_root)
-                        .map_err(|e| TableError::Storage { source: e })?;
+                        .map_err(OpenTableError::from)
+                        .map_err(TableError::from)?;
 
                     let table =
                         timeseries_table_format::table::TimeSeriesTable::open(location).await?;

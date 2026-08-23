@@ -293,36 +293,22 @@ pub(crate) fn table_error_to_py(
 
     match err {
         TableError::Create { source } => create_error_to_py(py, source, msg),
-
         TableError::Open { source } => open_error_to_py(py, source, msg),
-
         TableError::StateAccess { source } => state_access_error_to_py(py, source, msg),
-
-        TableError::Storage { source } => storage_error_to_py(py, source),
-
-        TableError::Scan {
-            source: ScanError::Storage { source, .. },
-        } => storage_error_to_py(py, *source),
-
-        TableError::CoverageQuery {
-            source:
-                CoverageQueryError::CoverageSnapshotRead { source, .. }
-                | CoverageQueryError::SegmentCoverageSidecarRead { source, .. },
-        } => coverage_sidecar_error_to_py(py, *source, msg),
-
-        TableError::CoverageQuery {
-            source: CoverageQueryError::SchemaCompatibility { .. },
-        } => SchemaMismatchError::new_err(msg),
-
-        TableError::TransactionLog { source } => commit_error_to_py(py, source),
-
         TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
-
+        TableError::Scan { source } => match source {
+            ScanError::Storage { source, .. } => storage_error_to_py(py, *source),
+            _ => TimeseriesTableError::new_err(msg),
+        },
+        TableError::CoverageQuery { source } => match source {
+            CoverageQueryError::CoverageSnapshotRead { source, .. }
+            | CoverageQueryError::SegmentCoverageSidecarRead { source, .. } => {
+                coverage_sidecar_error_to_py(py, *source, msg)
+            }
+            CoverageQueryError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(msg),
+            _ => TimeseriesTableError::new_err(msg),
+        },
         TableError::Optimize { source } => optimize_error_to_py(py, source, msg),
-
-        TableError::SchemaCompatibility { .. } => SchemaMismatchError::new_err(err.to_string()),
-
-        _ => TimeseriesTableError::new_err(err.to_string()),
     }
 }
 
