@@ -6,8 +6,7 @@
 //! re-exporting everything at the crate root. Keep new variants here to ensure
 //! consistent user-facing messages and to avoid scattering selectors.
 
-use arrow::{datatypes::DataType, error::ArrowError};
-use chrono::{DateTime, Utc};
+use arrow::error::ArrowError;
 use parquet::errors::ParquetError;
 use snafu::{Backtrace, prelude::*};
 
@@ -26,6 +25,8 @@ use crate::{
     storage::StorageError,
     transaction_log::{CommitError, TableKind, segments::SegmentError},
 };
+
+use super::{coverage::CoverageQueryError, scan::ScanError};
 
 /// Errors owned by an append operation.
 #[derive(Debug, Snafu)]
@@ -278,6 +279,22 @@ pub enum TableError {
         source: AppendError,
     },
 
+    /// A table scan failed during planning or lazy execution.
+    #[snafu(display("Table scan failed: {source}"))]
+    Scan {
+        /// Complete scan operation error.
+        #[snafu(source, backtrace)]
+        source: ScanError,
+    },
+
+    /// A table coverage query failed.
+    #[snafu(display("Table coverage query failed: {source}"))]
+    CoverageQuery {
+        /// Complete coverage query operation error.
+        #[snafu(source, backtrace)]
+        source: CoverageQueryError,
+    },
+
     /// Any error coming from the transaction log / commit machinery
     /// (for example, OCC conflicts, storage failures, or corrupt commits).
     #[snafu(display("Transaction log error: {source}"))]
@@ -364,13 +381,6 @@ pub enum TableError {
         source: IndexSpecError,
     },
 
-    /// An ordered value could not be mapped to its index interval ID.
-    #[snafu(display("Index interval mapping failed: {source}"))]
-    IndexIntervalMapping {
-        /// Domain, range, or index granularity failure.
-        source: IndexIntervalMappingError,
-    },
-
     /// Segment bounds cannot be ordered in one native index domain.
     #[snafu(display("Invalid segment ordered-index bounds: {source}"))]
     InvalidSegmentBounds {
@@ -400,117 +410,6 @@ pub enum TableError {
         source: StorageError,
     },
 
-    /// Ordered-index range validation failed.
-    #[snafu(display("Ordered-index range validation failed: {source}"))]
-    InvalidRange {
-        /// Domain, kind, or bound-order failure.
-        source: IndexValueError,
-    },
-
-    /// An identity-free coverage query was used on an entity-aware table.
-    #[snafu(display(
-        "Entity identity is required for coverage queries; configured entity columns: {entity_columns:?}"
-    ))]
-    EntityIdentityRequired {
-        /// Entity columns that require values from the caller.
-        entity_columns: Vec<String>,
-    },
-
-    /// An entity-aware coverage query was used on a table with global coverage.
-    #[snafu(display("Table has no configured entity columns"))]
-    EntityIdentityNotConfigured,
-
-    /// A required entity column has no caller-provided value.
-    #[snafu(display("Missing entity identity component for column {column}"))]
-    MissingEntityIdentityColumn {
-        /// Configured entity column missing from the caller input.
-        column: String,
-    },
-
-    /// Caller input repeats one entity column.
-    #[snafu(display("Duplicate entity identity component for column {column}"))]
-    DuplicateEntityIdentityColumn {
-        /// Repeated entity column name.
-        column: String,
-    },
-
-    /// Caller input contains a column that is not part of the entity identity.
-    #[snafu(display("Unexpected entity identity component for column {column}"))]
-    UnexpectedEntityIdentityColumn {
-        /// Unknown entity column name.
-        column: String,
-    },
-
-    /// Parquet read/IO error during scanning or schema extraction.
-    #[snafu(display("Parquet read error for segment {path}: {source}"))]
-    ParquetRead {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Underlying Parquet error raised during read or schema extraction.
-        source: ParquetError,
-    },
-
-    /// Arrow compute or conversion error while materializing or filtering batches.
-    #[snafu(display("Arrow error while filtering column {column} in segment {path}: {source}"))]
-    Arrow {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Configured time column being filtered.
-        column: String,
-        /// Underlying Arrow error raised during batch conversion or filtering.
-        source: ArrowError,
-    },
-
-    /// Segment is missing the configured ordered-index column required for scans.
-    #[snafu(display("Missing ordered-index column {column} in segment {path}"))]
-    MissingIndexColumn {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Name of the expected ordered-index column that was not found.
-        column: String,
-    },
-
-    /// Ordered-index column has an Arrow type that disagrees with the table index.
-    #[snafu(display(
-        "Ordered-index column {column} in segment {path} has Arrow type {datatype:?}, expected {expected}"
-    ))]
-    IndexColumnTypeMismatch {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Name of the ordered-index column with the mismatched type.
-        column: String,
-        /// Registered ordered-index domain.
-        expected: &'static str,
-        /// Arrow data type encountered for the ordered-index column.
-        datatype: DataType,
-    },
-
-    /// Converting a timestamp to the requested unit would overflow `i64`.
-    #[snafu(display(
-        "Timestamp conversion overflow for column {column} in segment {path} (value: {timestamp})"
-    ))]
-    TimeConversionOverflow {
-        /// Normalized table-relative path of the segment being scanned.
-        path: String,
-        /// Name of the time column being converted.
-        column: String,
-        /// The timestamp value that could not be represented as i64 nanos.
-        timestamp: DateTime<Utc>,
-    },
-
-    /// Table coverage pointer uses a different ordered-index descriptor.
-    #[snafu(display(
-        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    TableCoverageIndexKindMismatch {
-        /// Index descriptor defined by table metadata.
-        expected: IndexKind,
-        /// Index descriptor recorded in the table coverage pointer.
-        actual: IndexKind,
-        /// Log version where the mismatching coverage pointer was recorded.
-        pointer_version: u64,
-    },
-
     /// Coverage sidecar read/write or computation error.
     #[snafu(display("Coverage sidecar error: {source}"))]
     CoverageSidecar {
@@ -518,35 +417,6 @@ pub enum TableError {
         #[snafu(source, backtrace)]
         source: CoverageSidecarError,
     },
-
-    /// Existing segment lacks a coverage_path when coverage is required.
-    #[snafu(display(
-        "Cannot append because existing segment {path} is missing coverage_path (required for coverage tracking)"
-    ))]
-    ExistingSegmentMissingCoverage {
-        /// Canonical segment path missing a coverage_path entry.
-        path: String,
-    },
-
-    /// Reading the per-segment coverage sidecar failed while rebuilding coverage.
-    #[snafu(display(
-        "Cannot recover table coverage: failed to read segment coverage sidecar for {path} at {coverage_path}: {source}"
-    ))]
-    SegmentCoverageSidecarRead {
-        /// Canonical path of the segment whose coverage sidecar could not be read.
-        path: String,
-        /// Path to the coverage sidecar file that failed to read.
-        coverage_path: String,
-        /// Underlying coverage sidecar error (boxed to keep the variant size small).
-        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
-        source: Box<CoverageSidecarError>,
-    },
-
-    /// Table state is missing a coverage snapshot pointer when required.
-    #[snafu(display(
-        "Cannot append because table has segments but no table coverage snapshot pointer in state"
-    ))]
-    MissingTableCoveragePointer,
 }
 
 #[cfg(test)]

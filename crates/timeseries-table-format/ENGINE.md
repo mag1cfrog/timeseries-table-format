@@ -105,7 +105,8 @@ Log actions:
 ## Error behavior (high level)
 - Missing coverage snapshot when segments exist yields a clear error.
 - Overlaps surface a dedicated overlap error with context.
-- Invalid time ranges return `TableError::InvalidRange`.
+- Invalid ordered-index scan ranges return `TableError::Scan` containing
+  `ScanError::InvalidRange`.
 - Schema mismatches fail before any commit is attempted.
 
 ## Extension points

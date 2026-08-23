@@ -4,8 +4,8 @@
 
 pub use crate::metadata::{
     logical_schema::{
-        ArrowSchemaConversionError, LogicalDataType, LogicalField, LogicalSchema,
-        LogicalSchemaValidationError, LogicalTimestampUnit,
+        LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
+        LogicalTimestampUnit, LogicalToArrowSchemaError,
     },
     segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
     table_metadata::{

@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn external_error_mapping_preserves_scan_hierarchy() {
+    use crate::{
+        storage::StorageLocation,
+        table::{ScanError, TableError},
+    };
+
+    let storage = StorageLocation::parse("").expect_err("empty location must fail");
+    let error = df_external(TableError::Scan {
+        source: ScanError::Storage {
+            path: "data/missing.parquet".to_string(),
+            source: Box::new(storage),
+        },
+    });
+
+    let DataFusionError::External(source) = error else {
+        panic!("table error must remain external");
+    };
+    assert!(matches!(
+        source.downcast_ref::<TableError>(),
+        Some(TableError::Scan {
+            source: ScanError::Storage { path, .. }
+        }) if path == "data/missing.parquet"
+    ));
+}
+
+#[test]
 fn metadata_pruning_accepts_only_exact_supported_entity_literals() -> DFResult<()> {
     use std::num::NonZeroU64;
 

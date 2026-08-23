@@ -8,10 +8,12 @@ use crate::exceptions::{
     SchemaMismatchError, StorageError, TimeseriesTableError,
 };
 use timeseries_table_format::{
-    coverage::{EntityIdentity, EntityValue, index_interval::IndexInterval},
+    coverage::{
+        EntityIdentity, EntityValue, index_interval::IndexInterval, io::CoverageSidecarError,
+    },
     formats::parquet::SegmentCoverageError,
     storage::StorageError as CoreStorageError,
-    table::{AppendError, TableError},
+    table::{AppendError, CoverageQueryError, ScanError, TableError},
     transaction_log::CommitError,
 };
 
@@ -227,6 +229,24 @@ pub(crate) fn table_error_to_py(
     match err {
         TableError::Storage { source } => storage_error_to_py(py, source),
 
+        TableError::Scan {
+            source: ScanError::Storage { source, .. },
+        } => storage_error_to_py(py, *source),
+
+        TableError::CoverageQuery {
+            source:
+                CoverageQueryError::CoverageSnapshotRead { source, .. }
+                | CoverageQueryError::SegmentCoverageSidecarRead { source, .. },
+        } => match *source {
+            CoverageSidecarError::Storage { source, .. } => storage_error_to_py(py, source),
+            CoverageSidecarError::EntityIdentitySchema { .. } => SchemaMismatchError::new_err(msg),
+            _ => TimeseriesTableError::new_err(msg),
+        },
+
+        TableError::CoverageQuery {
+            source: CoverageQueryError::SchemaCompatibility { .. },
+        } => SchemaMismatchError::new_err(msg),
+
         TableError::TransactionLog { source } => commit_error_to_py(py, source),
 
         TableError::Append { source } => append_error_to_py(py, source, entity_columns, msg),
@@ -239,8 +259,9 @@ pub(crate) fn table_error_to_py(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
+    use std::{num::NonZeroU64, sync::Once};
 
+    use super::*;
     use pyo3::types::PyAnyMethods;
     use timeseries_table_format::{
         coverage::index_interval::{index_interval_for_id, index_interval_id_for_value},
@@ -248,10 +269,55 @@ mod tests {
         transaction_log::{IndexKind, IndexValue},
     };
 
-    use super::*;
+    fn init_python() {
+        static PYTHON: Once = Once::new();
+        PYTHON.call_once(Python::initialize);
+    }
+
+    fn invalid_location_error() -> CoreStorageError {
+        StorageLocation::parse("").expect_err("empty storage location must fail")
+    }
+
+    #[test]
+    fn scan_and_coverage_storage_errors_map_to_storage_error() {
+        init_python();
+
+        let attached = Python::try_attach(|py| {
+            let errors = [
+                TableError::Scan {
+                    source: ScanError::Storage {
+                        path: "data/missing.parquet".to_string(),
+                        source: Box::new(invalid_location_error()),
+                    },
+                },
+                TableError::CoverageQuery {
+                    source: CoverageQueryError::CoverageSnapshotRead {
+                        coverage_path: "_coverage/table/missing.roar".to_string(),
+                        source: Box::new(CoverageSidecarError::Storage {
+                            source: invalid_location_error(),
+                        }),
+                    },
+                },
+            ];
+
+            for error in errors {
+                let python_error = table_error_to_py(py, error, &[]);
+                assert!(python_error.is_instance_of::<StorageError>(py));
+                let path: String = python_error
+                    .value(py)
+                    .getattr("path")
+                    .expect("storage error path")
+                    .extract()
+                    .expect("string path");
+                assert_eq!(path, "<empty table location>");
+            }
+        });
+        assert!(attached.is_some());
+    }
 
     #[test]
     fn rollback_preserves_the_primary_python_exception_category() {
+        init_python();
         let kind = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(10).expect("nonzero test index granularity"),
         };
@@ -272,7 +338,6 @@ mod tests {
             cleanup_errors: vec![cleanup_error],
         });
 
-        Python::initialize();
         Python::attach(|py| {
             let error = table_error_to_py(py, error, &[]);
             assert!(error.is_instance_of::<IndexIntervalOverlapError>(py));
