@@ -2,34 +2,12 @@
 //!
 //! This module centralizes all *relative* path conventions under a table root:
 //! - transaction log directory / commit file naming (`_timeseries_log/`)
-//! - coverage sidecar directories (`_coverage/`)
-//! - conventional data directory (`data/`)
 //!
 //! The functions here return relative [`std::path::PathBuf`] values. Callers are
 //! expected to join these with a table root (for example, a
 //! [`crate::storage::TableLocation`] / backend root) before doing IO.
 
 use std::path::PathBuf;
-
-// Coverage layout lives under `coverage/` but is re-exported here for convenience
-// and to keep older imports compiling.
-pub use crate::coverage::layout::{
-    COVERAGE_EXT, COVERAGE_ROOT_DIR, CoverageLayoutError, SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR,
-    segment_coverage_id_v2, segment_coverage_key, table_coverage_id_v2, table_snapshot_key,
-    validate_coverage_id,
-};
-
-// ====================
-// Data layout
-// ====================
-
-/// Conventional directory where segment files are stored (v0.1 default).
-pub const DATA_DIR_NAME: &str = "data";
-
-/// Relative path: `data/`
-pub fn data_rel_dir() -> PathBuf {
-    PathBuf::from(DATA_DIR_NAME)
-}
 
 // ====================
 // Transaction log layout

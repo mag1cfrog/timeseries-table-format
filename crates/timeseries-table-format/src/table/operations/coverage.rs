@@ -256,6 +256,7 @@ impl TimeSeriesTable {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn load_global_coverage_snapshot_for_query(
         &self,
     ) -> Result<Coverage, CoverageQueryError> {
@@ -283,7 +284,8 @@ impl TimeSeriesTable {
     ///   - If table has zero segments: returns empty coverage.
     ///   - Else: returns MissingTableCoveragePointer (strict mode).
     /// - If snapshot exists but is missing/corrupt: returns the snapshot read error.
-    pub async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
+    #[cfg(test)]
+    pub(crate) async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
         self.load_global_coverage_snapshot_for_query()
             .await
             .context(crate::table::error::CoverageQuerySnafu)

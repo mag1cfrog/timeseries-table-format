@@ -14,8 +14,7 @@ use parquet::arrow::{
 };
 use tempfile::TempDir;
 use timeseries_table_format::{
-    coverage::EntityCoverage,
-    coverage::io::read_entity_coverage_sidecar,
+    coverage::EntityValue,
     metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     },
@@ -90,11 +89,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
     assert_eq!(ptr.index_kind, table.index_spec().kind);
     assert_eq!(ptr.version, table.state().version);
 
-    let expected = union_segment_coverages(&location, table.state().segments.values()).await?;
-
-    let snapshot_cov =
-        read_entity_coverage_sidecar(&location, Path::new(&ptr.coverage_path)).await?;
-    assert_eq!(snapshot_cov, expected);
+    assert_pipeline_coverage(&table).await?;
 
     let mut reopened = TimeSeriesTable::open(location.clone()).await?;
     assert_eq!(reopened.state(), table.state());
@@ -102,12 +97,9 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         .state()
         .table_coverage
         .as_ref()
-        .ok_or_else(|| "snapshot pointer missing after reopen".to_string())?
-        .clone();
+        .ok_or_else(|| "snapshot pointer missing after reopen".to_string())?;
     assert_eq!(reopened_ptr.index_kind, table.index_spec().kind);
-    let reopened_cov =
-        read_entity_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
-    assert_eq!(reopened_cov, expected);
+    assert_pipeline_coverage(&reopened).await?;
     for (id, seg) in reopened.state().segments.iter() {
         if seg.coverage_path.is_none() {
             return Err(format!("reopened segment {id:?} missing coverage_path").into());
@@ -126,9 +118,7 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
         }
     ));
 
-    let snapshot_after =
-        read_entity_coverage_sidecar(&location, Path::new(&reopened_ptr.coverage_path)).await?;
-    assert_eq!(snapshot_after, expected);
+    assert_pipeline_coverage(&reopened).await?;
     Ok(())
 }
 
@@ -236,23 +226,20 @@ async fn coverage_queries_work_end_to_end() -> TestResult {
     Ok(())
 }
 
-async fn union_segment_coverages<'a, I>(
-    location: &TableLocation,
-    segments: I,
-) -> Result<EntityCoverage, Box<dyn std::error::Error>>
-where
-    I: IntoIterator<Item = &'a timeseries_table_format::transaction_log::SegmentMeta>,
-{
-    let mut acc = EntityCoverage::empty();
-    for seg in segments {
-        let cov_path = seg
-            .coverage_path
-            .as_ref()
-            .ok_or_else(|| format!("missing coverage_path for segment {}", seg.path))?;
-        let cov = read_entity_coverage_sidecar(location, Path::new(cov_path)).await?;
-        acc.union_inplace(&cov);
+async fn assert_pipeline_coverage(table: &TimeSeriesTable) -> TestResult {
+    for symbol in ["A", "B"] {
+        for interval in 0..5 {
+            let ratio = table
+                .coverage_ratio_for_entity_range(
+                    &[("symbol", EntityValue::from(symbol))],
+                    ts_from_secs(interval * 60)?,
+                    ts_from_secs((interval + 1) * 60)?,
+                )
+                .await?;
+            assert_eq!(ratio, if interval % 2 == 0 { 1.0 } else { 0.0 });
+        }
     }
-    Ok(acc)
+    Ok(())
 }
 
 fn make_basic_table_meta(

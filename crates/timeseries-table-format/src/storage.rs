@@ -27,10 +27,10 @@
 mod error;
 pub use error::*;
 
-pub mod layout;
+pub(crate) mod layout;
 
 mod io;
-pub use io::*;
+pub(crate) use io::*;
 
 mod table_location;
 pub(crate) use table_location::normalize_relative_storage_path;

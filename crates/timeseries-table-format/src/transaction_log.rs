@@ -64,7 +64,7 @@
 //! and an API for committing changes safely.
 pub mod actions;
 pub mod log_store;
-pub mod segments;
+pub(crate) mod segments;
 pub mod table_state;
 
 #[cfg(test)]
@@ -75,7 +75,7 @@ pub use crate::metadata::table_metadata::{
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
-pub use segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
+pub use segments::{FileFormat, SegmentEntityLayout, SegmentError, SegmentMeta};
 pub use table_state::TableState;
 
 use snafu::{Backtrace, prelude::*};

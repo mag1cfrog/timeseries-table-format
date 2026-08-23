@@ -608,7 +608,11 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        coverage::{EntityIdentity, EntityValue, io::CoverageSidecarError},
+        coverage::{
+            EntityIdentity, EntityValue,
+            io::CoverageSidecarError,
+            layout::{SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR},
+        },
         formats::parquet::EntityRewriteError,
         metadata::{
             logical_schema::LogicalTimestampUnit,
@@ -676,7 +680,7 @@ mod tests {
 
     fn optimization_objects(root: &Path) -> std::io::Result<BTreeSet<PathBuf>> {
         let mut files = BTreeSet::new();
-        for relative in ["data/_staged", layout::SEGMENT_COVERAGE_DIR] {
+        for relative in ["data/_staged", SEGMENT_COVERAGE_DIR] {
             files.extend(files_below(&root.join(relative))?);
         }
         Ok(files)
@@ -1327,7 +1331,7 @@ mod tests {
         .await?;
         let paths = [
             "data/_staged/entity-rewrite/first.parquet".to_string(),
-            format!("{}/second.roar", layout::SEGMENT_COVERAGE_DIR),
+            format!("{SEGMENT_COVERAGE_DIR}/second.roar"),
         ];
         for path in &paths {
             let absolute = temp.path().join(path);
@@ -1385,7 +1389,7 @@ mod tests {
         let coverage_bytes = std::fs::read(temp.path().join(&coverage_pointer.coverage_path))
             .expect("table coverage bytes");
         let snapshot_files =
-            files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files");
+            files_below(&temp.path().join(TABLE_SNAPSHOT_DIR)).expect("snapshot files");
         let table_meta = table.state().table_meta.clone();
         let starting_version = table.state().version;
 
@@ -1421,7 +1425,7 @@ mod tests {
             coverage_bytes
         );
         assert_eq!(
-            files_below(&temp.path().join(layout::TABLE_SNAPSHOT_DIR)).expect("snapshot files"),
+            files_below(&temp.path().join(TABLE_SNAPSHOT_DIR)).expect("snapshot files"),
             snapshot_files
         );
         for source in &sources {

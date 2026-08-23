@@ -385,7 +385,7 @@ pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
 ///
 /// Returns `StorageError::OtherIo` when filesystem I/O fails; other internal
 /// helpers may add context to the returned error.
-pub async fn write_atomic(
+pub(crate) async fn write_atomic(
     location: &StorageLocation,
     rel_path: &Path,
     contents: &[u8],
@@ -453,7 +453,10 @@ pub async fn write_atomic(
 /// Currently only `StorageLocation::Local` is supported. On success this returns
 /// the file contents; if the file cannot be found a `StorageError::NotFound` is
 /// returned, while other filesystem problems produce `StorageError::OtherIo`.
-pub async fn read_to_string(location: &StorageLocation, rel_path: &Path) -> StorageResult<String> {
+pub(crate) async fn read_to_string(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<String> {
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
@@ -518,7 +521,7 @@ pub(crate) async fn remove_file_if_exists(
 ///
 /// This is used for objects that must not overwrite existing data, including
 /// commit files and writer-owned sidecars.
-pub async fn write_new(
+pub(crate) async fn write_new(
     location: &StorageLocation,
     rel_path: &Path,
     contents: &[u8],
@@ -540,7 +543,10 @@ pub async fn write_new(
 /// Errors:
 /// - If the file does not exist this returns `StorageError::NotFound`.
 /// - On any other I/O error this returns `StorageError::OtherIo`.
-pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> StorageResult<Vec<u8>> {
+pub(crate) async fn read_all_bytes(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<Vec<u8>> {
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
@@ -562,7 +568,7 @@ pub async fn read_all_bytes(location: &StorageLocation, rel_path: &Path) -> Stor
 /// Get the length (in bytes) of a file at `rel_path` within `location`.
 ///
 /// v0.1: only StorageLocation::Local is supported.
-pub async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageResult<u64> {
+pub(crate) async fn file_size(location: &StorageLocation, rel_path: &Path) -> StorageResult<u64> {
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;

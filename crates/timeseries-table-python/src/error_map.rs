@@ -9,15 +9,15 @@ use crate::exceptions::{
 };
 use timeseries_table_format::{
     coverage::{
-        EntityIdentity, EntityValue, index_interval::IndexInterval, io::CoverageSidecarError,
+        CoverageSidecarError, EntityIdentity, EntityValue, SegmentCoverageError,
+        index_interval::IndexInterval,
     },
-    formats::parquet::{EntityRewriteError, SegmentCoverageError},
     storage::StorageError as CoreStorageError,
     table::{
-        AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
-        ScanError, TableError, TableStateAccessError,
+        AppendError, CoverageQueryError, CreateTableError, EntityRewriteError, OpenTableError,
+        OptimizeError, ScanError, TableError, TableStateAccessError,
     },
-    transaction_log::{CommitError, segments::SegmentError},
+    transaction_log::{CommitError, SegmentError},
 };
 
 #[allow(dead_code)]

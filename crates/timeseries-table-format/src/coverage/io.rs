@@ -15,10 +15,8 @@
 //!
 //! # Atomic vs. New-Only Writes
 //!
-//! - **Atomic**: Writes using [`write_coverage_sidecar_atomic`] are safe for
-//!   overwriting existing sidecars (e.g., updating a table snapshot).
-//! - **New-Only**: Writes using [`write_coverage_sidecar_new`] fail if the file
-//!   already exists (e.g., creating per-segment coverage for the first time).
+//! - **Atomic** writes safely overwrite existing sidecars.
+//! - **New-only** writes fail if the file already exists.
 
 use std::path::Path;
 
@@ -28,13 +26,14 @@ use crate::{
     coverage::layout::CoverageLayoutError,
     coverage::{
         Coverage, EntityCoverage,
-        serde::{
-            CoverageCodecError, coverage_from_bytes, coverage_to_bytes, entity_coverage_from_bytes,
-        },
+        serde::{CoverageCodecError, coverage_from_bytes, entity_coverage_from_bytes},
     },
     metadata::schema_compat::SchemaCompatibilityError,
     storage::{self, StorageError, TableLocation},
 };
+
+#[cfg(test)]
+use crate::coverage::serde::coverage_to_bytes;
 
 /// Errors that can occur during coverage sidecar operations.
 ///
@@ -120,7 +119,8 @@ impl CoverageSidecarError {
 /// Returns [`CoverageSidecarError`] if:
 /// - Serialization of the coverage fails ([`CoverageSidecarError::Codec`]).
 /// - Storage I/O fails ([`CoverageSidecarError::Storage`]).
-pub async fn write_coverage_sidecar_atomic(
+#[cfg(test)]
+pub(crate) async fn write_coverage_sidecar_atomic(
     location: &TableLocation,
     rel_path: &Path,
     cov: &Coverage,
@@ -154,7 +154,8 @@ pub async fn write_coverage_sidecar_atomic(
 /// - Serialization of the coverage fails ([`CoverageSidecarError::Codec`]).
 /// - The file already exists (storage layer dependent).
 /// - Storage I/O fails for other reasons ([`CoverageSidecarError::Storage`]).
-pub async fn write_coverage_sidecar_new(
+#[cfg(test)]
+async fn write_coverage_sidecar_new(
     location: &TableLocation,
     rel_path: &Path,
     cov: &Coverage,

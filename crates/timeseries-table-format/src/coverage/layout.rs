@@ -13,8 +13,6 @@ use uuid::Uuid;
 
 use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeIndexGranularity};
 
-/// Root directory for coverage data.
-pub const COVERAGE_ROOT_DIR: &str = "_coverage";
 /// Directory for segment coverage data.
 pub const SEGMENT_COVERAGE_DIR: &str = "_coverage/segments";
 /// Directory for table snapshot coverage data.

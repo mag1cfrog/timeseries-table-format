@@ -745,6 +745,7 @@ mod tests {
     use crate::coverage::io::{
         CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar,
     };
+    use crate::coverage::layout::{SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR};
     use crate::coverage::serde::entity_coverage_from_bytes;
     use crate::coverage::{EntityCoverage, EntityIdentity, EntityValue};
     use crate::formats::parquet::SegmentCoverageError;
@@ -2107,7 +2108,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_retries_cleanup_after_sidecar_write_cleanup_failure() -> TestResult {
-        for sidecar_dir in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+        for sidecar_dir in [SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR] {
             let temp = TempDir::new()?;
             let mut table =
                 TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
@@ -2287,8 +2288,8 @@ mod tests {
 
         for dir in [
             Path::new("data"),
-            Path::new(layout::SEGMENT_COVERAGE_DIR),
-            Path::new(layout::TABLE_SNAPSHOT_DIR),
+            Path::new(SEGMENT_COVERAGE_DIR),
+            Path::new(TABLE_SNAPSHOT_DIR),
         ] {
             crate::storage::inject_cleanup_failure(temp.path().join(dir));
         }
@@ -2588,7 +2589,7 @@ mod tests {
 
     fn coverage_files(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
         let mut files = BTreeMap::new();
-        for rel_dir in [layout::SEGMENT_COVERAGE_DIR, layout::TABLE_SNAPSHOT_DIR] {
+        for rel_dir in [SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR] {
             let dir = root.join(rel_dir);
             if !dir.exists() {
                 continue;
@@ -4117,8 +4118,8 @@ mod tests {
         let location = TableLocation::local(tmp.path());
         let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
         let sidecars = [
-            format!("{}/first-stuck.roar", layout::SEGMENT_COVERAGE_DIR),
-            format!("{}/second-stuck.roar", layout::TABLE_SNAPSHOT_DIR),
+            format!("{SEGMENT_COVERAGE_DIR}/first-stuck.roar"),
+            format!("{TABLE_SNAPSHOT_DIR}/second-stuck.roar"),
         ];
         for sidecar in &sidecars {
             tokio::fs::create_dir_all(tmp.path().join(sidecar)).await?;

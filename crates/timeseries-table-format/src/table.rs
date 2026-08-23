@@ -28,6 +28,7 @@ use crate::{
     transaction_log::{IndexSpec, TableState, TransactionLogStore},
 };
 
+pub use crate::formats::parquet::EntityRewriteError;
 pub use error::TableError;
 
 /// Stream of Arrow RecordBatch values from a time-series scan.
