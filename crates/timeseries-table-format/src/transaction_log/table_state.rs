@@ -660,6 +660,19 @@ mod tests {
             .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
             .await?;
         prepend_raw_action(&tmp, serde_json::json!({"AddSegment": {"path": false}})).await?;
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
+        let mut commit: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+        let metadata = commit["actions"]
+            .as_array_mut()
+            .and_then(|actions| {
+                actions
+                    .iter_mut()
+                    .find_map(|action| action.get_mut("UpdateTableMeta"))
+            })
+            .expect("valid committed metadata action");
+        metadata["kind"] = serde_json::json!({"FutureKind": {"payload": false}});
+        tokio::fs::write(commit_path, serde_json::to_vec(&commit)?).await?;
 
         let error = store.rebuild_table_state().await.unwrap_err();
 

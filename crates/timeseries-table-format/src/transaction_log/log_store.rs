@@ -11,7 +11,7 @@
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the
 //! caller.
-use crate::metadata::table_metadata::TABLE_PROTOCOL_VERSION;
+use crate::metadata::table_metadata::RawTableProtocolRequirements;
 use crate::storage::{self, StorageError, TableLocation};
 use crate::transaction_log::actions::{Commit, LogAction};
 use crate::transaction_log::*;
@@ -121,18 +121,7 @@ impl TransactionLogStore {
                 }
             })
         {
-            if let Some(found) = metadata
-                .get("protocol_version")
-                .and_then(serde_json::Value::as_u64)
-                .filter(|&found| found != u64::from(TABLE_PROTOCOL_VERSION))
-            {
-                return Err(CommitError::from(TableProtocolError::UnsupportedVersion {
-                    expected: TABLE_PROTOCOL_VERSION,
-                    found,
-                }));
-            }
-
-            serde_json::from_value::<TableMeta>(metadata.clone())
+            serde_json::from_value::<RawTableProtocolRequirements>(metadata.clone())
                 .map_err(|source| CommitError::CommitDeserialization {
                     version,
                     source,
