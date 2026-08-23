@@ -667,18 +667,18 @@ mod tests {
 
     #[test]
     fn index_spec_json_rejects_impossible_field_combinations() {
-        let timestamp_with_integer_width = r#"{
+        let timestamp_with_integer_granularity = r#"{
             "column":"ts","kind":{"type":"timestamp","index_granularity":1}
         }"#;
         let integer_with_time_granularity_object = r#"{
             "column":"id","kind":{"type":"int64","index_granularity":{"Seconds":1}}
         }"#;
-        let zero_integer_width =
+        let zero_integer_granularity =
             r#"{"column":"id","kind":{"type":"uint64","index_granularity":0}}"#;
 
-        assert!(serde_json::from_str::<IndexSpec>(timestamp_with_integer_width).is_err());
+        assert!(serde_json::from_str::<IndexSpec>(timestamp_with_integer_granularity).is_err());
         assert!(serde_json::from_str::<IndexSpec>(integer_with_time_granularity_object).is_err());
-        assert!(serde_json::from_str::<IndexSpec>(zero_integer_width).is_err());
+        assert!(serde_json::from_str::<IndexSpec>(zero_integer_granularity).is_err());
     }
 
     #[test]

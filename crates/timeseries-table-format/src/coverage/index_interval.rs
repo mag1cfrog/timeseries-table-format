@@ -380,21 +380,21 @@ mod tests {
 
     #[test]
     fn uint64_mapping_is_exact_through_max() {
-        let unit = IndexKind::UInt64 {
+        let unit_granularity_kind = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
         };
         for value in [0, i64::MAX as u64 + 1, u64::MAX] {
             assert_eq!(
-                index_interval_id_for_value(&unit, &value.into()).unwrap(),
+                index_interval_id_for_value(&unit_granularity_kind, &value.into()).unwrap(),
                 value
             );
         }
 
-        let width = IndexKind::UInt64 {
+        let ten_value_granularity_kind = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
         assert_eq!(
-            index_interval_id_for_value(&width, &u64::MAX.into()).unwrap(),
+            index_interval_id_for_value(&ten_value_granularity_kind, &u64::MAX.into()).unwrap(),
             u64::MAX / 10
         );
     }

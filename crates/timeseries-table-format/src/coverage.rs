@@ -424,7 +424,7 @@ impl EntityCoverage {
     }
 
     /// Return the first canonical identity and smallest overlapping index interval ID.
-    pub fn overlap_example<'a>(
+    pub fn first_overlapping_identity_and_interval_id<'a>(
         &'a self,
         other: &Self,
     ) -> Option<(&'a EntityIdentity, IndexIntervalId)> {
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_coverage_overlap_example_is_deterministic() {
+    fn first_overlapping_identity_and_interval_id_is_deterministic() {
         let first = identity(&["A", "one"]);
         let later = identity(&["B", "one"]);
         let mut left = EntityCoverage::empty();
@@ -675,11 +675,14 @@ mod tests {
         right.union_coverage(later, [1].into_iter().collect());
         right.union_coverage(first.clone(), [3, 9].into_iter().collect());
 
-        assert_eq!(left.overlap_example(&right), Some((&first, 3)));
+        assert_eq!(
+            left.first_overlapping_identity_and_interval_id(&right),
+            Some((&first, 3))
+        );
     }
 
     #[test]
-    fn entity_coverage_overlap_example_does_not_enumerate_dense_intervals() {
+    fn first_overlapping_identity_and_interval_id_handles_dense_intervals() {
         let entity = identity(&["dense"]);
         let last = u64::from(u32::MAX);
         let mut dense = RoaringTreemap::new();
@@ -690,7 +693,10 @@ mod tests {
         let mut right = EntityCoverage::empty();
         right.union_coverage(entity.clone(), [last].into_iter().collect());
 
-        assert_eq!(left.overlap_example(&right), Some((&entity, last)));
+        assert_eq!(
+            left.first_overlapping_identity_and_interval_id(&right),
+            Some((&entity, last))
+        );
     }
 
     #[test]

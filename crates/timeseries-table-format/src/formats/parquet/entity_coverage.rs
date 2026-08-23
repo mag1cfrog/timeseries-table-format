@@ -395,7 +395,9 @@ pub async fn compute_segment_entity_coverage(
             source: ParquetError::General(format!("row-group scan task failed: {source}")),
             backtrace: Backtrace::capture(),
         })??;
-        if let Some((identity, index_interval_id)) = merged.overlap_example(&coverage) {
+        if let Some((identity, index_interval_id)) =
+            merged.first_overlapping_identity_and_interval_id(&coverage)
+        {
             return Err(duplicate_index_interval_error(
                 &path,
                 index,
