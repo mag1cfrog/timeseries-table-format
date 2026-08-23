@@ -390,7 +390,7 @@ async fn validate_source(
         }
         if coverage.is_empty() {
             return Err(invalid_input(format!(
-                "source identity {identity:?} has no covered ordered-index bucket"
+                "source identity {identity:?} has no covered ordered-index interval"
             )));
         }
     }
@@ -1429,7 +1429,7 @@ mod tests {
             &fixture.source,
         )
         .await
-        .expect_err("identity without a covered bucket must fail");
+        .expect_err("identity without a covered index interval must fail");
         assert!(matches!(error, EntityRewriteError::InvalidInput { .. }));
         assert_nothing_staged(&fixture);
         Ok(())

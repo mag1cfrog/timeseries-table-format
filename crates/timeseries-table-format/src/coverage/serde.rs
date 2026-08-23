@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_coverage_keeps_composite_identities_and_buckets_independent() {
+    fn entity_coverage_keeps_composite_identities_and_intervals_independent() {
         let first = identity(&["a", "b:c"]);
         let second = identity(&["a:b", "c"]);
         let mut coverage = EntityCoverage::empty();
@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_global_coverage_codec_is_unchanged_and_distinct() {
+    fn global_coverage_codec_golden_bytes_are_unchanged_and_distinct() {
         let global_empty = coverage_to_bytes(&Coverage::empty()).unwrap();
         assert_eq!(global_empty, vec![0; 8]);
         assert!(matches!(

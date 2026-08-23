@@ -22,7 +22,7 @@ use arrow_array::{
 
 use roaring::RoaringTreemap;
 
-use timeseries_table_format::coverage::bucket::bucket_id_from_epoch_secs;
+use timeseries_table_format::coverage::index_interval::index_interval_id_from_epoch_secs;
 use timeseries_table_format::metadata::table_metadata::TimeIndexGranularity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +91,7 @@ fn usage() -> String {
         "",
         "options:",
         "  --time-column <name>    (default: ts)",
-        "  --bucket <spec>         (must be 1s; default: 1s)",
+        "  --index-granularity <spec> (must be 1s; default: 1s)",
         "  --engine <name>         (baseline | rg-parallel | parquet-direct | all) (default: all)",
         "  --iters <n>             (default: 5)",
         "  --warmup <n>            (default: 1)",
@@ -127,8 +127,8 @@ fn parse_args() -> Result<Args, String> {
             "--time-column" => {
                 time_column = args.next().ok_or("missing value for --time-column")?;
             }
-            "--bucket" => {
-                let spec = args.next().ok_or("missing value for --bucket")?;
+            "--index-granularity" => {
+                let spec = args.next().ok_or("missing value for --index-granularity")?;
                 index_granularity =
                     TimeIndexGranularity::parse(&spec).map_err(|e| e.to_string())?;
             }
@@ -200,7 +200,7 @@ fn parse_args() -> Result<Args, String> {
     let file = file.ok_or_else(|| format!("--file is required\n\n{}", usage()))?;
 
     if index_granularity != TimeIndexGranularity::Seconds(1) {
-        return Err("bucket must be 1s for this benchmark".to_string());
+        return Err("index granularity must be 1s for this benchmark".to_string());
     }
 
     Ok(Args {
@@ -229,8 +229,8 @@ fn write_csv_row(path: &str, header: &str, row: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn bucket_spec_string(bucket: &TimeIndexGranularity) -> String {
-    match bucket {
+fn index_granularity_string(index_granularity: &TimeIndexGranularity) -> String {
+    match index_granularity {
         TimeIndexGranularity::Seconds(n) => format!("{n}s"),
         TimeIndexGranularity::Minutes(n) => format!("{n}m"),
         TimeIndexGranularity::Hours(n) => format!("{n}h"),
@@ -255,12 +255,15 @@ fn secs_from_parquet_unit(unit: ParquetTimeUnit, raw: i64) -> i64 {
     }
 }
 
-fn insert_bucket(bitmap: &mut RoaringTreemap, bucket: u64) -> Result<(), String> {
-    bitmap.insert(bucket);
+fn insert_index_interval_id(
+    bitmap: &mut RoaringTreemap,
+    index_interval_id: u64,
+) -> Result<(), String> {
+    bitmap.insert(index_interval_id);
     Ok(())
 }
 
-fn add_buckets_from_iter(
+fn add_index_interval_ids_from_iter(
     bitmap: &mut RoaringTreemap,
     spec: &TimeIndexGranularity,
     unit: TimeUnit,
@@ -268,13 +271,14 @@ fn add_buckets_from_iter(
 ) -> Result<(), String> {
     for raw in iter.flatten() {
         let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|error| error.to_string())?;
-        insert_bucket(bitmap, bucket)?;
+        let index_interval_id =
+            index_interval_id_from_epoch_secs(spec, secs).map_err(|error| error.to_string())?;
+        insert_index_interval_id(bitmap, index_interval_id)?;
     }
     Ok(())
 }
 
-fn add_buckets_from_values(
+fn add_index_interval_ids_from_values(
     bitmap: &mut RoaringTreemap,
     spec: &TimeIndexGranularity,
     unit: TimeUnit,
@@ -282,8 +286,9 @@ fn add_buckets_from_values(
 ) -> Result<(), String> {
     for &raw in values {
         let secs = secs_from_raw(unit, raw);
-        let bucket = bucket_id_from_epoch_secs(spec, secs).map_err(|error| error.to_string())?;
-        insert_bucket(bitmap, bucket)?;
+        let index_interval_id =
+            index_interval_id_from_epoch_secs(spec, secs).map_err(|error| error.to_string())?;
+        insert_index_interval_id(bitmap, index_interval_id)?;
     }
     Ok(())
 }
@@ -291,7 +296,7 @@ fn add_buckets_from_values(
 fn compute_bitmap_from_reader(
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
     time_column: &str,
-    bucket_spec: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
 ) -> Result<RoaringTreemap, String> {
     let mut bitmap = RoaringTreemap::new();
 
@@ -305,9 +310,14 @@ fn compute_bitmap_from_reader(
             })?;
 
             if arr.null_count() == 0 {
-                add_buckets_from_values(&mut bitmap, bucket_spec, $unit, arr.values())
+                add_index_interval_ids_from_values(
+                    &mut bitmap,
+                    index_granularity,
+                    $unit,
+                    arr.values(),
+                )
             } else {
-                add_buckets_from_iter(&mut bitmap, bucket_spec, $unit, arr.iter())
+                add_index_interval_ids_from_iter(&mut bitmap, index_granularity, $unit, arr.iter())
             }
         }};
     }
@@ -353,7 +363,7 @@ fn median_ms(values: &mut [f64]) -> f64 {
 fn compute_arrow_coverage(
     bytes: &Bytes,
     time_column: &str,
-    bucket: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
     batch_size: Option<usize>,
 ) -> Result<timeseries_table_format::coverage::Coverage, Box<dyn std::error::Error>> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())?;
@@ -369,7 +379,7 @@ fn compute_arrow_coverage(
         builder
     };
     let reader = builder.build()?;
-    let bitmap = compute_bitmap_from_reader(reader, time_column, bucket)?;
+    let bitmap = compute_bitmap_from_reader(reader, time_column, index_granularity)?;
     Ok(timeseries_table_format::coverage::Coverage::from_treemap(
         bitmap,
     ))
@@ -378,19 +388,19 @@ fn compute_arrow_coverage(
 fn run_baseline(
     bytes: &Bytes,
     time_column: &str,
-    bucket: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
     warmup: usize,
     iters: usize,
     batch_size: Option<usize>,
 ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
     for _ in 0..warmup {
-        let _cov = compute_arrow_coverage(bytes, time_column, bucket, batch_size)?;
+        let _cov = compute_arrow_coverage(bytes, time_column, index_granularity, batch_size)?;
     }
 
     let mut durations = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        let _cov = compute_arrow_coverage(bytes, time_column, bucket, batch_size)?;
+        let _cov = compute_arrow_coverage(bytes, time_column, index_granularity, batch_size)?;
         durations.push(start.elapsed());
     }
     Ok(durations)
@@ -436,7 +446,7 @@ fn resolve_rg_settings(
 fn compute_rg_parallel_coverage(
     bytes: &Bytes,
     time_column: &str,
-    bucket: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
     batch_size: Option<usize>,
     rg_chunk_used: usize,
     threads_used: usize,
@@ -471,7 +481,7 @@ fn compute_rg_parallel_coverage(
                 let reader = builder
                     .build()
                     .map_err(|e| format!("parquet read error: {e}"))?;
-                compute_bitmap_from_reader(reader, time_column, bucket)
+                compute_bitmap_from_reader(reader, time_column, index_granularity)
             })
             .collect()
     };
@@ -515,7 +525,7 @@ fn read_int64_column_into_bitmap(
     reader: &mut parquet::column::reader::ColumnReaderImpl<Int64Type>,
     max_def_level: i16,
     unit: ParquetTimeUnit,
-    bucket: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
     bitmap: &mut RoaringTreemap,
     batch_size: usize,
 ) -> Result<(), String> {
@@ -543,9 +553,9 @@ fn read_int64_column_into_bitmap(
         if max_def_level == 0 {
             for &raw in &values[..values_read] {
                 let secs = secs_from_parquet_unit(unit, raw);
-                let bucket_id =
-                    bucket_id_from_epoch_secs(bucket, secs).map_err(|error| error.to_string())?;
-                insert_bucket(bitmap, bucket_id)?;
+                let index_interval_id = index_interval_id_from_epoch_secs(index_granularity, secs)
+                    .map_err(|error| error.to_string())?;
+                insert_index_interval_id(bitmap, index_interval_id)?;
             }
         } else {
             let def_levels = def_levels_storage
@@ -557,9 +567,10 @@ fn read_int64_column_into_bitmap(
                     let raw = values[value_idx];
                     value_idx += 1;
                     let secs = secs_from_parquet_unit(unit, raw);
-                    let bucket_id = bucket_id_from_epoch_secs(bucket, secs)
-                        .map_err(|error| error.to_string())?;
-                    insert_bucket(bitmap, bucket_id)?;
+                    let index_interval_id =
+                        index_interval_id_from_epoch_secs(index_granularity, secs)
+                            .map_err(|error| error.to_string())?;
+                    insert_index_interval_id(bitmap, index_interval_id)?;
                 }
             }
         }
@@ -571,7 +582,7 @@ fn read_int64_column_into_bitmap(
 fn compute_parquet_direct_coverage_with_batch(
     bytes: &Bytes,
     time_column: &str,
-    bucket: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
     batch_size: Option<usize>,
 ) -> Result<timeseries_table_format::coverage::Coverage, Box<dyn std::error::Error>> {
     let reader = SerializedFileReader::new(bytes.clone())?;
@@ -612,7 +623,7 @@ fn compute_parquet_direct_coverage_with_batch(
                     &mut typed_reader,
                     max_def_level,
                     unit,
-                    bucket,
+                    index_granularity,
                     &mut bitmap,
                     batch_size,
                 )?;
@@ -669,21 +680,29 @@ fn run_rg_parallel(
 fn run_parquet_direct(
     bytes: &Bytes,
     time_column: &str,
-    bucket: &TimeIndexGranularity,
+    index_granularity: &TimeIndexGranularity,
     warmup: usize,
     iters: usize,
     batch_size: Option<usize>,
 ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
     for _ in 0..warmup {
-        let _cov =
-            compute_parquet_direct_coverage_with_batch(bytes, time_column, bucket, batch_size)?;
+        let _cov = compute_parquet_direct_coverage_with_batch(
+            bytes,
+            time_column,
+            index_granularity,
+            batch_size,
+        )?;
     }
 
     let mut durations = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        let _cov =
-            compute_parquet_direct_coverage_with_batch(bytes, time_column, bucket, batch_size)?;
+        let _cov = compute_parquet_direct_coverage_with_batch(
+            bytes,
+            time_column,
+            index_granularity,
+            batch_size,
+        )?;
         durations.push(start.elapsed());
     }
     Ok(durations)
@@ -817,7 +836,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         if let Some(csv_path) = &args.csv {
-            let header = "engine,file,rows,time_column,bucket_spec,batch_size,rg_chunk,threads,iter,elapsed_ms,throughput_rows_per_sec";
+            let header = "engine,file,rows,time_column,index_granularity,batch_size,rg_chunk,threads,iter,elapsed_ms,throughput_rows_per_sec";
             for (idx, duration) in durations.iter().enumerate() {
                 let elapsed_ms = duration.as_secs_f64() * 1000.0;
                 let throughput = if duration.as_secs_f64() > 0.0 {
@@ -825,7 +844,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     0.0
                 };
-                let bucket = bucket_spec_string(&args.index_granularity);
+                let index_granularity = index_granularity_string(&args.index_granularity);
                 let batch_size = args
                     .batch_size
                     .map(|v| v.to_string())
@@ -842,12 +861,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (args.rg_chunk.to_string(), args.threads.as_label())
                 };
                 let row = format!(
-                    "{label},{file},{rows},{time_column},{bucket},{batch_size},{rg_chunk},{threads},{iter},{elapsed_ms:.3},{throughput:.0}",
+                    "{label},{file},{rows},{time_column},{index_granularity},{batch_size},{rg_chunk},{threads},{iter},{elapsed_ms:.3},{throughput:.0}",
                     label = label,
                     file = args.file,
                     rows = rows,
                     time_column = args.time_column,
-                    bucket = bucket,
+                    index_granularity = index_granularity,
                     batch_size = batch_size,
                     rg_chunk = rg_chunk,
                     threads = threads,

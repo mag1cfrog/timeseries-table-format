@@ -1,4 +1,4 @@
-//! Stable order-preserving mappings from ordered-index values to 64-bit buckets.
+//! Stable order-preserving mappings from ordered-index values to index interval IDs.
 
 use std::{fmt, ops::RangeInclusive};
 
@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, SecondsFormat, TimeZone, Utc};
 use snafu::Snafu;
 
 use crate::{
-    coverage::Bucket,
+    coverage::IndexIntervalId,
     metadata::table_metadata::{
         IndexKind, IndexValue, IndexValueError, TimeIndexGranularity, validate_index_range,
     },
@@ -17,43 +17,45 @@ const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * 60;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
-/// Errors produced while mapping ordered values to coverage buckets.
+/// Errors produced while mapping ordered values to index interval IDs.
 #[derive(Debug, Snafu, PartialEq, Eq)]
-pub enum BucketError {
+pub enum IndexIntervalMappingError {
     /// The value or range does not match the registered index domain.
     #[snafu(display("Invalid ordered index value: {source}"))]
     IndexValue {
         /// Domain or range validation error.
         source: IndexValueError,
     },
-    /// A directly constructed timestamp bucket has a zero width.
-    #[snafu(display("Timestamp bucket width must be nonzero"))]
-    ZeroTimeBucket,
+    /// A directly constructed timestamp index granularity has a zero width.
+    #[snafu(display("Timestamp index granularity must be nonzero"))]
+    ZeroTimeIndexGranularity,
     /// A validated range end could not be adjusted to the final included value.
     #[snafu(display("Ordered range end cannot be adjusted to its predecessor: {end}"))]
     RangeEndUnderflow {
         /// Exclusive range end.
         end: IndexValue,
     },
-    /// A bucket identity cannot occur in the configured logical index domain.
-    #[snafu(display("Coverage bucket {bucket} is outside the logical {kind} index domain"))]
-    BucketOutsideDomain {
+    /// An index interval ID cannot occur in the configured logical index domain.
+    #[snafu(display(
+        "Index interval ID {index_interval_id} is outside the logical {kind} index domain"
+    ))]
+    IntervalIdOutsideDomain {
         /// Registered ordered-index domain.
         kind: &'static str,
-        /// Internal coverage bucket identity.
-        bucket: Bucket,
+        /// Internal index interval ID.
+        index_interval_id: IndexIntervalId,
     },
 }
 
-/// Logical ordered-index interval represented by one coverage bucket.
+/// Logical ordered-index interval represented by one index interval ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogicalBucketRange {
+pub struct IndexInterval {
     start: IndexValue,
     end: IndexValue,
     end_inclusive: bool,
 }
 
-impl LogicalBucketRange {
+impl IndexInterval {
     fn new(start: IndexValue, end: IndexValue, end_inclusive: bool) -> Self {
         Self {
             start,
@@ -72,13 +74,13 @@ impl LogicalBucketRange {
         &self.end
     }
 
-    /// Whether the end is included because the bucket reaches the domain maximum.
+    /// Whether the end is included because the interval reaches the domain maximum.
     pub fn end_inclusive(&self) -> bool {
         self.end_inclusive
     }
 }
 
-impl fmt::Display for LogicalBucketRange {
+impl fmt::Display for IndexInterval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let close = if self.end_inclusive { ']' } else { ')' };
         match (&self.start, &self.end) {
@@ -94,14 +96,14 @@ impl fmt::Display for LogicalBucketRange {
             (IndexValue::UInt64(start), IndexValue::UInt64(end)) => {
                 write!(f, "[{start}, {end}{close}")
             }
-            _ => unreachable!("logical bucket range endpoints share one index domain"),
+            _ => unreachable!("index interval endpoints share one index domain"),
         }
     }
 }
 
 fn time_index_granularity_seconds(
     index_granularity: &TimeIndexGranularity,
-) -> Result<u64, BucketError> {
+) -> Result<u64, IndexIntervalMappingError> {
     let (value, multiplier) = match *index_granularity {
         TimeIndexGranularity::Seconds(value) => (value, 1),
         TimeIndexGranularity::Minutes(value) => (value, SECONDS_PER_MINUTE),
@@ -109,44 +111,47 @@ fn time_index_granularity_seconds(
         TimeIndexGranularity::Days(value) => (value, SECONDS_PER_DAY),
     };
     if value == 0 {
-        return Err(BucketError::ZeroTimeBucket);
+        return Err(IndexIntervalMappingError::ZeroTimeIndexGranularity);
     }
     Ok(u64::from(value) * multiplier)
 }
 
-fn signed_bucket_id(ordinal: i64) -> Bucket {
+fn signed_index_interval_id(ordinal: i64) -> IndexIntervalId {
     (ordinal as u64) ^ SIGN_BIT
 }
 
-/// Map seconds since the Unix epoch to a timestamp bucket identity.
+/// Map seconds since the Unix epoch to a timestamp index interval ID.
 ///
 /// This lower-level helper is shared by the timestamp Parquet coverage path.
-pub fn bucket_id_from_epoch_secs(
+pub fn index_interval_id_from_epoch_secs(
     index_granularity: &TimeIndexGranularity,
     seconds: i64,
-) -> Result<Bucket, BucketError> {
+) -> Result<IndexIntervalId, IndexIntervalMappingError> {
     let width = i128::from(time_index_granularity_seconds(index_granularity)?);
     let ordinal = i128::from(seconds).div_euclid(width) as i64;
-    Ok(signed_bucket_id(ordinal))
+    Ok(signed_index_interval_id(ordinal))
 }
 
-fn timestamp_bucket_id(
+fn timestamp_index_interval_id(
     index_granularity: &TimeIndexGranularity,
     value: DateTime<Utc>,
-) -> Result<Bucket, BucketError> {
-    bucket_id_from_epoch_secs(index_granularity, value.timestamp())
+) -> Result<IndexIntervalId, IndexIntervalMappingError> {
+    index_interval_id_from_epoch_secs(index_granularity, value.timestamp())
 }
 
-fn int64_bucket_id(value: i64, index_granularity: u64) -> Bucket {
+fn int64_index_interval_id(value: i64, index_granularity: u64) -> IndexIntervalId {
     let ordinal = i128::from(value).div_euclid(i128::from(index_granularity)) as i64;
-    signed_bucket_id(ordinal)
+    signed_index_interval_id(ordinal)
 }
 
-/// Map an ordered-index value to its canonical coverage bucket identity.
-pub fn bucket_id(kind: &IndexKind, value: &IndexValue) -> Result<Bucket, BucketError> {
+/// Map an ordered-index value to its canonical index interval ID.
+pub fn index_interval_id_for_value(
+    kind: &IndexKind,
+    value: &IndexValue,
+) -> Result<IndexIntervalId, IndexIntervalMappingError> {
     value
         .validate_kind(kind)
-        .map_err(|source| BucketError::IndexValue { source })?;
+        .map_err(|source| IndexIntervalMappingError::IndexValue { source })?;
 
     match (kind, value) {
         (
@@ -154,9 +159,9 @@ pub fn bucket_id(kind: &IndexKind, value: &IndexValue) -> Result<Bucket, BucketE
                 index_granularity, ..
             },
             IndexValue::Timestamp(value),
-        ) => timestamp_bucket_id(index_granularity, *value),
+        ) => timestamp_index_interval_id(index_granularity, *value),
         (IndexKind::Int64 { index_granularity }, IndexValue::Int64(value)) => {
-            Ok(int64_bucket_id(*value, index_granularity.get()))
+            Ok(int64_index_interval_id(*value, index_granularity.get()))
         }
         (IndexKind::UInt64 { index_granularity }, IndexValue::UInt64(value)) => {
             Ok(*value / index_granularity.get())
@@ -165,21 +170,21 @@ pub fn bucket_id(kind: &IndexKind, value: &IndexValue) -> Result<Bucket, BucketE
     }
 }
 
-/// Decode one internal coverage bucket into its logical ordered-index interval.
-pub fn logical_bucket_range(
+/// Decode one index interval ID into its logical ordered-index interval.
+pub fn index_interval_for_id(
     kind: &IndexKind,
-    bucket: Bucket,
-) -> Result<LogicalBucketRange, BucketError> {
-    let outside_domain = || BucketError::BucketOutsideDomain {
+    index_interval_id: IndexIntervalId,
+) -> Result<IndexInterval, IndexIntervalMappingError> {
+    let outside_domain = || IndexIntervalMappingError::IntervalIdOutsideDomain {
         kind: kind.name(),
-        bucket,
+        index_interval_id,
     };
 
     match kind {
         IndexKind::Timestamp {
             index_granularity, ..
         } => {
-            let ordinal = i128::from((bucket ^ SIGN_BIT) as i64);
+            let ordinal = i128::from((index_interval_id ^ SIGN_BIT) as i64);
             let width = i128::from(time_index_granularity_seconds(index_granularity)?);
             let domain_start = i128::from(DateTime::<Utc>::MIN_UTC.timestamp());
             let domain_end = i128::from(DateTime::<Utc>::MAX_UTC.timestamp()) + 1;
@@ -201,14 +206,10 @@ pub fn logical_bucket_range(
                     .single()
                     .ok_or_else(&outside_domain)?
             };
-            Ok(LogicalBucketRange::new(
-                start.into(),
-                end.into(),
-                end_inclusive,
-            ))
+            Ok(IndexInterval::new(start.into(), end.into(), end_inclusive))
         }
         IndexKind::Int64 { index_granularity } => {
-            let ordinal = i128::from((bucket ^ SIGN_BIT) as i64);
+            let ordinal = i128::from((index_interval_id ^ SIGN_BIT) as i64);
             let width = i128::from(index_granularity.get());
             let domain_start = i128::from(i64::MIN);
             let domain_end = i128::from(i64::MAX) + 1;
@@ -219,7 +220,7 @@ pub fn logical_bucket_range(
             }
 
             let end_inclusive = end == domain_end;
-            Ok(LogicalBucketRange::new(
+            Ok(IndexInterval::new(
                 IndexValue::Int64(start as i64),
                 IndexValue::Int64(if end_inclusive { i64::MAX } else { end as i64 }),
                 end_inclusive,
@@ -228,14 +229,14 @@ pub fn logical_bucket_range(
         IndexKind::UInt64 { index_granularity } => {
             let width = u128::from(index_granularity.get());
             let domain_end = u128::from(u64::MAX) + 1;
-            let start = u128::from(bucket) * width;
-            let end = ((u128::from(bucket) + 1) * width).min(domain_end);
+            let start = u128::from(index_interval_id) * width;
+            let end = ((u128::from(index_interval_id) + 1) * width).min(domain_end);
             if start >= end {
                 return Err(outside_domain());
             }
 
             let end_inclusive = end == domain_end;
-            Ok(LogicalBucketRange::new(
+            Ok(IndexInterval::new(
                 IndexValue::UInt64(start as u64),
                 IndexValue::UInt64(if end_inclusive { u64::MAX } else { end as u64 }),
                 end_inclusive,
@@ -244,41 +245,45 @@ pub fn logical_bucket_range(
     }
 }
 
-/// Return the first and last buckets intersecting a half-open range `[start, end)`.
-pub fn bucket_range(
+/// Return the first and last index interval IDs intersecting `[start, end)`.
+pub fn index_interval_id_range(
     kind: &IndexKind,
     start: &IndexValue,
     end: &IndexValue,
-) -> Result<RangeInclusive<Bucket>, BucketError> {
-    validate_index_range(kind, start, end).map_err(|source| BucketError::IndexValue { source })?;
+) -> Result<RangeInclusive<IndexIntervalId>, IndexIntervalMappingError> {
+    validate_index_range(kind, start, end)
+        .map_err(|source| IndexIntervalMappingError::IndexValue { source })?;
 
-    let first = bucket_id(kind, start)?;
-    Ok(first..=bucket_id(kind, &value_before(end)?)?)
+    let first = index_interval_id_for_value(kind, start)?;
+    Ok(first..=index_interval_id_for_value(kind, &value_before(end)?)?)
 }
 
-/// Return the bucket containing the final value before an exclusive endpoint.
-pub fn bucket_for_exclusive_end(kind: &IndexKind, end: &IndexValue) -> Result<Bucket, BucketError> {
+/// Return the index interval ID containing the value before an exclusive end.
+pub fn index_interval_id_for_exclusive_end(
+    kind: &IndexKind,
+    end: &IndexValue,
+) -> Result<IndexIntervalId, IndexIntervalMappingError> {
     end.validate_kind(kind)
-        .map_err(|source| BucketError::IndexValue { source })?;
-    bucket_id(kind, &value_before(end)?)
+        .map_err(|source| IndexIntervalMappingError::IndexValue { source })?;
+    index_interval_id_for_value(kind, &value_before(end)?)
 }
 
-fn value_before(end: &IndexValue) -> Result<IndexValue, BucketError> {
+fn value_before(end: &IndexValue) -> Result<IndexValue, IndexIntervalMappingError> {
     Ok(match end {
         IndexValue::Timestamp(end) => {
             IndexValue::Timestamp(end.checked_sub_signed(Duration::nanoseconds(1)).ok_or(
-                BucketError::RangeEndUnderflow {
+                IndexIntervalMappingError::RangeEndUnderflow {
                     end: IndexValue::Timestamp(*end),
                 },
             )?)
         }
         IndexValue::Int64(end) => IndexValue::Int64(end.checked_sub(1).ok_or({
-            BucketError::RangeEndUnderflow {
+            IndexIntervalMappingError::RangeEndUnderflow {
                 end: IndexValue::Int64(*end),
             }
         })?),
         IndexValue::UInt64(end) => IndexValue::UInt64(end.checked_sub(1).ok_or({
-            BucketError::RangeEndUnderflow {
+            IndexIntervalMappingError::RangeEndUnderflow {
                 end: IndexValue::UInt64(*end),
             }
         })?),
@@ -307,27 +312,39 @@ mod tests {
         let epoch = Utc.timestamp_opt(0, 0).single().unwrap().into();
         let after = Utc.timestamp_opt(1, 0).single().unwrap().into();
 
-        assert_eq!(bucket_id(&kind, &before).unwrap(), SIGN_BIT - 1);
-        assert_eq!(bucket_id(&kind, &epoch).unwrap(), SIGN_BIT);
-        assert_eq!(bucket_id(&kind, &after).unwrap(), SIGN_BIT + 1);
+        assert_eq!(
+            index_interval_id_for_value(&kind, &before).unwrap(),
+            SIGN_BIT - 1
+        );
+        assert_eq!(
+            index_interval_id_for_value(&kind, &epoch).unwrap(),
+            SIGN_BIT
+        );
+        assert_eq!(
+            index_interval_id_for_value(&kind, &after).unwrap(),
+            SIGN_BIT + 1
+        );
     }
 
     #[test]
-    fn timestamp_mapping_uses_euclidean_buckets_before_epoch() {
-        let bucket = TimeIndexGranularity::Minutes(1);
+    fn timestamp_mapping_uses_euclidean_intervals_before_epoch() {
+        let index_granularity = TimeIndexGranularity::Minutes(1);
         assert_eq!(
-            bucket_id_from_epoch_secs(&bucket, -61).unwrap(),
+            index_interval_id_from_epoch_secs(&index_granularity, -61).unwrap(),
             SIGN_BIT - 2
         );
         assert_eq!(
-            bucket_id_from_epoch_secs(&bucket, -60).unwrap(),
+            index_interval_id_from_epoch_secs(&index_granularity, -60).unwrap(),
             SIGN_BIT - 1
         );
         assert_eq!(
-            bucket_id_from_epoch_secs(&bucket, -1).unwrap(),
+            index_interval_id_from_epoch_secs(&index_granularity, -1).unwrap(),
             SIGN_BIT - 1
         );
-        assert_eq!(bucket_id_from_epoch_secs(&bucket, 0).unwrap(), SIGN_BIT);
+        assert_eq!(
+            index_interval_id_from_epoch_secs(&index_granularity, 0).unwrap(),
+            SIGN_BIT
+        );
     }
 
     #[test]
@@ -337,19 +354,28 @@ mod tests {
                 index_granularity: NonZeroU64::new(width).unwrap(),
             };
             let values = [i64::MIN, -1, 0, 1, i64::MAX];
-            let buckets: Vec<_> = values
+            let interval_ids: Vec<_> = values
                 .into_iter()
-                .map(|value| bucket_id(&kind, &value.into()).unwrap())
+                .map(|value| index_interval_id_for_value(&kind, &value.into()).unwrap())
                 .collect();
-            assert!(buckets.windows(2).all(|pair| pair[0] <= pair[1]));
+            assert!(interval_ids.windows(2).all(|pair| pair[0] <= pair[1]));
         }
 
         let unit = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
         };
-        assert_eq!(bucket_id(&unit, &i64::MIN.into()).unwrap(), 0);
-        assert_eq!(bucket_id(&unit, &0i64.into()).unwrap(), SIGN_BIT);
-        assert_eq!(bucket_id(&unit, &i64::MAX.into()).unwrap(), u64::MAX);
+        assert_eq!(
+            index_interval_id_for_value(&unit, &i64::MIN.into()).unwrap(),
+            0
+        );
+        assert_eq!(
+            index_interval_id_for_value(&unit, &0i64.into()).unwrap(),
+            SIGN_BIT
+        );
+        assert_eq!(
+            index_interval_id_for_value(&unit, &i64::MAX.into()).unwrap(),
+            u64::MAX
+        );
     }
 
     #[test]
@@ -358,23 +384,30 @@ mod tests {
             index_granularity: NonZeroU64::new(1).unwrap(),
         };
         for value in [0, i64::MAX as u64 + 1, u64::MAX] {
-            assert_eq!(bucket_id(&unit, &value.into()).unwrap(), value);
+            assert_eq!(
+                index_interval_id_for_value(&unit, &value.into()).unwrap(),
+                value
+            );
         }
 
         let width = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
-        assert_eq!(bucket_id(&width, &u64::MAX.into()).unwrap(), u64::MAX / 10);
+        assert_eq!(
+            index_interval_id_for_value(&width, &u64::MAX.into()).unwrap(),
+            u64::MAX / 10
+        );
     }
 
     #[test]
-    fn logical_bucket_ranges_use_configured_index_units() {
+    fn index_intervals_use_configured_index_units() {
         let signed_unit = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
         };
-        let signed_unit_bucket = bucket_id(&signed_unit, &50_464i64.into()).unwrap();
+        let signed_unit_interval_id =
+            index_interval_id_for_value(&signed_unit, &50_464i64.into()).unwrap();
         assert_eq!(
-            logical_bucket_range(&signed_unit, signed_unit_bucket)
+            index_interval_for_id(&signed_unit, signed_unit_interval_id)
                 .unwrap()
                 .to_string(),
             "[50464, 50465)"
@@ -383,9 +416,9 @@ mod tests {
         let signed = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
-        let signed_bucket = bucket_id(&signed, &(-11i64).into()).unwrap();
+        let signed_interval_id = index_interval_id_for_value(&signed, &(-11i64).into()).unwrap();
         assert_eq!(
-            logical_bucket_range(&signed, signed_bucket)
+            index_interval_for_id(&signed, signed_interval_id)
                 .unwrap()
                 .to_string(),
             "[-20, -10)"
@@ -394,9 +427,10 @@ mod tests {
         let unsigned = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
-        let unsigned_bucket = bucket_id(&unsigned, &50_464u64.into()).unwrap();
+        let unsigned_interval_id =
+            index_interval_id_for_value(&unsigned, &50_464u64.into()).unwrap();
         assert_eq!(
-            logical_bucket_range(&unsigned, unsigned_bucket)
+            index_interval_for_id(&unsigned, unsigned_interval_id)
                 .unwrap()
                 .to_string(),
             "[50460, 50470)"
@@ -404,18 +438,19 @@ mod tests {
 
         let timestamp = timestamp_kind(TimeIndexGranularity::Hours(1));
         let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
-        let timestamp_bucket = bucket_id(&timestamp, &epoch.into()).unwrap();
+        let timestamp_interval_id = index_interval_id_for_value(&timestamp, &epoch.into()).unwrap();
         assert_eq!(
-            logical_bucket_range(&timestamp, timestamp_bucket)
+            index_interval_for_id(&timestamp, timestamp_interval_id)
                 .unwrap()
                 .to_string(),
             "[1970-01-01T00:00:00Z, 1970-01-01T01:00:00Z)"
         );
 
         let before_epoch = Utc.timestamp_opt(-1, 0).single().unwrap();
-        let before_epoch_bucket = bucket_id(&timestamp, &before_epoch.into()).unwrap();
+        let before_epoch_interval_id =
+            index_interval_id_for_value(&timestamp, &before_epoch.into()).unwrap();
         assert_eq!(
-            logical_bucket_range(&timestamp, before_epoch_bucket)
+            index_interval_for_id(&timestamp, before_epoch_interval_id)
                 .unwrap()
                 .to_string(),
             "[1969-12-31T23:00:00Z, 1970-01-01T00:00:00Z)"
@@ -423,40 +458,52 @@ mod tests {
     }
 
     #[test]
-    fn logical_bucket_ranges_clip_at_domain_maximum() -> Result<(), BucketError> {
+    fn index_intervals_clip_at_domain_maximum() -> Result<(), IndexIntervalMappingError> {
         let signed = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
-        let signed_range =
-            logical_bucket_range(&signed, bucket_id(&signed, &i64::MAX.into()).unwrap())?;
+        let signed_range = index_interval_for_id(
+            &signed,
+            index_interval_id_for_value(&signed, &i64::MAX.into()).unwrap(),
+        )?;
         assert_eq!(signed_range.end(), &IndexValue::Int64(i64::MAX));
         assert!(signed_range.end_inclusive());
-        let signed_min_range =
-            logical_bucket_range(&signed, bucket_id(&signed, &i64::MIN.into()).unwrap())?;
+        let signed_min_range = index_interval_for_id(
+            &signed,
+            index_interval_id_for_value(&signed, &i64::MIN.into()).unwrap(),
+        )?;
         assert_eq!(signed_min_range.start(), &IndexValue::Int64(i64::MIN));
         assert!(!signed_min_range.end_inclusive());
 
         let unsigned = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
-        let unsigned_range =
-            logical_bucket_range(&unsigned, bucket_id(&unsigned, &u64::MAX.into()).unwrap())?;
+        let unsigned_range = index_interval_for_id(
+            &unsigned,
+            index_interval_id_for_value(&unsigned, &u64::MAX.into()).unwrap(),
+        )?;
         assert_eq!(unsigned_range.end(), &IndexValue::UInt64(u64::MAX));
         assert!(unsigned_range.end_inclusive());
 
         let timestamp = timestamp_kind(TimeIndexGranularity::Days(u32::MAX));
-        let timestamp_range = logical_bucket_range(
+        let timestamp_range = index_interval_for_id(
             &timestamp,
-            bucket_id(&timestamp, &IndexValue::Timestamp(DateTime::<Utc>::MAX_UTC))?,
+            index_interval_id_for_value(
+                &timestamp,
+                &IndexValue::Timestamp(DateTime::<Utc>::MAX_UTC),
+            )?,
         )?;
         assert_eq!(
             timestamp_range.end(),
             &IndexValue::Timestamp(DateTime::<Utc>::MAX_UTC)
         );
         assert!(timestamp_range.end_inclusive());
-        let timestamp_min_range = logical_bucket_range(
+        let timestamp_min_range = index_interval_for_id(
             &timestamp,
-            bucket_id(&timestamp, &IndexValue::Timestamp(DateTime::<Utc>::MIN_UTC))?,
+            index_interval_id_for_value(
+                &timestamp,
+                &IndexValue::Timestamp(DateTime::<Utc>::MIN_UTC),
+            )?,
         )?;
         assert_eq!(
             timestamp_min_range.start(),
@@ -467,13 +514,13 @@ mod tests {
     }
 
     #[test]
-    fn logical_bucket_range_rejects_unreachable_bucket() {
+    fn index_interval_rejects_unreachable_interval_id() {
         let kind = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(2).unwrap(),
         };
         assert!(matches!(
-            logical_bucket_range(&kind, u64::MAX),
-            Err(BucketError::BucketOutsideDomain { .. })
+            index_interval_for_id(&kind, u64::MAX),
+            Err(IndexIntervalMappingError::IntervalIdOutsideDomain { .. })
         ));
     }
 
@@ -482,10 +529,10 @@ mod tests {
         let signed = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
-        let range = bucket_range(&signed, &0i64.into(), &20i64.into()).unwrap();
+        let range = index_interval_id_range(&signed, &0i64.into(), &20i64.into()).unwrap();
         assert_eq!(range, SIGN_BIT..=SIGN_BIT + 1);
         assert_eq!(
-            bucket_for_exclusive_end(&signed, &20i64.into()).unwrap(),
+            index_interval_id_for_exclusive_end(&signed, &20i64.into()).unwrap(),
             SIGN_BIT + 1
         );
 
@@ -493,11 +540,11 @@ mod tests {
             index_granularity: NonZeroU64::new(10).unwrap(),
         };
         assert_eq!(
-            bucket_range(&unsigned, &0u64.into(), &20u64.into()).unwrap(),
+            index_interval_id_range(&unsigned, &0u64.into(), &20u64.into()).unwrap(),
             0..=1
         );
         assert_eq!(
-            bucket_range(&unsigned, &0u64.into(), &1u64.into()).unwrap(),
+            index_interval_id_range(&unsigned, &0u64.into(), &1u64.into()).unwrap(),
             0..=0
         );
     }
@@ -509,11 +556,11 @@ mod tests {
         let boundary = Utc.timestamp_opt(2, 0).single().unwrap();
 
         assert_eq!(
-            bucket_range(&kind, &start.into(), &boundary.into()).unwrap(),
+            index_interval_id_range(&kind, &start.into(), &boundary.into()).unwrap(),
             SIGN_BIT..=SIGN_BIT + 1
         );
         assert_eq!(
-            bucket_range(
+            index_interval_id_range(
                 &kind,
                 &start.into(),
                 &(boundary + Duration::nanoseconds(1)).into(),
@@ -524,28 +571,28 @@ mod tests {
     }
 
     #[test]
-    fn invalid_domains_ranges_and_zero_time_buckets_are_errors() {
+    fn invalid_domains_ranges_and_zero_time_granularities_are_errors() {
         let kind = timestamp_kind(TimeIndexGranularity::Seconds(0));
         let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
         assert_eq!(
-            bucket_id(&kind, &epoch.into()),
-            Err(BucketError::ZeroTimeBucket)
+            index_interval_id_for_value(&kind, &epoch.into()),
+            Err(IndexIntervalMappingError::ZeroTimeIndexGranularity)
         );
 
         let unsigned = IndexKind::UInt64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
         };
         assert!(matches!(
-            bucket_range(&unsigned, &0i64.into(), &1i64.into()),
-            Err(BucketError::IndexValue { .. })
+            index_interval_id_range(&unsigned, &0i64.into(), &1i64.into()),
+            Err(IndexIntervalMappingError::IndexValue { .. })
         ));
         assert!(matches!(
-            bucket_range(&unsigned, &1u64.into(), &1u64.into()),
-            Err(BucketError::IndexValue { .. })
+            index_interval_id_range(&unsigned, &1u64.into(), &1u64.into()),
+            Err(IndexIntervalMappingError::IndexValue { .. })
         ));
         assert!(matches!(
-            bucket_for_exclusive_end(&unsigned, &0u64.into()),
-            Err(BucketError::RangeEndUnderflow { .. })
+            index_interval_id_for_exclusive_end(&unsigned, &0u64.into()),
+            Err(IndexIntervalMappingError::RangeEndUnderflow { .. })
         ));
     }
 }

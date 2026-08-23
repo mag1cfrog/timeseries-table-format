@@ -322,13 +322,14 @@ mod tests {
     }
 
     #[test]
-    fn segment_coverage_id_is_deterministic_and_valid() {
+    fn segment_coverage_id_matches_golden_value_and_is_valid() {
         let index = timestamp_index("ts", TimeIndexGranularity::Minutes(1));
         let bytes = b"bitmap-bytes";
 
         let id1 = segment_coverage_id_v2(&index, bytes);
         let id2 = segment_coverage_id_v2(&index, bytes);
 
+        assert_eq!(id1, "segcov-00720d0b60b246ef53e757b286681cc0");
         assert_eq!(id1, id2, "same inputs must produce stable id");
         assert!(id1.starts_with("segcov-"));
         assert_eq!(id1.len(), "segcov-".len() + 32, "prefix + 32 hex chars");
@@ -341,7 +342,7 @@ mod tests {
 
         let base_index = timestamp_index("ts", TimeIndexGranularity::Seconds(5));
         let base = segment_coverage_id_v2(&base_index, bytes);
-        let different_bucket = segment_coverage_id_v2(
+        let different_granularity = segment_coverage_id_v2(
             &timestamp_index("ts", TimeIndexGranularity::Hours(5)),
             bytes,
         );
@@ -369,7 +370,7 @@ mod tests {
             },
             bytes,
         );
-        let different_width = segment_coverage_id_v2(
+        let different_integer_granularity = segment_coverage_id_v2(
             &IndexSpec {
                 column: "ts".to_string(),
                 entity_columns: Vec::new(),
@@ -381,22 +382,26 @@ mod tests {
         );
         let different_bytes = segment_coverage_id_v2(&base_index, b"other");
 
-        assert_ne!(base, different_bucket, "bucket spec should affect id");
+        assert_ne!(
+            base, different_granularity,
+            "index granularity should affect id"
+        );
         assert_ne!(base, different_column, "index column should affect id");
         assert_ne!(base, different_kind, "index kind should affect id");
         assert_ne!(different_kind, different_integer_domain);
-        assert_ne!(different_kind, different_width);
+        assert_ne!(different_kind, different_integer_granularity);
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
     }
 
     #[test]
-    fn table_coverage_id_is_deterministic_and_valid() {
+    fn table_coverage_id_matches_golden_value_and_is_valid() {
         let index = timestamp_index("ts", TimeIndexGranularity::Hours(1));
         let bytes = b"table-bitmap";
 
         let id1 = table_coverage_id_v2(&index, bytes);
         let id2 = table_coverage_id_v2(&index, bytes);
 
+        assert_eq!(id1, "tblcov-38f0aa9c3e526d0cdabf234af8fb0fd3");
         assert_eq!(id1, id2, "same inputs must produce stable id");
         assert!(id1.starts_with("tblcov-"));
         assert_eq!(id1.len(), "tblcov-".len() + 32, "prefix + 32 hex chars");
@@ -409,7 +414,7 @@ mod tests {
 
         let base_index = timestamp_index("ts", TimeIndexGranularity::Minutes(15));
         let base = table_coverage_id_v2(&base_index, bytes);
-        let different_bucket =
+        let different_granularity =
             table_coverage_id_v2(&timestamp_index("ts", TimeIndexGranularity::Days(1)), bytes);
         let different_column = table_coverage_id_v2(
             &timestamp_index("event_time", TimeIndexGranularity::Minutes(15)),
@@ -417,13 +422,16 @@ mod tests {
         );
         let different_bytes = table_coverage_id_v2(&base_index, b"other");
 
-        assert_ne!(base, different_bucket, "bucket spec should affect id");
+        assert_ne!(
+            base, different_granularity,
+            "index granularity should affect id"
+        );
         assert_ne!(base, different_column, "index column should affect id");
         assert_ne!(base, different_bytes, "coverage bytes should affect id");
     }
 
     #[test]
-    fn entity_coverage_ids_include_ordered_entity_columns() {
+    fn entity_coverage_ids_match_golden_values_and_include_ordered_columns() {
         let index = IndexSpec {
             column: "ts".to_string(),
             entity_columns: vec!["symbol".to_string(), "venue".to_string()],
@@ -439,10 +447,12 @@ mod tests {
         let bytes = b"entity-coverage-bytes";
 
         let segment = segment_entity_coverage_id_v1(&index, bytes);
+        assert_eq!(segment, "segcov-67c0022aad0d9f5bf5ea813e9ef88119");
         assert_ne!(segment, segment_entity_coverage_id_v1(&renamed, bytes));
         assert_ne!(segment, segment_entity_coverage_id_v1(&reordered, bytes));
 
         let table = table_entity_coverage_id_v1(&index, bytes);
+        assert_eq!(table, "tblcov-9c54647467c3a0e89e60675e00b7c75b");
         assert_ne!(table, table_entity_coverage_id_v1(&renamed, bytes));
         assert_ne!(table, table_entity_coverage_id_v1(&reordered, bytes));
     }

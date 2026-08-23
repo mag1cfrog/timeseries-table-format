@@ -1517,7 +1517,7 @@ async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
         signed_location.clone(),
         make_numeric_table_meta(
             IndexKind::Int64 {
-                index_granularity: NonZeroU64::new(1).expect("nonzero bucket"),
+                index_granularity: NonZeroU64::new(1).expect("nonzero granularity"),
             },
             LogicalDataType::Int64,
         )?,
@@ -1551,7 +1551,7 @@ async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
         unsigned_location.clone(),
         make_numeric_table_meta(
             IndexKind::UInt64 {
-                index_granularity: NonZeroU64::new(1).expect("nonzero bucket"),
+                index_granularity: NonZeroU64::new(1).expect("nonzero granularity"),
             },
             LogicalDataType::UInt64,
         )?,
