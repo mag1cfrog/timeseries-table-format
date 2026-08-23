@@ -1432,7 +1432,7 @@ async fn append_rejects_hostile_arrow_types_without_artifacts() -> TestResult {
             matches!(
                 &error,
                 TableError::Append {
-                    source: AppendError::InputSchemaCompatibility {
+                    source: AppendError::SchemaValidation {
                         source,
                         ..
                     }

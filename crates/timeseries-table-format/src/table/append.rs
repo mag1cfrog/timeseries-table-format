@@ -1076,7 +1076,7 @@ mod tests {
         assert!(matches!(
             error,
             TableError::Append {
-                source: AppendError::InputSchemaCompatibility { .. }
+                source: AppendError::SchemaValidation { .. }
             }
         ));
         assert!(error.to_string().contains(expected_column));
@@ -2360,7 +2360,7 @@ mod tests {
         assert!(matches!(
             table.append(input_batch(vec![1])?).await,
             Err(TableError::Append {
-                source: AppendError::InputSchemaCompatibility { .. }
+                source: AppendError::SchemaValidation { .. }
             })
         ));
         assert_eq!(table.state().version, 1);
@@ -2972,7 +2972,7 @@ mod tests {
                 .await
                 .expect_err("later schema mismatch must fail"),
             TableError::Append {
-                source: AppendError::InputSchemaCompatibility { .. }
+                source: AppendError::SchemaValidation { .. }
             }
         ));
         assert_eq!(table.state, state_before);
@@ -3090,7 +3090,7 @@ mod tests {
             matches!(
                 error,
                 TableError::Append {
-                    source: AppendError::InputSchemaCompatibility {
+                    source: AppendError::SchemaValidation {
                         ref source,
                         ..
                     }
@@ -3430,7 +3430,7 @@ mod tests {
         assert!(matches!(
             error,
             TableError::Append {
-                source: AppendError::InputSchemaCompatibility {
+                source: AppendError::SchemaValidation {
                     ref source,
                     ..
                 }

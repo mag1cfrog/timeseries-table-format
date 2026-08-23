@@ -208,7 +208,7 @@ fn append_error_to_py(
             entity_columns,
             example_identity.as_ref(),
         ),
-        AppendError::InputSchemaCompatibility { .. }
+        AppendError::SchemaValidation { .. }
         | AppendError::GeneratedSegmentSchemaCompatibility { .. } => {
             SchemaMismatchError::new_err(msg)
         }

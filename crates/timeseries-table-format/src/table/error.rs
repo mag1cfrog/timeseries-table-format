@@ -64,12 +64,9 @@ pub enum AppendError {
         max_rows_per_row_group: usize,
     },
 
-    /// Append input is incompatible with the table schema or index specification.
-    #[snafu(
-        context(false),
-        display("Append input schema is incompatible: {source}")
-    )]
-    InputSchemaCompatibility {
+    /// Validating the incoming and registered table schemas failed.
+    #[snafu(context(false), display("Schema validation failed: {source}"))]
+    SchemaValidation {
         /// Complete schema compatibility failure.
         #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
         source: Box<SchemaCompatibilityError>,
@@ -610,9 +607,10 @@ mod tests {
     }
 
     #[test]
-    fn append_schema_wrapper_captures_a_backtrace_for_a_source_without_one() {
+    fn append_schema_wrapper_is_neutral_and_captures_a_backtrace() {
         let error = AppendError::from(SchemaCompatibilityError::MissingTableSchema);
 
+        assert!(error.to_string().starts_with("Schema validation failed:"));
         assert!(ErrorCompat::backtrace(&error).is_some());
     }
 
