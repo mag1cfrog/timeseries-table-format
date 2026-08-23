@@ -56,7 +56,7 @@ fn create_command(table_root: &Path) -> Command {
         "ts",
         "--index-type",
         "timestamp",
-        "--bucket",
+        "--index-granularity",
         "1h",
     ]);
     command
@@ -323,7 +323,7 @@ fn write_indexed_parquet(
 
 fn create_table_via_cli(
     table_root: &Path,
-    bucket: &str,
+    index_granularity: &str,
     entity_columns: &[&str],
 ) -> StdResult<(), Box<dyn std::error::Error>> {
     let table_root_str = table_root.to_string_lossy().to_string();
@@ -335,8 +335,8 @@ fn create_table_via_cli(
         "ts".to_string(),
         "--index-type".to_string(),
         "timestamp".to_string(),
-        "--bucket".to_string(),
-        bucket.to_string(),
+        "--index-granularity".to_string(),
+        index_granularity.to_string(),
         "--timezone".to_string(),
         "America/New_York".to_string(),
     ];
@@ -393,7 +393,7 @@ fn cli_create_supports_integer_index_domains() -> StdResult<(), Box<dyn std::err
         ),
     ];
 
-    for (index_type, bucket_width, expected_kind) in cases {
+    for (index_type, index_granularity, expected_kind) in cases {
         let table_root = tmp.path().join(index_type);
         let output = run_cli(&[
             "create",
@@ -403,8 +403,8 @@ fn cli_create_supports_integer_index_domains() -> StdResult<(), Box<dyn std::err
             "idx",
             "--index-type",
             index_type,
-            "--bucket-width",
-            bucket_width,
+            "--index-granularity",
+            index_granularity,
         ])?;
         assert_cli_success(&output);
 
@@ -429,7 +429,7 @@ fn cli_int64_create_append_query_and_wrong_domain_rollback()
         "idx",
         "--index-type",
         "int64",
-        "--bucket-width",
+        "--index-granularity",
         "10",
     ])?;
     assert_cli_success(&output);
@@ -525,39 +525,31 @@ fn cli_create_rejects_invalid_index_option_combinations_before_io()
 -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let cases: &[(&str, &[&str], &str)] = &[
+        ("timestamp", &[], "--index-granularity <INDEX_GRANULARITY>"),
         (
             "timestamp",
-            &[],
-            "Invalid --bucket for --index-type timestamp",
+            &["--index-granularity", "1"],
+            "Invalid --index-granularity '1' for --index-type timestamp",
         ),
+        ("int64", &[], "--index-granularity <INDEX_GRANULARITY>"),
         (
-            "timestamp",
-            &["--bucket", "1m", "--bucket-width", "1"],
-            "Invalid --bucket-width for --index-type timestamp",
+            "int64",
+            &["--index-granularity", "1m"],
+            "Invalid --index-granularity for --index-type int64",
         ),
         (
             "int64",
-            &[],
-            "Invalid --bucket-width for --index-type int64",
-        ),
-        (
-            "int64",
-            &["--bucket-width", "1", "--bucket", "1m"],
-            "Invalid --bucket for --index-type int64",
-        ),
-        (
-            "int64",
-            &["--bucket-width", "1", "--timezone", "UTC"],
+            &["--index-granularity", "1", "--timezone", "UTC"],
             "Invalid --timezone for --index-type int64",
         ),
         (
             "uint64",
-            &["--bucket", "1m"],
-            "Invalid --bucket for --index-type uint64",
+            &["--index-granularity", "1m"],
+            "Invalid --index-granularity for --index-type uint64",
         ),
         (
             "uint64",
-            &["--bucket-width", "1", "--timezone", "UTC"],
+            &["--index-granularity", "1", "--timezone", "UTC"],
             "Invalid --timezone for --index-type uint64",
         ),
     ];
@@ -590,14 +582,14 @@ fn cli_create_rejects_invalid_index_option_combinations_before_io()
 }
 
 #[test]
-fn cli_create_validates_integer_bucket_width_before_io() -> StdResult<(), Box<dyn std::error::Error>>
-{
+fn cli_create_validates_integer_index_granularity_before_io()
+-> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     for (position, value) in ["0", "-1", "18446744073709551616", "1.5", "1e3", ""]
         .into_iter()
         .enumerate()
     {
-        let table_root = tmp.path().join(format!("invalid-width-{position}"));
+        let table_root = tmp.path().join(format!("invalid-granularity-{position}"));
         let output = run_cli(&[
             "create",
             "--table",
@@ -606,14 +598,14 @@ fn cli_create_validates_integer_bucket_width_before_io() -> StdResult<(), Box<dy
             "idx",
             "--index-type",
             "int64",
-            "--bucket-width",
+            "--index-granularity",
             value,
         ])?;
 
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("Invalid --bucket-width for --index-type int64"),
+            stderr.contains("Invalid --index-granularity for --index-type int64"),
             "unexpected stderr: {stderr}"
         );
         assert!(!table_root.exists(), "invalid create performed storage I/O");
@@ -630,7 +622,11 @@ fn cli_create_help_uses_only_ordered_index_names() -> StdResult<(), Box<dyn std:
     assert!(stdout.contains("--index-column"));
     assert!(stdout.contains("--index-type <INDEX_TYPE>"));
     assert!(stdout.contains("timestamp, int64, uint64"));
-    assert!(stdout.contains("--bucket-width"));
+    assert!(stdout.contains("--index-granularity <INDEX_GRANULARITY>"));
+    assert!(stdout.contains("Time interval for timestamp"));
+    assert!(stdout.contains("positive integer for int64 and uint64"));
+    assert!(!stdout.contains("--bucket"));
+    assert!(!stdout.contains("--bucket-width"));
     assert!(!stdout.contains("--time-column"));
 
     let tmp = TempDir::new()?;
@@ -642,11 +638,31 @@ fn cli_create_help_uses_only_ordered_index_names() -> StdResult<(), Box<dyn std:
         "ts",
         "--index-type",
         "timestamp",
-        "--bucket",
+        "--index-granularity",
         "1m",
     ])?;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--time-column"));
+
+    for removed_flag in ["--bucket", "--bucket-width"] {
+        let table_root = tmp.path().join(removed_flag.trim_start_matches('-'));
+        let output = run_cli(&[
+            "create",
+            "--table",
+            table_root.to_string_lossy().as_ref(),
+            "--index-column",
+            "ts",
+            "--index-type",
+            "timestamp",
+            "--index-granularity",
+            "1m",
+            removed_flag,
+            "1m",
+        ])?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(removed_flag));
+        assert!(!table_root.exists());
+    }
 
     Ok(())
 }
@@ -1048,7 +1064,7 @@ fn cli_failed_external_append_preserves_its_source() -> StdResult<(), Box<dyn st
         "event_time",
         "--index-type",
         "timestamp",
-        "--bucket",
+        "--index-granularity",
         "1m",
     ])?;
     assert_cli_success(&output);
@@ -1177,7 +1193,8 @@ fn cli_append_uses_registered_time_column() -> StdResult<(), Box<dyn std::error:
 }
 
 #[test]
-fn cli_invalid_bucket_reports_user_friendly_error() -> StdResult<(), Box<dyn std::error::Error>> {
+fn cli_invalid_timestamp_granularity_reports_user_friendly_error()
+-> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
 
@@ -1189,15 +1206,20 @@ fn cli_invalid_bucket_reports_user_friendly_error() -> StdResult<(), Box<dyn std
         "ts",
         "--index-type",
         "timestamp",
-        "--bucket",
+        "--index-granularity",
         "1x",
     ])?;
 
     assert!(!output.status.success(), "create should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Invalid --bucket"),
+        stderr.contains("Invalid --index-granularity"),
         "unexpected stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("expected s|m|h|d"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!table_root.exists());
     Ok(())
 }

@@ -25,8 +25,9 @@ use timeseries_table_format::{
 
 use crate::{
     error::{
-        AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu, InvalidBucketSnafu,
-        OpenTableSnafu, OptimizeTableSnafu, ReadParquetSourceSnafu, StorageSnafu,
+        AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu,
+        InvalidTimeIndexGranularitySnafu, OpenTableSnafu, OptimizeTableSnafu,
+        ReadParquetSourceSnafu, StorageSnafu,
     },
     query::{
         QueryOpts, page_output, preview_message, print_query_result, render_preview,
@@ -110,17 +111,13 @@ enum Command {
         #[arg(long = "index-type", value_enum)]
         index_type: IndexTypeArg,
 
-        /// Timestamp coverage bucket, e.g. 1h, 15m, 1d
-        #[arg(long)]
-        bucket: Option<String>,
+        /// Time interval for timestamp, or positive integer for int64 and uint64
+        #[arg(long = "index-granularity", allow_hyphen_values = true)]
+        index_granularity: String,
 
         /// Optional timestamp IANA timezone
         #[arg(long)]
         timezone: Option<String>,
-
-        /// Positive integer coverage bucket width in index-value units
-        #[arg(long = "bucket-width", allow_hyphen_values = true)]
-        bucket_width: Option<String>,
 
         /// Repeatable entity column names
         #[arg(long = "entity")]
@@ -211,17 +208,17 @@ struct QueryArgs {
     backend: BackendArg,
 }
 
-fn parse_time_bucket(spec: &str) -> CliResult<TimeIndexGranularity> {
+fn parse_time_index_granularity(spec: &str) -> CliResult<TimeIndexGranularity> {
     spec.parse::<TimeIndexGranularity>()
-        .context(InvalidBucketSnafu {
+        .context(InvalidTimeIndexGranularitySnafu {
             spec: spec.to_string(),
         })
 }
 
-fn parse_bucket_width(spec: &str, index_type: IndexTypeArg) -> CliResult<NonZeroU64> {
+fn parse_integer_index_granularity(spec: &str, index_type: IndexTypeArg) -> CliResult<NonZeroU64> {
     spec.parse::<NonZeroU64>()
         .map_err(|_| CliError::InvalidIndexOption {
-            option: "--bucket-width",
+            option: "--index-granularity",
             index_type: index_type.name(),
             reason: format!("'{spec}' is not an integer in 1..={}", u64::MAX),
         })
@@ -244,44 +241,25 @@ async fn cmd_create(
     table: &Path,
     index_column: String,
     index_type: IndexTypeArg,
-    bucket: Option<String>,
-    bucket_width: Option<String>,
+    index_granularity: String,
     timezone: Option<String>,
     entity_columns: Vec<String>,
 ) -> CliResult<()> {
-    let invalid = |option, reason: &str| CliError::InvalidIndexOption {
-        option,
-        index_type: index_type.name(),
-        reason: reason.to_string(),
-    };
-
     let kind = match index_type {
-        IndexTypeArg::Timestamp => {
-            if bucket_width.is_some() {
-                return Err(invalid(
-                    "--bucket-width",
-                    "use --bucket for timestamp indexes",
-                ));
-            }
-            let bucket = bucket
-                .as_deref()
-                .ok_or_else(|| invalid("--bucket", "is required"))?;
-            IndexKind::Timestamp {
-                index_granularity: parse_time_bucket(bucket)?,
-                timezone,
-            }
-        }
+        IndexTypeArg::Timestamp => IndexKind::Timestamp {
+            index_granularity: parse_time_index_granularity(&index_granularity)?,
+            timezone,
+        },
         IndexTypeArg::Int64 | IndexTypeArg::UInt64 => {
-            if bucket.is_some() {
-                return Err(invalid("--bucket", "is only valid for timestamp indexes"));
-            }
             if timezone.is_some() {
-                return Err(invalid("--timezone", "is only valid for timestamp indexes"));
+                return Err(CliError::InvalidIndexOption {
+                    option: "--timezone",
+                    index_type: index_type.name(),
+                    reason: "is only valid for timestamp indexes".to_string(),
+                });
             }
-            let value = bucket_width
-                .as_deref()
-                .ok_or_else(|| invalid("--bucket-width", "is required"))?;
-            let index_granularity = parse_bucket_width(value, index_type)?;
+            let index_granularity =
+                parse_integer_index_granularity(&index_granularity, index_type)?;
 
             match index_type {
                 IndexTypeArg::Int64 => IndexKind::Int64 { index_granularity },
@@ -434,17 +412,15 @@ async fn run() -> CliResult<()> {
             table,
             index_column,
             index_type,
-            bucket,
+            index_granularity,
             timezone,
-            bucket_width,
             entity,
         } => {
             cmd_create(
                 &table,
                 index_column,
                 index_type,
-                bucket,
-                bucket_width,
+                index_granularity,
                 timezone,
                 entity,
             )
