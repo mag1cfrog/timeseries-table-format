@@ -387,7 +387,9 @@ impl TimeSeriesTable {
                     .map_err(TableError::from)?;
             let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
 
-            if let Some((identity, index_interval_id)) = segment_cov.overlap_example(&table_cov) {
+            if let Some((identity, index_interval_id)) =
+                segment_cov.first_overlapping_identity_and_interval_id(&table_cov)
+            {
                 let example_index_interval =
                     index_interval_for_id(&self.index.kind, index_interval_id)
                         .context(IndexIntervalMappingSnafu)?;

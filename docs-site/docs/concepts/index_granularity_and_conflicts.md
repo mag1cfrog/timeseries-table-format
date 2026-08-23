@@ -15,8 +15,8 @@ infer timestamps from integers or convert between signed and unsigned values.
 
 ## Index granularity
 
-Granularity divides the ordered-index domain into half-open logical intervals. The start is
-included and the end is excluded, written `[start, end)`.
+Granularity divides the ordered-index domain into logical intervals. Intervals are half-open,
+written `[start, end)`, except that the final interval includes the index domain maximum.
 
 - Timestamp granularity `"1h"` creates one-hour intervals.
 - Integer granularity `10` creates intervals ten index values wide.
