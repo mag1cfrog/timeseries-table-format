@@ -523,6 +523,7 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use parquet::basic::{Compression, LogicalType, Repetition, TimeUnit, Type as PhysicalType};
     use parquet::column::writer::ColumnWriter;
+    use parquet::errors::ParquetError;
     use parquet::file::metadata::{
         ColumnChunkMetaData, FileMetaData, ParquetMetaDataWriter, RowGroupMetaData,
     };
@@ -530,6 +531,8 @@ mod tests {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::types::{SchemaDescriptor, Type};
+    use snafu::ErrorCompat;
+    use std::error::Error as _;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::num::NonZeroU64;
@@ -1545,14 +1548,28 @@ mod tests {
         tokio::fs::create_dir_all(abs.parent().unwrap()).await?;
         tokio::fs::write(&abs, b"PAR1PAR1garbage").await?;
 
-        let result = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts")).await;
+        let error = segment_meta_from_parquet(&location, rel_path, &timestamp_index("ts"))
+            .await
+            .expect_err("corrupt Parquet must fail");
+
+        let segment_backtrace = ErrorCompat::backtrace(&error).expect("segment backtrace");
+        let metadata = error
+            .source()
+            .and_then(|source| source.downcast_ref::<SegmentMetaError>())
+            .expect("segment metadata source");
+        let metadata_backtrace = ErrorCompat::backtrace(metadata).expect("metadata backtrace");
+        metadata
+            .source()
+            .and_then(|source| source.downcast_ref::<ParquetError>())
+            .expect("Parquet source");
 
         assert!(matches!(
-            result,
-            Err(SegmentError::Metadata {
-                source: SegmentMetaError::ParquetRead { .. }
-            })
+            &error,
+            SegmentError::Metadata {
+                source: SegmentMetaError::ParquetRead { path, .. }
+            } if path == "data/corrupt.parquet"
         ));
+        assert!(std::ptr::eq(segment_backtrace, metadata_backtrace));
         Ok(())
     }
 

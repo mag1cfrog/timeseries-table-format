@@ -39,9 +39,10 @@ pub enum SegmentError {
     },
 
     /// Pure metadata/decoding/validation error.
-    #[snafu(transparent)]
+    #[snafu(context(false), display("{source}"))]
     Metadata {
         /// The underlying pure metadata error.
+        #[snafu(source, backtrace)]
         source: SegmentMetaError,
     },
 }
