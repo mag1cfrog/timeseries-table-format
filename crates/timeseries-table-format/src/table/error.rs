@@ -539,7 +539,7 @@ pub enum TableError {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error as _;
+    use std::{error::Error as _, io};
 
     use snafu::ErrorCompat;
 
@@ -592,5 +592,69 @@ mod tests {
             matches!(parquet_source, ParquetError::General(message) if message == "write failed")
         );
         assert!(std::ptr::eq(table_backtrace, append_backtrace));
+    }
+
+    #[test]
+    fn append_rollback_preserves_primary_chain_cleanup_errors_and_backtrace() {
+        let commit_error = CommitError::Conflict {
+            expected: 1,
+            found: 2,
+            backtrace: Backtrace::capture(),
+        };
+        let cleanup_error = StorageError::OtherIo {
+            path: "data/segment.parquet".to_string(),
+            source: io::Error::other("cleanup failed").into(),
+            backtrace: Backtrace::capture(),
+        };
+        let error = TableError::from(AppendError::Rollback {
+            source: Box::new(AppendError::Commit {
+                source: commit_error,
+            }),
+            cleanup_errors: vec![cleanup_error],
+        });
+
+        let rollback = error
+            .source()
+            .and_then(|source| source.downcast_ref::<AppendError>())
+            .expect("rollback source");
+        let cleanup_errors = match rollback {
+            AppendError::Rollback { cleanup_errors, .. } => cleanup_errors,
+            other => panic!("unexpected append error: {other:?}"),
+        };
+        let primary = rollback
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<AppendError>>())
+            .map(Box::as_ref)
+            .expect("primary append source");
+        let commit = primary
+            .source()
+            .and_then(|source| source.downcast_ref::<CommitError>())
+            .expect("commit source");
+        let commit_backtrace = ErrorCompat::backtrace(commit).expect("commit backtrace");
+
+        assert!(matches!(
+            commit,
+            CommitError::Conflict {
+                expected: 1,
+                found: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cleanup_errors.as_slice(),
+            [StorageError::OtherIo { path, .. }] if path == "data/segment.parquet"
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            commit_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(rollback).expect("rollback backtrace"),
+            commit_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(primary).expect("primary backtrace"),
+            commit_backtrace
+        ));
     }
 }
