@@ -75,6 +75,7 @@ nav:
       - Integer ordered indexes: guides/integer_indexes.md
       - Index granularity and conflicts: concepts/index_granularity_and_conflicts.md
       - Table root layout: concepts/table_root.md
+      - Table protocol compatibility: concepts/table_protocol.md
       - Streaming performance: performance.md
       - SQL result export: guides/sql_result_export.md
   - Reference:

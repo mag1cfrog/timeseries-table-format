@@ -89,6 +89,18 @@ struct RawTableMeta {
     extra: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct RawTableProtocolRequirements {
+    protocol_version: u64,
+    #[serde(deserialize_with = "deserialize_required_features")]
+    required_reader_features: BTreeSet<String>,
+    #[serde(
+        rename = "required_writer_features",
+        deserialize_with = "deserialize_required_features"
+    )]
+    _required_writer_features: BTreeSet<String>,
+}
+
 impl TryFrom<RawTableMeta> for TableMeta {
     type Error = String;
 
@@ -239,6 +251,10 @@ impl TableMeta {
         &self.required_writer_features
     }
 
+    pub(crate) fn ensure_read_compatible(&self) -> Result<(), TableProtocolError> {
+        self.ensure_read_compatible_with(SUPPORTED_READER_FEATURES)
+    }
+
     pub(crate) fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
         self.ensure_write_compatible_with(SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES)
     }
@@ -247,21 +263,11 @@ impl TableMeta {
         &self,
         supported_reader_features: &[&str],
     ) -> Result<(), TableProtocolError> {
-        if self.protocol_version != TABLE_PROTOCOL_VERSION {
-            return Err(TableProtocolError::UnsupportedVersion {
-                expected: TABLE_PROTOCOL_VERSION,
-                found: u64::from(self.protocol_version),
-            });
-        }
-
-        let unsupported =
-            unsupported_features(&self.required_reader_features, supported_reader_features);
-        if !unsupported.is_empty() {
-            return Err(TableProtocolError::UnsupportedReaderFeatures {
-                features: unsupported,
-            });
-        }
-        Ok(())
+        ensure_read_compatible(
+            u64::from(self.protocol_version),
+            &self.required_reader_features,
+            supported_reader_features,
+        )
     }
 
     fn ensure_write_compatible_with(
@@ -355,6 +361,37 @@ impl TableMeta {
 
         logical.to_arrow_schema_ref().context(ConversionSnafu)
     }
+}
+
+impl RawTableProtocolRequirements {
+    pub(crate) fn ensure_read_compatible(&self) -> Result<(), TableProtocolError> {
+        ensure_read_compatible(
+            self.protocol_version,
+            &self.required_reader_features,
+            SUPPORTED_READER_FEATURES,
+        )
+    }
+}
+
+fn ensure_read_compatible(
+    protocol_version: u64,
+    required_reader_features: &BTreeSet<String>,
+    supported_reader_features: &[&str],
+) -> Result<(), TableProtocolError> {
+    if protocol_version != u64::from(TABLE_PROTOCOL_VERSION) {
+        return Err(TableProtocolError::UnsupportedVersion {
+            expected: TABLE_PROTOCOL_VERSION,
+            found: protocol_version,
+        });
+    }
+
+    let unsupported = unsupported_features(required_reader_features, supported_reader_features);
+    if !unsupported.is_empty() {
+        return Err(TableProtocolError::UnsupportedReaderFeatures {
+            features: unsupported,
+        });
+    }
+    Ok(())
 }
 
 fn unsupported_features(required: &BTreeSet<String>, supported: &[&str]) -> Vec<String> {

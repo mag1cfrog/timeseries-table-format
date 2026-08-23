@@ -210,4 +210,48 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn open_applies_reader_requirements_without_requiring_writer_support() -> TestResult {
+        let writer_tmp = TempDir::new()?;
+        let writer_location = TableLocation::local(writer_tmp.path());
+        let mut writer_meta = make_basic_table_meta();
+        writer_meta
+            .required_writer_features
+            .insert("future_writer".to_string());
+        TransactionLogStore::new(writer_location.clone())
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(writer_meta)])
+            .await?;
+
+        let table = TimeSeriesTable::open(writer_location).await?;
+        assert_eq!(
+            table.state().table_meta.required_writer_features(),
+            &["future_writer".to_string()].into_iter().collect()
+        );
+
+        let reader_tmp = TempDir::new()?;
+        let reader_location = TableLocation::local(reader_tmp.path());
+        let mut reader_meta = make_basic_table_meta();
+        reader_meta
+            .required_reader_features
+            .insert("future_reader".to_string());
+        TransactionLogStore::new(reader_location.clone())
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(reader_meta)])
+            .await?;
+
+        assert!(matches!(
+            TimeSeriesTable::open(reader_location)
+                .await
+                .expect_err("unknown reader feature must reject open"),
+            TableError::Open {
+                source: OpenTableError::Commit {
+                    source: CommitError::Protocol {
+                        source: TableProtocolError::UnsupportedReaderFeatures { features },
+                        ..
+                    }
+                }
+            } if features == ["future_reader"]
+        ));
+        Ok(())
+    }
 }

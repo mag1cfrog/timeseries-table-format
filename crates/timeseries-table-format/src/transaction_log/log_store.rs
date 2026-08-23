@@ -11,13 +11,28 @@
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the
 //! caller.
-use crate::metadata::table_metadata::TABLE_PROTOCOL_VERSION;
+use crate::metadata::table_metadata::RawTableProtocolRequirements;
 use crate::storage::{self, StorageError, TableLocation};
 use crate::transaction_log::actions::{Commit, LogAction};
 use crate::transaction_log::*;
 use chrono::Utc;
 use snafu::Backtrace;
 use std::path::{Path, PathBuf};
+
+fn is_unknown_action(action: &serde_json::Value) -> bool {
+    let name = match action {
+        serde_json::Value::Object(fields) if fields.len() == 1 => fields.keys().next(),
+        serde_json::Value::String(name) => Some(name),
+        _ => None,
+    };
+
+    name.is_some_and(|name| {
+        !matches!(
+            name.as_str(),
+            "AddSegment" | "RemoveSegment" | "UpdateTableMeta" | "UpdateTableCoverage"
+        )
+    })
+}
 
 /// Helper for reading and writing the commit log under a table root.
 ///
@@ -85,29 +100,42 @@ impl TransactionLogStore {
         let rel = Self::commit_rel_path(version);
         let json = self.read_to_string_rel(&rel).await?;
 
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(&json).map_err(|source| CommitError::CommitDeserialization {
                 version,
                 source,
                 backtrace: Backtrace::capture(),
             })?;
 
-        if let Some(found) = value
+        for metadata in value
             .get("actions")
             .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|action| {
-                action
-                    .pointer("/UpdateTableMeta/protocol_version")
-                    .and_then(serde_json::Value::as_u64)
+                let fields = action.as_object()?;
+                if fields.len() == 1 {
+                    fields.get("UpdateTableMeta")
+                } else {
+                    None
+                }
             })
-            .find(|&found| found != u64::from(TABLE_PROTOCOL_VERSION))
         {
-            return Err(CommitError::from(TableProtocolError::UnsupportedVersion {
-                expected: TABLE_PROTOCOL_VERSION,
-                found,
-            }));
+            serde_json::from_value::<RawTableProtocolRequirements>(metadata.clone())
+                .map_err(|source| CommitError::CommitDeserialization {
+                    version,
+                    source,
+                    backtrace: Backtrace::capture(),
+                })?
+                .ensure_read_compatible()
+                .map_err(CommitError::from)?;
+        }
+
+        if let Some(actions) = value
+            .get_mut("actions")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            actions.retain(|action| !is_unknown_action(action));
         }
 
         let commit =

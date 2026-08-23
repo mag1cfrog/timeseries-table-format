@@ -196,10 +196,8 @@ impl TransactionLogStore {
             current_version,
             backtrace: snafu::Backtrace::capture(),
         })?;
-        // TODO(#399): Switch replay to reader compatibility after every
-        // mutating entry point has its own writer-compatibility gate.
         table_meta
-            .ensure_write_compatible()
+            .ensure_read_compatible()
             .map_err(CommitError::from)?;
 
         if let TableKind::TimeSeries(index) = &table_meta.kind {
@@ -369,6 +367,18 @@ mod tests {
             file_size: None,
             coverage_path: None,
         }
+    }
+
+    async fn prepend_raw_action(tmp: &TempDir, action: serde_json::Value) -> TestResult {
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
+        let mut commit: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+        commit["actions"]
+            .as_array_mut()
+            .expect("valid committed actions")
+            .insert(0, action);
+        tokio::fs::write(commit_path, serde_json::to_vec(&commit)?).await?;
+        Ok(())
     }
 
     fn segment_with_ts(id: &str, ts_min: i64, ts_max: i64) -> SegmentMeta {
@@ -581,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_table_state_conservatively_requires_writer_compatibility() -> TestResult {
+    async fn rebuild_table_state_allows_unknown_writer_features() -> TestResult {
         let (_tmp, store) = create_test_log_store();
         let mut meta = sample_table_meta();
         meta.required_writer_features
@@ -590,14 +600,103 @@ mod tests {
             .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
             .await?;
 
+        let state = store.rebuild_table_state().await?;
+        assert_eq!(
+            state.table_meta.required_writer_features(),
+            &["future_writer".to_string()].into_iter().collect()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_unknown_reader_features() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.required_reader_features
+            .insert("future_reader".to_string());
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
         let error = store.rebuild_table_state().await.unwrap_err();
         assert!(matches!(
             error,
             CommitError::Protocol {
-                source: TableProtocolError::UnsupportedWriterFeatures { features },
+                source: TableProtocolError::UnsupportedReaderFeatures { features },
                 ..
-            } if features == ["future_writer"]
+            } if features == ["future_reader"]
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_applies_writer_feature_before_unknown_action() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.required_writer_features
+            .insert("future_action".to_string());
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta.clone())])
+            .await?;
+        prepend_raw_action(
+            &tmp,
+            serde_json::json!({"FutureAction": {"payload": "ignored by readers"}}),
+        )
+        .await?;
+
+        let state = store.rebuild_table_state().await?;
+
+        assert_eq!(state.table_meta, meta);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_checks_reader_features_before_action_decoding() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.required_reader_features
+            .insert("future_action".to_string());
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+        prepend_raw_action(&tmp, serde_json::json!({"AddSegment": {"path": false}})).await?;
+        let commit_path = tmp.path().join(layout::commit_rel_path(1));
+        let mut commit: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&commit_path).await?)?;
+        let metadata = commit["actions"]
+            .as_array_mut()
+            .and_then(|actions| {
+                actions
+                    .iter_mut()
+                    .find_map(|action| action.get_mut("UpdateTableMeta"))
+            })
+            .expect("valid committed metadata action");
+        metadata["kind"] = serde_json::json!({"FutureKind": {"payload": false}});
+        tokio::fs::write(commit_path, serde_json::to_vec(&commit)?).await?;
+
+        let error = store.rebuild_table_state().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            CommitError::Protocol {
+                source: TableProtocolError::UnsupportedReaderFeatures { features },
+                ..
+            } if features == ["future_action"]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_malformed_known_action() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(sample_table_meta())])
+            .await?;
+        prepend_raw_action(&tmp, serde_json::json!({"AddSegment": {"path": false}})).await?;
+
+        let error = store.rebuild_table_state().await.unwrap_err();
+
+        assert!(matches!(error, CommitError::CommitDeserialization { .. }));
         Ok(())
     }
 
@@ -606,13 +705,13 @@ mod tests {
         let (_tmp, store) = create_test_log_store();
         let mut initial = sample_table_meta();
         initial
-            .required_reader_features
-            .insert("future_reader".to_string());
+            .required_writer_features
+            .insert("future_writer".to_string());
         store
             .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(initial.clone())])
             .await?;
 
-        initial.required_reader_features.clear();
+        initial.required_writer_features.clear();
         store
             .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(initial)])
             .await?;
@@ -621,9 +720,9 @@ mod tests {
         assert!(matches!(
             error,
             CommitError::Protocol {
-                source: TableProtocolError::ReaderFeaturesRemoved { features },
+                source: TableProtocolError::WriterFeaturesRemoved { features },
                 ..
-            } if features == ["future_reader"]
+            } if features == ["future_writer"]
         ));
         Ok(())
     }
