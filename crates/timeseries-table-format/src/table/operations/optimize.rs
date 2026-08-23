@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use snafu::{Backtrace, Snafu};
+use snafu::{Backtrace, ResultExt, Snafu};
 
 use crate::{
     coverage::{
@@ -618,7 +618,7 @@ impl TimeSeriesTable {
                 span.record("outcome", "failed");
             }
         }
-        result.map_err(TableError::from)
+        result.context(crate::table::error::OptimizeSnafu)
     }
 }
 
@@ -1470,7 +1470,8 @@ mod tests {
             .collect::<Vec<_>>();
         let expected_coverage = table
             .load_entity_coverage_with_recovery::<AppendError>()
-            .await?;
+            .await
+            .context(crate::table::error::AppendSnafu)?;
         let coverage_pointer = table
             .state()
             .table_coverage
@@ -1575,7 +1576,8 @@ mod tests {
         assert_eq!(
             reopened
                 .recover_entity_coverage_from_segments::<AppendError>()
-                .await?,
+                .await
+                .context(crate::table::error::AppendSnafu)?,
             expected_coverage
         );
         let mut scan = reopened

@@ -276,23 +276,29 @@ mod tests {
         init_python();
 
         let attached = Python::try_attach(|py| {
-            let storage = TableError::from(OpenTableError::Commit {
-                source: CommitError::Storage {
-                    source: invalid_location_error(),
+            let storage = TableError::Open {
+                source: OpenTableError::Commit {
+                    source: CommitError::Storage {
+                        source: invalid_location_error(),
+                    },
                 },
-            });
+            };
             assert!(table_error_to_py(py, storage, &[]).is_instance_of::<StorageError>(py));
 
-            let state_storage = TableError::from(TableStateAccessError::Commit {
-                source: CommitError::Storage {
-                    source: invalid_location_error(),
+            let state_storage = TableError::StateAccess {
+                source: TableStateAccessError::Commit {
+                    source: CommitError::Storage {
+                        source: invalid_location_error(),
+                    },
                 },
-            });
+            };
             assert!(table_error_to_py(py, state_storage, &[]).is_instance_of::<StorageError>(py));
 
-            let schema = TableError::from(CreateTableError::from(
-                timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError::MissingTableSchema,
-            ));
+            let schema = TableError::Create {
+                source: CreateTableError::from(
+                    timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError::MissingTableSchema,
+                ),
+            };
             assert!(table_error_to_py(py, schema, &[]).is_instance_of::<SchemaMismatchError>(py));
         });
         assert!(attached.is_some());
@@ -303,12 +309,14 @@ mod tests {
         init_python();
 
         Python::attach(|py| {
-            let error = TableError::from(TableStateAccessError::Commit {
-                source: CommitError::from(TableProtocolError::UnsupportedVersion {
-                    expected: 1,
-                    found: 2,
-                }),
-            });
+            let error = TableError::StateAccess {
+                source: TableStateAccessError::Commit {
+                    source: CommitError::from(TableProtocolError::UnsupportedVersion {
+                        expected: 1,
+                        found: 2,
+                    }),
+                },
+            };
             let python_error = table_error_to_py(py, error, &[]);
 
             assert!(
@@ -370,27 +378,35 @@ mod tests {
         init_python();
 
         let errors = [
-            TableError::from(AppendError::SegmentMetadata {
-                source: Box::new(SegmentError::from(invalid_location_error())),
-            }),
-            TableError::from(AppendError::GeneratedSegmentCoverage {
-                source: Box::new(SegmentCoverageError::Storage {
-                    path: "data/segment.parquet".to_string(),
-                    source: invalid_location_error(),
-                }),
-            }),
-            TableError::from(AppendError::CoverageSidecar {
-                source: Box::new(CoverageSidecarError::Storage {
-                    source: invalid_location_error(),
-                }),
-            }),
-            TableError::from(AppendError::ExistingSegmentCoverageSidecarRead {
-                segment_path: "data/segment.parquet".to_string(),
-                coverage_path: "_coverage/segments/missing.roar".to_string(),
-                source: Box::new(CoverageSidecarError::Storage {
-                    source: invalid_location_error(),
-                }),
-            }),
+            TableError::Append {
+                source: AppendError::SegmentMetadata {
+                    source: Box::new(SegmentError::from(invalid_location_error())),
+                },
+            },
+            TableError::Append {
+                source: AppendError::GeneratedSegmentCoverage {
+                    source: Box::new(SegmentCoverageError::Storage {
+                        path: "data/segment.parquet".to_string(),
+                        source: invalid_location_error(),
+                    }),
+                },
+            },
+            TableError::Append {
+                source: AppendError::CoverageSidecar {
+                    source: Box::new(CoverageSidecarError::Storage {
+                        source: invalid_location_error(),
+                    }),
+                },
+            },
+            TableError::Append {
+                source: AppendError::ExistingSegmentCoverageSidecarRead {
+                    segment_path: "data/segment.parquet".to_string(),
+                    coverage_path: "_coverage/segments/missing.roar".to_string(),
+                    source: Box::new(CoverageSidecarError::Storage {
+                        source: invalid_location_error(),
+                    }),
+                },
+            },
         ];
 
         Python::attach(|py| {
@@ -413,16 +429,18 @@ mod tests {
             .expect("valid test index interval");
         let cleanup_error =
             StorageLocation::parse("").expect_err("empty storage location must fail");
-        let error = TableError::from(AppendError::Rollback {
-            source: Box::new(AppendError::PersistedIndexIntervalOverlap {
-                segment_path: "data/test.parquet".to_string(),
-                overlap_count: 1,
-                example_identity: None,
-                example_index_interval_id,
-                example_index_interval: Box::new(example_index_interval),
-            }),
-            cleanup_errors: vec![cleanup_error],
-        });
+        let error = TableError::Append {
+            source: AppendError::Rollback {
+                source: Box::new(AppendError::PersistedIndexIntervalOverlap {
+                    segment_path: "data/test.parquet".to_string(),
+                    overlap_count: 1,
+                    example_identity: None,
+                    example_index_interval_id,
+                    example_index_interval: Box::new(example_index_interval),
+                }),
+                cleanup_errors: vec![cleanup_error],
+            },
+        };
 
         Python::attach(|py| {
             let error = table_error_to_py(py, error, &[]);
@@ -442,19 +460,23 @@ mod tests {
     #[test]
     fn optimize_commit_and_rollback_preserve_storage_python_categories() {
         init_python();
-        let commit = TableError::from(OptimizeError::Commit {
-            source: CommitError::Storage {
-                source: invalid_location_error(),
-            },
-        });
-        let rollback = TableError::from(OptimizeError::Rollback {
-            source: Box::new(OptimizeError::MixedSegmentRewrite {
-                source: Box::new(EntityRewriteError::Storage {
+        let commit = TableError::Optimize {
+            source: OptimizeError::Commit {
+                source: CommitError::Storage {
                     source: invalid_location_error(),
+                },
+            },
+        };
+        let rollback = TableError::Optimize {
+            source: OptimizeError::Rollback {
+                source: Box::new(OptimizeError::MixedSegmentRewrite {
+                    source: Box::new(EntityRewriteError::Storage {
+                        source: invalid_location_error(),
+                    }),
                 }),
-            }),
-            cleanup_errors: vec![invalid_location_error()],
-        });
+                cleanup_errors: vec![invalid_location_error()],
+            },
+        };
 
         Python::attach(|py| {
             let commit = table_error_to_py(py, commit, &[]);

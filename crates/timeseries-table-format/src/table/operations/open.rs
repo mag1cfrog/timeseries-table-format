@@ -1,6 +1,6 @@
 //! Opening an existing time-series table.
 
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 use crate::{
     storage::TableLocation,
@@ -79,7 +79,7 @@ impl TimeSeriesTable {
                 "failed"
             },
         );
-        result.map_err(TableError::from)
+        result.context(crate::table::error::OpenSnafu)
     }
 }
 

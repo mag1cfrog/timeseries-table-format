@@ -22,7 +22,7 @@ use super::operations::{
 #[non_exhaustive]
 pub enum TableError {
     /// A table creation operation failed.
-    #[snafu(context(false), display("Table creation failed: {source}"))]
+    #[snafu(display("Table creation failed: {source}"))]
     Create {
         /// Complete table creation failure.
         #[snafu(source, backtrace)]
@@ -30,7 +30,7 @@ pub enum TableError {
     },
 
     /// A table open operation failed.
-    #[snafu(context(false), display("Table open failed: {source}"))]
+    #[snafu(display("Table open failed: {source}"))]
     Open {
         /// Complete table open failure.
         #[snafu(source, backtrace)]
@@ -38,7 +38,7 @@ pub enum TableError {
     },
 
     /// A table state access or refresh operation failed.
-    #[snafu(context(false), display("Table state access failed: {source}"))]
+    #[snafu(display("Table state access failed: {source}"))]
     StateAccess {
         /// Complete state-access failure.
         #[snafu(source, backtrace)]
@@ -46,7 +46,7 @@ pub enum TableError {
     },
 
     /// An append operation failed.
-    #[snafu(context(false), display("Append failed: {source}"))]
+    #[snafu(display("Append failed: {source}"))]
     Append {
         /// Complete append-owned failure.
         #[snafu(source, backtrace)]
@@ -70,7 +70,7 @@ pub enum TableError {
     },
 
     /// An entity-layout optimization operation failed.
-    #[snafu(context(false), display("Entity-layout optimization failed: {source}"))]
+    #[snafu(display("Entity-layout optimization failed: {source}"))]
     Optimize {
         /// Complete optimization-owned failure.
         #[snafu(source, backtrace)]
@@ -84,7 +84,7 @@ mod tests {
 
     use arrow::error::ArrowError;
     use parquet::errors::ParquetError;
-    use snafu::{Backtrace, ErrorCompat};
+    use snafu::{Backtrace, ErrorCompat, IntoError};
 
     use crate::coverage::{CoverageCodecError, CoverageSidecarError};
     use crate::formats::parquet::EntityRewriteError;
@@ -103,7 +103,7 @@ mod tests {
             source: ArrowError::ComputeError("input failed".to_string()),
             backtrace: Backtrace::capture(),
         };
-        let error = TableError::from(append_error);
+        let error = AppendSnafu.into_error(append_error);
 
         let append_source = error
             .source()
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn append_facade_preserves_parquet_source_and_backtrace() {
-        let error = TableError::from(AppendError::ParquetWrite {
+        let error = AppendSnafu.into_error(AppendError::ParquetWrite {
             source: ParquetError::General("write failed".to_string()),
             backtrace: Backtrace::capture(),
         });
@@ -162,7 +162,7 @@ mod tests {
                 backtrace: Backtrace::capture(),
             }),
         };
-        let error = TableError::from(AppendError::from(schema));
+        let error = AppendSnafu.into_error(AppendError::from(schema));
 
         let append = error
             .source()
@@ -206,7 +206,7 @@ mod tests {
             source: io::Error::other("cleanup failed").into(),
             backtrace: Backtrace::capture(),
         };
-        let error = TableError::from(AppendError::Rollback {
+        let error = AppendSnafu.into_error(AppendError::Rollback {
             source: Box::new(AppendError::Commit {
                 source: commit_error,
             }),
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn create_facade_preserves_index_source_and_operation_backtrace() {
-        let error = TableError::from(CreateTableError::IndexSpecValidation {
+        let error = CreateSnafu.into_error(CreateTableError::IndexSpecValidation {
             source: IndexSpecError::EmptyColumn,
             backtrace: Backtrace::capture(),
         });
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn open_facade_preserves_commit_source_and_backtrace() {
-        let error = TableError::from(OpenTableError::Commit {
+        let error = OpenSnafu.into_error(OpenTableError::Commit {
             source: CommitError::Conflict {
                 expected: 8,
                 found: 9,
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn state_access_facade_preserves_commit_source_and_backtrace() {
-        let error = TableError::from(TableStateAccessError::Commit {
+        let error = StateAccessSnafu.into_error(TableStateAccessError::Commit {
             source: CommitError::MissingTableMetadata {
                 current_version: 7,
                 backtrace: Backtrace::capture(),
@@ -347,14 +347,12 @@ mod tests {
 
     #[test]
     fn scan_facade_preserves_parquet_source_and_backtrace() {
-        let error = TableError::Scan {
-            source: ScanError::Parquet {
-                path: "data/segment.parquet".to_string(),
-                operation: "reading metadata",
-                source: Box::new(ParquetError::General("corrupt footer".to_string())),
-                backtrace: Box::new(Backtrace::capture()),
-            },
-        };
+        let error = ScanSnafu.into_error(ScanError::Parquet {
+            path: "data/segment.parquet".to_string(),
+            operation: "reading metadata",
+            source: Box::new(ParquetError::General("corrupt footer".to_string())),
+            backtrace: Box::new(Backtrace::capture()),
+        });
 
         let scan = error
             .source()
@@ -376,16 +374,14 @@ mod tests {
 
     #[test]
     fn coverage_facade_preserves_codec_source_and_backtrace() {
-        let error = TableError::CoverageQuery {
-            source: CoverageQueryError::CoverageSnapshotRead {
-                coverage_path: "coverage/table.coverage".to_string(),
-                source: Box::new(CoverageSidecarError::Codec {
-                    source: CoverageCodecError::InvalidEntityCoverageMagic {
-                        backtrace: Backtrace::capture(),
-                    },
-                }),
-            },
-        };
+        let error = CoverageQuerySnafu.into_error(CoverageQueryError::CoverageSnapshotRead {
+            coverage_path: "coverage/table.coverage".to_string(),
+            source: Box::new(CoverageSidecarError::Codec {
+                source: CoverageCodecError::InvalidEntityCoverageMagic {
+                    backtrace: Backtrace::capture(),
+                },
+            }),
+        });
 
         let coverage_query = error
             .source()
@@ -418,7 +414,7 @@ mod tests {
 
     #[test]
     fn optimize_facade_preserves_commit_source_and_backtrace() {
-        let error = TableError::from(OptimizeError::Commit {
+        let error = OptimizeSnafu.into_error(OptimizeError::Commit {
             source: CommitError::Conflict {
                 expected: 3,
                 found: 4,
@@ -456,7 +452,7 @@ mod tests {
 
     #[test]
     fn optimize_facade_preserves_rewrite_storage_source_and_backtrace() {
-        let error = TableError::from(OptimizeError::from(EntityRewriteError::Storage {
+        let error = OptimizeSnafu.into_error(OptimizeError::from(EntityRewriteError::Storage {
             source: StorageError::OtherIo {
                 path: "data/mixed.parquet".to_string(),
                 source: io::Error::other("read failed").into(),
@@ -499,7 +495,7 @@ mod tests {
 
     #[test]
     fn optimize_rollback_preserves_primary_chain_and_typed_cleanup_errors() {
-        let error = TableError::from(OptimizeError::Rollback {
+        let error = OptimizeSnafu.into_error(OptimizeError::Rollback {
             source: Box::new(OptimizeError::Commit {
                 source: CommitError::Conflict {
                     expected: 5,

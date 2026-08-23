@@ -1,6 +1,6 @@
 //! Reading and refreshing a table handle's committed state.
 
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 use crate::{
     table::{TableError, TimeSeriesTable},
@@ -42,7 +42,7 @@ impl TimeSeriesTable {
             .load_current_version()
             .await
             .map_err(TableStateAccessError::from)
-            .map_err(TableError::from)
+            .context(crate::table::error::StateAccessSnafu)
     }
 
     /// Rebuild and return the latest time-series table state.
@@ -57,7 +57,7 @@ impl TimeSeriesTable {
             Ok(state)
         }
         .await;
-        result.map_err(TableError::from)
+        result.context(crate::table::error::StateAccessSnafu)
     }
 
     /// Refresh in-memory state if the transaction log has advanced.
@@ -114,7 +114,7 @@ impl TimeSeriesTable {
                 span.record("outcome", "failed");
             }
         }
-        result.map_err(TableError::from)
+        result.context(crate::table::error::StateAccessSnafu)
     }
 }
 

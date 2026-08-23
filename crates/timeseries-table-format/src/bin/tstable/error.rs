@@ -144,10 +144,12 @@ mod tests {
 
     #[test]
     fn table_cli_error_delegates_the_table_backtrace() {
-        let table = TableError::from(AppendError::ArrowInput {
-            source: ArrowError::ComputeError("input failed".to_string()),
-            backtrace: Backtrace::capture(),
-        });
+        let table = TableError::Append {
+            source: AppendError::ArrowInput {
+                source: ArrowError::ComputeError("input failed".to_string()),
+                backtrace: Backtrace::capture(),
+            },
+        };
         let error = CliError::AppendSegment {
             table: "table".to_string(),
             parquet: "input.parquet".to_string(),
@@ -169,7 +171,9 @@ mod tests {
     fn open_error_message_does_not_name_an_obsolete_format_version() {
         let error = CliError::OpenTable {
             table: "table".to_string(),
-            source: Box::new(TableError::from(OpenTableError::EmptyTable)),
+            source: Box::new(TableError::Open {
+                source: OpenTableError::EmptyTable,
+            }),
         };
         let message = error.to_string();
 

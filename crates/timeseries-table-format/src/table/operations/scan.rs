@@ -29,7 +29,7 @@ use parquet::{
     arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder},
     errors::ParquetError,
 };
-use snafu::{Backtrace, prelude::*};
+use snafu::{Backtrace, IntoError, prelude::*};
 
 use crate::metadata::{
     index::{IndexValue, IndexValueError, validate_index_range},
@@ -509,7 +509,7 @@ impl TimeSeriesTable {
         let end = end.into();
         let stream = self.build_scan_stream(start, end).context(ScanSnafu)?;
         Ok(Box::pin(
-            stream.map_err(|source| TableError::Scan { source }),
+            stream.map_err(|source| ScanSnafu.into_error(source)),
         ))
     }
 }

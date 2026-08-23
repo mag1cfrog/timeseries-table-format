@@ -735,7 +735,7 @@ impl TimeSeriesTable {
             }
         }
         .await;
-        let result = append_result.map_err(TableError::from);
+        let result = append_result.context(crate::table::error::AppendSnafu);
         record_append_failure(&result);
         result
     }
@@ -744,6 +744,8 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snafu::IntoError;
+
     use crate::coverage::io::{
         CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar,
     };
@@ -4354,7 +4356,7 @@ mod tests {
             .rollback_created_artifacts(&[segment_path.to_string()], source)
             .await;
         data_guard.disarm();
-        let error = TableError::from(source);
+        let error = crate::table::error::AppendSnafu.into_error(source);
 
         assert!(matches!(
             &error,

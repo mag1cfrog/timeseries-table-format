@@ -21,7 +21,7 @@ use crate::{
         io::{CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
     metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
-    table::{AppendError, TableError, TimeSeriesTable},
+    table::{AppendError, TableError, TimeSeriesTable, error::CoverageQuerySnafu},
 };
 
 use self::error as query_error;
@@ -237,7 +237,7 @@ impl TimeSeriesTable {
     pub(crate) async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
         self.load_global_coverage_snapshot_for_query()
             .await
-            .context(crate::table::error::CoverageQuerySnafu)
+            .context(CoverageQuerySnafu)
     }
 
     /// Load table coverage for read paths (no writes).
@@ -351,7 +351,6 @@ use crate::{
     coverage::IndexIntervalId,
     coverage::index_interval::{index_interval_id_for_exclusive_end, index_interval_id_range},
     metadata::index::{IndexValue, validate_index_range},
-    table::error::CoverageQuerySnafu,
 };
 
 impl TimeSeriesTable {

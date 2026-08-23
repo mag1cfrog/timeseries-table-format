@@ -1,6 +1,6 @@
 //! Creating a time-series table.
 
-use snafu::{Backtrace, Snafu};
+use snafu::{Backtrace, ResultExt, Snafu};
 
 use crate::{
     metadata::{
@@ -162,7 +162,7 @@ impl TimeSeriesTable {
                 "failed"
             },
         );
-        result.map_err(TableError::from)
+        result.context(crate::table::error::CreateSnafu)
     }
 }
 
