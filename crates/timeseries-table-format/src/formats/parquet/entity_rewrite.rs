@@ -127,10 +127,8 @@ pub enum EntityRewriteError {
     #[snafu(display("Rewrite table schema validation failed: {source}"))]
     TableSchemaValidation {
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the rewrite boundary.
-        backtrace: Backtrace,
     },
 
     /// A source or replacement segment schema is incompatible with the table schema.
@@ -139,20 +137,16 @@ pub enum EntityRewriteError {
         /// Source or staged replacement path.
         path: String,
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the rewrite boundary.
-        backtrace: Backtrace,
     },
 
     /// Persisted source segment metadata violates the registered ordered-index domain.
     #[snafu(display("Invalid rewrite source metadata: {source}"))]
     SegmentMetadataValidation {
         /// Complete segment metadata validation failure.
-        #[snafu(source(from(SegmentMetaError, Box::new)))]
+        #[snafu(source(from(SegmentMetaError, Box::new)), backtrace)]
         source: Box<SegmentMetaError>,
-        /// Backtrace captured at the rewrite boundary.
-        backtrace: Backtrace,
     },
 
     /// Segment metadata or schema inspection failed.
@@ -409,7 +403,6 @@ async fn validate_source(
     ensure_index_spec_matches_schema(table_schema, index).map_err(|source| {
         EntityRewriteError::TableSchemaValidation {
             source: Box::new(source),
-            backtrace: Backtrace::capture(),
         }
     })?;
     if index.entity_columns.is_empty() {
@@ -428,7 +421,6 @@ async fn validate_source(
     source.validate_bounds(&index.kind).map_err(|source| {
         EntityRewriteError::SegmentMetadataValidation {
             source: Box::new(source),
-            backtrace: Backtrace::capture(),
         }
     })?;
     let coverage_path = source
@@ -444,7 +436,6 @@ async fn validate_source(
         EntityRewriteError::SegmentSchemaValidation {
             path: source.path.clone(),
             source: Box::new(error),
-            backtrace: Backtrace::capture(),
         }
     })?;
 
@@ -541,7 +532,6 @@ async fn rewrite_inner(
             |source| EntityRewriteError::SegmentSchemaValidation {
                 path: data_path.clone(),
                 source: Box::new(source),
-                backtrace: Backtrace::capture(),
             },
         )?;
         let (mut meta, _) = segment_meta_from_parquet(location, Path::new(&data_path), index)

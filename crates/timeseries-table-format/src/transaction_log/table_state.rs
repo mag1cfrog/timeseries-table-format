@@ -222,7 +222,6 @@ impl TransactionLogStore {
                 ensure_index_spec_matches_schema(schema, index).map_err(|source| {
                     CommitError::TableSchemaCompatibility {
                         source: Box::new(source),
-                        backtrace: snafu::Backtrace::capture(),
                     }
                 })?;
             }
@@ -246,7 +245,6 @@ impl TransactionLogStore {
                             |source| CommitError::SegmentEntityIdentitySchema {
                                 path: path.clone(),
                                 source: Box::new(source),
-                                backtrace: snafu::Backtrace::capture(),
                             },
                         )?;
                     }
@@ -264,7 +262,6 @@ impl TransactionLogStore {
                 segment.validate_bounds(&index.kind).map_err(|source| {
                     CommitError::SegmentMetadata {
                         source: Box::new(source),
-                        backtrace: snafu::Backtrace::capture(),
                     }
                 })?;
             }

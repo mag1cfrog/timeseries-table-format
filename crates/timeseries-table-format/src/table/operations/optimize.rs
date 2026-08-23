@@ -73,10 +73,8 @@ pub enum OptimizeError {
     )]
     SchemaValidation {
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured because schema compatibility errors do not own one.
-        backtrace: Backtrace,
     },
 
     /// A coverage sidecar required to validate a staged plan could not be read.

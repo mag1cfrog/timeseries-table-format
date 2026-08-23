@@ -88,7 +88,10 @@ mod tests {
 
     use crate::coverage::{CoverageCodecError, CoverageSidecarError};
     use crate::formats::parquet::EntityRewriteError;
-    use crate::metadata::{index::IndexSpecError, schema_compat::SchemaCompatibilityError};
+    use crate::metadata::{
+        index::IndexSpecError,
+        logical_schema::LogicalToArrowSchemaError, schema_compat::SchemaCompatibilityError,
+    };
     use crate::storage::StorageError;
     use crate::transaction_log::CommitError;
 
@@ -144,11 +147,51 @@ mod tests {
     }
 
     #[test]
-    fn append_schema_wrapper_is_neutral_and_captures_a_backtrace() {
+    fn append_schema_validation_leaf_does_not_manufacture_a_backtrace() {
         let error = AppendError::from(SchemaCompatibilityError::MissingTableSchema);
 
         assert!(error.to_string().starts_with("Schema validation failed:"));
-        assert!(ErrorCompat::backtrace(&error).is_some());
+        assert!(ErrorCompat::backtrace(&error).is_none());
+    }
+
+    #[test]
+    fn schema_wrappers_delegate_the_originating_backtrace() {
+        let schema = SchemaCompatibilityError::RegisteredSchemaConversion {
+            source: Box::new(LogicalToArrowSchemaError::Int96Unsupported {
+                column: "time".to_string(),
+                backtrace: Backtrace::capture(),
+            }),
+        };
+        let error = TableError::from(AppendError::from(schema));
+
+        let append = error
+            .source()
+            .and_then(|source| source.downcast_ref::<AppendError>())
+            .expect("append source");
+        let schema = append
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<SchemaCompatibilityError>>())
+            .map(Box::as_ref)
+            .expect("schema compatibility source");
+        let conversion = schema
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<LogicalToArrowSchemaError>>())
+            .map(Box::as_ref)
+            .expect("logical-to-Arrow source");
+        let originating_backtrace = ErrorCompat::backtrace(conversion).expect("source backtrace");
+
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(schema).expect("schema backtrace"),
+            originating_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(append).expect("append backtrace"),
+            originating_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            originating_backtrace
+        ));
     }
 
     #[test]

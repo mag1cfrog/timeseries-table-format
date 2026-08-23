@@ -71,10 +71,8 @@ pub enum AppendError {
     #[snafu(context(false), display("Schema validation failed: {source}"))]
     SchemaValidation {
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the append schema boundary.
-        backtrace: Backtrace,
     },
 
     /// A generated segment is incompatible with the table schema.
@@ -85,10 +83,8 @@ pub enum AppendError {
         /// Generated table-relative segment path.
         segment_path: String,
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the generated-segment schema boundary.
-        backtrace: Backtrace,
     },
 
     /// Table state lacks the canonical schema required by append.
@@ -104,10 +100,8 @@ pub enum AppendError {
     #[snafu(context(false), display("Generated segment metadata error: {source}"))]
     SegmentMetadata {
         /// Complete segment metadata failure.
-        #[snafu(source(from(SegmentError, Box::new)))]
+        #[snafu(source(from(SegmentError, Box::new)), backtrace)]
         source: Box<SegmentError>,
-        /// Backtrace captured because not every segment error variant owns one.
-        backtrace: Backtrace,
     },
 
     /// Streaming the append input into Parquet failed.
@@ -124,10 +118,8 @@ pub enum AppendError {
     #[snafu(context(false), display("Segment coverage error: {source}"))]
     GeneratedSegmentCoverage {
         /// Complete segment coverage derivation failure.
-        #[snafu(source(from(SegmentCoverageError, Box::new)))]
+        #[snafu(source(from(SegmentCoverageError, Box::new)), backtrace)]
         source: Box<SegmentCoverageError>,
-        /// Backtrace captured because not every segment coverage error variant owns one.
-        backtrace: Backtrace,
     },
 
     /// An ordered-index interval could not be reconstructed for a diagnostic.

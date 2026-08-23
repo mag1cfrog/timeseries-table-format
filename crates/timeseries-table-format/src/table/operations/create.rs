@@ -53,10 +53,8 @@ pub enum CreateTableError {
     #[snafu(context(false), display("Table schema validation failed: {source}"))]
     SchemaValidation {
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured because schema compatibility errors do not own one.
-        backtrace: Backtrace,
     },
 
     /// The target already contains a committed table.

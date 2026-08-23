@@ -33,17 +33,17 @@ pub enum CliError {
     ))]
     CreateTable {
         table: String,
-        #[snafu(source(from(TableError, Box::new)))]
+        #[snafu(source(from(TableError, Box::new)), backtrace)]
         source: Box<TableError>,
     },
 
     #[snafu(display(
-        "Failed to open v0.1 table at {table}. \
-         Ensure it is a valid timeseries-table-format table (v0.1 log format)."
+        "Failed to open time-series table at {table}. \
+         Ensure it is a valid timeseries-table-format table."
     ))]
     OpenTable {
         table: String,
-        #[snafu(source(from(TableError, Box::new)))]
+        #[snafu(source(from(TableError, Box::new)), backtrace)]
         source: Box<TableError>,
     },
 
@@ -57,14 +57,14 @@ pub enum CliError {
     AppendSegment {
         table: String,
         parquet: String,
-        #[snafu(source(from(TableError, Box::new)))]
+        #[snafu(source(from(TableError, Box::new)), backtrace)]
         source: Box<TableError>,
     },
 
     #[snafu(display("Entity-layout optimization failed for table {table}: {source}"))]
     OptimizeTable {
         table: String,
-        #[snafu(source(from(TableError, Box::new)))]
+        #[snafu(source(from(TableError, Box::new)), backtrace)]
         source: Box<TableError>,
     },
 
@@ -76,6 +76,7 @@ pub enum CliError {
 
     #[snafu(display("Storage error: {source}"))]
     Storage {
+        #[snafu(backtrace)]
         source: timeseries_table_format::storage::StorageError,
     },
 
@@ -98,10 +99,12 @@ pub enum CliError {
 mod tests {
     use std::error::Error as _;
 
+    use arrow::error::ArrowError;
+    use snafu::{Backtrace, ErrorCompat};
     use timeseries_table_format::{
         coverage::CoverageSidecarError,
         storage::StorageLocation,
-        table::{CoverageQueryError, TableError},
+        table::{AppendError, CoverageQueryError, OpenTableError, TableError},
     };
 
     use super::CliError;
@@ -137,5 +140,40 @@ mod tests {
             })
                 if path == "_coverage/table/missing.roar"
         ));
+    }
+
+    #[test]
+    fn table_cli_error_delegates_the_table_backtrace() {
+        let table = TableError::from(AppendError::ArrowInput {
+            source: ArrowError::ComputeError("input failed".to_string()),
+            backtrace: Backtrace::capture(),
+        });
+        let error = CliError::AppendSegment {
+            table: "table".to_string(),
+            parquet: "input.parquet".to_string(),
+            source: Box::new(table),
+        };
+        let table = error
+            .source()
+            .and_then(|source| source.downcast_ref::<Box<TableError>>())
+            .expect("table source");
+        let table_backtrace = ErrorCompat::backtrace(table).expect("table backtrace");
+
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("CLI backtrace"),
+            table_backtrace
+        ));
+    }
+
+    #[test]
+    fn open_error_message_does_not_name_an_obsolete_format_version() {
+        let error = CliError::OpenTable {
+            table: "table".to_string(),
+            source: Box::new(TableError::from(OpenTableError::EmptyTable)),
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("Failed to open time-series table"));
+        assert!(!message.contains("v0.1"));
     }
 }
