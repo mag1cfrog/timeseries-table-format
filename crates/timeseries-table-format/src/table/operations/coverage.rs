@@ -22,14 +22,11 @@ use crate::{
     },
     metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
     metadata::table_metadata::IndexKind,
+    table::{AppendError, TableError, TimeSeriesTable},
     transaction_log::table_state::TableCoveragePointer,
 };
 
 use self::error as query_error;
-use super::{
-    TimeSeriesTable,
-    error::{AppendError, TableError},
-};
 
 pub(crate) trait CoverageRecoveryError: Sized {
     fn missing_segment_coverage_path(segment_path: String) -> Self;
@@ -289,7 +286,7 @@ impl TimeSeriesTable {
     pub async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
         self.load_global_coverage_snapshot_for_query()
             .await
-            .context(super::error::CoverageQuerySnafu)
+            .context(crate::table::error::CoverageQuerySnafu)
     }
 
     /// Load table coverage for read paths (no writes).

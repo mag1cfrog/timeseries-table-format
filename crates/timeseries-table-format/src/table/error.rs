@@ -1,369 +1,21 @@
-//! Error types and SNAFU context selectors for the table layer.
-//!
-//! This module centralizes the `TableError` enum used by the public API and
-//! exposes context selectors (via `#[snafu(visibility(pub(crate)))]`) so
-//! implementation details in sibling modules can attach error context without
-//! re-exporting everything at the crate root. Keep new variants here to ensure
-//! consistent user-facing messages and to avoid scattering selectors.
+//! Public error facade for high-level table operations.
 
-use arrow::error::ArrowError;
-use parquet::errors::ParquetError;
-use snafu::{Backtrace, prelude::*};
+use snafu::prelude::*;
 
 use crate::{
-    coverage::{
-        EntityIdentity, IndexIntervalId,
-        index_interval::{IndexInterval, IndexIntervalMappingError},
-        io::CoverageSidecarError,
-    },
-    formats::parquet::{EntityRewriteError, SegmentCoverageError},
+    coverage::io::CoverageSidecarError,
     metadata::{
-        logical_schema::ArrowToLogicalSchemaError,
         schema_compat::SchemaCompatibilityError,
-        table_metadata::{IndexKind, IndexSpecError, IndexValueError},
+        table_metadata::{IndexSpecError, IndexValueError},
     },
     storage::StorageError,
-    transaction_log::{CommitError, TableKind, segments::SegmentError},
+    transaction_log::{CommitError, TableKind},
 };
 
-use super::{coverage::CoverageQueryError, scan::ScanError};
-
-/// Errors owned by an append operation.
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
-pub enum AppendError {
-    /// An Arrow input reader or batch normalization failed.
-    #[snafu(display("Arrow input error: {source}"))]
-    ArrowInput {
-        /// Arrow error returned while reading or normalizing a batch.
-        #[snafu(source)]
-        source: ArrowError,
-        /// Backtrace captured at the append input boundary.
-        backtrace: Backtrace,
-    },
-
-    /// An Arrow schema could not be represented by the table logical schema.
-    #[snafu(display("Invalid append input schema: {source}"))]
-    ArrowToLogicalSchema {
-        /// Arrow-to-logical schema conversion failure.
-        #[snafu(source)]
-        source: ArrowToLogicalSchemaError,
-        /// Backtrace captured at the append schema boundary.
-        backtrace: Backtrace,
-    },
-
-    /// An append input contained no rows.
-    #[snafu(display("Cannot append an empty Arrow input"))]
-    EmptyInput,
-
-    /// A configured Parquet row group cannot contain zero rows.
-    #[snafu(display(
-        "Invalid maximum rows per Parquet row group: {max_rows_per_row_group}; expected a positive value"
-    ))]
-    InvalidMaxRowsPerRowGroup {
-        /// Rejected per-append row-group limit.
-        max_rows_per_row_group: usize,
-    },
-
-    /// Validating the incoming and registered table schemas failed.
-    #[snafu(context(false), display("Schema validation failed: {source}"))]
-    SchemaValidation {
-        /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
-        source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the append schema boundary.
-        backtrace: Backtrace,
-    },
-
-    /// A generated segment is incompatible with the table schema.
-    #[snafu(display(
-        "Generated segment {segment_path} is incompatible with the table schema: {source}"
-    ))]
-    GeneratedSegmentSchemaCompatibility {
-        /// Generated table-relative segment path.
-        segment_path: String,
-        /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
-        source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the generated-segment schema boundary.
-        backtrace: Backtrace,
-    },
-
-    /// Table state lacks the canonical schema required by append.
-    #[snafu(display(
-        "Table has no logical_schema at version {version}; cannot append without a canonical schema"
-    ))]
-    MissingCanonicalTableSchema {
-        /// Transaction log version missing a canonical logical schema.
-        version: u64,
-    },
-
-    /// Reading metadata from the generated segment failed.
-    #[snafu(context(false), display("Generated segment metadata error: {source}"))]
-    SegmentMetadata {
-        /// Complete segment metadata failure.
-        #[snafu(source(from(SegmentError, Box::new)))]
-        source: Box<SegmentError>,
-        /// Backtrace captured because not every segment error variant owns one.
-        backtrace: Backtrace,
-    },
-
-    /// Streaming the append input into Parquet failed.
-    #[snafu(display("Parquet write error: {source}"))]
-    ParquetWrite {
-        /// Parquet writer failure.
-        #[snafu(source)]
-        source: ParquetError,
-        /// Backtrace captured at the append writer boundary.
-        backtrace: Backtrace,
-    },
-
-    /// Deriving ordered-index coverage from the generated segment failed.
-    #[snafu(context(false), display("Segment coverage error: {source}"))]
-    GeneratedSegmentCoverage {
-        /// Complete segment coverage derivation failure.
-        #[snafu(source(from(SegmentCoverageError, Box::new)))]
-        source: Box<SegmentCoverageError>,
-        /// Backtrace captured because not every segment coverage error variant owns one.
-        backtrace: Backtrace,
-    },
-
-    /// An ordered-index interval could not be reconstructed for a diagnostic.
-    #[snafu(context(false), display("Index interval mapping failed: {source}"))]
-    IndexIntervalMapping {
-        /// Complete interval mapping failure.
-        #[snafu(source)]
-        source: IndexIntervalMappingError,
-        /// Backtrace captured at the append boundary.
-        backtrace: Backtrace,
-    },
-
-    /// A coverage sidecar could not be prepared or written.
-    #[snafu(context(false), display("Coverage sidecar error: {source}"))]
-    CoverageSidecar {
-        /// Complete coverage sidecar failure.
-        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
-        source: Box<CoverageSidecarError>,
-    },
-
-    /// The generated segment overlaps coverage already persisted by the table.
-    #[snafu(display(
-        "Ordered-index interval overlap while appending {segment_path}: {overlap_count} overlapping identity/index interval pairs (example_identity={example_identity:?}, example_index_interval={example_index_interval})"
-    ))]
-    PersistedIndexIntervalOverlap {
-        /// Relative path of the generated segment.
-        segment_path: String,
-        /// Number of overlapping identity/index interval pairs.
-        overlap_count: u128,
-        /// First overlapping identity, or `None` for a table-wide index.
-        example_identity: Option<EntityIdentity>,
-        /// Internal ID of the example interval.
-        example_index_interval_id: IndexIntervalId,
-        /// Logical ordered-index interval represented by the example ID.
-        example_index_interval: Box<IndexInterval>,
-    },
-
-    /// An entity-aware generated segment produced no entity coverage.
-    #[snafu(display("No entity coverage derived while appending segment {segment_path}"))]
-    EmptySegmentEntityCoverage {
-        /// Relative path of the generated segment.
-        segment_path: String,
-    },
-
-    /// One entity has rows but no usable ordered-index coverage.
-    #[snafu(display(
-        "Entity {identity:?} in segment {segment_path} has no non-null ordered-index values"
-    ))]
-    EntityWithoutIndexCoverage {
-        /// Relative path of the generated segment.
-        segment_path: String,
-        /// Complete identity whose rows all have null ordered-index values.
-        identity: EntityIdentity,
-    },
-
-    /// An existing segment lacks coverage metadata required by append.
-    #[snafu(display(
-        "Cannot append because existing segment {segment_path} is missing coverage_path"
-    ))]
-    ExistingSegmentMissingCoverageMetadata {
-        /// Canonical segment path missing coverage metadata.
-        segment_path: String,
-    },
-
-    /// A table coverage snapshot describes a different ordered index.
-    #[snafu(display(
-        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    CoverageSnapshotIndexKindMismatch {
-        /// Index descriptor defined by table metadata.
-        expected: IndexKind,
-        /// Index descriptor recorded by the snapshot pointer.
-        actual: IndexKind,
-        /// Log version where the mismatching pointer was recorded.
-        pointer_version: u64,
-    },
-
-    /// Reading one existing segment's coverage sidecar during recovery failed.
-    #[snafu(display(
-        "Cannot recover append coverage: failed to read segment {segment_path} coverage at {coverage_path}: {source}"
-    ))]
-    ExistingSegmentCoverageSidecarRead {
-        /// Canonical path of the segment whose sidecar could not be read.
-        segment_path: String,
-        /// Path of the failed coverage sidecar.
-        coverage_path: String,
-        /// Complete coverage sidecar failure.
-        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
-        source: Box<CoverageSidecarError>,
-    },
-
-    /// Direct storage access for an append artifact failed.
-    #[snafu(context(false), display("Storage error: {source}"))]
-    Storage {
-        /// Complete storage failure.
-        #[snafu(source, backtrace)]
-        source: StorageError,
-    },
-
-    /// Publishing the append transaction failed with a definite outcome.
-    #[snafu(context(false), display("Commit error: {source}"))]
-    Commit {
-        /// Complete transaction-log failure.
-        #[snafu(source, backtrace)]
-        source: CommitError,
-    },
-
-    /// The append transaction may have committed, so its artifacts were preserved.
-    #[snafu(display(
-        "Commit outcome is ambiguous; generated Parquet path {segment_path} was preserved: {source}"
-    ))]
-    CommitAmbiguous {
-        /// Generated table-relative Parquet path that was preserved.
-        segment_path: String,
-        /// Ambiguous transaction-log failure.
-        #[snafu(source(from(CommitError, Box::new)), backtrace)]
-        source: Box<CommitError>,
-    },
-
-    /// Append failed and one or more attempt-owned artifacts could not be removed.
-    #[snafu(display(
-        "{source}; artifact rollback also failed: [{}]",
-        cleanup_errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ")
-    ))]
-    Rollback {
-        /// Original append failure that triggered rollback.
-        #[snafu(source, backtrace)]
-        source: Box<AppendError>,
-        /// Typed cleanup failure for every artifact that could not be removed.
-        cleanup_errors: Vec<StorageError>,
-    },
-}
-
-/// Errors owned by an entity-layout optimization operation.
-#[derive(Debug, Snafu)]
-#[snafu(module, visibility(pub(crate)))]
-pub enum OptimizeError {
-    /// Entity-layout optimization requires at least one entity column.
-    #[snafu(display(
-        "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
-    ))]
-    NotApplicable {
-        /// User-facing table root.
-        table_root: String,
-    },
-
-    /// Staging replacements for one mixed segment failed.
-    #[snafu(context(false), display("Mixed-segment rewrite failed: {source}"))]
-    MixedSegmentRewrite {
-        /// Complete mixed-segment rewrite failure.
-        #[snafu(source(from(EntityRewriteError, Box::new)), backtrace)]
-        source: Box<EntityRewriteError>,
-    },
-
-    /// Live segment bounds cannot be ordered in one native index domain.
-    #[snafu(
-        context(false),
-        display("Invalid segment ordered-index bounds: {source}")
-    )]
-    InvalidSegmentBounds {
-        /// Complete bounds validation failure.
-        #[snafu(source)]
-        source: IndexValueError,
-        /// Backtrace captured because index value validation does not own one.
-        backtrace: Backtrace,
-    },
-
-    /// Optimization cannot use the table's canonical schema.
-    #[snafu(
-        context(false),
-        display("Optimization schema validation failed: {source}")
-    )]
-    SchemaValidation {
-        /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
-        source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured because schema compatibility errors do not own one.
-        backtrace: Backtrace,
-    },
-
-    /// A coverage sidecar required to validate a staged plan could not be read.
-    #[snafu(
-        context(false),
-        display("Optimization coverage sidecar error: {source}")
-    )]
-    CoverageSidecar {
-        /// Complete coverage sidecar failure.
-        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
-        source: Box<CoverageSidecarError>,
-    },
-
-    /// A staged optimization plan violated an atomic publication invariant.
-    #[snafu(display("Invalid staged entity-layout optimization plan: {reason}"))]
-    InvalidStagedPlan {
-        /// Failed plan invariant.
-        reason: String,
-        /// Backtrace captured at the failed internal invariant.
-        backtrace: Backtrace,
-    },
-
-    /// An optimization count could not be represented without wrapping.
-    #[snafu(display("Entity-layout optimization count overflow: {field}"))]
-    CountOverflow {
-        /// Report or version field that overflowed.
-        field: &'static str,
-        /// Backtrace captured at the failed internal arithmetic boundary.
-        backtrace: Backtrace,
-    },
-
-    /// Publishing the optimization transaction failed.
-    #[snafu(context(false), display("Optimization commit failed: {source}"))]
-    Commit {
-        /// Complete transaction-log failure.
-        #[snafu(source, backtrace)]
-        source: CommitError,
-    },
-
-    /// Optimization failed and one or more owned staged objects could not be removed.
-    #[snafu(display(
-        "{source}; staged-object rollback also failed: [{}]",
-        cleanup_errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ")
-    ))]
-    Rollback {
-        /// Original optimization failure that triggered rollback.
-        #[snafu(source, backtrace)]
-        source: Box<OptimizeError>,
-        /// Typed cleanup failure for every staged object that could not be removed.
-        cleanup_errors: Vec<StorageError>,
-    },
-}
+use super::operations::{
+    AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError, ScanError,
+    TableStateAccessError,
+};
 
 /// Errors from high-level time-series table operations.
 ///
@@ -373,6 +25,30 @@ pub enum OptimizeError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum TableError {
+    /// A table creation operation failed.
+    #[snafu(context(false), display("Table creation failed: {source}"))]
+    Create {
+        /// Complete table creation failure.
+        #[snafu(source, backtrace)]
+        source: CreateTableError,
+    },
+
+    /// A table open operation failed.
+    #[snafu(context(false), display("Table open failed: {source}"))]
+    Open {
+        /// Complete table open failure.
+        #[snafu(source, backtrace)]
+        source: OpenTableError,
+    },
+
+    /// A table state access or refresh operation failed.
+    #[snafu(context(false), display("Table state access failed: {source}"))]
+    StateAccess {
+        /// Complete state-access failure.
+        #[snafu(source, backtrace)]
+        source: TableStateAccessError,
+    },
+
     /// An append operation failed.
     #[snafu(context(false), display("Append failed: {source}"))]
     Append {
@@ -490,7 +166,11 @@ pub enum TableError {
 mod tests {
     use std::{error::Error as _, io};
 
-    use snafu::ErrorCompat;
+    use arrow::error::ArrowError;
+    use parquet::errors::ParquetError;
+    use snafu::{Backtrace, ErrorCompat};
+
+    use crate::formats::parquet::EntityRewriteError;
 
     use super::*;
 
@@ -614,6 +294,90 @@ mod tests {
         ));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(primary).expect("primary backtrace"),
+            commit_backtrace
+        ));
+    }
+
+    #[test]
+    fn create_facade_preserves_index_source_and_operation_backtrace() {
+        let error = TableError::from(CreateTableError::IndexSpecValidation {
+            source: IndexSpecError::EmptyColumn,
+            backtrace: Backtrace::capture(),
+        });
+
+        let create = error
+            .source()
+            .and_then(|source| source.downcast_ref::<CreateTableError>())
+            .expect("create source");
+        let index = create
+            .source()
+            .and_then(|source| source.downcast_ref::<IndexSpecError>())
+            .expect("index specification source");
+
+        assert!(matches!(index, IndexSpecError::EmptyColumn));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            ErrorCompat::backtrace(create).expect("create backtrace")
+        ));
+    }
+
+    #[test]
+    fn open_facade_preserves_commit_source_and_backtrace() {
+        let error = TableError::from(OpenTableError::Commit {
+            source: CommitError::Conflict {
+                expected: 8,
+                found: 9,
+                backtrace: Backtrace::capture(),
+            },
+        });
+
+        let open = error
+            .source()
+            .and_then(|source| source.downcast_ref::<OpenTableError>())
+            .expect("open source");
+        let commit = open
+            .source()
+            .and_then(|source| source.downcast_ref::<CommitError>())
+            .expect("commit source");
+        let commit_backtrace = ErrorCompat::backtrace(commit).expect("commit backtrace");
+
+        assert!(matches!(commit, CommitError::Conflict { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(open).expect("open backtrace"),
+            commit_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
+            commit_backtrace
+        ));
+    }
+
+    #[test]
+    fn state_access_facade_preserves_commit_source_and_backtrace() {
+        let error = TableError::from(TableStateAccessError::Commit {
+            source: CommitError::CorruptState {
+                msg: "corrupt state".to_string(),
+                backtrace: Backtrace::capture(),
+            },
+        });
+
+        let state_access = error
+            .source()
+            .and_then(|source| source.downcast_ref::<TableStateAccessError>())
+            .expect("state access source");
+        let commit = state_access
+            .source()
+            .and_then(|source| source.downcast_ref::<CommitError>())
+            .expect("commit source");
+        let commit_backtrace = ErrorCompat::backtrace(commit).expect("commit backtrace");
+
+        assert!(matches!(commit, CommitError::CorruptState { .. }));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(state_access).expect("state access backtrace"),
+            commit_backtrace
+        ));
+        assert!(std::ptr::eq(
+            ErrorCompat::backtrace(&error).expect("table backtrace"),
             commit_backtrace
         ));
     }

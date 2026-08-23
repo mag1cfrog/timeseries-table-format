@@ -13,7 +13,10 @@ use timeseries_table_format::{
     },
     formats::parquet::{EntityRewriteError, SegmentCoverageError},
     storage::StorageError as CoreStorageError,
-    table::{AppendError, CoverageQueryError, OptimizeError, ScanError, TableError},
+    table::{
+        AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
+        ScanError, TableError, TableStateAccessError,
+    },
     transaction_log::{CommitError, segments::SegmentError},
 };
 
@@ -256,6 +259,30 @@ fn optimize_error_to_py(py: Python<'_>, err: OptimizeError, msg: String) -> PyEr
     }
 }
 
+fn create_error_to_py(py: Python<'_>, err: CreateTableError, msg: String) -> PyErr {
+    match err {
+        CreateTableError::Storage { source } => storage_error_to_py(py, source),
+        CreateTableError::Commit { source } => commit_error_to_py(py, source),
+        CreateTableError::SchemaValidation { .. } => SchemaMismatchError::new_err(msg),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn open_error_to_py(py: Python<'_>, err: OpenTableError, msg: String) -> PyErr {
+    match err {
+        OpenTableError::Storage { source } => storage_error_to_py(py, source),
+        OpenTableError::Commit { source } => commit_error_to_py(py, source),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
+fn state_access_error_to_py(py: Python<'_>, err: TableStateAccessError, msg: String) -> PyErr {
+    match err {
+        TableStateAccessError::Commit { source } => commit_error_to_py(py, source),
+        _ => TimeseriesTableError::new_err(msg),
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn table_error_to_py(
     py: Python<'_>,
@@ -265,6 +292,12 @@ pub(crate) fn table_error_to_py(
     let msg = err.to_string();
 
     match err {
+        TableError::Create { source } => create_error_to_py(py, source, msg),
+
+        TableError::Open { source } => open_error_to_py(py, source, msg),
+
+        TableError::StateAccess { source } => state_access_error_to_py(py, source, msg),
+
         TableError::Storage { source } => storage_error_to_py(py, source),
 
         TableError::Scan {
@@ -312,6 +345,31 @@ mod tests {
 
     fn invalid_location_error() -> CoreStorageError {
         StorageLocation::parse("").expect_err("empty storage location must fail")
+    }
+
+    #[test]
+    fn lifecycle_errors_preserve_python_exception_categories() {
+        init_python();
+
+        let attached = Python::try_attach(|py| {
+            let storage = TableError::from(OpenTableError::Storage {
+                source: invalid_location_error(),
+            });
+            assert!(table_error_to_py(py, storage, &[]).is_instance_of::<StorageError>(py));
+
+            let state_storage = TableError::from(TableStateAccessError::Commit {
+                source: CommitError::Storage {
+                    source: invalid_location_error(),
+                },
+            });
+            assert!(table_error_to_py(py, state_storage, &[]).is_instance_of::<StorageError>(py));
+
+            let schema = TableError::from(CreateTableError::from(
+                timeseries_table_format::metadata::schema_compat::SchemaCompatibilityError::MissingTableSchema,
+            ));
+            assert!(table_error_to_py(py, schema, &[]).is_instance_of::<SchemaMismatchError>(py));
+        });
+        assert!(attached.is_some());
     }
 
     #[test]

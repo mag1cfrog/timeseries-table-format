@@ -112,6 +112,61 @@ impl TraceCapture {
     }
 }
 
+pub(crate) fn captured_span(capture: &TraceCapture, name: &str) -> CapturedSpan {
+    let mut spans: Vec<_> = capture
+        .spans()
+        .into_iter()
+        .filter(|span| span.name == name)
+        .collect();
+    assert_eq!(spans.len(), 1, "expected one {name} span");
+    spans.pop().expect("captured span")
+}
+
+pub(crate) fn assert_debug_span(
+    capture: &TraceCapture,
+    name: &str,
+    expected_fields: &[(&str, Option<&str>)],
+) {
+    let span = captured_span(capture, name);
+    assert_eq!(span.level, tracing::Level::DEBUG);
+    for (field, expected) in expected_fields {
+        assert_eq!(
+            span.fields.get(*field).map(String::as_str),
+            *expected,
+            "unexpected {name}.{field}"
+        );
+    }
+}
+
+pub(crate) fn assert_no_event(capture: &TraceCapture, name: &str) {
+    assert!(!capture.events().iter().any(|event| event.name == name));
+}
+
+pub(crate) fn assert_capture_excludes(capture: &TraceCapture, forbidden: &[&str]) {
+    let values = capture
+        .spans()
+        .into_iter()
+        .flat_map(|span| span.fields.into_values())
+        .chain(
+            capture
+                .events()
+                .into_iter()
+                .flat_map(|event| event.fields.into_values()),
+        );
+    for value in values {
+        for forbidden in forbidden
+            .iter()
+            .copied()
+            .chain(["LogicalSchema", "RecordBatch"])
+        {
+            assert!(
+                !value.contains(forbidden),
+                "diagnostic value contains sensitive data '{forbidden}': {value}"
+            );
+        }
+    }
+}
+
 struct FieldCapture<'a>(&'a mut BTreeMap<&'static str, String>);
 
 impl Visit for FieldCapture<'_> {

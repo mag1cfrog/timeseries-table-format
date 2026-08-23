@@ -2,19 +2,126 @@
 
 use std::{collections::HashSet, path::Path};
 
-use snafu::Backtrace;
+use snafu::{Backtrace, Snafu};
 
 use crate::{
-    coverage::{EntityCoverage, EntityIdentity, io::read_entity_coverage_sidecar},
-    formats::parquet::{StagedEntityRewrite, rewrite_mixed_parquet_segment},
+    coverage::{
+        EntityCoverage, EntityIdentity,
+        io::{CoverageSidecarError, read_entity_coverage_sidecar},
+    },
+    formats::parquet::{EntityRewriteError, StagedEntityRewrite, rewrite_mixed_parquet_segment},
     metadata::{
         schema_compat::SchemaCompatibilityError, segments::SegmentEntityLayout,
         table_metadata::IndexValueError,
     },
-    storage::{StorageLocation, normalize_relative_storage_path, remove_file_if_exists},
-    table::{OptimizeError, TableError, TimeSeriesTable},
+    storage::{
+        StorageError, StorageLocation, normalize_relative_storage_path, remove_file_if_exists,
+    },
+    table::{TableError, TimeSeriesTable},
     transaction_log::{CommitError, LogAction, SegmentMeta, TableState},
 };
+
+/// Errors owned by an entity-layout optimization operation.
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+pub enum OptimizeError {
+    /// Entity-layout optimization requires at least one entity column.
+    #[snafu(display(
+        "Entity-layout optimization is not applicable to table {table_root}: no entity columns are configured"
+    ))]
+    NotApplicable {
+        /// User-facing table root.
+        table_root: String,
+    },
+
+    /// Staging replacements for one mixed segment failed.
+    #[snafu(context(false), display("Mixed-segment rewrite failed: {source}"))]
+    MixedSegmentRewrite {
+        /// Complete mixed-segment rewrite failure.
+        #[snafu(source(from(EntityRewriteError, Box::new)), backtrace)]
+        source: Box<EntityRewriteError>,
+    },
+
+    /// Live segment bounds cannot be ordered in one native index domain.
+    #[snafu(
+        context(false),
+        display("Invalid segment ordered-index bounds: {source}")
+    )]
+    InvalidSegmentBounds {
+        /// Complete bounds validation failure.
+        #[snafu(source)]
+        source: IndexValueError,
+        /// Backtrace captured because index value validation does not own one.
+        backtrace: Backtrace,
+    },
+
+    /// Optimization cannot use the table's canonical schema.
+    #[snafu(
+        context(false),
+        display("Optimization schema validation failed: {source}")
+    )]
+    SchemaValidation {
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        source: Box<SchemaCompatibilityError>,
+        /// Backtrace captured because schema compatibility errors do not own one.
+        backtrace: Backtrace,
+    },
+
+    /// A coverage sidecar required to validate a staged plan could not be read.
+    #[snafu(
+        context(false),
+        display("Optimization coverage sidecar error: {source}")
+    )]
+    CoverageSidecar {
+        /// Complete coverage sidecar failure.
+        #[snafu(source(from(CoverageSidecarError, Box::new)), backtrace)]
+        source: Box<CoverageSidecarError>,
+    },
+
+    /// A staged optimization plan violated an atomic publication invariant.
+    #[snafu(display("Invalid staged entity-layout optimization plan: {reason}"))]
+    InvalidStagedPlan {
+        /// Failed plan invariant.
+        reason: String,
+        /// Backtrace captured at the failed internal invariant.
+        backtrace: Backtrace,
+    },
+
+    /// An optimization count could not be represented without wrapping.
+    #[snafu(display("Entity-layout optimization count overflow: {field}"))]
+    CountOverflow {
+        /// Report or version field that overflowed.
+        field: &'static str,
+        /// Backtrace captured at the failed internal arithmetic boundary.
+        backtrace: Backtrace,
+    },
+
+    /// Publishing the optimization transaction failed.
+    #[snafu(context(false), display("Optimization commit failed: {source}"))]
+    Commit {
+        /// Complete transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
+    },
+
+    /// Optimization failed and one or more owned staged objects could not be removed.
+    #[snafu(display(
+        "{source}; staged-object rollback also failed: [{}]",
+        cleanup_errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))]
+    Rollback {
+        /// Original optimization failure that triggered rollback.
+        #[snafu(source, backtrace)]
+        source: Box<OptimizeError>,
+        /// Typed cleanup failure for every staged object that could not be removed.
+        cleanup_errors: Vec<StorageError>,
+    },
+}
 
 /// Result of one entity-layout optimization operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
