@@ -113,10 +113,10 @@ pub enum CommitError {
         source: StorageError,
     },
 
-    /// Table metadata uses a format version this reader cannot interpret.
-    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
-    UnsupportedFormatVersion {
-        /// The only table format version this reader supports.
+    /// Table metadata uses a protocol version this client cannot interpret.
+    #[snafu(display("Unsupported table protocol version: expected {expected}, found {found}"))]
+    UnsupportedProtocolVersion {
+        /// The only table protocol version this client supports.
         expected: u32,
         /// Version found in persisted table metadata.
         found: u64,
@@ -345,7 +345,7 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
         LogicalTimestampUnit,
     };
-    use crate::metadata::table_metadata::TABLE_FORMAT_VERSION;
+    use crate::metadata::table_metadata::TABLE_PROTOCOL_VERSION;
     use crate::transaction_log::*;
 
     use chrono::{DateTime, TimeZone, Utc};
@@ -401,7 +401,9 @@ mod tests {
                 .expect("valid logical schema"),
             ),
             created_at: ts0,
-            format_version: TABLE_FORMAT_VERSION,
+            protocol_version: TABLE_PROTOCOL_VERSION,
+            required_reader_features: Default::default(),
+            required_writer_features: Default::default(),
         };
 
         let seg_meta = SegmentMeta {
@@ -429,7 +431,9 @@ mod tests {
 
         // Serialize to JSON.
         let json = serde_json::to_string_pretty(&commit).expect("serialize commit");
-        assert!(json.contains(&format!("\"format_version\": {TABLE_FORMAT_VERSION}")));
+        assert!(json.contains(&format!("\"protocol_version\": {TABLE_PROTOCOL_VERSION}")));
+        assert!(json.contains("\"required_reader_features\": []"));
+        assert!(json.contains("\"required_writer_features\": []"));
         // println!("{json}");
 
         // Deserialize back.

@@ -3,7 +3,7 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_FORMAT_VERSION, TableKind, TableMeta, TimeIndexGranularity,
+    IndexKind, IndexSpec, TABLE_PROTOCOL_VERSION, TableKind, TableMeta, TimeIndexGranularity,
 };
 use crate::storage::StorageLocation;
 use arrow::array::{
@@ -291,7 +291,9 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
         kind: TableKind::TimeSeries(index),
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: TABLE_FORMAT_VERSION,
+        protocol_version: TABLE_PROTOCOL_VERSION,
+        required_reader_features: Default::default(),
+        required_writer_features: Default::default(),
     }
 }
 
@@ -689,7 +691,9 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
         kind: TableKind::TimeSeries(index),
         logical_schema: Some(logical_schema),
         created_at: utc_datetime(2025, 1, 1, 0, 0, 0),
-        format_version: TABLE_FORMAT_VERSION,
+        protocol_version: TABLE_PROTOCOL_VERSION,
+        required_reader_features: Default::default(),
+        required_writer_features: Default::default(),
     }
 }
 

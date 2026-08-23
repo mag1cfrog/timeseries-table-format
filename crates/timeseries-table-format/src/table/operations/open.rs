@@ -95,7 +95,7 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::{
-        metadata::table_metadata::TABLE_FORMAT_VERSION,
+        metadata::table_metadata::TABLE_PROTOCOL_VERSION,
         table::test_util::{
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, assert_no_event,
             captured_span, make_basic_table_meta,
@@ -162,12 +162,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_preserves_format_and_table_kind_failures() -> TestResult {
-        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+    async fn open_preserves_protocol_and_table_kind_failures() -> TestResult {
+        for found in [TABLE_PROTOCOL_VERSION - 1, TABLE_PROTOCOL_VERSION + 1] {
             let tmp = TempDir::new()?;
             let location = TableLocation::local(tmp.path());
             let mut meta = make_basic_table_meta();
-            meta.format_version = found;
+            meta.protocol_version = found;
             TransactionLogStore::new(location.clone())
                 .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
                 .await?;
@@ -175,11 +175,11 @@ mod tests {
             assert!(matches!(
                 TimeSeriesTable::open(location)
                     .await
-                    .expect_err("unsupported format must fail"),
+                    .expect_err("unsupported protocol must fail"),
                 TableError::Open {
                     source: OpenTableError::Commit {
-                        source: CommitError::UnsupportedFormatVersion {
-                            expected: TABLE_FORMAT_VERSION,
+                        source: CommitError::UnsupportedProtocolVersion {
+                            expected: TABLE_PROTOCOL_VERSION,
                             found: actual,
                         }
                     }

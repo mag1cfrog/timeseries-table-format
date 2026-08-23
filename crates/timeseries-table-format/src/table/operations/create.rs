@@ -5,7 +5,7 @@ use snafu::{Backtrace, Snafu};
 use crate::{
     metadata::{
         schema_compat::{SchemaCompatibilityError, ensure_index_spec_matches_schema},
-        table_metadata::{IndexSpecError, TABLE_FORMAT_VERSION},
+        table_metadata::{IndexSpecError, TABLE_PROTOCOL_VERSION},
     },
     storage::{StorageError, TableLocation},
     table::{TableError, TimeSeriesTable},
@@ -17,12 +17,12 @@ use crate::{
 #[snafu(module, visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum CreateTableError {
-    /// The caller requested an unsupported table format version.
-    #[snafu(display("Unsupported table format version: expected {expected}, found {found}"))]
-    UnsupportedFormatVersion {
-        /// Format version supported by this writer.
+    /// The caller requested an unsupported table protocol version.
+    #[snafu(display("Unsupported table protocol version: expected {expected}, found {found}"))]
+    UnsupportedProtocolVersion {
+        /// Protocol version supported by this writer.
         expected: u32,
-        /// Format version supplied by the caller.
+        /// Protocol version supplied by the caller.
         found: u32,
     },
 
@@ -103,10 +103,10 @@ impl TimeSeriesTable {
         table_meta: TableMeta,
     ) -> Result<Self, TableError> {
         let result: Result<Self, CreateTableError> = async {
-            if table_meta.format_version() != TABLE_FORMAT_VERSION {
-                return Err(CreateTableError::UnsupportedFormatVersion {
-                    expected: TABLE_FORMAT_VERSION,
-                    found: table_meta.format_version(),
+            if table_meta.protocol_version() != TABLE_PROTOCOL_VERSION {
+                return Err(CreateTableError::UnsupportedProtocolVersion {
+                    expected: TABLE_PROTOCOL_VERSION,
+                    found: table_meta.protocol_version(),
                 });
             }
 
@@ -240,8 +240,8 @@ mod tests {
 
         assert_eq!(table.state().version, 1);
         assert_eq!(
-            table.state().table_meta.format_version(),
-            TABLE_FORMAT_VERSION
+            table.state().table_meta.protocol_version(),
+            TABLE_PROTOCOL_VERSION
         );
         assert!(table.state().segments.is_empty());
         let StorageLocation::Local(root) = table.location().storage();
@@ -260,17 +260,17 @@ mod tests {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
 
-        for found in [TABLE_FORMAT_VERSION - 1, TABLE_FORMAT_VERSION + 1] {
+        for found in [TABLE_PROTOCOL_VERSION - 1, TABLE_PROTOCOL_VERSION + 1] {
             let mut meta = make_basic_table_meta();
-            meta.format_version = found;
+            meta.protocol_version = found;
             let error = TimeSeriesTable::create(location.clone(), meta)
                 .await
-                .expect_err("unsupported format version must fail");
+                .expect_err("unsupported protocol version must fail");
             assert!(matches!(
                 error,
                 TableError::Create {
-                    source: CreateTableError::UnsupportedFormatVersion {
-                        expected: TABLE_FORMAT_VERSION,
+                    source: CreateTableError::UnsupportedProtocolVersion {
+                        expected: TABLE_PROTOCOL_VERSION,
                         found: actual,
                     }
                 } if actual == found

@@ -277,7 +277,7 @@ mod tests {
     use crate::coverage::EntityIdentity;
     use crate::metadata::{
         logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
-        table_metadata::TABLE_FORMAT_VERSION,
+        table_metadata::TABLE_PROTOCOL_VERSION,
     };
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};
@@ -313,7 +313,9 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid sample table metadata timestamp"),
-            format_version: TABLE_FORMAT_VERSION,
+            protocol_version: TABLE_PROTOCOL_VERSION,
+            required_reader_features: Default::default(),
+            required_writer_features: Default::default(),
         }
     }
 
@@ -513,7 +515,9 @@ mod tests {
                         }},
                         "logical_schema": null,
                         "created_at": "2025-01-01T00:00:00Z",
-                        "format_version": 6
+                        "protocol_version": 6,
+                        "required_reader_features": [],
+                        "required_writer_features": []
                     }
                 }]
             }"#,
@@ -527,8 +531,8 @@ mod tests {
             .expect_err("version 6 should be rejected");
         assert!(matches!(
             err,
-            CommitError::UnsupportedFormatVersion {
-                expected: TABLE_FORMAT_VERSION,
+            CommitError::UnsupportedProtocolVersion {
+                expected: TABLE_PROTOCOL_VERSION,
                 found: 6,
             }
         ));
