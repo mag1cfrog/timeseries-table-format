@@ -6,7 +6,7 @@ create_exception!(
     _native,
     TimeseriesTableError,
     PyException,
-    "Based exception for timeseries_table_format."
+    "Base exception for timeseries_table_format."
 );
 
 create_exception!(
@@ -25,9 +25,16 @@ create_exception!(
 
 create_exception!(
     _native,
-    CoverageOverlapError,
+    IndexIntervalOverlapError,
     TimeseriesTableError,
-    "Raised when an appended segment reuses a covered bucket for the same identity."
+    "Raised when an append conflicts with committed index intervals."
+);
+
+create_exception!(
+    _native,
+    DuplicateIndexIntervalError,
+    TimeseriesTableError,
+    "Raised when an append contains a duplicate identity and index interval."
 );
 
 create_exception!(

@@ -272,10 +272,20 @@ def test_append_overlap_preserves_exception_type_and_table_root(tmp_path):
     assert table.append(_batch()) == 2
     files_before = _data_and_coverage_files(root)
 
-    with pytest.raises(ttf.CoverageOverlapError) as excinfo:
+    with pytest.raises(ttf.IndexIntervalOverlapError) as excinfo:
         table.append(_batch())
 
-    assert getattr(excinfo.value, "table_root", None) == root
+    error = excinfo.value
+    assert getattr(error, "table_root", None) == root
+    assert error.segment_path.startswith("data/")
+    assert error.segment_path.endswith(".parquet")
+    assert error.conflict_count == 2
+    assert error.example_identity == {"symbol": "A"}
+    assert error.example_index_interval == "[0, 10)"
+    assert not hasattr(error, "example_index_interval_id")
+    assert not hasattr(error, "overlap_count")
+    assert not hasattr(error, "example_bucket")
+    assert not hasattr(error, "example_bucket_range")
     assert table.version() == 2
     assert _data_and_coverage_files(root) == files_before
 
@@ -291,18 +301,57 @@ def test_append_duplicate_interval_rolls_back_and_allows_retry(tmp_path):
     )
 
     with pytest.raises(
-        ttf.TimeseriesTableError, match="Duplicate ordered-index interval"
+        ttf.DuplicateIndexIntervalError, match="Duplicate ordered-index interval"
     ) as excinfo:
         table.append(duplicate)
 
-    assert type(excinfo.value) is ttf.TimeseriesTableError
-    assert getattr(excinfo.value, "table_root", None) == root
+    error = excinfo.value
+    assert type(error) is ttf.DuplicateIndexIntervalError
+    assert getattr(error, "table_root", None) == root
+    assert error.segment_path.startswith("data/")
+    assert error.segment_path.endswith(".parquet")
+    assert error.example_identity == {"symbol": "A"}
+    assert error.example_index_interval == "[0, 10)"
+    assert not hasattr(error, "conflict_count")
+    assert not hasattr(error, "example_index_interval_id")
     assert table.version() == 1
     assert ttf.TimeSeriesTable.open(root).version() == 1
     assert _data_and_coverage_files(root) == []
 
     assert table.append(_batch()) == 2
     _assert_default_rows(root)
+
+
+def test_interval_conflicts_without_entity_columns_have_no_example_identity(tmp_path):
+    root = tmp_path / "global"
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="ts",
+        index_type="int64",
+        index_granularity=10,
+    )
+    duplicate = pa.record_batch(
+        {
+            "ts": pa.array([0, 9], type=pa.int64()),
+            "value": pa.array([1.0, 2.0]),
+        }
+    )
+
+    with pytest.raises(ttf.DuplicateIndexIntervalError) as duplicate_error:
+        table.append(duplicate)
+    assert duplicate_error.value.example_identity is None
+
+    first = pa.record_batch(
+        {"ts": pa.array([0], type=pa.int64()), "value": pa.array([1.0])}
+    )
+    overlap = pa.record_batch(
+        {"ts": pa.array([9], type=pa.int64()), "value": pa.array([2.0])}
+    )
+    assert table.append(first) == 2
+    with pytest.raises(ttf.IndexIntervalOverlapError) as overlap_error:
+        table.append(overlap)
+    assert overlap_error.value.example_identity is None
+    assert overlap_error.value.conflict_count == 1
 
 
 def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):

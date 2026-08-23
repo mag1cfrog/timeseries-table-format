@@ -4,11 +4,23 @@ import time
 
 import pytest
 
+import timeseries_table_format as ttf
 import timeseries_table_format._native as native
 
 
 class _TestingModule(Protocol):
     def _test_sleep_without_gil(self, millis: int) -> None: ...
+
+
+def test_public_index_interval_exceptions_are_exact():
+    for module in (ttf, native):
+        assert issubclass(module.IndexIntervalOverlapError, module.TimeseriesTableError)
+        assert issubclass(module.DuplicateIndexIntervalError, module.TimeseriesTableError)
+        assert not hasattr(module, "CoverageOverlapError")
+
+    assert "IndexIntervalOverlapError" in ttf.__all__
+    assert "DuplicateIndexIntervalError" in ttf.__all__
+    assert "CoverageOverlapError" not in ttf.__all__
 
 
 def test_test_sleep_without_gil_allows_other_threads_to_run():

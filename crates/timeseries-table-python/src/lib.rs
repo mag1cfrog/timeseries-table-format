@@ -46,8 +46,8 @@ mod _native {
     use crate::sql_stream_reader::SqlStreamRecordBatchReader;
     use crate::{
         exceptions::{
-            ConflictError, CoverageOverlapError, DataFusionError, SchemaMismatchError,
-            StorageError, TimeseriesTableError,
+            ConflictError, DataFusionError, DuplicateIndexIntervalError, IndexIntervalOverlapError,
+            SchemaMismatchError, StorageError, TimeseriesTableError,
         },
         tokio_runner,
     };
@@ -2461,8 +2461,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         m.add("StorageError", py.get_type::<StorageError>())?;
         m.add("ConflictError", py.get_type::<ConflictError>())?;
         m.add(
-            "CoverageOverlapError",
-            py.get_type::<CoverageOverlapError>(),
+            "IndexIntervalOverlapError",
+            py.get_type::<IndexIntervalOverlapError>(),
+        )?;
+        m.add(
+            "DuplicateIndexIntervalError",
+            py.get_type::<DuplicateIndexIntervalError>(),
         )?;
         m.add("SchemaMismatchError", py.get_type::<SchemaMismatchError>())?;
         m.add("DataFusionError", py.get_type::<DataFusionError>())?;

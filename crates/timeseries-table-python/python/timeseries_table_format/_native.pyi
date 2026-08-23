@@ -18,17 +18,23 @@ class TimeseriesTableError(Exception): ...
 class StorageError(TimeseriesTableError): ...
 class ConflictError(TimeseriesTableError): ...
 
-class CoverageOverlapError(TimeseriesTableError):
+class IndexIntervalOverlapError(TimeseriesTableError):
     segment_path: str
     """Path to the Parquet segment that triggered the overlap."""
-    overlap_count: int
-    """Number of overlapping buckets, or entity/bucket pairs for an entity-aware table."""
-    example_entity_identity: dict[str, str | int] | None
-    """One typed identity in configured column order, or `None` for global coverage."""
-    example_bucket: int | None
-    """Internal overlapping bucket identifier, retained for compatibility."""
-    example_bucket_range: str
-    """Logical ordered-index interval covered by `example_bucket`."""
+    conflict_count: int
+    """Number of conflicting intervals, or identity and interval pairs."""
+    example_identity: dict[str, str | int] | None
+    """One complete identity, or `None` for a table without entity columns."""
+    example_index_interval: str
+    """One conflicting logical ordered-index interval."""
+
+class DuplicateIndexIntervalError(TimeseriesTableError):
+    segment_path: str
+    """Path to the generated Parquet segment that contains the duplicate."""
+    example_identity: dict[str, str | int] | None
+    """One complete identity, or `None` for a table without entity columns."""
+    example_index_interval: str
+    """One duplicated logical ordered-index interval."""
 
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
@@ -261,8 +267,10 @@ class TimeSeriesTable:
             If `source` is not one of the supported Arrow forms.
         ValueError
             If the Arrow C Stream exporter or capsule is invalid.
-        CoverageOverlapError
+        IndexIntervalOverlapError
             If incoming coverage overlaps committed coverage for the same entity.
+        DuplicateIndexIntervalError
+            If two incoming rows for one entity occupy the same index interval.
         SchemaMismatchError
             If the Arrow schema does not match the table's established schema.
         TimeseriesTableError
