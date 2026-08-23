@@ -122,13 +122,21 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::{
+        coverage::EntityValue,
         storage::{TableLocation, layout},
-        table::test_util::{
-            TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, assert_no_event,
-            captured_span, make_basic_table_meta,
+        table::{
+            OptimizeError,
+            test_util::{
+                TestResult, TraceCapture, assert_capture_excludes, assert_debug_span,
+                assert_no_event, captured_span, make_basic_table_meta, utc_datetime,
+            },
         },
-        transaction_log::{IndexKind, LogAction, TimeIndexGranularity, TransactionLogStore},
+        transaction_log::{
+            CommitError, IndexKind, LogAction, TableProtocolError, TimeIndexGranularity,
+            TransactionLogStore,
+        },
     };
+    use futures::StreamExt;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -277,6 +285,73 @@ mod tests {
             }
         ));
         assert_eq!(table.state(), &state_before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_applies_reader_and_writer_requirements_by_operation() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = TableLocation::local(tmp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+
+        let mut writer_meta = table.state().table_meta.clone();
+        writer_meta
+            .required_writer_features
+            .insert("future_writer".to_string());
+        TransactionLogStore::new(location.clone())
+            .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(writer_meta.clone())])
+            .await?;
+
+        assert!(table.refresh().await?);
+        assert_eq!(table.state().version, 2);
+
+        let start = utc_datetime(2025, 1, 1, 0, 0, 0);
+        let end = utc_datetime(2025, 1, 1, 1, 0, 0);
+        let mut scan = table.scan_range(start, end).await?;
+        assert!(scan.next().await.is_none());
+        assert_eq!(
+            table
+                .coverage_ratio_for_entity_range(&[("symbol", EntityValue::from("A"))], start, end,)
+                .await?,
+            0.0
+        );
+        assert!(matches!(
+            table
+                .optimize()
+                .await
+                .expect_err("unknown writer feature must reject optimize after refresh"),
+            TableError::Optimize {
+                source: OptimizeError::Protocol {
+                    source: TableProtocolError::UnsupportedWriterFeatures { features },
+                    ..
+                }
+            } if features == ["future_writer"]
+        ));
+
+        let state_before_reader_upgrade = table.state().clone();
+        let mut reader_meta = writer_meta;
+        reader_meta
+            .required_reader_features
+            .insert("future_reader".to_string());
+        TransactionLogStore::new(location)
+            .commit_with_expected_version(2, vec![LogAction::UpdateTableMeta(reader_meta)])
+            .await?;
+
+        assert!(matches!(
+            table
+                .refresh()
+                .await
+                .expect_err("unknown reader feature must reject refresh"),
+            TableError::StateAccess {
+                source: TableStateAccessError::Commit {
+                    source: CommitError::Protocol {
+                        source: TableProtocolError::UnsupportedReaderFeatures { features },
+                        ..
+                    }
+                }
+            } if features == ["future_reader"]
+        ));
+        assert_eq!(table.state(), &state_before_reader_upgrade);
         Ok(())
     }
 }

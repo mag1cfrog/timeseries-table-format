@@ -220,3 +220,45 @@ async fn provider_cache_is_primed_from_snapshot() -> DFResult<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn provider_scan_refresh_allows_unknown_writer_features() -> DFResult<()> {
+    use datafusion::{catalog::TableProvider, prelude::SessionContext};
+
+    use crate::{
+        storage::TableLocation,
+        table::TimeSeriesTable,
+        transaction_log::{LogAction, TransactionLogStore},
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let location = TableLocation::local(tmp.path());
+    let table = TimeSeriesTable::create(location.clone(), make_table_meta())
+        .await
+        .expect("create");
+    let mut updated_meta = table.state().table_meta.clone();
+    updated_meta
+        .required_writer_features
+        .insert("future_writer".to_string());
+    let provider = TsTableProvider::try_new(Arc::new(table))?;
+    TransactionLogStore::new(location)
+        .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(updated_meta)])
+        .await
+        .map_err(df_external)?;
+
+    let session = SessionContext::new().state();
+    provider.scan(&session, None, &[], None).await?;
+
+    let cache = provider.cache.read().await;
+    assert_eq!(cache.version, Some(2));
+    assert_eq!(
+        cache
+            .state
+            .as_ref()
+            .expect("refreshed state")
+            .table_meta
+            .required_writer_features(),
+        &["future_writer".to_string()].into_iter().collect()
+    );
+    Ok(())
+}

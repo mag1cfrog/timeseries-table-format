@@ -239,6 +239,10 @@ impl TableMeta {
         &self.required_writer_features
     }
 
+    pub(crate) fn ensure_read_compatible(&self) -> Result<(), TableProtocolError> {
+        self.ensure_read_compatible_with(SUPPORTED_READER_FEATURES)
+    }
+
     pub(crate) fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
         self.ensure_write_compatible_with(SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES)
     }

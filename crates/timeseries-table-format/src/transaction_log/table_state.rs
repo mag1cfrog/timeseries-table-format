@@ -196,10 +196,8 @@ impl TransactionLogStore {
             current_version,
             backtrace: snafu::Backtrace::capture(),
         })?;
-        // TODO(#399): Switch replay to reader compatibility after every
-        // mutating entry point has its own writer-compatibility gate.
         table_meta
-            .ensure_write_compatible()
+            .ensure_read_compatible()
             .map_err(CommitError::from)?;
 
         if let TableKind::TimeSeries(index) = &table_meta.kind {
@@ -581,7 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_table_state_conservatively_requires_writer_compatibility() -> TestResult {
+    async fn rebuild_table_state_allows_unknown_writer_features() -> TestResult {
         let (_tmp, store) = create_test_log_store();
         let mut meta = sample_table_meta();
         meta.required_writer_features
@@ -590,13 +588,31 @@ mod tests {
             .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
             .await?;
 
+        let state = store.rebuild_table_state().await?;
+        assert_eq!(
+            state.table_meta.required_writer_features(),
+            &["future_writer".to_string()].into_iter().collect()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_table_state_rejects_unknown_reader_features() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let mut meta = sample_table_meta();
+        meta.required_reader_features
+            .insert("future_reader".to_string());
+        store
+            .commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+
         let error = store.rebuild_table_state().await.unwrap_err();
         assert!(matches!(
             error,
             CommitError::Protocol {
-                source: TableProtocolError::UnsupportedWriterFeatures { features },
+                source: TableProtocolError::UnsupportedReaderFeatures { features },
                 ..
-            } if features == ["future_writer"]
+            } if features == ["future_reader"]
         ));
         Ok(())
     }
