@@ -2,14 +2,14 @@
 
 pub mod append;
 mod append_schema;
-pub mod coverage;
+mod coverage;
 mod create;
 mod open;
 mod optimize;
-pub mod scan;
+mod scan;
 mod state_access;
 
-pub use append::AppendError;
+pub use append::error::AppendError;
 pub use coverage::CoverageQueryError;
 pub use create::CreateTableError;
 pub use open::OpenTableError;

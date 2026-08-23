@@ -144,7 +144,7 @@ impl SegmentMeta {
 ///
 /// This enum intentionally contains **no storage backend errors**. IO-related
 /// errors should be wrapped at the IO boundary (for example, in
-/// `transaction_log::segments::SegmentError`).
+/// [`crate::transaction_log::SegmentError`]).
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum SegmentMetaError {

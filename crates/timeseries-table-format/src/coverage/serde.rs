@@ -30,19 +30,6 @@
 //!   nested_historical_roaring_treemap_bytes
 //! ```
 //!
-//! # Example
-//!
-//! ```ignore
-//! use timeseries_table_format::coverage::Coverage;
-//! use timeseries_table_format::coverage::serde::{coverage_to_bytes, coverage_from_bytes};
-//!
-//! let cov = Coverage::from_iter(vec![1u64, 2, 3]);
-//! let bytes = coverage_to_bytes(&cov)?;
-//! let restored = coverage_from_bytes(&bytes)?;
-//! assert_eq!(cov.cardinality(), restored.cardinality());
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
-
 use std::{io::Cursor, str::Utf8Error};
 
 use roaring::{RoaringBitmap, RoaringTreemap};

@@ -5,8 +5,8 @@
 //!   version `0` (fresh table).
 //! - Writing zero-padded commit files with optimistic concurrency control so
 //!   each version is created exactly once.
-//! - Mapping storage-layer failures into [`CommitError`] variants so callers
-//!   can differentiate between conflicts, storage errors, and corrupt state.
+//! - Mapping failures into [`CommitError`] variants so callers retain typed
+//!   storage, protocol, and state-validation causes.
 //!
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the

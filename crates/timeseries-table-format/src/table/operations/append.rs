@@ -8,9 +8,9 @@
 //! - optimistic commit to the transaction log and in-memory state update.
 //!   Keep new append-time invariants here so the flow remains centralized.
 
-mod error;
+pub(super) mod error;
 
-pub use error::AppendError;
+use error::AppendError;
 
 use std::{marker::PhantomData, path::Path, sync::Arc};
 

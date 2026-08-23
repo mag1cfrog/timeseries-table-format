@@ -1,4 +1,9 @@
-//! Public error facade for high-level table operations.
+//! Top-level error facade for table operations.
+//!
+//! [`TableError`] adds only operation context. Each variant wraps the complete
+//! error owned by that operation and delegates its source and backtrace. Add
+//! detailed failures to the owning operation error rather than copying
+//! subsystem-specific variants into this facade.
 
 use snafu::prelude::*;
 
