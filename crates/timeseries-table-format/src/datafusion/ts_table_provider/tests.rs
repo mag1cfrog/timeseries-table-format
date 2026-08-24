@@ -40,7 +40,7 @@ fn metadata_pruning_accepts_only_exact_supported_entity_literals() -> DFResult<(
         Field::new("signed_64", DataType::Int64, false),
         Field::new("unsigned_64", DataType::UInt64, false),
     ]));
-    let index = crate::metadata::table_metadata::IndexSpec {
+    let index = crate::metadata::index::IndexSpec {
         column: "idx".to_string(),
         entity_columns: vec![
             "text".to_string(),
@@ -48,7 +48,7 @@ fn metadata_pruning_accepts_only_exact_supported_entity_literals() -> DFResult<(
             "signed_64".to_string(),
             "unsigned_64".to_string(),
         ],
-        kind: crate::metadata::table_metadata::IndexKind::Int64 {
+        kind: crate::metadata::index::IndexKind::Int64 {
             index_granularity: NonZeroU64::MIN,
         },
     };
@@ -77,11 +77,11 @@ fn metadata_pruning_accepts_only_exact_supported_entity_literals() -> DFResult<(
     Ok(())
 }
 
-fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
+fn make_table_meta() -> crate::metadata::table::TableMeta {
+    use crate::metadata::index::{IndexKind, IndexSpec, TimeIndexGranularity};
     use crate::metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
-    use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeIndexGranularity};
 
     let index = IndexSpec {
         column: "ts".to_string(),
@@ -114,7 +114,7 @@ fn make_table_meta() -> crate::metadata::table_metadata::TableMeta {
     ])
     .expect("valid logical schema");
 
-    crate::metadata::table_metadata::TableMeta::new_time_series_with_schema(index, logical_schema)
+    crate::metadata::table::TableMeta::new_time_series_with_schema(index, logical_schema)
 }
 
 #[tokio::test]

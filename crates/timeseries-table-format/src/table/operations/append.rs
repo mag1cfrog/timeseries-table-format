@@ -755,7 +755,7 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
     };
     use crate::metadata::segments::SegmentEntityLayout;
-    use crate::metadata::table_metadata::{IndexValue, TableProtocolError};
+    use crate::metadata::{index::IndexValue, protocol::TableProtocolError};
     use crate::storage::layout;
     use crate::storage::{StorageError, StorageLocation, TableLocation};
     use crate::table::test_util::*;

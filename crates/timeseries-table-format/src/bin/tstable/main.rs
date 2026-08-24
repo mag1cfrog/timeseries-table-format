@@ -18,7 +18,10 @@ use parquet::{
 };
 use snafu::ResultExt;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
+    metadata::{
+        index::{IndexKind, IndexSpec, TimeIndexGranularity},
+        table::TableMeta,
+    },
     storage::TableLocation,
     table::{AppendError, OptimizeReport, TableError, TimeSeriesTable},
 };

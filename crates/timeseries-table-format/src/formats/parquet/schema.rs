@@ -13,12 +13,12 @@ use parquet::file::metadata::FileMetaData;
 use parquet::schema::types::{SchemaDescriptor, Type};
 use snafu::Backtrace;
 
+use crate::metadata::index::{IndexKind, IndexSpec};
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
     LogicalTimestampUnit,
 };
 use crate::metadata::segments::ParquetIndexColumnError;
-use crate::metadata::table_metadata::{IndexKind, IndexSpec};
 use crate::storage::{TableLocation, open_parquet_reader};
 use crate::transaction_log::segments::{SegmentError, SegmentMetaError, SegmentResult};
 

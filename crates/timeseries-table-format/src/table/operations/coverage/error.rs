@@ -5,8 +5,8 @@ use crate::{
         EntityIdentityError, index_interval::IndexIntervalMappingError, io::CoverageSidecarError,
     },
     metadata::{
+        index::{IndexKind, IndexValueError},
         schema_compat::SchemaCompatibilityError,
-        table_metadata::{IndexKind, IndexValueError},
     },
 };
 

@@ -12,8 +12,9 @@ use snafu::prelude::*;
 use crate::{
     coverage::{EntityIdentity, EntityValue},
     metadata::{
+        index::{IndexKind, IndexSpec},
         logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalToArrowSchemaError},
-        table_metadata::{IndexKind, IndexSpec, TableMeta},
+        table::TableMeta,
     },
 };
 
@@ -380,8 +381,8 @@ mod tests {
 
     use super::*;
     use crate::metadata::{
+        index::TimeIndexGranularity,
         logical_schema::{LogicalSchema, LogicalTimestampUnit},
-        table_metadata::TimeIndexGranularity,
     };
 
     fn schema(data_type: LogicalDataType) -> LogicalSchema {

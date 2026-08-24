@@ -70,9 +70,10 @@ pub mod table_state;
 #[cfg(test)]
 mod log_integration_tests;
 
-pub use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, IndexValue, TableKind, TableMeta, TableMetaDelta, TableProtocolError,
-    TimeIndexGranularity,
+pub use crate::metadata::{
+    index::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity},
+    protocol::TableProtocolError,
+    table::{TableKind, TableMeta, TableMetaDelta},
 };
 pub use actions::{Commit, LogAction};
 pub use log_store::TransactionLogStore;
@@ -83,8 +84,7 @@ use snafu::{Backtrace, prelude::*};
 
 use crate::{
     metadata::{
-        schema_compat::SchemaCompatibilityError, segments::SegmentMetaError,
-        table_metadata::IndexSpecError,
+        index::IndexSpecError, schema_compat::SchemaCompatibilityError, segments::SegmentMetaError,
     },
     storage::StorageError,
 };
@@ -119,7 +119,7 @@ pub enum CommitError {
     Protocol {
         /// Complete table protocol failure.
         #[snafu(source)]
-        source: crate::metadata::table_metadata::TableProtocolError,
+        source: crate::metadata::protocol::TableProtocolError,
         /// Backtrace captured at the transaction-log boundary.
         backtrace: Backtrace,
     },
@@ -347,7 +347,7 @@ mod tests {
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
         LogicalTimestampUnit,
     };
-    use crate::metadata::table_metadata::TABLE_PROTOCOL_VERSION;
+    use crate::metadata::protocol::TABLE_PROTOCOL_VERSION;
     use crate::transaction_log::*;
 
     use chrono::{DateTime, TimeZone, Utc};

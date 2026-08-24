@@ -10,7 +10,10 @@ use arrow::{
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use tempfile::TempDir;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
+    metadata::{
+        index::{IndexKind, IndexSpec, TimeIndexGranularity},
+        table::TableMeta,
+    },
     storage::TableLocation,
     table::TimeSeriesTable,
 };

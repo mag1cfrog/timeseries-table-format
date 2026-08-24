@@ -18,8 +18,8 @@ use parquet::file::statistics::Statistics;
 use snafu::Backtrace;
 use tokio::task::JoinSet;
 
+use crate::metadata::index::{IndexKind, IndexSpec, IndexValue};
 use crate::metadata::segments::ParquetIndexColumnError;
-use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
 use crate::storage::{TableLocation, file_size, open_parquet_reader};
 use crate::transaction_log::segments::{SegmentError, SegmentMetaError, SegmentResult};
 use crate::transaction_log::{FileFormat, SegmentEntityLayout, SegmentMeta};
@@ -511,7 +511,7 @@ pub(crate) async fn segment_meta_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity};
+    use crate::metadata::index::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity};
     use crate::transaction_log::segments::SegmentError;
     use arrow::array::{
         ArrayRef, BinaryBuilder, Int64Array, TimestampMillisecondArray, UInt64Array,

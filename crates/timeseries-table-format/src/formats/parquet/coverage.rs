@@ -38,8 +38,8 @@ use crate::{
     },
     coverage::{Coverage, EntityIdentity, EntityIdentityError, IndexIntervalId},
     metadata::{
+        index::{IndexKind, IndexSpec, IndexValue},
         segments::ParquetIndexColumnError,
-        table_metadata::{IndexKind, IndexSpec, IndexValue},
     },
     storage::{StorageError, TableLocation, open_parquet_reader},
 };
@@ -491,7 +491,7 @@ mod tests {
     use super::*;
     use std::{fs::File, io::SeekFrom, num::NonZeroU64, sync::Arc};
 
-    use crate::metadata::table_metadata::TimeIndexGranularity;
+    use crate::metadata::index::TimeIndexGranularity;
     use arrow::{
         datatypes::{Field, Schema},
         record_batch::RecordBatch,

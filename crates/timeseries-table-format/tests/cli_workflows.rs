@@ -21,8 +21,8 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use tempfile::TempDir;
 use timeseries_table_format::{
     metadata::{
+        index::{IndexKind, TimeIndexGranularity},
         segments::SegmentEntityLayout,
-        table_metadata::{IndexKind, TimeIndexGranularity},
     },
     storage::TableLocation,
     table::TimeSeriesTable,

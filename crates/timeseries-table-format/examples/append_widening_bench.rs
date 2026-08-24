@@ -24,7 +24,10 @@ use timeseries_table_format::{
     metadata::logical_schema::{
         LogicalDataType, LogicalField, LogicalSchema, LogicalSchemaValidationError,
     },
-    metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta},
+    metadata::{
+        index::{IndexKind, IndexSpec, IndexValue},
+        table::TableMeta,
+    },
     storage::TableLocation,
     table::{TimeSeriesTable, append::AppendRequest},
 };

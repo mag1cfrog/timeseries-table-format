@@ -98,7 +98,7 @@ impl TableState {
     /// stable tie-breaker.
     pub fn segments_sorted_by_index(
         &self,
-    ) -> Result<Vec<&SegmentMeta>, crate::metadata::table_metadata::IndexValueError> {
+    ) -> Result<Vec<&SegmentMeta>, crate::metadata::index::IndexValueError> {
         let mut v: Vec<&SegmentMeta> = self.segments.values().collect();
         sort_segment_meta_by_index(&mut v)?;
         Ok(v)
@@ -285,7 +285,7 @@ mod tests {
     use crate::coverage::EntityIdentity;
     use crate::metadata::{
         logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit},
-        table_metadata::TABLE_PROTOCOL_VERSION,
+        protocol::TABLE_PROTOCOL_VERSION,
     };
     use crate::storage::layout;
     use crate::storage::{StorageError, TableLocation};

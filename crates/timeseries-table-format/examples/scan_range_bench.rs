@@ -20,7 +20,10 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use timeseries_table_format::{
     AppendRequest,
-    metadata::table_metadata::{IndexKind, IndexSpec, IndexValue, TableMeta, TimeIndexGranularity},
+    metadata::{
+        index::{IndexKind, IndexSpec, IndexValue, TimeIndexGranularity},
+        table::TableMeta,
+    },
     storage::TableLocation,
     table::TimeSeriesTable,
 };

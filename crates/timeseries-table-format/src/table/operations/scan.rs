@@ -32,8 +32,8 @@ use parquet::{
 use snafu::{Backtrace, prelude::*};
 
 use crate::metadata::{
+    index::{IndexValue, IndexValueError, validate_index_range},
     segments::SegmentMeta,
-    table_metadata::{IndexValue, IndexValueError, validate_index_range},
 };
 use crate::storage::{self, TableLocation};
 use crate::table::error::ScanSnafu;
@@ -522,7 +522,10 @@ mod tests {
 
     use crate::metadata::logical_schema::LogicalTimestampUnit;
     use crate::metadata::segments::{FileFormat, SegmentEntityLayout};
-    use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta};
+    use crate::metadata::{
+        index::{IndexKind, IndexSpec},
+        table::TableMeta,
+    };
 
     use arrow::array::ArrayRef;
     use arrow::datatypes::{Schema, TimeUnit as ArrowTimeUnit};

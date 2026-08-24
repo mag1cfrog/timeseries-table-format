@@ -2,8 +2,10 @@ use super::*;
 use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
-use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_PROTOCOL_VERSION, TableKind, TableMeta, TimeIndexGranularity,
+use crate::metadata::{
+    index::{IndexKind, IndexSpec, TimeIndexGranularity},
+    protocol::TABLE_PROTOCOL_VERSION,
+    table::{TableKind, TableMeta},
 };
 use crate::storage::StorageLocation;
 use arrow::array::{

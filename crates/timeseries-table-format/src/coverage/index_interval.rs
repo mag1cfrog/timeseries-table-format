@@ -7,7 +7,7 @@ use snafu::Snafu;
 
 use crate::{
     coverage::IndexIntervalId,
-    metadata::table_metadata::{
+    metadata::index::{
         IndexKind, IndexValue, IndexValueError, TimeIndexGranularity, validate_index_range,
     },
 };

@@ -24,7 +24,7 @@ use arrow::array::RecordBatch;
 use futures::Stream;
 
 use crate::{
-    metadata::table_metadata::TableProtocolError,
+    metadata::protocol::TableProtocolError,
     storage::TableLocation,
     transaction_log::{IndexSpec, TableState, TransactionLogStore},
 };

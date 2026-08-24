@@ -12,8 +12,8 @@ use snafu::{Backtrace, prelude::*};
 use crate::{
     coverage::EntityIdentity,
     metadata::{
+        index::{IndexKind, IndexValue, IndexValueError},
         logical_schema::{ArrowToLogicalSchemaError, LogicalSchemaValidationError},
-        table_metadata::{IndexKind, IndexValue, IndexValueError},
     },
 };
 

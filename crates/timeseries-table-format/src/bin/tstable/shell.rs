@@ -10,7 +10,10 @@ use rustyline::{DefaultEditor, error::ReadlineError};
 use snafu::ResultExt;
 use terminal_size::terminal_size;
 use timeseries_table_format::{
-    metadata::table_metadata::{IndexKind, IndexSpec, TableMeta},
+    metadata::{
+        index::{IndexKind, IndexSpec},
+        table::TableMeta,
+    },
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -1188,7 +1191,10 @@ mod tests {
         metadata::logical_schema::{
             LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
-        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
+        metadata::{
+            index::{IndexKind, IndexSpec, TimeIndexGranularity},
+            table::TableMeta,
+        },
         storage::TableLocation,
         table::TimeSeriesTable,
     };

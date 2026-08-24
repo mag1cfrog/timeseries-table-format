@@ -11,9 +11,8 @@ use crate::{
     },
     formats::parquet::{EntityRewriteError, StagedEntityRewrite, rewrite_mixed_parquet_segment},
     metadata::{
-        schema_compat::SchemaCompatibilityError,
-        segments::SegmentEntityLayout,
-        table_metadata::{IndexValueError, TableProtocolError},
+        index::IndexValueError, protocol::TableProtocolError,
+        schema_compat::SchemaCompatibilityError, segments::SegmentEntityLayout,
     },
     storage::{
         StorageError, StorageLocation, normalize_relative_storage_path, remove_file_if_exists,
@@ -649,9 +648,10 @@ mod tests {
         },
         formats::parquet::EntityRewriteError,
         metadata::{
+            index::IndexValue,
             logical_schema::LogicalTimestampUnit,
+            protocol::TableProtocolError,
             segments::{FileFormat, SegmentEntityLayout},
-            table_metadata::{IndexValue, TableProtocolError},
         },
         storage::{StorageError, TableLocation, layout},
         table::test_util::{

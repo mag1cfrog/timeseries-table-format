@@ -34,13 +34,13 @@ use crate::{
         segment_meta::segment_meta_from_parquet,
     },
     metadata::{
+        index::{IndexSpec, IndexSpecError},
         logical_schema::LogicalSchema,
         schema_compat::{
             SchemaCompatibilityError, ensure_index_spec_matches_schema,
             ensure_schema_fields_match_by_name,
         },
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
-        table_metadata::{IndexSpec, IndexSpecError},
     },
     storage::{
         OutputSink, StorageError, TableLocation, normalize_relative_storage_path,
@@ -723,7 +723,7 @@ mod tests {
         coverage::{
             EntityValue, io::write_coverage_sidecar_new_bytes, serde::entity_coverage_to_bytes,
         },
-        metadata::table_metadata::{IndexKind, TimeIndexGranularity},
+        metadata::index::{IndexKind, TimeIndexGranularity},
         table::test_util::{make_table_meta_with_unit, write_arrow_parquet_with_unit},
         transaction_log::TableKind,
     };

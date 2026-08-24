@@ -11,7 +11,7 @@
 use snafu::Snafu;
 use uuid::Uuid;
 
-use crate::metadata::table_metadata::{IndexKind, IndexSpec, TimeIndexGranularity};
+use crate::metadata::index::{IndexKind, IndexSpec, TimeIndexGranularity};
 
 /// Directory for segment coverage data.
 pub const SEGMENT_COVERAGE_DIR: &str = "_coverage/segments";
