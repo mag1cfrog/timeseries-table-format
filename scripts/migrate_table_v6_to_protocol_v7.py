@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -857,6 +858,27 @@ def _print_report(report: MigrationReport) -> None:
     print(f"preserved other: {report.other_files} files, {report.other_bytes} bytes")
     print("non-log SHA-256: identical")
     print("publication: atomic sibling rename completed")
+    table = shlex.quote(str(report.destination))
+    expected = str(report.current_version)
+    print("follow-up validation:")
+    print(
+        f"  TTF_MIGRATED_TABLE={table} TTF_EXPECTED_CURRENT={expected} "
+        "cargo test -p timeseries-table-format "
+        "--test migrate_table_v6_to_protocol_v7 "
+        "validate_migrated_table_from_environment -- "
+        "--ignored --exact --nocapture"
+    )
+    python_check = (
+        "import os; import timeseries_table_format as ttf; "
+        "table = ttf.TimeSeriesTable.open(os.environ['TTF_MIGRATED_TABLE']); "
+        "assert table.version() == int(os.environ['TTF_EXPECTED_CURRENT']); "
+        "print(table.index_spec())"
+    )
+    print(
+        f"  TTF_MIGRATED_TABLE={table} TTF_EXPECTED_CURRENT={expected} "
+        f"python -c {shlex.quote(python_check)}"
+    )
+    print("  complete the full validation checklist in the temporary runbook")
 
 
 def main(argv: list[str] | None = None) -> int:
