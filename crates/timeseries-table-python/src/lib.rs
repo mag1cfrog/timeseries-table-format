@@ -39,7 +39,8 @@ mod _native {
     };
 
     use timeseries_table_format::{
-        datafusion::TsTableProvider, table::OptimizeReport as CoreOptimizeReport,
+        AppendRequest, ParquetCompression, datafusion::TsTableProvider,
+        table::OptimizeReport as CoreOptimizeReport,
     };
 
     use crate::error_map::{datafusion_error_to_py, storage_error_to_py};
@@ -1747,20 +1748,63 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// `source` must be a `pyarrow.RecordBatch`, `pyarrow.Table`,
         /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
         /// The stream is consumed lazily while the GIL is released.
-        fn append(&mut self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<u64> {
+        #[pyo3(signature = (source, *, compression=None, max_rows_per_row_group=None, max_bytes_per_row_group=None))]
+        fn append(
+            &mut self,
+            py: Python<'_>,
+            source: &Bound<'_, PyAny>,
+            compression: Option<&str>,
+            max_rows_per_row_group: Option<usize>,
+            max_bytes_per_row_group: Option<usize>,
+        ) -> PyResult<u64> {
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
             self.inner.ensure_append_supported().map_err(|error| {
                 table_error_to_py_with_root(py, &table_root_for_err, &entity_columns_for_err, error)
             })?;
+
+            let compression = match compression.map(|value| value.trim().to_ascii_lowercase()) {
+                None => None,
+                Some(value) => Some(match value.as_str() {
+                    "uncompressed" => ParquetCompression::Uncompressed,
+                    "snappy" => ParquetCompression::Snappy,
+                    "zstd" => ParquetCompression::Zstd,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "invalid compression={value:?}; expected 'uncompressed', 'snappy', or 'zstd'"
+                        )));
+                    }
+                }),
+            };
+            if max_rows_per_row_group == Some(0) {
+                return Err(PyValueError::new_err(
+                    "max_rows_per_row_group must be positive",
+                ));
+            }
+            if max_bytes_per_row_group == Some(0) {
+                return Err(PyValueError::new_err(
+                    "max_bytes_per_row_group must be positive",
+                ));
+            }
+
             let reader = record_batch_reader_from_python(source)?;
+            let mut request = AppendRequest::new(reader);
+            if let Some(compression) = compression {
+                request = request.compression(compression);
+            }
+            if let Some(max_rows_per_row_group) = max_rows_per_row_group {
+                request = request.max_rows_per_row_group(max_rows_per_row_group);
+            }
+            if let Some(max_bytes_per_row_group) = max_bytes_per_row_group {
+                request = request.max_bytes_per_row_group(max_bytes_per_row_group);
+            }
             let rt = tokio_runner::global_runtime()?;
             let table = &mut self.inner;
 
             tokio_runner::run_blocking_map_err(
                 py,
                 rt.as_ref(),
-                async move { table.append(reader).await },
+                async move { table.append(request).await },
                 move |py, err| {
                     table_error_to_py_with_root(
                         py,

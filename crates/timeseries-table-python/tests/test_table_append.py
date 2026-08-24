@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import timeseries_table_format as ttf
@@ -54,6 +55,12 @@ def _data_and_coverage_files(root: str) -> list[Path]:
     )
 
 
+def _only_data_file(root: str) -> Path:
+    files = sorted((Path(root) / "data").glob("*.parquet"))
+    assert len(files) == 1
+    return files[0]
+
+
 def _testing_module():
     testing = getattr(native, "_testing", None)
     if testing is None:
@@ -61,11 +68,22 @@ def _testing_module():
     return testing
 
 
-def test_append_runtime_signature_uses_source_parameter():
-    assert list(inspect.signature(ttf.TimeSeriesTable.append).parameters) == [
+def test_append_runtime_signature_exposes_keyword_only_writer_settings():
+    parameters = inspect.signature(ttf.TimeSeriesTable.append).parameters
+    assert list(parameters) == [
         "self",
         "source",
+        "compression",
+        "max_rows_per_row_group",
+        "max_bytes_per_row_group",
     ]
+    for name in [
+        "compression",
+        "max_rows_per_row_group",
+        "max_bytes_per_row_group",
+    ]:
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters[name].default is None
 
 
 def test_append_record_batch_returns_version_and_preserves_source(tmp_path):
@@ -75,6 +93,153 @@ def test_append_record_batch_returns_version_and_preserves_source(tmp_path):
     assert table.append(source) == 2
     assert source.column("value").to_pylist() == [1.0, 2.0]
     _assert_default_rows(root)
+
+
+def test_append_defaults_to_zstd_compression(tmp_path):
+    table, root = _create_table(tmp_path)
+
+    assert table.append(_batch()) == 2
+
+    metadata = pq.ParquetFile(_only_data_file(root)).metadata
+    assert metadata.num_row_groups == 1
+    for column_index in range(metadata.num_columns):
+        assert metadata.row_group(0).column(column_index).compression == "ZSTD"
+
+
+@pytest.mark.parametrize(
+    ("compression", "expected"),
+    [
+        ("uncompressed", "UNCOMPRESSED"),
+        ("snappy", "SNAPPY"),
+        (" ZsTd ", "ZSTD"),
+    ],
+)
+def test_append_compression_override_reaches_parquet_metadata(
+    tmp_path, compression, expected
+):
+    table, root = _create_table(tmp_path)
+
+    assert table.append(_batch(), compression=compression) == 2
+
+    metadata = pq.ParquetFile(_only_data_file(root)).metadata
+    for column_index in range(metadata.num_columns):
+        assert metadata.row_group(0).column(column_index).compression == expected
+
+
+def test_append_row_limit_splits_groups_and_round_trips(tmp_path):
+    table, root = _create_table(tmp_path)
+    source = pa.record_batch(
+        {
+            "ts": pa.array([0, 10, 20, 30, 40], type=pa.int64()),
+            "symbol": pa.array(["A"] * 5),
+            "value": pa.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+        }
+    )
+
+    assert (
+        table.append(
+            source,
+            compression="uncompressed",
+            max_rows_per_row_group=2,
+            max_bytes_per_row_group=1024 * 1024,
+        )
+        == 2
+    )
+
+    metadata = pq.ParquetFile(_only_data_file(root)).metadata
+    assert [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)] == [
+        2,
+        2,
+        1,
+    ]
+    assert all(
+        metadata.row_group(row_group).column(column).compression == "UNCOMPRESSED"
+        for row_group in range(metadata.num_row_groups)
+        for column in range(metadata.num_columns)
+    )
+    session = ttf.Session()
+    session.register_tstable("series", root)
+    assert (
+        session.sql("SELECT * FROM series ORDER BY ts").to_pydict()
+        == pa.Table.from_batches([source]).to_pydict()
+    )
+
+
+def test_append_byte_limit_splits_binary_batches_and_round_trips(tmp_path):
+    table, root = _create_table(tmp_path)
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.int64(), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("payload", pa.binary(), nullable=False),
+        ]
+    )
+    payloads = [bytes([value]) * 256 for value in [1, 2, 3]]
+    batches = [
+        pa.RecordBatch.from_arrays(
+            [pa.array([index * 10]), pa.array(["A"]), pa.array([payload])],
+            schema=schema,
+        )
+        for index, payload in enumerate(payloads)
+    ]
+    source = pa.RecordBatchReader.from_batches(schema, batches)
+
+    assert (
+        table.append(
+            source,
+            compression="uncompressed",
+            max_rows_per_row_group=100,
+            max_bytes_per_row_group=1,
+        )
+        == 2
+    )
+
+    metadata = pq.ParquetFile(_only_data_file(root)).metadata
+    assert [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)] == [
+        1,
+        1,
+        1,
+    ]
+    session = ttf.Session()
+    session.register_tstable("series", root)
+    assert session.sql("SELECT * FROM series ORDER BY ts").to_pydict() == {
+        "ts": [0, 10, 20],
+        "symbol": ["A", "A", "A"],
+        "payload": payloads,
+    }
+
+
+@pytest.mark.parametrize(
+    ("options", "error_type"),
+    [
+        ({"compression": "brotli"}, ValueError),
+        ({"compression": ""}, ValueError),
+        ({"max_rows_per_row_group": 0}, ValueError),
+        ({"max_bytes_per_row_group": 0}, ValueError),
+        ({"max_rows_per_row_group": -1}, OverflowError),
+        ({"max_bytes_per_row_group": -1}, OverflowError),
+    ],
+)
+def test_append_rejects_invalid_writer_settings_before_exporting_source(
+    tmp_path, options, error_type
+):
+    class CountingSource:
+        def __init__(self):
+            self.calls = 0
+
+        def __arrow_c_stream__(self, requested_schema=None):
+            self.calls += 1
+            raise AssertionError("invalid settings must not export the source")
+
+    table, root = _create_table(tmp_path)
+    source = CountingSource()
+
+    with pytest.raises(error_type):
+        table.append(source, **options)
+
+    assert source.calls == 0
+    assert table.version() == 1
+    assert _data_and_coverage_files(root) == []
 
 
 def test_append_multichunk_table_preserves_chunks_and_source(tmp_path):
