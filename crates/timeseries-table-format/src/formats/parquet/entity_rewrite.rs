@@ -43,7 +43,7 @@ use crate::{
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
     },
     storage::{
-        OutputSink, StorageError, TableLocation, normalize_relative_storage_path,
+        OutputSink, StorageError, TableLocation, ensure_canonical_relative_storage_path,
         open_new_output_sink, open_parquet_reader, remove_file_if_exists,
     },
     transaction_log::segments::SegmentError,
@@ -255,20 +255,12 @@ fn invalid_output(reason: impl Into<String>) -> EntityRewriteError {
     }
 }
 
-fn canonical_path(path: &str, description: &'static str) -> Result<(), EntityRewriteError> {
-    let (canonical, _) = normalize_relative_storage_path(Path::new(path)).map_err(|source| {
-        EntityRewriteError::InvalidPath {
-            description,
-            path: path.to_string(),
-            source: Box::new(source),
-        }
-    })?;
-    if canonical != path {
-        return Err(invalid_input(format!(
-            "{description} path {path:?} is not canonical; expected {canonical:?}"
-        )));
-    }
-    Ok(())
+fn validate_rewrite_path(path: &str, description: &'static str) -> Result<(), EntityRewriteError> {
+    ensure_canonical_relative_storage_path(path).map_err(|source| EntityRewriteError::InvalidPath {
+        description,
+        path: path.to_string(),
+        source: Box::new(source),
+    })
 }
 
 async fn cleanup_created(location: &TableLocation, created_paths: &[String]) -> Vec<StorageError> {
@@ -417,7 +409,7 @@ async fn validate_source(
             source.path
         )));
     }
-    canonical_path(&source.path, "source segment")?;
+    validate_rewrite_path(&source.path, "source segment")?;
     source.validate_bounds(&index.kind).map_err(|source| {
         EntityRewriteError::SegmentMetadataValidation {
             source: Box::new(source),
@@ -427,7 +419,7 @@ async fn validate_source(
         .coverage_path
         .as_deref()
         .ok_or_else(|| invalid_input("source has no committed entity-coverage sidecar"))?;
-    canonical_path(coverage_path, "source coverage")?;
+    validate_rewrite_path(coverage_path, "source coverage")?;
 
     let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
         .await
@@ -714,6 +706,7 @@ mod tests {
             EntityValue, io::write_coverage_sidecar_new_bytes, serde::entity_coverage_to_bytes,
         },
         metadata::index::{IndexKind, TimeIndexGranularity},
+        storage::normalize_relative_storage_path,
         table::test_util::{make_table_meta_with_unit, write_arrow_parquet_with_unit},
         transaction_log::TableKind,
     };
@@ -722,7 +715,7 @@ mod tests {
 
     #[test]
     fn invalid_rewrite_path_preserves_storage_source_and_backtrace() {
-        let error = canonical_path("../outside.parquet", "source segment")
+        let error = validate_rewrite_path("../outside.parquet", "source segment")
             .expect_err("parent traversal must fail");
         let storage = error
             .source()

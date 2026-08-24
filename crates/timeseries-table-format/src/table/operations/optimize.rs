@@ -15,7 +15,8 @@ use crate::{
         schema_compat::SchemaCompatibilityError, segments::SegmentEntityLayout,
     },
     storage::{
-        StorageError, StorageLocation, normalize_relative_storage_path, remove_file_if_exists,
+        StorageError, StorageLocation, ensure_canonical_relative_storage_path,
+        remove_file_if_exists,
     },
     table::{TableError, TimeSeriesTable},
     transaction_log::{CommitError, LogAction, SegmentMeta, TableState},
@@ -224,22 +225,6 @@ fn invalid_plan(reason: impl Into<String>) -> OptimizeError {
     }
 }
 
-fn ensure_canonical(path: &str, description: &'static str) -> Result<(), OptimizeError> {
-    let (canonical, _) = normalize_relative_storage_path(Path::new(path)).map_err(|source| {
-        OptimizeError::InvalidStagedPath {
-            description,
-            path: path.to_string(),
-            source: Box::new(source),
-        }
-    })?;
-    if canonical != path {
-        return Err(invalid_plan(format!(
-            "{description} path {path:?} is not canonical; expected {canonical:?}"
-        )));
-    }
-    Ok(())
-}
-
 async fn validate_staged_plan(
     table: &TimeSeriesTable,
     candidates: &[SegmentMeta],
@@ -317,7 +302,13 @@ async fn validate_staged_plan(
                 (replacement.meta.path.as_str(), "replacement data"),
                 (coverage_path, "replacement coverage"),
             ] {
-                ensure_canonical(path, description)?;
+                ensure_canonical_relative_storage_path(path).map_err(|source| {
+                    OptimizeError::InvalidStagedPath {
+                        description,
+                        path: path.to_string(),
+                        source: Box::new(source),
+                    }
+                })?;
                 if !object_paths.insert(path) {
                     return Err(invalid_plan(format!(
                         "staged object path {path} appears more than once"
@@ -826,8 +817,14 @@ mod tests {
 
     #[test]
     fn invalid_staged_path_preserves_storage_source_and_backtrace() {
-        let error = ensure_canonical("../outside.parquet", "replacement data")
-            .expect_err("parent traversal must fail");
+        let path = "../outside.parquet";
+        let source =
+            ensure_canonical_relative_storage_path(path).expect_err("parent traversal must fail");
+        let error = OptimizeError::InvalidStagedPath {
+            description: "replacement data",
+            path: path.to_string(),
+            source: Box::new(source),
+        };
         let storage = error
             .source()
             .and_then(|source| source.downcast_ref::<Box<StorageError>>())

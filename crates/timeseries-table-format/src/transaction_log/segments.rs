@@ -56,7 +56,8 @@ impl From<StorageError> for SegmentError {
     fn from(source: StorageError) -> Self {
         let is_missing = matches!(&source, StorageError::NotFound { .. });
         let path = match &source {
-            StorageError::NotFound { path, .. }
+            StorageError::InvalidRelativePath { path, .. }
+            | StorageError::NotFound { path, .. }
             | StorageError::AlreadyExists { path, .. }
             | StorageError::OtherIo { path, .. }
             | StorageError::CleanupFailed { path, .. } => path.clone(),

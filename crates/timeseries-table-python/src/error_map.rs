@@ -29,7 +29,8 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: &CoreStorageError) -> PyE
     let msg = err.to_string();
 
     let path_attr = match err {
-        CoreStorageError::NotFound { path, .. }
+        CoreStorageError::InvalidRelativePath { path, .. }
+        | CoreStorageError::NotFound { path, .. }
         | CoreStorageError::AlreadyExists { path, .. }
         | CoreStorageError::OtherIo { path, .. }
         | CoreStorageError::CleanupFailed { path, .. } => Some(path.as_str()),

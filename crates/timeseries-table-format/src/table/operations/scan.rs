@@ -2140,7 +2140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_range_preserves_non_not_found_storage_error() -> TestResult {
+    async fn scan_range_preserves_invalid_relative_path_source() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
@@ -2172,7 +2172,7 @@ mod tests {
 
         assert!(matches!(
             storage_source,
-            storage::StorageError::OtherIo { .. }
+            storage::StorageError::InvalidRelativePath { .. }
         ));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(&error).expect("table backtrace"),

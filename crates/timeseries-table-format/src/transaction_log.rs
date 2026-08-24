@@ -204,21 +204,6 @@ pub enum CommitError {
         source: Box<SegmentMetaError>,
     },
 
-    /// A normalized persisted path differs from its stored representation.
-    #[snafu(display(
-        "Non-canonical persisted {description} {path:?}; canonical form is {canonical:?}"
-    ))]
-    NonCanonicalPersistedPath {
-        /// Kind of persisted path being validated.
-        description: String,
-        /// Persisted path as stored.
-        path: String,
-        /// Canonical table-relative representation.
-        canonical: String,
-        /// Backtrace captured while rebuilding table state.
-        backtrace: Box<Backtrace>,
-    },
-
     /// Rebuilding table state was requested before the first commit.
     #[snafu(display("Cannot rebuild table state because CURRENT is 0"))]
     UninitializedTableState {
