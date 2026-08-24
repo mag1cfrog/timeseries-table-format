@@ -67,6 +67,15 @@ pub enum AppendError {
         max_rows_per_row_group: usize,
     },
 
+    /// A configured Parquet row group cannot contain zero estimated bytes.
+    #[snafu(display(
+        "Invalid maximum bytes per Parquet row group: {max_bytes_per_row_group}; expected a positive value"
+    ))]
+    InvalidMaxBytesPerRowGroup {
+        /// Rejected per-append row-group byte limit.
+        max_bytes_per_row_group: usize,
+    },
+
     /// Validating the incoming and registered table schemas failed.
     #[snafu(context(false), display("Schema validation failed: {source}"))]
     SchemaValidation {

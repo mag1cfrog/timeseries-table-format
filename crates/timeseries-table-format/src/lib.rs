@@ -62,7 +62,7 @@ pub use storage::TableLocation;
 pub use table::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
     OptimizeReport, ScanError, TableError, TableStateAccessError, TimeSeriesTable,
-    append::{AppendRequest, IntoRecordBatchReader},
+    append::{AppendRequest, IntoRecordBatchReader, ParquetCompression},
 };
 
 /// DataFusion table provider (enabled by default).

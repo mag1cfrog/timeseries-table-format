@@ -20,6 +20,7 @@ use arrow::{
     error::ArrowError,
 };
 use parquet::arrow::ArrowWriter as ParquetArrowWriter;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use snafu::prelude::*;
 use uuid::Uuid;
@@ -119,6 +120,88 @@ fn record_append_failure<T>(result: &Result<T, TableError>) {
 #[doc(hidden)]
 pub struct RecordBatchReaderSourceKind;
 
+/// Compression used for Parquet segments written by append.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParquetCompression {
+    /// Write Parquet pages without compression.
+    Uncompressed,
+    /// Use Snappy compression.
+    Snappy,
+    /// Use Zstandard compression with its standard level.
+    #[default]
+    Zstd,
+}
+
+impl From<ParquetCompression> for Compression {
+    fn from(value: ParquetCompression) -> Self {
+        match value {
+            ParquetCompression::Uncompressed => Self::UNCOMPRESSED,
+            ParquetCompression::Snappy => Self::SNAPPY,
+            ParquetCompression::Zstd => Self::ZSTD(Default::default()),
+        }
+    }
+}
+
+const DEFAULT_MAX_ROWS_PER_ROW_GROUP: usize = 1024 * 1024;
+const DEFAULT_MAX_BYTES_PER_ROW_GROUP: usize = 128 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppendWriterSettings {
+    compression: ParquetCompression,
+    max_rows_per_row_group: usize,
+    max_bytes_per_row_group: usize,
+}
+
+impl Default for AppendWriterSettings {
+    fn default() -> Self {
+        Self {
+            compression: ParquetCompression::default(),
+            max_rows_per_row_group: DEFAULT_MAX_ROWS_PER_ROW_GROUP,
+            max_bytes_per_row_group: DEFAULT_MAX_BYTES_PER_ROW_GROUP,
+        }
+    }
+}
+
+impl AppendWriterSettings {
+    fn from_source<S, SourceKind>(source: &S) -> Self
+    where
+        S: IntoRecordBatchReader<SourceKind>,
+    {
+        Self {
+            compression: source.effective_compression().unwrap_or_default(),
+            max_rows_per_row_group: source
+                .effective_max_rows_per_row_group()
+                .unwrap_or(DEFAULT_MAX_ROWS_PER_ROW_GROUP),
+            max_bytes_per_row_group: source
+                .effective_max_bytes_per_row_group()
+                .unwrap_or(DEFAULT_MAX_BYTES_PER_ROW_GROUP),
+        }
+    }
+
+    fn validate(self) -> Result<Self, AppendError> {
+        if self.max_rows_per_row_group == 0 {
+            return Err(AppendError::InvalidMaxRowsPerRowGroup {
+                max_rows_per_row_group: 0,
+            });
+        }
+        if self.max_bytes_per_row_group == 0 {
+            return Err(AppendError::InvalidMaxBytesPerRowGroup {
+                max_bytes_per_row_group: 0,
+            });
+        }
+        Ok(self)
+    }
+
+    fn writer_properties(self) -> WriterProperties {
+        WriterProperties::builder()
+            .set_compression(self.compression.into())
+            .set_max_row_group_row_count(Some(self.max_rows_per_row_group))
+            .set_max_row_group_bytes(Some(self.max_bytes_per_row_group))
+            .build()
+    }
+}
+
 /// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
 ///
 /// Implementations preserve non-`Send` readers. The `SourceKind` parameter is an
@@ -128,9 +211,21 @@ pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
     /// Reader produced from this source.
     type Reader: RecordBatchReader;
 
+    /// Return a per-append Parquet compression override, when configured.
+    #[doc(hidden)]
+    fn effective_compression(&self) -> Option<ParquetCompression> {
+        None
+    }
+
     /// Return a per-append Parquet row-group limit, when configured.
     #[doc(hidden)]
     fn effective_max_rows_per_row_group(&self) -> Option<usize> {
+        None
+    }
+
+    /// Return a per-append Parquet row-group byte limit, when configured.
+    #[doc(hidden)]
+    fn effective_max_bytes_per_row_group(&self) -> Option<usize> {
         None
     }
 
@@ -140,29 +235,38 @@ pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
 
 /// One Arrow source plus physical settings for a single append.
 ///
-/// Pass the source directly to [`TimeSeriesTable::append`] to use the current
-/// Parquet writer defaults. Wrap it in `AppendRequest` only when one append
-/// needs an explicit output row-group limit. A nested request inherits its
-/// source's limit unless the outer request replaces it.
+/// Pass the source directly to [`TimeSeriesTable::append`] to use Zstandard
+/// compression and row groups bounded by 1,048,576 rows and 128 MiB estimated
+/// encoded bytes. Wrap it in `AppendRequest` only when one append needs an
+/// explicit physical override. A nested request inherits each setting from its
+/// source unless the outer request replaces it.
 #[derive(Debug)]
 #[must_use = "an append request has no effect until passed to TimeSeriesTable::append"]
 pub struct AppendRequest<S> {
     source: S,
+    compression: Option<ParquetCompression>,
     max_rows_per_row_group: Option<usize>,
+    max_bytes_per_row_group: Option<usize>,
 }
 
 impl<S> AppendRequest<S> {
-    /// Create a request without adding a row-group override.
+    /// Create a request without adding physical writer overrides.
     ///
-    /// Ordinary Arrow sources therefore use the current Parquet writer
-    /// defaults. If `source` already carries a limit, this request inherits it
-    /// until [`max_rows_per_row_group`](Self::max_rows_per_row_group) replaces
-    /// it.
+    /// If `source` already carries overrides, this request inherits each one
+    /// until the corresponding builder method replaces it.
     pub fn new(source: S) -> Self {
         Self {
             source,
+            compression: None,
             max_rows_per_row_group: None,
+            max_bytes_per_row_group: None,
         }
+    }
+
+    /// Set Parquet compression for this append.
+    pub fn compression(mut self, compression: ParquetCompression) -> Self {
+        self.compression = Some(compression);
+        self
     }
 
     /// Limit output Parquet row groups to this many rows for this append.
@@ -173,6 +277,16 @@ impl<S> AppendRequest<S> {
     /// or consumed.
     pub fn max_rows_per_row_group(mut self, max_rows_per_row_group: usize) -> Self {
         self.max_rows_per_row_group = Some(max_rows_per_row_group);
+        self
+    }
+
+    /// Limit output Parquet row groups to this many estimated encoded bytes.
+    ///
+    /// This is not a strict process-memory ceiling, and a single oversized value
+    /// may exceed it. Zero is rejected by [`TimeSeriesTable::append`] before the
+    /// source is inspected or consumed.
+    pub fn max_bytes_per_row_group(mut self, max_bytes_per_row_group: usize) -> Self {
+        self.max_bytes_per_row_group = Some(max_bytes_per_row_group);
         self
     }
 }
@@ -186,9 +300,19 @@ where
 {
     type Reader = S::Reader;
 
+    fn effective_compression(&self) -> Option<ParquetCompression> {
+        self.compression
+            .or_else(|| self.source.effective_compression())
+    }
+
     fn effective_max_rows_per_row_group(&self) -> Option<usize> {
         self.max_rows_per_row_group
             .or_else(|| self.source.effective_max_rows_per_row_group())
+    }
+
+    fn effective_max_bytes_per_row_group(&self) -> Option<usize> {
+        self.max_bytes_per_row_group
+            .or_else(|| self.source.effective_max_bytes_per_row_group())
     }
 
     fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
@@ -627,9 +751,10 @@ impl TimeSeriesTable {
     /// widenings are accepted: `Int8 -> Int32/Int64`, `Int16 -> Int32/Int64`,
     /// `Int32 -> Int64`, `UInt8/UInt16/UInt32 -> UInt64`, and
     /// `Float32 -> Float64`.
-    /// Wrap the source in [`AppendRequest`] and call
-    /// [`AppendRequest::max_rows_per_row_group`] to limit output Parquet row
-    /// groups for only this append.
+    /// New segments use Zstandard compression and row groups bounded by
+    /// 1,048,576 rows and 128 MiB estimated encoded bytes. Wrap the source in
+    /// [`AppendRequest`] to override those physical settings for only this
+    /// append.
     #[tracing::instrument(
         name = "table.append",
         target = "timeseries_table_format::table::append",
@@ -652,12 +777,7 @@ impl TimeSeriesTable {
         let append_result: Result<u64, AppendError> = async {
             self.ensure_write_compatible().map_err(AppendError::from)?;
 
-            let max_rows_per_row_group = source.effective_max_rows_per_row_group();
-            if max_rows_per_row_group == Some(0) {
-                return Err(AppendError::InvalidMaxRowsPerRowGroup {
-                    max_rows_per_row_group: 0,
-                });
-            }
+            let writer_settings = AppendWriterSettings::from_source(&source).validate()?;
             let next_version =
                 checked_next_version(self.state.version).map_err(AppendError::from)?;
             let mut reader = source.into_record_batch_reader()?;
@@ -691,13 +811,9 @@ impl TimeSeriesTable {
                     .await
                     .map_err(AppendError::from)?;
             let write_result = async {
-                let writer_properties = max_rows_per_row_group.map(|max_rows| {
-                    WriterProperties::builder()
-                        .set_max_row_group_row_count(Some(max_rows))
-                        .build()
-                });
+                let writer_properties = writer_settings.writer_properties();
                 let mut writer =
-                    ParquetArrowWriter::try_new(sink, output_schema, writer_properties)
+                    ParquetArrowWriter::try_new(sink, output_schema, Some(writer_properties))
                         .context(ParquetWriteSnafu)?;
                 writer.write(&first_batch).context(ParquetWriteSnafu)?;
                 drop(first_batch);
@@ -776,9 +892,9 @@ mod tests {
     };
     use arrow::{
         array::{
-            Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
-            Int64Array, StringArray, TimestampMillisecondArray, UInt32Array, UInt64Array,
-            new_null_array,
+            Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array,
+            Int32Array, Int64Array, StringArray, TimestampMillisecondArray, UInt32Array,
+            UInt64Array, new_null_array,
         },
         datatypes::{DataType, Field, Fields, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
@@ -1493,6 +1609,192 @@ mod tests {
         assert!(matches!(result, Err(AppendError::EmptyInput)));
     }
 
+    #[test]
+    fn append_writer_defaults_are_compressed_and_bounded() {
+        let settings = AppendWriterSettings::default();
+        let properties = settings.writer_properties();
+
+        assert_eq!(settings.compression, ParquetCompression::Zstd);
+        assert_eq!(
+            properties.max_row_group_row_count(),
+            Some(DEFAULT_MAX_ROWS_PER_ROW_GROUP)
+        );
+        assert_eq!(
+            properties.max_row_group_bytes(),
+            Some(DEFAULT_MAX_BYTES_PER_ROW_GROUP)
+        );
+    }
+
+    #[test]
+    fn append_request_nested_writer_settings_inherit_and_override() -> TestResult {
+        let inner = AppendRequest::new(timestamp_only_batch(1)?)
+            .compression(ParquetCompression::Snappy)
+            .max_rows_per_row_group(3)
+            .max_bytes_per_row_group(30);
+        let inherited = AppendWriterSettings::from_source(&AppendRequest::new(inner));
+        assert_eq!(
+            inherited,
+            AppendWriterSettings {
+                compression: ParquetCompression::Snappy,
+                max_rows_per_row_group: 3,
+                max_bytes_per_row_group: 30,
+            }
+        );
+
+        let overridden = AppendWriterSettings::from_source(
+            &AppendRequest::new(
+                AppendRequest::new(timestamp_only_batch(1)?)
+                    .compression(ParquetCompression::Snappy)
+                    .max_rows_per_row_group(3)
+                    .max_bytes_per_row_group(30),
+            )
+            .compression(ParquetCompression::Zstd)
+            .max_rows_per_row_group(2)
+            .max_bytes_per_row_group(20),
+        );
+        assert_eq!(
+            overridden,
+            AppendWriterSettings {
+                compression: ParquetCompression::Zstd,
+                max_rows_per_row_group: 2,
+                max_bytes_per_row_group: 20,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_default_and_explicit_compression_reach_parquet_metadata() -> TestResult {
+        for (compression, expected) in [
+            (None, Compression::ZSTD(Default::default())),
+            (
+                Some(ParquetCompression::Uncompressed),
+                Compression::UNCOMPRESSED,
+            ),
+            (Some(ParquetCompression::Snappy), Compression::SNAPPY),
+            (
+                Some(ParquetCompression::Zstd),
+                Compression::ZSTD(Default::default()),
+            ),
+        ] {
+            let temp = TempDir::new()?;
+            let mut table =
+                TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                    .await?;
+            let batch = timestamp_only_batch(1)?;
+
+            match compression {
+                Some(compression) => {
+                    table
+                        .append(AppendRequest::new(batch).compression(compression))
+                        .await?;
+                }
+                None => {
+                    table.append(batch).await?;
+                }
+            }
+
+            let segment_path = &table
+                .state()
+                .segments
+                .values()
+                .next()
+                .ok_or("missing appended segment")?
+                .path;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(
+                temp.path().join(segment_path),
+            )?)?;
+            assert!(builder.metadata().row_groups().iter().all(|row_group| {
+                row_group
+                    .columns()
+                    .iter()
+                    .all(|column| column.compression() == expected)
+            }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_byte_limit_splits_row_groups_and_preserves_values() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(
+            location.clone(),
+            TableMeta::new_time_series(timestamp_only_index()),
+        )
+        .await?;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("payload", DataType::Binary, false),
+        ]));
+        let payloads = [vec![1_u8; 256], vec![2_u8; 256], vec![3_u8; 256]];
+        let batches = payloads
+            .iter()
+            .enumerate()
+            .map(|(minute, payload)| {
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(TimestampMillisecondArray::from(vec![
+                            minute as i64 * 60_000,
+                        ])),
+                        Arc::new(BinaryArray::from_iter_values([payload.as_slice()])),
+                    ],
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            table
+                .append(
+                    AppendRequest::new(batches)
+                        .compression(ParquetCompression::Uncompressed)
+                        .max_rows_per_row_group(100)
+                        .max_bytes_per_row_group(1),
+                )
+                .await?,
+            2
+        );
+
+        let segment_path = &table
+            .state()
+            .segments
+            .values()
+            .next()
+            .ok_or("missing appended segment")?
+            .path;
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(temp.path().join(segment_path))?)?;
+        assert_eq!(
+            builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|row_group| row_group.num_rows())
+                .collect::<Vec<_>>(),
+            [1, 1, 1]
+        );
+        let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
+        let mut actual_payloads = Vec::new();
+        for batch in batches {
+            let values = batch
+                .column_by_name("payload")
+                .and_then(|column| column.as_any().downcast_ref::<BinaryArray>())
+                .ok_or("missing binary payload column")?;
+            actual_payloads.extend((0..values.len()).map(|index| values.value(index).to_vec()));
+        }
+        assert_eq!(actual_payloads, payloads);
+
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn append_request_nested_settings_inherit_and_override() -> TestResult {
         for (inner_limit, outer_limit, expected_row_groups) in
@@ -1571,7 +1873,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_request_without_limit_matches_direct_append() -> TestResult {
+    async fn append_request_zero_byte_limit_is_rejected_before_inspecting_source() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let (reader, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+
+        assert!(matches!(
+            table
+                .append(AppendRequest::new(reader).max_bytes_per_row_group(0))
+                .await,
+            Err(TableError::Append {
+                source: AppendError::InvalidMaxBytesPerRowGroup {
+                    max_bytes_per_row_group: 0
+                }
+            })
+        ));
+        assert_eq!(observations.schema_calls.get(), 0);
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(table.state().segments.is_empty());
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_request_without_overrides_matches_direct_append() -> TestResult {
         let direct_root = TempDir::new()?;
         let request_root = TempDir::new()?;
         let mut direct = TimeSeriesTable::create(
