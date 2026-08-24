@@ -240,6 +240,10 @@ class TimeSeriesTable:
         | pyarrow.Table
         | pyarrow.RecordBatchReader
         | _ArrowStreamExportable,
+        *,
+        compression: Literal["uncompressed", "snappy", "zstd"] | None = None,
+        max_rows_per_row_group: int | None = None,
+        max_bytes_per_row_group: int | None = None,
     ) -> int:
         """Append Arrow data and return the committed table version.
 
@@ -249,6 +253,12 @@ class TimeSeriesTable:
             A `pyarrow.RecordBatch`, `pyarrow.Table`, `pyarrow.RecordBatchReader`, or another
             object implementing `__arrow_c_stream__`. File paths, pandas objects, NumPy arrays,
             mappings, row iterables, and arbitrary batch iterables are not converted implicitly.
+        compression:
+            Parquet compression for this append. `None` uses the Zstd default.
+        max_rows_per_row_group:
+            Maximum rows per output Parquet row group. `None` uses 1,048,576 rows.
+        max_bytes_per_row_group:
+            Maximum estimated encoded bytes per output Parquet row group. `None` uses 128 MiB.
 
         Returns
         -------
@@ -260,13 +270,15 @@ class TimeSeriesTable:
         Arrow streams are consumed lazily without staging or collecting the complete input in
         Python. `RecordBatch` and `Table` sources remain usable after append; readers and other
         single-use streams are consumed. After importing the stream, append releases the GIL.
+        The byte limit is not a strict process-memory ceiling, and a single oversized value may
+        exceed it. Settings apply only to this append and are not persisted in table metadata.
 
         Raises
         ------
         TypeError
             If `source` is not one of the supported Arrow forms.
         ValueError
-            If the Arrow C Stream exporter or capsule is invalid.
+            If a writer setting, Arrow C Stream exporter, or capsule is invalid.
         IndexIntervalOverlapError
             If incoming coverage overlaps committed coverage for the same entity.
         DuplicateIndexIntervalError
