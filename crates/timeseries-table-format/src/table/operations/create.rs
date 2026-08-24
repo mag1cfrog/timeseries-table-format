@@ -1,13 +1,13 @@
 //! Creating a time-series table.
 
-use snafu::{Backtrace, Snafu};
+use snafu::{Backtrace, ResultExt, Snafu};
 
 use crate::{
     metadata::{
         index::IndexSpecError,
         schema_compat::{SchemaCompatibilityError, ensure_index_spec_matches_schema},
     },
-    storage::{StorageError, TableLocation},
+    storage::TableLocation,
     table::{TableError, TimeSeriesTable},
     transaction_log::{
         CommitError, LogAction, TableKind, TableMeta, TableProtocolError, TransactionLogStore,
@@ -53,10 +53,8 @@ pub enum CreateTableError {
     #[snafu(context(false), display("Table schema validation failed: {source}"))]
     SchemaValidation {
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured because schema compatibility errors do not own one.
-        backtrace: Backtrace,
     },
 
     /// The target already contains a committed table.
@@ -64,14 +62,6 @@ pub enum CreateTableError {
     AlreadyExists {
         /// Existing transaction log version.
         current_version: u64,
-    },
-
-    /// Resolving or accessing the requested table location failed.
-    #[snafu(context(false), display("Table storage error: {source}"))]
-    Storage {
-        /// Complete storage failure.
-        #[snafu(source, backtrace)]
-        source: StorageError,
     },
 
     /// Accessing or publishing the transaction log failed.
@@ -172,7 +162,7 @@ impl TimeSeriesTable {
                 "failed"
             },
         );
-        result.map_err(TableError::from)
+        result.context(crate::table::error::CreateSnafu)
     }
 }
 

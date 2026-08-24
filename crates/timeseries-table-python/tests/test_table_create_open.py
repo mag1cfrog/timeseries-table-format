@@ -93,7 +93,7 @@ def test_create_twice_includes_root(tmp_path):
 def test_open_rejects_unsupported_scheme_includes_root():
     root = "s3://bucket/path"
 
-    with pytest.raises(ttf.TimeseriesTableError) as excinfo:
+    with pytest.raises(ttf.StorageError) as excinfo:
         ttf.TimeSeriesTable.open(root)
 
     e = excinfo.value
@@ -104,7 +104,7 @@ def test_open_rejects_unsupported_scheme_includes_root():
 def test_create_rejects_unsupported_scheme_includes_root():
     root = "s3://bucket/path"
 
-    with pytest.raises(ttf.TimeseriesTableError) as excinfo:
+    with pytest.raises(ttf.StorageError) as excinfo:
         ttf.TimeSeriesTable.create(
             table_root=root,
             index_column="ts",

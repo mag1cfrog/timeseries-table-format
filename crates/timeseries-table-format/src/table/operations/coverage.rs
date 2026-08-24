@@ -20,10 +20,8 @@ use crate::{
         Coverage, EntityCoverage, EntityIdentity, EntityValue,
         io::{CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
-    metadata::index::IndexKind,
     metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
-    table::{AppendError, TableError, TimeSeriesTable},
-    transaction_log::table_state::TableCoveragePointer,
+    table::{AppendError, TableError, TimeSeriesTable, error::CoverageQuerySnafu},
 };
 
 use self::error as query_error;
@@ -35,12 +33,6 @@ pub(crate) trait CoverageRecoveryError: Sized {
         segment_path: String,
         coverage_path: String,
         source: CoverageSidecarError,
-    ) -> Self;
-
-    fn coverage_index_mismatch(
-        expected: IndexKind,
-        actual: IndexKind,
-        pointer_version: u64,
     ) -> Self;
 }
 
@@ -58,18 +50,6 @@ impl CoverageRecoveryError for AppendError {
             segment_path,
             coverage_path,
             source: Box::new(source),
-        }
-    }
-
-    fn coverage_index_mismatch(
-        expected: IndexKind,
-        actual: IndexKind,
-        pointer_version: u64,
-    ) -> Self {
-        Self::CoverageSnapshotIndexKindMismatch {
-            expected,
-            actual,
-            pointer_version,
         }
     }
 }
@@ -91,19 +71,6 @@ impl CoverageRecoveryError for CoverageQueryError {
             segment_path,
             coverage_path,
             source: Box::new(source),
-        }
-    }
-
-    fn coverage_index_mismatch(
-        expected: IndexKind,
-        actual: IndexKind,
-        pointer_version: u64,
-    ) -> Self {
-        Self::TableCoverageIndexKindMismatch {
-            expected,
-            actual,
-            pointer_version,
-            backtrace: Box::new(Backtrace::capture()),
         }
     }
 }
@@ -241,21 +208,6 @@ impl TimeSeriesTable {
         Ok(acc)
     }
 
-    fn validate_coverage_pointer_index_kind<E>(&self, ptr: &TableCoveragePointer) -> Result<(), E>
-    where
-        E: CoverageRecoveryError,
-    {
-        let expected = self.index_spec().kind.clone();
-        if ptr.index_kind != expected {
-            return Err(E::coverage_index_mismatch(
-                expected,
-                ptr.index_kind.clone(),
-                ptr.version,
-            ));
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     async fn load_global_coverage_snapshot_for_query(
         &self,
@@ -267,14 +219,11 @@ impl TimeSeriesTable {
                 }
                 query_error::MissingTableCoveragePointerSnafu.fail()
             }
-            Some(ptr) => {
-                self.validate_coverage_pointer_index_kind::<CoverageQueryError>(ptr)?;
-                read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
-                    .await
-                    .context(query_error::CoverageSnapshotReadSnafu {
-                        coverage_path: ptr.coverage_path.clone(),
-                    })
-            }
+            Some(ptr) => read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path))
+                .await
+                .context(query_error::CoverageSnapshotReadSnafu {
+                    coverage_path: ptr.coverage_path.clone(),
+                }),
         }
     }
 
@@ -288,7 +237,7 @@ impl TimeSeriesTable {
     pub(crate) async fn load_table_coverage_snapshot_only(&self) -> Result<Coverage, TableError> {
         self.load_global_coverage_snapshot_for_query()
             .await
-            .context(crate::table::error::CoverageQuerySnafu)
+            .context(CoverageQuerySnafu)
     }
 
     /// Load table coverage for read paths (no writes).
@@ -310,8 +259,6 @@ impl TimeSeriesTable {
                 self.recover_global_coverage_from_segments::<E>().await
             }
             Some(ptr) => {
-                self.validate_coverage_pointer_index_kind::<E>(ptr)?;
-
                 match read_coverage_sidecar(self.location(), Path::new(&ptr.coverage_path)).await {
                     Ok(cov) => Ok(cov),
                     Err(snapshot_err) => {
@@ -356,7 +303,6 @@ impl TimeSeriesTable {
                 self.recover_entity_coverage_from_segments::<E>().await
             }
             Some(ptr) => {
-                self.validate_coverage_pointer_index_kind::<E>(ptr)?;
                 match self
                     .read_and_validate_entity_coverage_sidecar(Path::new(&ptr.coverage_path))
                     .await
@@ -405,7 +351,6 @@ use crate::{
     coverage::IndexIntervalId,
     coverage::index_interval::{index_interval_id_for_exclusive_end, index_interval_id_range},
     metadata::index::{IndexValue, validate_index_range},
-    table::error::CoverageQuerySnafu,
 };
 
 impl TimeSeriesTable {
@@ -725,7 +670,7 @@ mod tests {
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
         metadata::schema_compat::SchemaCompatibilityError,
         metadata::{
-            index::{IndexKind, IndexSpec, IndexValueError, TimeIndexGranularity},
+            index::{IndexKind, IndexSpec, IndexValueError},
             table::{TableKind, TableMeta},
         },
         storage::{StorageError, TableLocation},
@@ -734,6 +679,7 @@ mod tests {
             make_int32_entity_table_meta, utc_datetime, write_int32_entity_parquet,
             write_test_parquet,
         },
+        transaction_log::table_state::TableCoveragePointer,
     };
     use chrono::{DateTime, TimeZone, Utc};
     use snafu::ErrorCompat;
@@ -1902,40 +1848,6 @@ mod tests {
             ErrorCompat::backtrace(&error).expect("table backtrace"),
             ErrorCompat::backtrace(codec).expect("codec backtrace"),
         ));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn coverage_ratio_errors_on_index_granularity_mismatch() -> TestResult {
-        let (_tmp, mut table) = table_with_sparse_coverage().await?;
-        let mut ptr = table
-            .state()
-            .table_coverage
-            .clone()
-            .expect("snapshot pointer present");
-        ptr.index_kind = IndexKind::Timestamp {
-            index_granularity: TimeIndexGranularity::Hours(1),
-            timezone: None,
-        };
-        table.state_mut().table_coverage = Some(ptr.clone());
-
-        let err = table
-            .coverage_ratio_for_range(ts_from_secs(0), ts_from_secs(240))
-            .await
-            .expect_err("mismatched index granularity should error");
-
-        match err {
-            TableError::CoverageQuery {
-                source:
-                    CoverageQueryError::TableCoverageIndexKindMismatch {
-                        expected, actual, ..
-                    },
-            } => {
-                assert_eq!(expected, table.index_spec().kind);
-                assert_eq!(actual, ptr.index_kind);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
         Ok(())
     }
 

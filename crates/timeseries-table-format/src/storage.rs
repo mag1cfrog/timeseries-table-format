@@ -33,8 +33,10 @@ mod io;
 pub(crate) use io::*;
 
 mod table_location;
-pub(crate) use table_location::normalize_relative_storage_path;
 pub use table_location::*;
+pub(crate) use table_location::{
+    ensure_canonical_relative_storage_path, normalize_relative_storage_path,
+};
 
 mod output;
 pub use output::*;

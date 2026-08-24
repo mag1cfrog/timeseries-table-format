@@ -608,6 +608,16 @@ impl TimeSeriesTable {
         Ok(new_version)
     }
 
+    /// Check whether this client supports appending to the current table.
+    ///
+    /// Higher-level wrappers can call this before inspecting or converting an
+    /// append input. [`Self::append`] repeats the check before writing.
+    pub fn ensure_append_supported(&self) -> Result<(), TableError> {
+        self.ensure_write_compatible()
+            .map_err(AppendError::from)
+            .context(crate::table::error::AppendSnafu)
+    }
+
     /// Append Arrow record batches into one table-managed Parquet segment.
     ///
     /// Rows need not be ordered by the table's ordered index. The source is
@@ -735,7 +745,7 @@ impl TimeSeriesTable {
             }
         }
         .await;
-        let result = append_result.map_err(TableError::from);
+        let result = append_result.context(crate::table::error::AppendSnafu);
         record_append_failure(&result);
         result
     }
@@ -744,6 +754,8 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snafu::IntoError;
+
     use crate::coverage::io::{
         CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar,
     };
@@ -4331,70 +4343,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_fails_when_table_snapshot_granularity_mismatches_index() -> TestResult {
-        let tmp = TempDir::new()?;
-        let location = TableLocation::local(tmp.path());
-        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-
-        let rel1 = "data/seg-granularity-a.parquet";
-        let rel2 = "data/seg-granularity-b.parquet";
-        let path1 = tmp.path().join(rel1);
-        let path2 = tmp.path().join(rel2);
-
-        write_test_parquet(
-            &path1,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 1_000,
-                symbol: "A",
-                price: 10.0,
-            }],
-        )?;
-        write_test_parquet(
-            &path2,
-            true,
-            false,
-            &[TestRow {
-                ts_millis: 120_000,
-                symbol: "A",
-                price: 20.0,
-            }],
-        )?;
-
-        append_parquet_fixture(&mut table, rel1).await?;
-
-        // Tamper with the snapshot pointer's index granularity.
-        let incompatible_granularity = TimeIndexGranularity::Hours(1);
-        let ptr = table
-            .state
-            .table_coverage
-            .as_ref()
-            .expect("pointer present")
-            .clone();
-        table.state.table_coverage = Some(TableCoveragePointer {
-            index_kind: IndexKind::Timestamp {
-                index_granularity: incompatible_granularity.clone(),
-                timezone: None,
-            },
-            coverage_path: ptr.coverage_path.clone(),
-            version: ptr.version,
-        });
-
-        let err = append_parquet_fixture(&mut table, rel2)
-            .await
-            .expect_err("append should fail when snapshot granularity mismatches the index");
-
-        assert!(matches!(
-            err,
-            TableError::Append {
-                source: AppendError::CoverageSnapshotIndexKindMismatch { .. }
-            }
-        ));
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn generated_segment_metadata_failure_preserves_source_cleans_data_and_allows_retry()
     -> TestResult {
         let tmp = TempDir::new()?;
@@ -4418,7 +4366,7 @@ mod tests {
             .rollback_created_artifacts(&[segment_path.to_string()], source)
             .await;
         data_guard.disarm();
-        let error = TableError::from(source);
+        let error = crate::table::error::AppendSnafu.into_error(source);
 
         assert!(matches!(
             &error,

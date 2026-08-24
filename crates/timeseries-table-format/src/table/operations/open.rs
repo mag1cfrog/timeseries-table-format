@@ -1,9 +1,9 @@
 //! Opening an existing time-series table.
 
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 use crate::{
-    storage::{StorageError, TableLocation},
+    storage::TableLocation,
     table::{TableError, TimeSeriesTable},
     transaction_log::{CommitError, TableKind, TransactionLogStore},
 };
@@ -22,14 +22,6 @@ pub enum OpenTableError {
     NotTimeSeries {
         /// Loaded table kind.
         kind: TableKind,
-    },
-
-    /// Resolving or accessing the requested table location failed.
-    #[snafu(context(false), display("Table storage error: {source}"))]
-    Storage {
-        /// Complete storage failure.
-        #[snafu(source, backtrace)]
-        source: StorageError,
     },
 
     /// Reading or replaying the transaction log failed.
@@ -87,7 +79,7 @@ impl TimeSeriesTable {
                 "failed"
             },
         );
-        result.map_err(TableError::from)
+        result.context(crate::table::error::OpenSnafu)
     }
 }
 

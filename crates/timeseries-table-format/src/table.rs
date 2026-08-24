@@ -70,11 +70,7 @@ impl TimeSeriesTable {
         self.log.location()
     }
 
-    /// Check whether this client can mutate the current table state.
-    ///
-    /// Mutating methods repeat this check. Higher-level wrappers can call it
-    /// before inspecting an input that will be passed to a mutation.
-    pub fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
+    pub(crate) fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
         self.state.table_meta.ensure_write_compatible()
     }
 }

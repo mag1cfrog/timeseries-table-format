@@ -6,7 +6,7 @@
 //! logic isolated from the append-only write path and documents the invariant
 //! that table readers must see a state consistent with the latest committed
 //! version.
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 #[cfg(feature = "test-counters")]
 use std::cell::Cell;
@@ -33,32 +33,18 @@ use crate::{
         schema_compat::{ensure_entity_identity_matches_schema, ensure_index_spec_matches_schema},
         segments::sort_segment_meta_by_index,
     },
-    storage::normalize_relative_storage_path,
+    storage::ensure_canonical_relative_storage_path,
     transaction_log::*,
 };
 
 fn validate_persisted_storage_path(path: &str, description: &str) -> Result<(), CommitError> {
-    let (canonical, _) = match normalize_relative_storage_path(Path::new(path)) {
-        Ok(path) => path,
-        Err(source) => {
-            return Err(CommitError::InvalidPersistedPath {
-                description: description.to_string(),
-                path: path.to_string(),
-                source: Box::new(source),
-            });
-        }
-    };
-
-    if canonical != path {
-        return Err(CommitError::NonCanonicalPersistedPath {
+    ensure_canonical_relative_storage_path(path).map_err(|source| {
+        CommitError::InvalidPersistedPath {
             description: description.to_string(),
             path: path.to_string(),
-            canonical,
-            backtrace: Box::new(snafu::Backtrace::capture()),
-        });
-    }
-
-    Ok(())
+            source: Box::new(source),
+        }
+    })
 }
 
 /// Pointer to table coverage metadata including index descriptor, path, and version.
@@ -222,7 +208,6 @@ impl TransactionLogStore {
                 ensure_index_spec_matches_schema(schema, index).map_err(|source| {
                     CommitError::TableSchemaCompatibility {
                         source: Box::new(source),
-                        backtrace: snafu::Backtrace::capture(),
                     }
                 })?;
             }
@@ -246,7 +231,6 @@ impl TransactionLogStore {
                             |source| CommitError::SegmentEntityIdentitySchema {
                                 path: path.clone(),
                                 source: Box::new(source),
-                                backtrace: snafu::Backtrace::capture(),
                             },
                         )?;
                     }
@@ -264,7 +248,6 @@ impl TransactionLogStore {
                 segment.validate_bounds(&index.kind).map_err(|source| {
                     CommitError::SegmentMetadata {
                         source: Box::new(source),
-                        backtrace: snafu::Backtrace::capture(),
                     }
                 })?;
             }
@@ -992,11 +975,7 @@ mod tests {
                     .rebuild_table_state()
                     .await
                     .expect_err("noncanonical segment action path should be rejected");
-                assert!(matches!(
-                    err,
-                    CommitError::InvalidPersistedPath { .. }
-                        | CommitError::NonCanonicalPersistedPath { .. }
-                ));
+                assert!(matches!(err, CommitError::InvalidPersistedPath { .. }));
                 assert!(err.to_string().contains("segment path"), "{err}");
             }
         }
@@ -1044,11 +1023,7 @@ mod tests {
                     .rebuild_table_state()
                     .await
                     .expect_err("noncanonical coverage path should be rejected");
-                assert!(matches!(
-                    err,
-                    CommitError::InvalidPersistedPath { .. }
-                        | CommitError::NonCanonicalPersistedPath { .. }
-                ));
+                assert!(matches!(err, CommitError::InvalidPersistedPath { .. }));
                 assert!(err.to_string().contains(description), "{err}");
             }
         }

@@ -25,6 +25,17 @@ impl From<io::Error> for StorageBackendError {
 #[snafu(visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum StorageError {
+    /// A table-relative storage path is invalid or non-canonical.
+    #[snafu(display("Invalid table-relative storage path {path:?}: {reason}"))]
+    InvalidRelativePath {
+        /// Rejected table-relative path.
+        path: String,
+        /// Reason the path cannot be used as its canonical storage key.
+        reason: String,
+        /// Backtrace captured at the path-validation boundary.
+        backtrace: Box<Backtrace>,
+    },
+
     /// The specified path was not found.
     #[snafu(display("Path not found: {path}"))]
     NotFound {

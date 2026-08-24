@@ -29,7 +29,7 @@ use parquet::{
     arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder},
     errors::ParquetError,
 };
-use snafu::{Backtrace, prelude::*};
+use snafu::{Backtrace, IntoError, prelude::*};
 
 use crate::metadata::{
     index::{IndexValue, IndexValueError, validate_index_range},
@@ -509,7 +509,7 @@ impl TimeSeriesTable {
         let end = end.into();
         let stream = self.build_scan_stream(start, end).context(ScanSnafu)?;
         Ok(Box::pin(
-            stream.map_err(|source| TableError::Scan { source }),
+            stream.map_err(|source| ScanSnafu.into_error(source)),
         ))
     }
 }
@@ -2140,7 +2140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_range_preserves_non_not_found_storage_error() -> TestResult {
+    async fn scan_range_preserves_invalid_relative_path_source() -> TestResult {
         let tmp = TempDir::new()?;
         let kind = IndexKind::Int64 {
             index_granularity: NonZeroU64::new(1).unwrap(),
@@ -2172,7 +2172,7 @@ mod tests {
 
         assert!(matches!(
             storage_source,
-            storage::StorageError::OtherIo { .. }
+            storage::StorageError::InvalidRelativePath { .. }
         ));
         assert!(std::ptr::eq(
             ErrorCompat::backtrace(&error).expect("table backtrace"),

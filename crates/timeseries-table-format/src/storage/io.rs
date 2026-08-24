@@ -849,12 +849,18 @@ mod tests {
             let write_error = write_new(&location, &path, b"escaped")
                 .await
                 .expect_err("outside write path must be rejected");
-            assert!(matches!(write_error, StorageError::OtherIo { .. }));
+            assert!(matches!(
+                write_error,
+                StorageError::InvalidRelativePath { .. }
+            ));
 
             let read_error = read_all_bytes(&location, &path)
                 .await
                 .expect_err("outside read path must be rejected");
-            assert!(matches!(read_error, StorageError::OtherIo { .. }));
+            assert!(matches!(
+                read_error,
+                StorageError::InvalidRelativePath { .. }
+            ));
         }
 
         assert!(!outside.exists());

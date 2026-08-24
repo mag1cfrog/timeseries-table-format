@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "datafusion")]
 use object_store::path::Path as ObjectStorePath;
-use snafu::IntoError;
 #[cfg(feature = "datafusion")]
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 
-use crate::storage::{OtherIoSnafu, StorageBackendError, StorageLocation, StorageResult};
+#[cfg(feature = "datafusion")]
+use crate::storage::{OtherIoSnafu, StorageBackendError};
+use crate::storage::{StorageError, StorageLocation, StorageResult};
 
 /// Table root location with table-scoped semantics.
 ///
@@ -73,6 +74,7 @@ impl TableLocation {
     }
 }
 
+/// Normalize a portable table-relative path into its storage key and native path.
 pub(crate) fn normalize_relative_storage_path(path: &Path) -> StorageResult<(String, PathBuf)> {
     let supplied = path
         .to_str()
@@ -118,16 +120,29 @@ pub(crate) fn normalize_relative_storage_path(path: &Path) -> StorageResult<(Str
     Ok((normalized, native_path))
 }
 
-fn invalid_relative_storage_path(path: &Path, reason: &str) -> crate::storage::StorageError {
+/// Verify that a table-relative storage key is already in canonical form.
+pub(crate) fn ensure_canonical_relative_storage_path(path: &str) -> StorageResult<()> {
+    let (canonical, _) = normalize_relative_storage_path(Path::new(path))?;
+    if canonical != path {
+        return Err(invalid_relative_storage_path(
+            Path::new(path),
+            format!("path is not canonical; expected {canonical:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_relative_storage_path(path: &Path, reason: impl Into<String>) -> StorageError {
     let path = if path.as_os_str().is_empty() {
         "<empty>".to_owned()
     } else {
         path.display().to_string()
     };
-    OtherIoSnafu { path: path.clone() }.into_error(StorageBackendError::from(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        format!("invalid table-relative storage path '{path}': {reason}"),
-    )))
+    StorageError::InvalidRelativePath {
+        path,
+        reason: reason.into(),
+        backtrace: Box::new(snafu::Backtrace::capture()),
+    }
 }
 
 #[cfg(test)]
@@ -137,7 +152,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_relative_storage_path_enforces_portable_relative_paths() {
+    fn normalize_relative_storage_path_normalizes_separators_and_rejects_unsafe_components() {
         assert_eq!(
             normalize_relative_storage_path(Path::new("data/seg.parquet")).unwrap(),
             (
@@ -164,7 +179,25 @@ mod tests {
         ] {
             let err = normalize_relative_storage_path(Path::new(invalid))
                 .expect_err("path must be rejected");
-            assert!(matches!(err, StorageError::OtherIo { .. }), "{invalid}");
+            assert!(
+                matches!(err, StorageError::InvalidRelativePath { .. }),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_relative_storage_path_rejects_normalizable_spellings() {
+        ensure_canonical_relative_storage_path("data/seg.parquet").unwrap();
+
+        for path in [r"data\seg.parquet", "data//seg.parquet"] {
+            let error = ensure_canonical_relative_storage_path(path)
+                .expect_err("non-canonical path must be rejected");
+            assert!(
+                matches!(error, StorageError::InvalidRelativePath { .. }),
+                "{path}"
+            );
+            assert!(error.to_string().contains("data/seg.parquet"));
         }
     }
 }

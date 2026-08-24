@@ -4,10 +4,7 @@ use crate::{
     coverage::{
         EntityIdentityError, index_interval::IndexIntervalMappingError, io::CoverageSidecarError,
     },
-    metadata::{
-        index::{IndexKind, IndexValueError},
-        schema_compat::SchemaCompatibilityError,
-    },
+    metadata::{index::IndexValueError, schema_compat::SchemaCompatibilityError},
 };
 
 /// Errors from table coverage queries and read-only coverage recovery.
@@ -46,10 +43,8 @@ pub enum CoverageQueryError {
     #[snafu(display("Coverage query schema compatibility error: {source}"))]
     SchemaCompatibility {
         /// Complete schema compatibility error.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the coverage query boundary.
-        backtrace: Box<Backtrace>,
     },
 
     /// An identity-free query was used on an entity-aware table.
@@ -93,21 +88,6 @@ pub enum CoverageQueryError {
     UnexpectedEntityIdentityColumn {
         /// Unknown entity column name.
         column: String,
-        /// Backtrace captured at the coverage query boundary.
-        backtrace: Box<Backtrace>,
-    },
-
-    /// The table coverage pointer uses a different ordered-index descriptor.
-    #[snafu(display(
-        "Table coverage index kind mismatch: expected {expected:?}, found {actual:?} (from coverage version {pointer_version})"
-    ))]
-    TableCoverageIndexKindMismatch {
-        /// Index descriptor defined by table metadata.
-        expected: IndexKind,
-        /// Index descriptor recorded in the table coverage pointer.
-        actual: IndexKind,
-        /// Log version where the mismatching pointer was recorded.
-        pointer_version: u64,
         /// Backtrace captured at the coverage query boundary.
         backtrace: Box<Backtrace>,
     },

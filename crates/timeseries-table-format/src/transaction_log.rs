@@ -182,10 +182,8 @@ pub enum CommitError {
     #[snafu(display("Persisted table schema is incompatible with its ordered index: {source}"))]
     TableSchemaCompatibility {
         /// Complete schema compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured while rebuilding table state.
-        backtrace: Backtrace,
     },
 
     /// A persisted single-entity segment identity is incompatible with the table schema.
@@ -194,35 +192,16 @@ pub enum CommitError {
         /// Persisted segment path.
         path: String,
         /// Complete entity identity compatibility failure.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured while rebuilding table state.
-        backtrace: Backtrace,
     },
 
     /// Persisted segment metadata violates its registered ordered-index domain.
     #[snafu(display("Invalid persisted segment metadata: {source}"))]
     SegmentMetadata {
         /// Complete segment metadata validation failure.
-        #[snafu(source(from(SegmentMetaError, Box::new)))]
+        #[snafu(source(from(SegmentMetaError, Box::new)), backtrace)]
         source: Box<SegmentMetaError>,
-        /// Backtrace captured while rebuilding table state.
-        backtrace: Backtrace,
-    },
-
-    /// A normalized persisted path differs from its stored representation.
-    #[snafu(display(
-        "Non-canonical persisted {description} {path:?}; canonical form is {canonical:?}"
-    ))]
-    NonCanonicalPersistedPath {
-        /// Kind of persisted path being validated.
-        description: String,
-        /// Persisted path as stored.
-        path: String,
-        /// Canonical table-relative representation.
-        canonical: String,
-        /// Backtrace captured while rebuilding table state.
-        backtrace: Box<Backtrace>,
     },
 
     /// Rebuilding table state was requested before the first commit.

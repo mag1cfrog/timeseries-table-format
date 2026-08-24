@@ -67,10 +67,8 @@ pub enum CoverageSidecarError {
     )]
     EntityIdentitySchema {
         /// Identity arity or scalar-type mismatch.
-        #[snafu(source(from(SchemaCompatibilityError, Box::new)))]
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
         source: Box<SchemaCompatibilityError>,
-        /// Backtrace captured at the sidecar boundary.
-        backtrace: Backtrace,
     },
 
     /// Storage I/O error (read, write, or metadata operations).

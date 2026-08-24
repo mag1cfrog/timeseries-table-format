@@ -306,7 +306,7 @@ fn cli_returned_error_is_printed_once_with_debug_enabled()
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
-        stderr.matches("Failed to open v0.1 table").count(),
+        stderr.matches("Failed to open time-series table").count(),
         1,
         "stderr:\n{stderr}"
     );
