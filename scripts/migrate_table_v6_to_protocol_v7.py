@@ -23,6 +23,8 @@ FORMAT_V6 = 6
 PROTOCOL_V7 = 7
 _U32_MAX = 2**32 - 1
 _U64_MAX = 2**64 - 1
+_I32_MIN = -(2**31)
+_I32_MAX = 2**31 - 1
 _UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z\Z")
 _CURRENT = re.compile(rb"[1-9][0-9]*[ \t\r\n\f\v]*\Z")
 _COMMIT_FILE = re.compile(r"([0-9]{10,})\.json\Z")
@@ -34,6 +36,23 @@ _ACTION_NAMES = {
     "RemoveSegment",
     "UpdateTableMeta",
     "UpdateTableCoverage",
+}
+_LOGICAL_SCALARS = {
+    "Bool",
+    "Int32",
+    "Int64",
+    "UInt64",
+    "Float32",
+    "Float64",
+    "Binary",
+    "Utf8",
+    "Int96",
+}
+_ENTITY_LOGICAL_TYPES = {
+    "utf8": "Utf8",
+    "int32": "Int32",
+    "int64": "Int64",
+    "uint64": "UInt64",
 }
 
 
@@ -107,6 +126,177 @@ def _timestamp(value: Any, commit: int, action: int | None, path: str) -> None:
         datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
         _fail(commit, action, path, "expected a valid RFC3339 UTC timestamp")
+
+
+def _logical_field(
+    value: Any, commit: int, action: int, path: str
+) -> tuple[str, str, bool]:
+    field = _object(value, commit, action, path)
+    _keys(field, {"name", "data_type", "nullable"}, set(), commit, action, path)
+    name = field["name"]
+    if not isinstance(name, str) or not name:
+        _fail(commit, action, f"{path}.name", "expected a non-empty string")
+    if type(field["nullable"]) is not bool:
+        _fail(commit, action, f"{path}.nullable", "expected a boolean")
+    data_type = _logical_data_type(
+        field["data_type"], commit, action, f"{path}.data_type"
+    )
+    return name, data_type, field["nullable"]
+
+
+def _logical_fields(
+    value: Any,
+    commit: int,
+    action: int,
+    path: str,
+    *,
+    require_nonempty: bool = False,
+) -> dict[str, str]:
+    if not isinstance(value, list) or (require_nonempty and not value):
+        requirement = (
+            "expected a non-empty array" if require_nonempty else "expected an array"
+        )
+        _fail(commit, action, path, requirement)
+    fields: dict[str, str] = {}
+    for index, raw_field in enumerate(value):
+        name, data_type, _ = _logical_field(
+            raw_field, commit, action, f"{path}[{index}]"
+        )
+        if name in fields:
+            _fail(commit, action, f"{path}[{index}].name", f"duplicate field {name!r}")
+        fields[name] = data_type
+    return fields
+
+
+def _logical_data_type(value: Any, commit: int, action: int, path: str) -> str:
+    if isinstance(value, str):
+        if value not in _LOGICAL_SCALARS:
+            _fail(commit, action, path, f"unknown logical data type {value!r}")
+        return value
+
+    data_type = _object(value, commit, action, path)
+    if len(data_type) != 1:
+        _fail(commit, action, path, "expected one logical data type variant")
+    variant, raw_payload = next(iter(data_type.items()))
+    payload_path = f"{path}.{variant}"
+    if variant == "Other":
+        if not isinstance(raw_payload, str) or not raw_payload:
+            _fail(commit, action, payload_path, "expected a non-empty string")
+        return variant
+    payload = _object(raw_payload, commit, action, payload_path)
+
+    if variant == "FixedBinary":
+        _keys(payload, {"byte_width"}, set(), commit, action, payload_path)
+        width = payload["byte_width"]
+        if type(width) is not int or not 1 <= width <= _I32_MAX:
+            _fail(
+                commit, action, f"{payload_path}.byte_width", "expected a positive i32"
+            )
+    elif variant == "Timestamp":
+        _keys(payload, {"unit", "timezone"}, set(), commit, action, payload_path)
+        if not isinstance(payload["unit"], str) or payload["unit"] not in {
+            "Millis",
+            "Micros",
+            "Nanos",
+        }:
+            _fail(
+                commit,
+                action,
+                f"{payload_path}.unit",
+                "expected Millis, Micros, or Nanos",
+            )
+        if payload["timezone"] is not None and not isinstance(payload["timezone"], str):
+            _fail(
+                commit,
+                action,
+                f"{payload_path}.timezone",
+                "expected a string or null",
+            )
+    elif variant == "Decimal":
+        _keys(payload, {"precision", "scale"}, set(), commit, action, payload_path)
+        precision = payload["precision"]
+        scale = payload["scale"]
+        if (
+            type(precision) is not int
+            or type(scale) is not int
+            or not 1 <= precision <= 76
+            or not 0 <= scale <= precision
+        ):
+            _fail(
+                commit,
+                action,
+                payload_path,
+                "expected 1 <= precision <= 76 and 0 <= scale <= precision",
+            )
+    elif variant == "Struct":
+        _keys(payload, {"fields"}, set(), commit, action, payload_path)
+        _logical_fields(
+            payload["fields"],
+            commit,
+            action,
+            f"{payload_path}.fields",
+            require_nonempty=True,
+        )
+    elif variant == "List":
+        _keys(payload, {"elements"}, set(), commit, action, payload_path)
+        _logical_field(payload["elements"], commit, action, f"{payload_path}.elements")
+    elif variant == "Map":
+        _keys(
+            payload,
+            {"key", "value", "keys_sorted"},
+            set(),
+            commit,
+            action,
+            payload_path,
+        )
+        _, _, key_nullable = _logical_field(
+            payload["key"], commit, action, f"{payload_path}.key"
+        )
+        if key_nullable:
+            _fail(commit, action, f"{payload_path}.key.nullable", "expected false")
+        if payload["value"] is not None:
+            _logical_field(payload["value"], commit, action, f"{payload_path}.value")
+        if type(payload["keys_sorted"]) is not bool:
+            _fail(commit, action, f"{payload_path}.keys_sorted", "expected a boolean")
+    else:
+        _fail(commit, action, path, f"unknown logical data type {variant!r}")
+    return variant
+
+
+def _logical_schema(
+    value: Any,
+    index: dict[str, Any],
+    commit: int,
+    action: int,
+    path: str,
+) -> dict[str, str] | None:
+    if value is None:
+        return None
+    schema = _object(value, commit, action, path)
+    _keys(schema, {"columns"}, set(), commit, action, path)
+    columns = _logical_fields(schema["columns"], commit, action, f"{path}.columns")
+    index_column = index["column"]
+    expected_index_type = {
+        "timestamp": "Timestamp",
+        "int64": "Int64",
+        "uint64": "UInt64",
+    }[index["kind"]["type"]]
+    if columns.get(index_column) != expected_index_type:
+        _fail(
+            commit,
+            action,
+            path,
+            f"index column {index_column!r} must have type {expected_index_type}",
+        )
+    for entity_column in index["entity_columns"]:
+        if columns.get(entity_column) not in _ENTITY_LOGICAL_TYPES.values():
+            _fail(
+                commit,
+                action,
+                path,
+                f"entity column {entity_column!r} has a missing or unsupported type",
+            )
+    return columns
 
 
 def _persisted_path(value: Any, commit: int, action: int, path: str) -> str:
@@ -188,11 +378,6 @@ def _transform_metadata(value: Any, commit: int, action: int, path: str) -> None
     ):
         _fail(commit, action, f"{path}.format_version", "expected exactly 6")
     _timestamp(metadata["created_at"], commit, action, f"{path}.created_at")
-    if metadata["logical_schema"] is not None and not isinstance(
-        metadata["logical_schema"], dict
-    ):
-        _fail(commit, action, f"{path}.logical_schema", "expected an object or null")
-
     table_kind = _object(metadata["kind"], commit, action, f"{path}.kind")
     _keys(table_kind, {"TimeSeries"}, set(), commit, action, f"{path}.kind")
     index = _object(table_kind["TimeSeries"], commit, action, f"{path}.kind.TimeSeries")
@@ -225,6 +410,9 @@ def _transform_metadata(value: Any, commit: int, action: int, path: str) -> None
             "expected unique non-empty strings distinct from the index column",
         )
     _transform_index_kind(index["kind"], commit, action, f"{path}.kind.TimeSeries.kind")
+    _logical_schema(
+        metadata["logical_schema"], index, commit, action, f"{path}.logical_schema"
+    )
 
     del metadata["format_version"]
     metadata["protocol_version"] = PROTOCOL_V7
@@ -246,6 +434,39 @@ def _validate_index_value(value: Any, commit: int, action: int, path: str) -> No
         _fail(commit, action, f"{path}.type", "unknown format-v6 index value type")
 
 
+def _validate_entity_value(value: Any, commit: int, action: int, path: str) -> str:
+    entity = _object(value, commit, action, path)
+    _keys(entity, {"type", "value"}, set(), commit, action, path)
+    tag = entity["type"]
+    raw = entity["value"]
+    if tag == "utf8":
+        if not isinstance(raw, str):
+            _fail(commit, action, f"{path}.value", "expected a string")
+    elif tag == "int32":
+        if type(raw) is not int or not _I32_MIN <= raw <= _I32_MAX:
+            _fail(commit, action, f"{path}.value", "expected an i32 integer")
+    elif tag == "int64":
+        if type(raw) is not int or not -(2**63) <= raw < 2**63:
+            _fail(commit, action, f"{path}.value", "expected an i64 integer")
+    elif tag == "uint64":
+        _unsigned(raw, _U64_MAX, commit, action, f"{path}.value")
+    else:
+        _fail(commit, action, f"{path}.type", "unknown entity value type")
+    return tag
+
+
+def _validate_entity_layout(value: Any, commit: int, action: int, path: str) -> None:
+    if isinstance(value, str) and value in {"NotApplicable", "Mixed"}:
+        return
+    layout = _object(value, commit, action, path)
+    _keys(layout, {"Single"}, set(), commit, action, path)
+    identity = layout["Single"]
+    if not isinstance(identity, list) or not identity:
+        _fail(commit, action, f"{path}.Single", "expected a non-empty array")
+    for index, entity in enumerate(identity):
+        _validate_entity_value(entity, commit, action, f"{path}.Single[{index}]")
+
+
 def _validate_segment(
     value: Any, commit: int, action: int, path: str, referenced: set[str]
 ) -> None:
@@ -261,6 +482,9 @@ def _validate_segment(
     referenced.add(_persisted_path(segment["path"], commit, action, f"{path}.path"))
     if segment["format"] != "parquet":
         _fail(commit, action, f"{path}.format", "expected parquet")
+    _validate_entity_layout(
+        segment["entity_layout"], commit, action, f"{path}.entity_layout"
+    )
     _validate_index_value(segment["index_min"], commit, action, f"{path}.index_min")
     _validate_index_value(segment["index_max"], commit, action, f"{path}.index_max")
     _unsigned(segment["row_count"], _U64_MAX, commit, action, f"{path}.row_count")
@@ -513,6 +737,10 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant {value!r}")
+
+
 def _load_commits(root: Path, current_version: int) -> list[dict[str, Any]]:
     log_dir = root / _LOG_DIR
     if not log_dir.is_dir() or log_dir.is_symlink():
@@ -550,6 +778,7 @@ def _load_commits(root: Path, current_version: int) -> list[dict[str, Any]]:
             commit = json.loads(
                 _read_bytes(path).decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_json_constant,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise MigrationError(
@@ -665,6 +894,18 @@ def _validate_v7_replay(commits: list[dict[str, Any]]) -> None:
         raise MigrationError("destination has segments but no logical schema")
 
     entity_count = len(table["entity_columns"])
+    schema_columns = (
+        {
+            field["name"]: (
+                field["data_type"]
+                if isinstance(field["data_type"], str)
+                else next(iter(field["data_type"]))
+            )
+            for field in metadata["logical_schema"]["columns"]
+        }
+        if metadata["logical_schema"] is not None
+        else {}
+    )
     for segment in all_segments:
         layout = segment["entity_layout"]
         valid_layout = (entity_count == 0 and layout == "NotApplicable") or (
@@ -683,6 +924,15 @@ def _validate_v7_replay(commits: list[dict[str, Any]]) -> None:
             raise MigrationError(
                 f"segment {segment['path']} has invalid entity layout for metadata"
             )
+        if isinstance(layout, dict):
+            for column, component in zip(
+                table["entity_columns"], layout["Single"], strict=True
+            ):
+                if schema_columns[column] != _ENTITY_LOGICAL_TYPES[component["type"]]:
+                    raise MigrationError(
+                        f"segment {segment['path']} entity {column!r} type does not "
+                        "match metadata"
+                    )
 
     for segment in live_segments.values():
         minimum = _index_value(segment["index_min"], kind["type"])
@@ -878,7 +1128,7 @@ def _print_report(report: MigrationReport) -> None:
         f"  TTF_MIGRATED_TABLE={table} TTF_EXPECTED_CURRENT={expected} "
         f"python -c {shlex.quote(python_check)}"
     )
-    print("  complete the full validation checklist in the temporary runbook")
+    print("  complete the full validation checklist in the migration runbook")
 
 
 def main(argv: list[str] | None = None) -> int:

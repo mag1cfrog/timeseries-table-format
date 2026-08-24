@@ -1,7 +1,7 @@
-# Temporary format-v6 to protocol-v7 migration runbook
+# Format-v6 to protocol-v7 migration runbook
 
-Delete this runbook, the migration script, and their migration-only tests after the
-internal user accepts the migration and before the 0.5 release.
+This is operator guidance for the repository migration tool. Running a private
+migration or cutover is not part of issue #400's repository acceptance criteria.
 
 ## Prerequisites
 
@@ -127,14 +127,11 @@ cargo test -p timeseries-table-format \
 Re-run the full scan against the disposable table and verify the expected appended
 rows. Do not append to the validated migration destination.
 
-## Cut over, rollback, and retire
+## Cut over and rollback
 
 Point the internal user's configuration to `TTF_DESTINATION_TABLE` only after every
 check passes. If validation or initial use fails, stop the user and point it back to
 `TTF_SOURCE_TABLE`; do not reverse-convert the destination.
 
 Retain the source until the internal user explicitly accepts the migrated table and
-the agreed backup-retention window passes. Record acceptance privately, then remove
-the script, this runbook, `scripts/test_migrate_table_v6_to_protocol_v7.py`, and
-`crates/timeseries-table-format/tests/migrate_table_v6_to_protocol_v7.rs` before
-0.5. Preserve the implementation and execution record in Git and issue #400.
+the agreed backup-retention window passes. Record operational results privately.

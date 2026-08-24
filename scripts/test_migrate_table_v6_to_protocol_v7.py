@@ -19,6 +19,13 @@ def _index(kind: str) -> dict[str, Any]:
 
 
 def _metadata(kind: str) -> dict[str, Any]:
+    index_type: Any
+    if kind == "timestamp":
+        index_type = {"Timestamp": {"unit": "Micros", "timezone": "UTC"}}
+    elif kind == "u_int64":
+        index_type = "UInt64"
+    else:
+        index_type = "Int64"
     return {
         "kind": {
             "TimeSeries": {
@@ -28,13 +35,22 @@ def _metadata(kind: str) -> dict[str, Any]:
             }
         },
         "logical_schema": {
-            "fields": [
+            "columns": [
+                {
+                    "name": "ts",
+                    "data_type": index_type,
+                    "nullable": False,
+                },
                 {
                     "name": "bucket",
                     "data_type": "Utf8",
                     "nullable": False,
-                    "metadata": {"description": "bucket_width"},
-                }
+                },
+                {
+                    "name": "bucket_width",
+                    "data_type": "Utf8",
+                    "nullable": False,
+                },
             ]
         },
         "created_at": "2026-08-23T12:34:56.123Z",
@@ -151,11 +167,11 @@ class TransformCommitsTests(unittest.TestCase):
                     self.assertNotIn("bucket", transformed_kind)
                     self.assertNotIn("bucket_width", transformed_kind)
                 self.assertEqual(
-                    metadata["logical_schema"]["fields"][0]["name"], "bucket"
-                )
-                self.assertEqual(
-                    metadata["logical_schema"]["fields"][0]["metadata"]["description"],
-                    "bucket_width",
+                    [
+                        column["name"]
+                        for column in metadata["logical_schema"]["columns"]
+                    ],
+                    ["ts", "bucket", "bucket_width"],
                 )
                 self.assertEqual(count, 2)
                 self.assertEqual(referenced, {"_coverage/table.bin"})
@@ -236,6 +252,53 @@ class TransformCommitsTests(unittest.TestCase):
                 ]
             )
 
+        malformed_schema = _metadata("int64")
+        malformed_schema["logical_schema"] = {"fields": []}
+        with self.assertRaisesRegex(MigrationError, "missing fields.*columns"):
+            transform_commits([_commit({"UpdateTableMeta": malformed_schema})])
+
+        malformed_timestamp = _metadata("timestamp")
+        malformed_timestamp["logical_schema"]["columns"][0]["data_type"] = {
+            "Timestamp": {"unit": {}, "timezone": "UTC"}
+        }
+        with self.assertRaisesRegex(
+            MigrationError, "expected Millis, Micros, or Nanos"
+        ):
+            transform_commits([_commit({"UpdateTableMeta": malformed_timestamp})])
+
+        mixed_version = _metadata("int64")
+        mixed_version["format_version"] = 5
+        with self.assertRaisesRegex(MigrationError, "expected exactly 6"):
+            transform_commits(
+                [
+                    _commit({"UpdateTableMeta": _metadata("int64")}),
+                    _commit({"UpdateTableMeta": mixed_version}, version=2),
+                ]
+            )
+
+        bad_base = _commit({"UpdateTableMeta": _metadata("int64")})
+        bad_base["base_version"] = 1
+        with self.assertRaisesRegex(MigrationError, "base_version.*expected 0"):
+            transform_commits([bad_base])
+
+        invalid_entity = _metadata("int64")
+        invalid_entity["kind"]["TimeSeries"]["entity_columns"] = ["entity"]
+        invalid_entity["logical_schema"]["columns"].append(
+            {"name": "entity", "data_type": "Utf8", "nullable": False}
+        )
+        segment = {
+            "path": "data/segment.parquet",
+            "format": "parquet",
+            "entity_layout": {"Single": [{"type": "future", "value": "A"}]},
+            "index_min": {"type": "int64", "value": 0},
+            "index_max": {"type": "int64", "value": 1},
+            "row_count": 2,
+        }
+        with self.assertRaisesRegex(MigrationError, "unknown entity value type"):
+            transform_commits(
+                [_commit({"UpdateTableMeta": invalid_entity}, {"AddSegment": segment})]
+            )
+
 
 class FilesystemMigrationTests(unittest.TestCase):
     def test_copies_validates_and_publishes_independent_files(self) -> None:
@@ -304,6 +367,9 @@ class FilesystemMigrationTests(unittest.TestCase):
                     migration.migrate_table(source_arg, destination_arg)
 
     def test_rejects_invalid_log_states_without_publishing(self) -> None:
+        def missing_current(source: Path) -> None:
+            (source / "_timeseries_log" / "CURRENT").unlink()
+
         def malformed_current(source: Path) -> None:
             (source / "_timeseries_log" / "CURRENT").write_text("02\n")
 
@@ -318,6 +384,12 @@ class FilesystemMigrationTests(unittest.TestCase):
 
         def malformed_json(source: Path) -> None:
             (source / "_timeseries_log" / "0000000002.json").write_text("{\n")
+
+        def nonstandard_json_constant(source: Path) -> None:
+            path = source / "_timeseries_log" / "0000000002.json"
+            path.write_text(
+                path.read_text().replace('"row_count": 3', '"row_count": NaN')
+            )
 
         def duplicate_json_member(source: Path) -> None:
             path = source / "_timeseries_log" / "0000000002.json"
@@ -342,11 +414,13 @@ class FilesystemMigrationTests(unittest.TestCase):
             path.write_text(json.dumps(commit))
 
         cases = (
+            (missing_current, "CURRENT"),
             (malformed_current, "CURRENT"),
             (missing_commit, "commits but CURRENT"),
             (extra_commit, "commits but CURRENT"),
             (unexpected_log_file, "unexpected temporary table entry"),
             (malformed_json, "malformed JSON"),
+            (nonstandard_json_constant, "non-standard JSON constant"),
             (duplicate_json_member, "duplicate JSON member"),
             (noncanonical_numeric_name, "noncanonical numeric commit filename"),
             (mismatched_payload, "expected 2"),
@@ -414,10 +488,19 @@ class FilesystemMigrationTests(unittest.TestCase):
     def test_current_change_and_publication_failure_clean_up_only_temporary_output(
         self,
     ) -> None:
+        original_copy = migration._copy_table
+
+        def hard_link_copy(source: Path, destination: Path) -> None:
+            original_copy(source, destination)
+            copied = destination / "data" / "segment.parquet"
+            copied.unlink()
+            os.link(source / "data" / "segment.parquet", copied)
+
         for failure in (
             "copy",
             "current_after_copy",
             "current_after_transform",
+            "hardlink",
             "publish",
         ):
             with (
@@ -443,6 +526,10 @@ class FilesystemMigrationTests(unittest.TestCase):
                 elif failure == "current_after_transform":
                     context = patch.object(
                         migration, "_read_current", side_effect=(2, 2, 3)
+                    )
+                elif failure == "hardlink":
+                    context = patch.object(
+                        migration, "_copy_table", side_effect=hard_link_copy
                     )
                 else:
                     context = patch.object(
