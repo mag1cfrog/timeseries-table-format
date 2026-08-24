@@ -49,9 +49,9 @@ def test_python_protocol_distinguishes_reads_and_writes_before_input_inspection(
     opened = ttf.TimeSeriesTable.open(str(root))
     session = ttf.Session()
     session.register_tstable("protocol_table", str(root))
-    assert session.sql("SELECT COUNT(*) AS count FROM protocol_table")["count"].to_pylist() == [
-        2
-    ]
+    assert session.sql("SELECT COUNT(*) AS count FROM protocol_table")[
+        "count"
+    ].to_pylist() == [2]
 
     class UninspectedSource:
         calls = 0
@@ -79,9 +79,7 @@ def test_python_protocol_distinguishes_reads_and_writes_before_input_inspection(
     assert getattr(optimize_error.value, "table_root", None) == str(root)
     assert opened.version() == version_before
 
-    _set_protocol_features(
-        root, reader=["future_reader"], writer=["future_writer"]
-    )
+    _set_protocol_features(root, reader=["future_reader"], writer=["future_writer"])
     with pytest.raises(
         ttf.TimeseriesTableError, match="unsupported table reader features"
     ) as open_error:
