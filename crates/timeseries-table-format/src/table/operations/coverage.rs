@@ -670,7 +670,7 @@ mod tests {
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
         metadata::schema_compat::SchemaCompatibilityError,
         metadata::{
-            index::{IndexKind, IndexSpec, IndexValueError, TimeIndexGranularity},
+            index::{IndexKind, IndexSpec, IndexValueError},
             table::{TableKind, TableMeta},
         },
         storage::{StorageError, TableLocation},

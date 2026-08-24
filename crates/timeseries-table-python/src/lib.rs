@@ -1748,22 +1748,11 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
         /// The stream is consumed lazily while the GIL is released.
         fn append(&mut self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<u64> {
-            use timeseries_table_format::table::{AppendError, TableError};
-
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
-            self.inner
-                .ensure_write_compatible()
-                .map_err(AppendError::from)
-                .map_err(TableError::from)
-                .map_err(|error| {
-                    table_error_to_py_with_root(
-                        py,
-                        &table_root_for_err,
-                        &entity_columns_for_err,
-                        error,
-                    )
-                })?;
+            self.inner.ensure_append_supported().map_err(|error| {
+                table_error_to_py_with_root(py, &table_root_for_err, &entity_columns_for_err, error)
+            })?;
             let reader = record_batch_reader_from_python(source)?;
             let rt = tokio_runner::global_runtime()?;
             let table = &mut self.inner;

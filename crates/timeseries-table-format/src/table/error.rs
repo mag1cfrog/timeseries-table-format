@@ -89,8 +89,8 @@ mod tests {
     use crate::coverage::{CoverageCodecError, CoverageSidecarError};
     use crate::formats::parquet::EntityRewriteError;
     use crate::metadata::{
-        index::IndexSpecError,
-        logical_schema::LogicalToArrowSchemaError, schema_compat::SchemaCompatibilityError,
+        index::IndexSpecError, logical_schema::LogicalToArrowSchemaError,
+        schema_compat::SchemaCompatibilityError,
     };
     use crate::storage::StorageError;
     use crate::transaction_log::CommitError;

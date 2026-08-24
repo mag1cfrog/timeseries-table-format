@@ -23,7 +23,7 @@ use timeseries_table_format::{
         table::TableMeta,
     },
     storage::TableLocation,
-    table::{AppendError, OptimizeReport, TableError, TimeSeriesTable},
+    table::{OptimizeReport, TimeSeriesTable},
 };
 
 use crate::{
@@ -309,9 +309,7 @@ async fn append_parquet_file(
     parquet: &Path,
 ) -> CliResult<u64> {
     table
-        .ensure_write_compatible()
-        .map_err(AppendError::from)
-        .map_err(TableError::from)
+        .ensure_append_supported()
         .context(AppendSegmentSnafu {
             table: table_root.display().to_string(),
             parquet: parquet.display().to_string(),

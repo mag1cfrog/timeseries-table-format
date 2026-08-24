@@ -608,6 +608,16 @@ impl TimeSeriesTable {
         Ok(new_version)
     }
 
+    /// Check whether this client supports appending to the current table.
+    ///
+    /// Higher-level wrappers can call this before inspecting or converting an
+    /// append input. [`Self::append`] repeats the check before writing.
+    pub fn ensure_append_supported(&self) -> Result<(), TableError> {
+        self.ensure_write_compatible()
+            .map_err(AppendError::from)
+            .context(crate::table::error::AppendSnafu)
+    }
+
     /// Append Arrow record batches into one table-managed Parquet segment.
     ///
     /// Rows need not be ordered by the table's ordered index. The source is

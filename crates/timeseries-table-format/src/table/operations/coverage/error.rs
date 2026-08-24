@@ -4,10 +4,7 @@ use crate::{
     coverage::{
         EntityIdentityError, index_interval::IndexIntervalMappingError, io::CoverageSidecarError,
     },
-    metadata::{
-        index::IndexValueError,
-        schema_compat::SchemaCompatibilityError,
-    },
+    metadata::{index::IndexValueError, schema_compat::SchemaCompatibilityError},
 };
 
 /// Errors from table coverage queries and read-only coverage recovery.
