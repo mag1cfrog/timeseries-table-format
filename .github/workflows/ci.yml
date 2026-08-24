@@ -47,6 +47,8 @@ jobs:
               - 'scripts/test_check_release_version.py'
               - 'scripts/scan_range_rss_regression.py'
               - 'scripts/test_scan_range_rss_regression.py'
+              - 'scripts/migrate_table_v6_to_protocol_v7.py'
+              - 'scripts/test_migrate_table_v6_to_protocol_v7.py'
       - name: Check for skip label
         id: skip
         env:
@@ -186,8 +188,8 @@ jobs:
         if: matrix.task == 'scan RSS harness'
         run: |
           uv sync --project crates/timeseries-table-python --locked --no-install-project
-          crates/timeseries-table-python/.venv/bin/ruff check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
-          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py
+          crates/timeseries-table-python/.venv/bin/ruff check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py scripts/migrate_table_v6_to_protocol_v7.py scripts/test_migrate_table_v6_to_protocol_v7.py
+          crates/timeseries-table-python/.venv/bin/ruff format --check scripts/scan_range_rss_regression.py scripts/test_scan_range_rss_regression.py scripts/migrate_table_v6_to_protocol_v7.py scripts/test_migrate_table_v6_to_protocol_v7.py
           (
             cd crates/timeseries-table-python
             PYTHONPATH=../../scripts .venv/bin/ty check \
@@ -195,6 +197,13 @@ jobs:
               ../../scripts/test_scan_range_rss_regression.py
           )
           crates/timeseries-table-python/.venv/bin/python scripts/test_scan_range_rss_regression.py
+          (
+            cd scripts
+            ../crates/timeseries-table-python/.venv/bin/ty check \
+              migrate_table_v6_to_protocol_v7.py \
+              test_migrate_table_v6_to_protocol_v7.py
+          )
+          crates/timeseries-table-python/.venv/bin/python scripts/test_migrate_table_v6_to_protocol_v7.py
 
       - name: fmt
         if: matrix.task == 'lints and docs'
