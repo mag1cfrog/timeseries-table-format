@@ -187,7 +187,7 @@ def test_append_byte_limit_splits_binary_batches_and_round_trips(tmp_path):
     assert (
         table.append(
             source,
-            compression="uncompressed",
+            compression="zstd",
             max_rows_per_row_group=100,
             max_bytes_per_row_group=1,
         )
@@ -200,6 +200,11 @@ def test_append_byte_limit_splits_binary_batches_and_round_trips(tmp_path):
         1,
         1,
     ]
+    assert all(
+        metadata.row_group(row_group).column(column).compression == "ZSTD"
+        for row_group in range(metadata.num_row_groups)
+        for column in range(metadata.num_columns)
+    )
     session = ttf.Session()
     session.register_tstable("series", root)
     assert session.sql("SELECT * FROM series ORDER BY ts").to_pydict() == {
@@ -216,8 +221,8 @@ def test_append_byte_limit_splits_binary_batches_and_round_trips(tmp_path):
         ({"compression": ""}, ValueError),
         ({"max_rows_per_row_group": 0}, ValueError),
         ({"max_bytes_per_row_group": 0}, ValueError),
-        ({"max_rows_per_row_group": -1}, OverflowError),
-        ({"max_bytes_per_row_group": -1}, OverflowError),
+        ({"max_rows_per_row_group": -1}, ValueError),
+        ({"max_bytes_per_row_group": -1}, ValueError),
     ],
 )
 def test_append_rejects_invalid_writer_settings_before_exporting_source(
@@ -240,6 +245,17 @@ def test_append_rejects_invalid_writer_settings_before_exporting_source(
     assert source.calls == 0
     assert table.version() == 1
     assert _data_and_coverage_files(root) == []
+
+
+def test_append_rejects_invalid_writer_settings_without_consuming_reader(tmp_path):
+    table, _ = _create_table(tmp_path)
+    batch = _batch()
+    source = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+
+    with pytest.raises(ValueError, match="max_rows_per_row_group must be positive"):
+        table.append(source, max_rows_per_row_group=-1)
+
+    assert source.read_next_batch().equals(batch)
 
 
 def test_append_multichunk_table_preserves_chunks_and_source(tmp_path):

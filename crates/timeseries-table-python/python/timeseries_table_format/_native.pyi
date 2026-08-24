@@ -278,7 +278,7 @@ class TimeSeriesTable:
         TypeError
             If `source` is not one of the supported Arrow forms.
         ValueError
-            If the Arrow C Stream exporter or capsule is invalid.
+            If a writer setting, Arrow C Stream exporter, or capsule is invalid.
         IndexIntervalOverlapError
             If incoming coverage overlaps committed coverage for the same entity.
         DuplicateIndexIntervalError

@@ -1435,6 +1435,17 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
+    fn positive_append_limit(name: &str, value: Option<isize>) -> PyResult<Option<usize>> {
+        value
+            .map(|value| {
+                usize::try_from(value)
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| PyValueError::new_err(format!("{name} must be positive")))
+            })
+            .transpose()
+    }
+
     /// Local filesystem time-series table rooted at `table_root`.
     ///
     /// Use `TimeSeriesTable` for table lifecycle operations (create/open/append Arrow data). For SQL
@@ -1754,8 +1765,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             py: Python<'_>,
             source: &Bound<'_, PyAny>,
             compression: Option<&str>,
-            max_rows_per_row_group: Option<usize>,
-            max_bytes_per_row_group: Option<usize>,
+            max_rows_per_row_group: Option<isize>,
+            max_bytes_per_row_group: Option<isize>,
         ) -> PyResult<u64> {
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
@@ -1776,16 +1787,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                     }
                 }),
             };
-            if max_rows_per_row_group == Some(0) {
-                return Err(PyValueError::new_err(
-                    "max_rows_per_row_group must be positive",
-                ));
-            }
-            if max_bytes_per_row_group == Some(0) {
-                return Err(PyValueError::new_err(
-                    "max_bytes_per_row_group must be positive",
-                ));
-            }
+            let max_rows_per_row_group =
+                positive_append_limit("max_rows_per_row_group", max_rows_per_row_group)?;
+            let max_bytes_per_row_group =
+                positive_append_limit("max_bytes_per_row_group", max_bytes_per_row_group)?;
 
             let reader = record_batch_reader_from_python(source)?;
             let mut request = AppendRequest::new(reader);

@@ -1641,6 +1641,24 @@ mod tests {
             }
         );
 
+        let partially_overridden = AppendWriterSettings::from_source(
+            &AppendRequest::new(
+                AppendRequest::new(timestamp_only_batch(1)?)
+                    .compression(ParquetCompression::Snappy)
+                    .max_rows_per_row_group(3)
+                    .max_bytes_per_row_group(30),
+            )
+            .max_bytes_per_row_group(20),
+        );
+        assert_eq!(
+            partially_overridden,
+            AppendWriterSettings {
+                compression: ParquetCompression::Snappy,
+                max_rows_per_row_group: 3,
+                max_bytes_per_row_group: 20,
+            }
+        );
+
         let overridden = AppendWriterSettings::from_source(
             &AppendRequest::new(
                 AppendRequest::new(timestamp_only_batch(1)?)
