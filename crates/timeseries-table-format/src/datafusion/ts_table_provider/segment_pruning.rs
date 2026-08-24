@@ -11,7 +11,7 @@ use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::scalar::ScalarValue;
 
 use crate::coverage::EntityValue;
-use crate::metadata::table_metadata::{IndexKind, IndexSpec, IndexValue};
+use crate::metadata::index::{IndexKind, IndexSpec, IndexValue};
 use crate::transaction_log::{SegmentEntityLayout, SegmentMeta};
 
 use super::df_external;
@@ -226,8 +226,8 @@ mod tests {
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as PhysicalColumn, Literal};
 
     use crate::coverage::EntityIdentity;
+    use crate::metadata::index::TimeIndexGranularity;
     use crate::metadata::segments::SegmentMetaError;
-    use crate::metadata::table_metadata::TimeIndexGranularity;
     use crate::transaction_log::{FileFormat, SegmentEntityLayout};
 
     use super::*;

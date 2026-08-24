@@ -27,7 +27,7 @@ use datafusion::logical_expr::{Expr, Operator};
 
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
-use crate::metadata::table_metadata::{IndexKind, IndexSpec};
+use crate::metadata::index::{IndexKind, IndexSpec};
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;

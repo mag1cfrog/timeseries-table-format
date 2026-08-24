@@ -6,7 +6,10 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
-use crate::metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity};
+use crate::metadata::{
+    index::{IndexKind, IndexSpec, TimeIndexGranularity},
+    table::TableMeta,
+};
 use crate::storage::TableLocation;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::{LogAction, TransactionLogStore};
@@ -107,7 +110,7 @@ async fn load_latest_state_no_change_returns_current_snapshot() -> TestResult {
     assert!(latest.segments.is_empty());
     assert!(latest.table_coverage.is_none());
     match latest.table_meta.kind() {
-        crate::metadata::table_metadata::TableKind::TimeSeries(_) => {}
+        crate::metadata::table::TableKind::TimeSeries(_) => {}
         other => panic!("expected time series table kind, got {other:?}"),
     }
 

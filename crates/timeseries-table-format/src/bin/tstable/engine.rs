@@ -424,7 +424,10 @@ mod tests {
         metadata::logical_schema::{
             LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
         },
-        metadata::table_metadata::{IndexKind, IndexSpec, TableMeta, TimeIndexGranularity},
+        metadata::{
+            index::{IndexKind, IndexSpec, TimeIndexGranularity},
+            table::TableMeta,
+        },
         storage::TableLocation,
         table::TimeSeriesTable,
     };

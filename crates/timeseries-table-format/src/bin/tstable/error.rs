@@ -1,7 +1,7 @@
 use arrow::error::ArrowError;
 use parquet::errors::ParquetError;
 use std::path::PathBuf;
-use timeseries_table_format::metadata::table_metadata::ParseTimeIndexGranularityError;
+use timeseries_table_format::metadata::index::ParseTimeIndexGranularityError;
 use timeseries_table_format::table::TableError;
 
 use snafu::Snafu;

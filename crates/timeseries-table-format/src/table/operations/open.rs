@@ -95,7 +95,7 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::{
-        metadata::table_metadata::TABLE_PROTOCOL_VERSION,
+        metadata::protocol::TABLE_PROTOCOL_VERSION,
         table::test_util::{
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, assert_no_event,
             captured_span, make_basic_table_meta,

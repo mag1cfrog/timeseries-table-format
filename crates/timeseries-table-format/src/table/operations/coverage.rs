@@ -20,8 +20,8 @@ use crate::{
         Coverage, EntityCoverage, EntityIdentity, EntityValue,
         io::{CoverageSidecarError, read_coverage_sidecar, read_entity_coverage_sidecar},
     },
+    metadata::index::IndexKind,
     metadata::schema_compat::{ensure_entity_identity_matches_schema, require_table_schema},
-    metadata::table_metadata::IndexKind,
     table::{AppendError, TableError, TimeSeriesTable},
     transaction_log::table_state::TableCoveragePointer,
 };
@@ -404,7 +404,7 @@ use std::ops::RangeInclusive;
 use crate::{
     coverage::IndexIntervalId,
     coverage::index_interval::{index_interval_id_for_exclusive_end, index_interval_id_range},
-    metadata::table_metadata::{IndexValue, validate_index_range},
+    metadata::index::{IndexValue, validate_index_range},
     table::error::CoverageQuerySnafu,
 };
 
@@ -724,8 +724,9 @@ mod tests {
         },
         metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema},
         metadata::schema_compat::SchemaCompatibilityError,
-        metadata::table_metadata::{
-            IndexKind, IndexSpec, IndexValueError, TableKind, TableMeta, TimeIndexGranularity,
+        metadata::{
+            index::{IndexKind, IndexSpec, IndexValueError, TimeIndexGranularity},
+            table::{TableKind, TableMeta},
         },
         storage::{StorageError, TableLocation},
         table::test_util::{

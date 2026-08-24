@@ -51,12 +51,13 @@ pub mod storage;
 pub mod table;
 pub mod transaction_log;
 
-pub use metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
-pub use metadata::table_metadata::{
+pub use metadata::index::{
     IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
-    ParseTimeIndexGranularityError, TableMeta, TableProtocolError, TimeIndexGranularity,
-    validate_index_range,
+    ParseTimeIndexGranularityError, TimeIndexGranularity, validate_index_range,
 };
+pub use metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
+pub use metadata::protocol::TableProtocolError;
+pub use metadata::table::TableMeta;
 pub use storage::TableLocation;
 pub use table::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,

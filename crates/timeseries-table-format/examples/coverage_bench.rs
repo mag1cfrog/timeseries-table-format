@@ -23,7 +23,7 @@ use arrow_array::{
 use roaring::RoaringTreemap;
 
 use timeseries_table_format::coverage::index_interval::index_interval_id_from_epoch_secs;
-use timeseries_table_format::metadata::table_metadata::TimeIndexGranularity;
+use timeseries_table_format::metadata::index::TimeIndexGranularity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {

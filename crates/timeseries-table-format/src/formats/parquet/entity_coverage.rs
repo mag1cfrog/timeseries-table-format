@@ -22,7 +22,7 @@ use tokio::task::JoinSet;
 
 use crate::{
     coverage::{Coverage, EntityCoverage, EntityIdentity, EntityValue},
-    metadata::table_metadata::{IndexKind, IndexSpec, IndexValue},
+    metadata::index::{IndexKind, IndexSpec, IndexValue},
     storage::{TableLocation, open_parquet_reader},
 };
 
@@ -431,7 +431,7 @@ mod tests {
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::TempDir;
 
-    use crate::metadata::table_metadata::TimeIndexGranularity;
+    use crate::metadata::index::TimeIndexGranularity;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const EPOCH_INDEX_INTERVAL_ID: u64 = 0x8000_0000_0000_0000;

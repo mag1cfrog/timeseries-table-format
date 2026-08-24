@@ -4,8 +4,8 @@ use snafu::{Backtrace, Snafu};
 
 use crate::{
     metadata::{
+        index::IndexSpecError,
         schema_compat::{SchemaCompatibilityError, ensure_index_spec_matches_schema},
-        table_metadata::IndexSpecError,
     },
     storage::{StorageError, TableLocation},
     table::{TableError, TimeSeriesTable},
@@ -180,7 +180,7 @@ impl TimeSeriesTable {
 mod tests {
     use super::*;
     use crate::{
-        metadata::table_metadata::TABLE_PROTOCOL_VERSION,
+        metadata::protocol::TABLE_PROTOCOL_VERSION,
         storage::{StorageLocation, layout},
         table::test_util::{
             TestResult, TraceCapture, assert_capture_excludes, assert_debug_span, captured_span,

@@ -6,10 +6,12 @@
 //! replay, storage access, Parquet scanning, etc.) should live in higher layers
 //! such as `transaction_log`, `storage`, and `table`.
 
+pub mod index;
 pub mod logical_schema;
+pub mod protocol;
 pub mod schema_compat;
 pub mod segments;
-pub mod table_metadata;
+pub mod table;
 
 /// Convenience re-exports for the metadata "model" surface.
 pub mod model;

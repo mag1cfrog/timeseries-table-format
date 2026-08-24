@@ -11,8 +11,10 @@ use crate::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
 use crate::metadata::segments::{FileFormat, SegmentEntityLayout, SegmentMeta};
-use crate::metadata::table_metadata::{
-    IndexKind, IndexSpec, TABLE_PROTOCOL_VERSION, TableKind, TableMeta, TimeIndexGranularity,
+use crate::metadata::{
+    index::{IndexKind, IndexSpec, TimeIndexGranularity},
+    protocol::TABLE_PROTOCOL_VERSION,
+    table::{TableKind, TableMeta},
 };
 use crate::storage::{StorageError, TableLocation, layout};
 use crate::transaction_log::{CommitError, LogAction, TransactionLogStore};

@@ -12,9 +12,8 @@ use crate::{
     },
     formats::parquet::SegmentCoverageError,
     metadata::{
-        logical_schema::ArrowToLogicalSchemaError,
+        index::IndexKind, logical_schema::ArrowToLogicalSchemaError, protocol::TableProtocolError,
         schema_compat::SchemaCompatibilityError,
-        table_metadata::{IndexKind, TableProtocolError},
     },
     storage::StorageError,
     transaction_log::{CommitError, segments::SegmentError},

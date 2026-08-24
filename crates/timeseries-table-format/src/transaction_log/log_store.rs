@@ -11,7 +11,7 @@
 //! All operations delegate to the async storage backend and remain focused on
 //! durability, leaving higher-level planning (which actions to commit) to the
 //! caller.
-use crate::metadata::table_metadata::RawTableProtocolRequirements;
+use crate::metadata::protocol::RawTableProtocolRequirements;
 use crate::storage::{self, StorageError, TableLocation};
 use crate::transaction_log::actions::{Commit, LogAction};
 use crate::transaction_log::*;
