@@ -4,6 +4,14 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.6.0
+
+
+### Features
+
+- Add bounded compressed append writer settings ([971aa64](https://github.com/mag1cfrog/timeseries-table-format/commit/971aa648fa9ee1332f0b4c49d8a1f6ae906ab411))
+
+
 ## 0.5.0
 
 
