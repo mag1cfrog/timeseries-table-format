@@ -18,7 +18,8 @@ columns remain ordinary SQL columns for filtering and grouping.
 
 ## Append Arrow data
 
-`TimeSeriesTable.append(source)` accepts these sources:
+`TimeSeriesTable.append(source, *, compression=None, max_rows_per_row_group=None,
+max_bytes_per_row_group=None)` accepts these sources:
 
 | Source | Behavior |
 |---|---|
@@ -30,6 +31,18 @@ columns remain ordinary SQL columns for filtering and grouping.
 The method returns the newly committed table version as an `int`. It does not accept file paths,
 pandas or NumPy objects, mappings, row iterables, or arbitrary iterables of batches. Convert those
 inputs to one of the supported Arrow forms explicitly.
+
+The keyword-only settings control the physical layout of the new table-owned Parquet segment:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `compression` | `"zstd"` | `"uncompressed"`, `"snappy"`, or `"zstd"` |
+| `max_rows_per_row_group` | 1,048,576 | Maximum rows per output row group |
+| `max_bytes_per_row_group` | 128 MiB | Maximum estimated encoded bytes per output row group |
+
+Both row-group limits apply, and the first one reached closes the active row group. The byte limit
+is an estimate, not a strict process-memory ceiling, and a single oversized value may exceed it.
+Settings apply only to the current append and are not persisted in table metadata.
 
 After the table has a canonical schema, append matches top-level fields by name and writes them in
 canonical order. Nullability must match. Types must match except for these lossless widenings:
@@ -64,7 +77,12 @@ batch = pa.record_batch(
     }
 )
 reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-new_version = table.append(reader)
+new_version = table.append(
+    reader,
+    compression="zstd",
+    max_rows_per_row_group=4_096,
+    max_bytes_per_row_group=128 * 1024 * 1024,
+)
 ```
 
 Append imports the source through Arrow C Stream and writes a table-owned Parquet segment. It does
@@ -72,8 +90,9 @@ not stage or collect the complete input in Python. A `RecordBatch` or `Table` re
 the call; a reader or other single-use stream is consumed. Once Rust owns the stream, append runs
 with the Python GIL released.
 
-Unsupported sources raise `TypeError`, invalid stream exporters or capsules raise `ValueError`,
-and table failures use the library's existing [exception hierarchy](exceptions.md). Boundary and
+Unsupported sources raise `TypeError`. Invalid writer settings, stream exporters, or capsules
+raise `ValueError`; writer settings are validated before the source is exported or consumed.
+Table failures use the library's existing [exception hierarchy](exceptions.md). Boundary and
 mid-stream source failures do not commit a new version.
 
 ::: timeseries_table_format.TimeSeriesTable
