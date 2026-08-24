@@ -1,0 +1,1 @@
+{"version":1,"base_version":0,"timestamp":"2026-08-24T01:27:27.374141041Z","actions":[{"UpdateTableMeta":{"kind":{"TimeSeries":{"column":"ts","entity_columns":[],"kind":{"type":"timestamp","bucket":{"Hours":1}}}},"logical_schema":null,"created_at":"2026-08-24T01:27:27.371536361Z","format_version":6}}]}
