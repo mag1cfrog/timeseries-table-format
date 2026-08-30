@@ -392,10 +392,12 @@ impl TimeSeriesTable {
     /// Vacuum considers regular files below `data/` and `_coverage/`. It never
     /// deletes transaction-log files, expires snapshots, or rewrites history.
     /// `older_than` is required and exclusive: files modified at or after the
-    /// cutoff are retained. Choose a cutoff older than the longest expected
-    /// writer duration so active writers remain inside the retention window.
+    /// cutoff are retained, and a future cutoff is rejected. Choose a cutoff
+    /// older than the longest expected writer duration so active writers remain
+    /// inside the retention window.
     ///
     /// Apply mode may delete earlier candidates before a later deletion error.
+    /// [`VacuumError::Delete`] includes the partial report from that attempt.
     #[tracing::instrument(
         name = "table.vacuum",
         target = "timeseries_table_format::table::vacuum",

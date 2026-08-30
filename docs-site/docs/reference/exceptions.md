@@ -8,6 +8,7 @@ error with a single `except ttf.TimeseriesTableError`.
 ```
 TimeseriesTableError
 |-- StorageError                - filesystem or I/O problem
+|   `-- VacuumApplyError        - vacuum stopped after apply began
 |-- ConflictError               - concurrent table metadata modification
 |-- IndexIntervalOverlapError   - incoming interval conflicts with committed data
 |-- DuplicateIndexIntervalError - incoming rows duplicate an identity and interval
@@ -20,6 +21,11 @@ TimeseriesTableError
 **`StorageError`** - raised when the filesystem operation fails. Common causes: the table root
 directory doesn't exist, a file is missing, or a permissions problem. The error message includes
 the path that caused the problem.
+
+**`VacuumApplyError`** - raised when vacuum apply mode cannot delete a selected file. It inherits
+from `StorageError` and carries `path` for the failed table-relative path plus `partial_report` for
+the state of every candidate when deletion stopped. Entries marked `deleted` completed before the
+failure; entries still marked `removable` were not deleted.
 
 **`IndexIntervalOverlapError`** - raised by `append(...)` when an incoming row uses an identity
 and logical index interval already present in committed data. The exception carries:
@@ -59,6 +65,10 @@ SQL error (syntax error, type error, unknown column, etc.).
       show_source: false
 
 ::: timeseries_table_format.StorageError
+    options:
+      show_source: false
+
+::: timeseries_table_format.VacuumApplyError
     options:
       show_source: false
 

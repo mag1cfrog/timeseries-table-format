@@ -182,6 +182,62 @@ Optimization may change physical row order.
 
 ---
 
+### `vacuum` - Remove expired unreferenced files
+
+An interrupted append can leave an incomplete Parquet file under `data/` without committing it
+to the transaction log. Vacuum finds these files, along with other unreferenced Parquet and
+coverage artifacts. It is a dry-run unless you pass `--apply`.
+
+Start by choosing a cutoff older than the longest writer operation you expect:
+
+```bash
+tstable vacuum \
+  --table ./data/my_table \
+  --older-than 2026-08-01T00:00:00Z
+```
+
+Review the removable files, then run the same command with `--apply`:
+
+```bash
+tstable vacuum \
+  --table ./data/my_table \
+  --older-than 2026-08-01T00:00:00Z \
+  --apply
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--table` | Yes | Path to an existing table |
+| `--older-than` | Yes | Exclusive RFC3339 cutoff; must not be in the future |
+| `--apply` | | Delete removable files; omit for a dry-run |
+
+Files modified at or after the cutoff are retained. Vacuum also retains files referenced by any
+valid retained commit, files whose names are not recognized as table-managed artifacts, and files
+that change while apply mode is running. A cutoff that is too recent can select an active writer's
+uncommitted file, so leave enough time for the longest expected write to finish.
+
+The report includes file counts, byte counts, and one line per file. Artifact paths are quoted and
+escaped. The reason values are:
+
+| Reason | Meaning |
+|--------|---------|
+| `referenced_by_commit` | A retained commit references the file |
+| `within_retention` | The file is not older than the cutoff |
+| `changed_since_planning` | The file changed before apply could delete it |
+| `unrecognized_artifact` | The file is inside a managed directory but its name is not managed |
+| `unreferenced` | An expired managed file has no retained reference |
+| `invalid_or_unreadable_parquet` | An expired unreferenced Parquet file has no readable valid footer |
+
+If apply mode stops on a deletion error, the CLI prints a partial report before exiting nonzero.
+Files marked `deleted` were completed before the failure. Files still marked `removable` were not
+deleted and can be retried.
+
+Vacuum is orphan-file cleanup. It does not expire snapshots, choose a transaction-log retention
+boundary, rewrite table history, or delete transaction-log files. It only considers regular files
+under `data/` and `_coverage/`; source files outside those directories are never candidates.
+
+---
+
 ### `query` — Run SQL queries
 
 Execute SQL queries against your table using DataFusion.

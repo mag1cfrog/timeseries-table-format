@@ -1447,9 +1447,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     struct VacuumArtifact {
         /// Canonical table-relative path.
         path: String,
-        /// File size observed during planning.
+        /// Latest file size observed by this invocation.
         size_bytes: u64,
-        /// Modification time observed during planning.
+        /// Latest modification time observed by this invocation.
         modified_at: DateTime<Utc>,
         /// `retained`, `removable`, or `deleted`.
         disposition: String,
@@ -2035,9 +2035,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
         /// Inspect or delete expired files unreachable from retained table history.
         ///
-        /// `older_than` must be timezone-aware. Files modified at or after it are retained.
-        /// Choose a cutoff older than the longest expected writer duration. This operation does
-        /// not expire snapshots, rewrite history, or delete transaction-log files.
+        /// `older_than` must be timezone-aware and must not be in the future. Files modified at
+        /// or after it are retained. Choose a cutoff older than the longest expected writer
+        /// duration. This operation does not expire snapshots, rewrite history, or delete
+        /// transaction-log files.
         ///
         /// Parameters
         /// ----------
@@ -2054,8 +2055,13 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// Raises
         /// ------
         /// TimeseriesTableError
-        ///     If retained history cannot be validated or storage access fails. The exception
-        ///     includes a `table_root` attribute.
+        ///     If retained history cannot be validated or storage access fails. Exceptions include
+        ///     a `table_root` attribute. A deletion failure raises `VacuumApplyError`, whose
+        ///     `partial_report` records deletions completed before the failure.
+        /// TypeError
+        ///     If `older_than` is not a timezone-aware `datetime.datetime`.
+        /// ValueError
+        ///     If `older_than` is in the future.
         #[pyo3(signature = (older_than, *, apply=false))]
         fn vacuum(
             &self,

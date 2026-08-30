@@ -1,6 +1,7 @@
 # TimeSeriesTable reference
 
-`TimeSeriesTable` manages table lifecycle (create/open/append/optimize) on the local filesystem.
+`TimeSeriesTable` manages table lifecycle (create/open/append/optimize/vacuum) on the local
+filesystem.
 
 `entity_columns` is an ordered identity definition. A table may contain many identities, and one
 Parquet segment may contain rows for several identities. Different identities may use the same
@@ -110,6 +111,61 @@ coverage, but it does not combine small files or accept a target file size. Repl
 may remain on disk until a future vacuum operation removes unreferenced files.
 
 ::: timeseries_table_format.OptimizeReport
+    options:
+      members: true
+      show_source: false
+
+## Vacuum expired orphan files
+
+An interrupted append can leave an incomplete Parquet file under `data/` without adding it to the
+transaction log. `TimeSeriesTable.vacuum(older_than, *, apply=False)` finds expired files that no
+valid retained commit references. The default dry-run does not modify the table.
+
+Choose a timezone-aware cutoff older than the longest writer operation you expect, then inspect
+the plan:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+plan = table.vacuum(cutoff)
+
+for artifact in plan.artifacts:
+    if artifact.disposition == "removable":
+        print(artifact.path, artifact.size_bytes, artifact.reason)
+```
+
+Apply the same retention policy after reviewing the plan:
+
+```python
+report = table.vacuum(cutoff, apply=True)
+print(report.deleted_files, report.deleted_bytes)
+```
+
+The cutoff is exclusive. Files modified at or after it are retained, and a future cutoff raises
+`ValueError`. Vacuum also retains files referenced anywhere in valid retained history,
+unrecognized files, and files that change while apply mode is running. Leave enough retention
+time for active writers to finish before their files become eligible.
+
+`VacuumReport.artifacts` contains every regular file considered under `data/` and `_coverage/`.
+Each artifact has a disposition (`retained`, `removable`, or `deleted`) and a reason. The report
+also provides matching file and byte totals.
+
+Apply mode can remove some files before a later deletion fails. In that case,
+`VacuumApplyError.partial_report` records the completed deletions and the remaining candidates;
+`VacuumApplyError.path` identifies the file that failed. The exception is also a `StorageError`,
+so existing storage-error handlers continue to catch it.
+
+Vacuum is orphan-file cleanup. It does not expire snapshots, choose a transaction-log retention
+boundary, rewrite history, or delete transaction-log files. Files outside `data/` and `_coverage/`
+are not candidates.
+
+::: timeseries_table_format.VacuumArtifact
+    options:
+      members: true
+      show_source: false
+
+::: timeseries_table_format.VacuumReport
     options:
       members: true
       show_source: false

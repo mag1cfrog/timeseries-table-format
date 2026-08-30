@@ -369,9 +369,12 @@ class TimeSeriesTable:
     def vacuum(self, older_than: datetime, *, apply: bool = False) -> VacuumReport:
         """Inspect or delete expired files unreachable from retained table history.
 
-        `older_than` must be timezone-aware and older than the longest expected writer
-        duration. The default is a non-mutating dry-run. Vacuum does not expire snapshots,
-        rewrite history, or delete transaction-log files.
+        `older_than` must be timezone-aware, must not be in the future, and should be older
+        than the longest expected writer duration. The default is a non-mutating dry-run.
+        Vacuum does not expire snapshots, rewrite history, or delete transaction-log files.
+
+        A deletion failure raises `VacuumApplyError`; its `partial_report` records deletions
+        completed before the failure.
         """
         ...
 

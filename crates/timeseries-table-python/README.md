@@ -16,6 +16,7 @@ DataFusion SQL. Query results are returned as `pyarrow.Table` objects.
 - Timestamp, Int64, or UInt64 ordered indexes
 - Per-entity index-interval uniqueness within and across appends
 - Local table roots with managed metadata and table-relative Parquet segment paths
+- Dry-run and apply vacuum modes for expired unreferenced table-managed files
 - DataFusion SQL over managed tables and standalone Parquet data
 - Materialized and streaming Arrow result APIs
 

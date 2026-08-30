@@ -155,7 +155,7 @@ enum Command {
         #[arg(long)]
         table: PathBuf,
 
-        /// Exclusive retention cutoff in RFC3339 format
+        /// Exclusive retention cutoff in RFC3339 format; must not be in the future
         #[arg(long, value_name = "RFC3339")]
         older_than: DateTime<FixedOffset>,
 
