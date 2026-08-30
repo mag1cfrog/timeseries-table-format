@@ -4,6 +4,16 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.6.1
+
+
+### Features
+
+- Expose phase-level telemetry for streaming append ([3fce372](https://github.com/mag1cfrog/timeseries-table-format/commit/3fce372c5688397a37289d285eaaa30651ac9664))
+
+- Add retention-aware vacuum for interrupted writes ([0a85239](https://github.com/mag1cfrog/timeseries-table-format/commit/0a8523950b164db39dc22b8e51f2c70734fd6bfe))
+
+
 ## 0.6.0
 
 
