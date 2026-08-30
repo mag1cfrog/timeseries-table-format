@@ -7,6 +7,8 @@ import timeseries_table_format as ttf
 
 
 def test_vacuum_defaults_to_dry_run_and_requires_apply_to_delete(tmp_path):
+    assert issubclass(ttf.VacuumApplyError, ttf.StorageError)
+
     root = tmp_path / "table"
     table = ttf.TimeSeriesTable.create(
         table_root=str(root),

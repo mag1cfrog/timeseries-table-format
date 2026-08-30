@@ -44,8 +44,8 @@ mod _native {
         datafusion::TsTableProvider,
         table::{
             OptimizeReport as CoreOptimizeReport, VacuumArtifact as CoreVacuumArtifact,
-            VacuumArtifactReason as CoreVacuumArtifactReason, VacuumMode as CoreVacuumMode,
-            VacuumReport as CoreVacuumReport,
+            VacuumArtifactReason as CoreVacuumArtifactReason, VacuumError as CoreVacuumError,
+            VacuumMode as CoreVacuumMode, VacuumReport as CoreVacuumReport,
         },
     };
 
@@ -54,7 +54,7 @@ mod _native {
     use crate::{
         exceptions::{
             ConflictError, DataFusionError, DuplicateIndexIntervalError, IndexIntervalOverlapError,
-            SchemaMismatchError, StorageError, TimeseriesTableError,
+            SchemaMismatchError, StorageError, TimeseriesTableError, VacuumApplyError,
         },
         tokio_runner,
     };
@@ -1531,6 +1531,43 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
+    fn vacuum_error_to_py_with_root(
+        py: Python<'_>,
+        table_root: &str,
+        entity_columns: &[String],
+        error: timeseries_table_format::table::TableError,
+    ) -> PyErr {
+        let partial = match &error {
+            timeseries_table_format::table::TableError::Vacuum {
+                source:
+                    CoreVacuumError::Delete {
+                        path,
+                        partial_report,
+                        ..
+                    },
+            } => Some((path.clone(), partial_report.as_ref().clone())),
+            _ => None,
+        };
+        let Some((path, partial_report)) = partial else {
+            return table_error_to_py_with_root(py, table_root, entity_columns, error);
+        };
+
+        let message = error.to_string();
+        let py_error = VacuumApplyError::new_err(message.clone());
+        let exception = py_error.value(py);
+        if let Err(error) = exception.setattr("path", path) {
+            return error;
+        }
+        let partial_report = match Py::new(py, VacuumReport::from(partial_report)) {
+            Ok(partial_report) => partial_report,
+            Err(error) => return error,
+        };
+        if let Err(error) = exception.setattr("partial_report", partial_report) {
+            return error;
+        }
+        py_error_with_table_root(py, table_root, message, py_error)
+    }
+
     fn positive_append_limit(name: &str, value: Option<isize>) -> PyResult<Option<usize>> {
         value
             .map(|value| {
@@ -2011,7 +2048,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 rt.as_ref(),
                 self.inner.vacuum(older_than, mode),
                 move |py, err| {
-                    table_error_to_py_with_root(
+                    vacuum_error_to_py_with_root(
                         py,
                         &table_root_for_err,
                         &entity_columns_for_err,
@@ -2692,6 +2729,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         )?;
 
         m.add("StorageError", py.get_type::<StorageError>())?;
+        m.add("VacuumApplyError", py.get_type::<VacuumApplyError>())?;
         m.add("ConflictError", py.get_type::<ConflictError>())?;
         m.add(
             "IndexIntervalOverlapError",

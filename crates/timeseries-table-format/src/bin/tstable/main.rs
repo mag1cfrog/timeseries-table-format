@@ -24,7 +24,10 @@ use timeseries_table_format::{
         table::TableMeta,
     },
     storage::TableLocation,
-    table::{OptimizeReport, TimeSeriesTable, VacuumArtifactReason, VacuumMode, VacuumReport},
+    table::{
+        OptimizeReport, TimeSeriesTable, VacuumArtifactReason, VacuumError, VacuumMode,
+        VacuumReport,
+    },
 };
 
 use crate::{
@@ -420,12 +423,23 @@ async fn cmd_vacuum(table: &Path, older_than: DateTime<FixedOffset>, apply: bool
     } else {
         VacuumMode::DryRun
     };
-    let report = table_handle
+    let report = match table_handle
         .vacuum(older_than.with_timezone(&Utc), mode)
         .await
-        .context(VacuumTableSnafu {
-            table: table.display().to_string(),
-        })?;
+    {
+        Ok(report) => report,
+        Err(source) => {
+            if let timeseries_table_format::table::TableError::Vacuum {
+                source: VacuumError::Delete { partial_report, .. },
+            } = &source
+            {
+                print_vacuum_report(partial_report);
+            }
+            return Err(source).context(VacuumTableSnafu {
+                table: table.display().to_string(),
+            });
+        }
+    };
     print_vacuum_report(&report);
     Ok(())
 }

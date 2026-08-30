@@ -103,6 +103,7 @@ class VacuumArtifact:
     def reason(self) -> Literal[
         "referenced_by_commit",
         "within_retention",
+        "changed_since_planning",
         "unrecognized_artifact",
         "unreferenced",
         "invalid_or_unreadable_parquet",
@@ -129,6 +130,12 @@ class VacuumReport:
     def removable_bytes(self) -> int: ...
     @property
     def deleted_bytes(self) -> int: ...
+
+class VacuumApplyError(StorageError):
+    """Vacuum apply failure with the completed portion of the report."""
+
+    path: str
+    partial_report: VacuumReport
 
 class Session:
     def __init__(self) -> None:

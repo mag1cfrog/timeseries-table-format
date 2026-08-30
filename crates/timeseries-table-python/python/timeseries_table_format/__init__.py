@@ -19,6 +19,7 @@ from ._native import (
     TimeSeriesTable,
     TimeseriesTableError,
     VacuumArtifact,
+    VacuumApplyError,
     VacuumReport,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "DataFusionError",
     "OptimizeReport",
     "VacuumArtifact",
+    "VacuumApplyError",
     "VacuumReport",
     "refresh_logging_cache",
     "Session",

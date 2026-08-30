@@ -68,6 +68,8 @@ pub enum VacuumArtifactReason {
     },
     /// The file modification time is at or after the required cutoff.
     WithinRetention,
+    /// The file changed after vacuum planned it, so apply preserved it.
+    ChangedSincePlanning,
     /// The file is below a managed directory but does not have a managed shape.
     UnrecognizedArtifact,
     /// The file is expired and no retained commit references it.
@@ -82,6 +84,7 @@ impl VacuumArtifactReason {
         match self {
             Self::ReferencedByCommit { .. } => "referenced_by_commit",
             Self::WithinRetention => "within_retention",
+            Self::ChangedSincePlanning => "changed_since_planning",
             Self::UnrecognizedArtifact => "unrecognized_artifact",
             Self::Unreferenced => "unreferenced",
             Self::InvalidOrUnreadableParquet => "invalid_or_unreadable_parquet",
@@ -94,9 +97,9 @@ impl VacuumArtifactReason {
 pub struct VacuumArtifact {
     /// Canonical table-relative path.
     pub path: String,
-    /// File size observed during planning.
+    /// Latest file size observed by this invocation.
     pub size_bytes: u64,
-    /// Modification time observed during planning.
+    /// Latest modification time observed by this invocation.
     pub modified_at: DateTime<Utc>,
     /// Action taken or proposed by this invocation.
     pub disposition: VacuumArtifactDisposition,
@@ -204,6 +207,8 @@ pub enum VacuumError {
         /// Complete storage failure.
         #[snafu(source, backtrace)]
         source: StorageError,
+        /// Report state after every deletion completed before this failure.
+        partial_report: Box<VacuumReport>,
     },
 }
 
@@ -333,6 +338,34 @@ async fn classify_artifact(
     }
 }
 
+async fn prepare_candidate_for_delete(
+    table: &TimeSeriesTable,
+    artifact: &mut VacuumArtifact,
+) -> Result<bool, StorageError> {
+    let fresh =
+        match storage::regular_file_metadata(table.location().as_ref(), Path::new(&artifact.path))
+            .await
+        {
+            Ok(fresh) => fresh,
+            Err(StorageError::NotFound { .. }) => {
+                artifact.disposition = VacuumArtifactDisposition::Deleted;
+                return Ok(false);
+            }
+            Err(source) => return Err(source),
+        };
+    let modified_at = DateTime::<Utc>::from(fresh.modified_at);
+    // ponytail: size and mtime are the portable identity available today; use backend
+    // generation tokens when the storage abstraction exposes them.
+    if fresh.size_bytes != artifact.size_bytes || modified_at != artifact.modified_at {
+        artifact.size_bytes = fresh.size_bytes;
+        artifact.modified_at = modified_at;
+        artifact.disposition = VacuumArtifactDisposition::Retained;
+        artifact.reason = VacuumArtifactReason::ChangedSincePlanning;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 impl TimeSeriesTable {
     /// Inspect or delete expired files unreachable from retained table history.
     ///
@@ -375,6 +408,7 @@ impl TimeSeriesTable {
 
             if mode == VacuumMode::Apply {
                 (table_version, retained) = retained_paths(self).await?;
+                let mut delete_failure = None;
                 for artifact in &mut artifacts {
                     if artifact.disposition != VacuumArtifactDisposition::Removable {
                         continue;
@@ -385,13 +419,36 @@ impl TimeSeriesTable {
                             VacuumArtifactReason::ReferencedByCommit { version: *version };
                         continue;
                     }
-                    storage::remove_file(self.location().as_ref(), Path::new(&artifact.path))
-                        .await
-                        .map_err(|source| VacuumError::Delete {
-                            path: artifact.path.clone(),
-                            source,
-                        })?;
+                    match prepare_candidate_for_delete(self, artifact).await {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(source) => {
+                            delete_failure = Some((artifact.path.clone(), source));
+                            break;
+                        }
+                    }
+                    if let Err(source) = storage::remove_file_if_exists(
+                        self.location().as_ref(),
+                        Path::new(&artifact.path),
+                    )
+                    .await
+                    {
+                        delete_failure = Some((artifact.path.clone(), source));
+                        break;
+                    }
                     artifact.disposition = VacuumArtifactDisposition::Deleted;
+                }
+                if let Some((path, source)) = delete_failure {
+                    return Err(VacuumError::Delete {
+                        path,
+                        source,
+                        partial_report: Box::new(VacuumReport::new(
+                            table_version,
+                            older_than,
+                            mode,
+                            artifacts,
+                        )),
+                    });
                 }
             }
 
@@ -434,7 +491,7 @@ mod tests {
     use super::*;
     use crate::{
         coverage::EntityIdentity,
-        storage::{TableLocation, layout, open_new_output_sink, write_new},
+        storage::{TableLocation, inject_cleanup_failure, layout, open_new_output_sink, write_new},
         table::test_util::{
             TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
         },
@@ -666,6 +723,80 @@ mod tests {
             }
         ));
         assert!(temp.path().join(orphan).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_preserves_a_candidate_that_changed_after_planning() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let path = "data/changing.parquet";
+        write_new(location.as_ref(), Path::new(path), b"old").await?;
+        let file = storage::list_files(location.as_ref(), Path::new("data"))
+            .await?
+            .pop()
+            .ok_or("missing planned file")?;
+        let mut candidate = classify_artifact(
+            &table,
+            file,
+            Utc::now() + Duration::hours(1),
+            &HashMap::new(),
+        )
+        .await;
+        fs::write(temp.path().join(path), b"new contents")?;
+
+        assert!(!prepare_candidate_for_delete(&table, &mut candidate).await?);
+        assert_eq!(candidate.disposition, VacuumArtifactDisposition::Retained);
+        assert_eq!(candidate.reason, VacuumArtifactReason::ChangedSincePlanning);
+        assert_eq!(candidate.size_bytes, b"new contents".len() as u64);
+        assert!(temp.path().join(path).exists());
+
+        fs::remove_file(temp.path().join(path))?;
+        assert!(!prepare_candidate_for_delete(&table, &mut candidate).await?);
+        assert_eq!(candidate.disposition, VacuumArtifactDisposition::Deleted);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_error_includes_deletions_completed_before_the_failure() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let first = "data/a.parquet";
+        let failed = "data/b.parquet";
+        for path in [first, failed] {
+            write_new(location.as_ref(), Path::new(path), b"incomplete").await?;
+        }
+        inject_cleanup_failure(temp.path().join(failed));
+
+        let error = table
+            .vacuum(Utc::now() + Duration::hours(1), VacuumMode::Apply)
+            .await
+            .expect_err("injected deletion failure must fail apply");
+
+        let TableError::Vacuum {
+            source:
+                VacuumError::Delete {
+                    path,
+                    partial_report,
+                    ..
+                },
+        } = error
+        else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(path, failed);
+        assert_eq!(
+            artifact(&partial_report, first).disposition,
+            VacuumArtifactDisposition::Deleted
+        );
+        assert_eq!(
+            artifact(&partial_report, failed).disposition,
+            VacuumArtifactDisposition::Removable
+        );
+        assert!(!temp.path().join(first).exists());
+        assert!(temp.path().join(failed).exists());
         Ok(())
     }
 }

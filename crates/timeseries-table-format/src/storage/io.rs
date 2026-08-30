@@ -597,6 +597,59 @@ pub(crate) async fn file_size(location: &StorageLocation, rel_path: &Path) -> St
     }
 }
 
+/// Read fresh metadata for one regular file without following symbolic links.
+pub(crate) async fn regular_file_metadata(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<StorageFileMetadata> {
+    let (path, native_path) = normalize_relative_storage_path(rel_path)?;
+
+    match location {
+        StorageLocation::Local(root) => {
+            let metadata = match fs::symlink_metadata(root.join(native_path)).await {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    return Err(StorageError::NotFound {
+                        path,
+                        source: source.into(),
+                        backtrace: Backtrace::capture(),
+                    });
+                }
+                Err(source) => {
+                    return Err(StorageError::OtherIo {
+                        path,
+                        source: source.into(),
+                        backtrace: Backtrace::capture(),
+                    });
+                }
+            };
+            if !metadata.file_type().is_file() {
+                return Err(StorageError::OtherIo {
+                    path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "path is no longer a regular file",
+                    )
+                    .into(),
+                    backtrace: Backtrace::capture(),
+                });
+            }
+            let modified_at = metadata
+                .modified()
+                .map_err(|source| StorageError::OtherIo {
+                    path: path.clone(),
+                    source: source.into(),
+                    backtrace: Backtrace::capture(),
+                })?;
+            Ok(StorageFileMetadata {
+                path,
+                size_bytes: metadata.len(),
+                modified_at,
+            })
+        }
+    }
+}
+
 /// List regular files recursively below a table-relative directory.
 pub(crate) async fn list_files(
     location: &StorageLocation,
