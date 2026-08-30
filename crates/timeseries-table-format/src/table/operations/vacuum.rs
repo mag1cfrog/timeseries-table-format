@@ -25,7 +25,8 @@ pub enum VacuumMode {
 }
 
 impl VacuumMode {
-    fn name(self) -> &'static str {
+    /// Return the stable snake-case mode name.
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::DryRun => "dry_run",
             Self::Apply => "apply",
@@ -45,6 +46,17 @@ pub enum VacuumArtifactDisposition {
     Deleted,
 }
 
+impl VacuumArtifactDisposition {
+    /// Return the stable snake-case disposition name.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retained => "retained",
+            Self::Removable => "removable",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
 /// Why vacuum retained or selected one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -62,6 +74,19 @@ pub enum VacuumArtifactReason {
     Unreferenced,
     /// The expired, unreferenced Parquet file has no readable valid footer.
     InvalidOrUnreadableParquet,
+}
+
+impl VacuumArtifactReason {
+    /// Return the stable snake-case reason name.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReferencedByCommit { .. } => "referenced_by_commit",
+            Self::WithinRetention => "within_retention",
+            Self::UnrecognizedArtifact => "unrecognized_artifact",
+            Self::Unreferenced => "unreferenced",
+            Self::InvalidOrUnreadableParquet => "invalid_or_unreadable_parquet",
+        }
+    }
 }
 
 /// Vacuum classification for one table-managed file.
@@ -324,7 +349,7 @@ impl TimeSeriesTable {
         level = "debug",
         skip_all,
         fields(
-            mode = mode.name(),
+            mode = mode.as_str(),
             table_version = tracing::field::Empty,
             outcome = tracing::field::Empty
         )

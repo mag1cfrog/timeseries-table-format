@@ -68,6 +68,13 @@ pub enum CliError {
         source: Box<TableError>,
     },
 
+    #[snafu(display("Vacuum failed for table {table}: {source}"))]
+    VacuumTable {
+        table: String,
+        #[snafu(source(from(TableError, Box::new)), backtrace)]
+        source: Box<TableError>,
+    },
+
     #[snafu(display("Internal path error: {message}"))]
     PathInvariantNoSource {
         message: String,

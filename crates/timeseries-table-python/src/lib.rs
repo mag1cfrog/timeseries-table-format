@@ -17,6 +17,7 @@ mod _native {
     use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
     use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 
+    use chrono::{DateTime, Utc};
     use datafusion::arrow::datatypes::DataType;
     use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::error::ArrowError;
@@ -35,12 +36,17 @@ mod _native {
         },
         prelude::*,
         pyclass, pymethods,
-        types::{PyBytes, PyDict, PyList, PyModule, PyTuple, PyType},
+        types::{PyBytes, PyDateTime, PyDict, PyList, PyModule, PyTuple, PyType},
     };
 
     use timeseries_table_format::{
-        AppendRequest, ParquetCompression, datafusion::TsTableProvider,
-        table::OptimizeReport as CoreOptimizeReport,
+        AppendRequest, ParquetCompression,
+        datafusion::TsTableProvider,
+        table::{
+            OptimizeReport as CoreOptimizeReport, VacuumArtifact as CoreVacuumArtifact,
+            VacuumArtifactReason as CoreVacuumArtifactReason, VacuumMode as CoreVacuumMode,
+            VacuumReport as CoreVacuumReport,
+        },
     };
 
     use crate::error_map::{datafusion_error_to_py, storage_error_to_py};
@@ -1435,6 +1441,96 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
+    /// Vacuum classification for one table-managed file.
+    #[derive(Clone)]
+    #[pyclass(frozen, get_all, skip_from_py_object)]
+    struct VacuumArtifact {
+        /// Canonical table-relative path.
+        path: String,
+        /// File size observed during planning.
+        size_bytes: u64,
+        /// Modification time observed during planning.
+        modified_at: DateTime<Utc>,
+        /// `retained`, `removable`, or `deleted`.
+        disposition: String,
+        /// Stable snake-case classification reason.
+        reason: String,
+        /// Earliest retained commit referencing the path, when applicable.
+        referenced_by_commit_version: Option<u64>,
+    }
+
+    impl From<CoreVacuumArtifact> for VacuumArtifact {
+        fn from(artifact: CoreVacuumArtifact) -> Self {
+            let referenced_by_commit_version = match &artifact.reason {
+                CoreVacuumArtifactReason::ReferencedByCommit { version } => Some(*version),
+                _ => None,
+            };
+            Self {
+                path: artifact.path,
+                size_bytes: artifact.size_bytes,
+                modified_at: artifact.modified_at,
+                disposition: artifact.disposition.as_str().to_string(),
+                reason: artifact.reason.as_str().to_string(),
+                referenced_by_commit_version,
+            }
+        }
+    }
+
+    /// Structured result of one vacuum invocation.
+    #[pyclass(frozen)]
+    struct VacuumReport {
+        #[pyo3(get)]
+        /// Latest transaction-log version used for deletion safety.
+        table_version: u64,
+        #[pyo3(get)]
+        /// Exclusive retention cutoff.
+        older_than: DateTime<Utc>,
+        #[pyo3(get)]
+        /// `dry_run` or `apply`.
+        mode: String,
+        artifacts: Vec<VacuumArtifact>,
+        #[pyo3(get)]
+        /// Bytes across every considered file.
+        considered_bytes: u128,
+        #[pyo3(get)]
+        /// Bytes retained by this invocation.
+        retained_bytes: u128,
+        #[pyo3(get)]
+        /// Bytes reported as removable by dry-run.
+        removable_bytes: u128,
+        #[pyo3(get)]
+        /// Bytes removed by apply mode.
+        deleted_bytes: u128,
+    }
+
+    #[pymethods]
+    impl VacuumReport {
+        /// Every regular file considered below `data/` and `_coverage/`.
+        #[getter]
+        fn artifacts(&self, py: Python<'_>) -> PyResult<Vec<Py<VacuumArtifact>>> {
+            self.artifacts
+                .iter()
+                .cloned()
+                .map(|artifact| Py::new(py, artifact))
+                .collect()
+        }
+    }
+
+    impl From<CoreVacuumReport> for VacuumReport {
+        fn from(report: CoreVacuumReport) -> Self {
+            Self {
+                table_version: report.table_version,
+                older_than: report.older_than,
+                mode: report.mode.as_str().to_string(),
+                artifacts: report.artifacts.into_iter().map(Into::into).collect(),
+                considered_bytes: report.considered_bytes,
+                retained_bytes: report.retained_bytes,
+                removable_bytes: report.removable_bytes,
+                deleted_bytes: report.deleted_bytes,
+            }
+        }
+    }
+
     fn positive_append_limit(name: &str, value: Option<isize>) -> PyResult<Option<usize>> {
         value
             .map(|value| {
@@ -1444,6 +1540,17 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                     .ok_or_else(|| PyValueError::new_err(format!("{name} must be positive")))
             })
             .transpose()
+    }
+
+    fn datetime_to_utc(value: &Bound<'_, PyAny>) -> PyResult<DateTime<Utc>> {
+        let value = value.cast::<PyDateTime>()?;
+        if value.getattr("tzinfo")?.is_none() {
+            return Err(PyTypeError::new_err(
+                "older_than must be a timezone-aware datetime",
+            ));
+        }
+        let utc = Utc.into_pyobject(value.py())?;
+        value.call_method1("astimezone", (utc,))?.extract()
     }
 
     /// Local filesystem time-series table rooted at `table_root`.
@@ -1847,6 +1954,62 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 py,
                 rt.as_ref(),
                 table.optimize(),
+                move |py, err| {
+                    table_error_to_py_with_root(
+                        py,
+                        &table_root_for_err,
+                        &entity_columns_for_err,
+                        err,
+                    )
+                },
+            )?;
+            Ok(report.into())
+        }
+
+        /// Inspect or delete expired files unreachable from retained table history.
+        ///
+        /// `older_than` must be timezone-aware. Files modified at or after it are retained.
+        /// Choose a cutoff older than the longest expected writer duration. This operation does
+        /// not expire snapshots, rewrite history, or delete transaction-log files.
+        ///
+        /// Parameters
+        /// ----------
+        /// older_than:
+        ///     Exclusive retention cutoff as a timezone-aware `datetime.datetime`.
+        /// apply:
+        ///     Delete candidates when true. The default is a non-mutating dry-run.
+        ///
+        /// Returns
+        /// -------
+        /// VacuumReport
+        ///     Per-file classifications and aggregate byte counts.
+        ///
+        /// Raises
+        /// ------
+        /// TimeseriesTableError
+        ///     If retained history cannot be validated or storage access fails. The exception
+        ///     includes a `table_root` attribute.
+        #[pyo3(signature = (older_than, *, apply=false))]
+        fn vacuum(
+            &self,
+            py: Python<'_>,
+            older_than: &Bound<'_, PyAny>,
+            apply: bool,
+        ) -> PyResult<VacuumReport> {
+            let older_than = datetime_to_utc(older_than)?;
+            let rt = tokio_runner::global_runtime()?;
+            let table_root_for_err = self.table_root.clone();
+            let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
+            let mode = if apply {
+                CoreVacuumMode::Apply
+            } else {
+                CoreVacuumMode::DryRun
+            };
+
+            let report = tokio_runner::run_blocking_map_err(
+                py,
+                rt.as_ref(),
+                self.inner.vacuum(older_than, mode),
                 move |py, err| {
                     table_error_to_py_with_root(
                         py,
@@ -2517,6 +2680,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         // Export classes
         m.add_class::<Session>()?;
         m.add_class::<OptimizeReport>()?;
+        m.add_class::<VacuumArtifact>()?;
+        m.add_class::<VacuumReport>()?;
         m.add_class::<TimeSeriesTable>()?;
 
         // Export exception types

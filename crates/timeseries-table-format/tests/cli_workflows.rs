@@ -823,6 +823,56 @@ fn cli_optimize_rewrites_mixed_segments_and_reports_repeated_no_op()
 }
 
 #[test]
+fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let table_root = tmp.path().join("table");
+    create_table_via_cli(&table_root, "1m", &[])?;
+    let orphan = table_root.join("data/orphan.parquet");
+    std::fs::create_dir_all(
+        orphan
+            .parent()
+            .ok_or_else(|| io::Error::other("missing parent"))?,
+    )?;
+    std::fs::write(&orphan, b"incomplete")?;
+    let table_root_arg = table_root.to_string_lossy();
+    let args = [
+        "vacuum",
+        "--table",
+        table_root_arg.as_ref(),
+        "--older-than",
+        "2099-01-01T00:00:00Z",
+    ];
+
+    let dry_run = run_cli(&args)?;
+
+    assert_cli_success(&dry_run);
+    let stdout = String::from_utf8(dry_run.stdout)?;
+    assert!(stdout.contains("mode: dry_run\n"));
+    assert!(stdout.contains("removable_bytes: 10\n"));
+    assert!(stdout.contains("deleted_bytes: 0\n"));
+    assert!(
+        stdout.contains("artifact: disposition=removable reason=invalid_or_unreadable_parquet")
+    );
+    assert!(stdout.contains("path=data/orphan.parquet\n"));
+    assert!(orphan.exists());
+
+    let mut apply_args = args.to_vec();
+    apply_args.push("--apply");
+    let applied = run_cli(&apply_args)?;
+
+    assert_cli_success(&applied);
+    let stdout = String::from_utf8(applied.stdout)?;
+    assert!(stdout.contains("mode: apply\n"));
+    assert!(stdout.contains("removable_bytes: 0\n"));
+    assert!(stdout.contains("deleted_bytes: 10\n"));
+    assert!(stdout.contains("artifact: disposition=deleted reason=invalid_or_unreadable_parquet"));
+    assert!(!orphan.exists());
+    assert_eq!(open_table_blocking(&table_root)?.state().version, 1);
+    Ok(())
+}
+
+#[test]
 fn cli_optimize_rejects_tables_without_entities_with_context()
 -> StdResult<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
