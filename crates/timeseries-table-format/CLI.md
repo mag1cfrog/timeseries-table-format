@@ -213,9 +213,10 @@ tstable vacuum \
 | `--apply` | | Delete removable files; omit for a dry-run |
 
 Files modified at or after the cutoff are retained. Vacuum also retains files referenced by any
-valid retained commit, files whose names are not recognized as table-managed artifacts, and files
-that change while apply mode is running. A cutoff that is too recent can select an active writer's
-uncommitted file, so leave enough time for the longest expected write to finish.
+valid retained commit and files whose names are not recognized as table-managed artifacts. Apply
+rechecks each candidate's size and modification time before deletion and retains it if either value
+differs from planning. This check is best effort, not atomic with deletion, so leave enough
+retention time for the longest expected write to finish.
 
 Parquet files elsewhere under `data/` are not vacuum candidates. This includes source files passed
 to `append`, even when the source is inside the table root.
@@ -227,14 +228,15 @@ escaped. The reason values are:
 |--------|---------|
 | `referenced_by_commit` | A retained commit references the file |
 | `within_retention` | The file is not older than the cutoff |
-| `changed_since_planning` | The file changed before apply could delete it |
+| `changed_since_planning` | The file's size or modification time differed from planning |
 | `unrecognized_artifact` | The file is inside a scanned directory but its path is not reserved |
 | `unreferenced` | An expired managed file has no retained reference |
 | `invalid_or_unreadable_parquet` | An expired unreferenced Parquet file has no readable valid footer |
 
 If apply mode stops on a deletion error, the CLI prints a partial report before exiting nonzero.
 Files marked `deleted` were completed before the failure. Files still marked `removable` were not
-deleted and can be retried.
+deleted and can be retried. `already_absent` means vacuum found a candidate missing before
+deletion; its last observed size is counted in `already_absent_bytes`, not `deleted_bytes`.
 
 Vacuum is orphan-file cleanup. It does not expire snapshots, choose a transaction-log retention
 boundary, rewrite table history, or delete transaction-log files. It scans regular files under

@@ -1451,7 +1451,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         size_bytes: u64,
         /// Latest modification time observed by this invocation.
         modified_at: DateTime<Utc>,
-        /// `retained`, `removable`, or `deleted`.
+        /// `retained`, `removable`, `deleted`, or `already_absent`.
         disposition: String,
         /// Stable snake-case classification reason.
         reason: String,
@@ -1502,6 +1502,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// Number of files removed by apply mode.
         deleted_files: usize,
         #[pyo3(get)]
+        /// Number of candidates already absent when apply checked or removed them.
+        already_absent_files: usize,
+        #[pyo3(get)]
         /// Bytes across every considered file.
         considered_bytes: u128,
         #[pyo3(get)]
@@ -1513,6 +1516,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         #[pyo3(get)]
         /// Bytes removed by apply mode.
         deleted_bytes: u128,
+        #[pyo3(get)]
+        /// Bytes last observed for candidates already absent during apply.
+        already_absent_bytes: u128,
     }
 
     #[pymethods]
@@ -1539,10 +1545,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 retained_files: report.retained_files,
                 removable_files: report.removable_files,
                 deleted_files: report.deleted_files,
+                already_absent_files: report.already_absent_files,
                 considered_bytes: report.considered_bytes,
                 retained_bytes: report.retained_bytes,
                 removable_bytes: report.removable_bytes,
                 deleted_bytes: report.deleted_bytes,
+                already_absent_bytes: report.already_absent_bytes,
             }
         }
     }
@@ -1611,7 +1619,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
     fn datetime_to_utc(value: &Bound<'_, PyAny>) -> PyResult<DateTime<Utc>> {
         let value = value.cast::<PyDateTime>()?;
-        if value.getattr("tzinfo")?.is_none() {
+        if value.call_method0("utcoffset")?.is_none() {
             return Err(PyTypeError::new_err(
                 "older_than must be a timezone-aware datetime",
             ));
@@ -2037,8 +2045,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         ///
         /// `older_than` must be timezone-aware and must not be in the future. Files modified at
         /// or after it are retained. Choose a cutoff older than the longest expected writer
-        /// duration. This operation does not expire snapshots, rewrite history, or delete
-        /// transaction-log files.
+        /// duration. Apply rechecks each candidate's size and modification time immediately
+        /// before deletion, but that check and deletion are not atomic. This operation does not
+        /// expire snapshots, rewrite history, or delete transaction-log files.
         ///
         /// Parameters
         /// ----------

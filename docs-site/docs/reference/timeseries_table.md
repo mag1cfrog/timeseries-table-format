@@ -145,16 +145,19 @@ print(report.deleted_files, report.deleted_bytes)
 ```
 
 The cutoff is exclusive. Files modified at or after it are retained, and a future cutoff raises
-`ValueError`. Vacuum also retains files referenced anywhere in valid retained history,
-unrecognized files, and files that change while apply mode is running. Leave enough retention
-time for active writers to finish before their files become eligible.
+`ValueError`. Vacuum also retains files referenced anywhere in valid retained history and
+unrecognized files. Apply rechecks each candidate's size and modification time before deletion and
+retains it if either value differs from planning. This check is best effort, not atomic with
+deletion, so leave enough retention time for active writers to finish.
 
 Parquet files elsewhere under `data/` are not vacuum candidates. This includes append source files
 inside the table root.
 
 `VacuumReport.artifacts` contains every regular file considered under `data/` and `_coverage/`.
-Each artifact has a disposition (`retained`, `removable`, or `deleted`) and a reason. The report
-also provides matching file and byte totals.
+Each artifact has a disposition (`retained`, `removable`, `deleted`, or `already_absent`) and a
+reason. `already_absent` means vacuum found a candidate missing before deletion; its last observed
+size is counted in `already_absent_bytes`, not `deleted_bytes`. The report also provides matching
+file and byte totals.
 
 Apply mode can remove some files before a later deletion fails. In that case,
 `VacuumApplyError.partial_report` records the completed deletions and the remaining candidates;

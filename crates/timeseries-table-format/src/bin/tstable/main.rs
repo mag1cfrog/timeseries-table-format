@@ -398,10 +398,12 @@ fn print_vacuum_report(report: &VacuumReport) {
     println!("retained_files: {}", report.retained_files);
     println!("removable_files: {}", report.removable_files);
     println!("deleted_files: {}", report.deleted_files);
+    println!("already_absent_files: {}", report.already_absent_files);
     println!("considered_bytes: {}", report.considered_bytes);
     println!("retained_bytes: {}", report.retained_bytes);
     println!("removable_bytes: {}", report.removable_bytes);
     println!("deleted_bytes: {}", report.deleted_bytes);
+    println!("already_absent_bytes: {}", report.already_absent_bytes);
     for artifact in &report.artifacts {
         let referenced_by_commit_version = match artifact.reason {
             VacuumArtifactReason::ReferencedByCommit { version } => version.to_string(),

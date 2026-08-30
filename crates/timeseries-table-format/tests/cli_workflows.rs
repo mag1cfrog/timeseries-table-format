@@ -860,8 +860,10 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
     assert!(stdout.contains("retained_files: 0\n"));
     assert!(stdout.contains("removable_files: 1\n"));
     assert!(stdout.contains("deleted_files: 0\n"));
+    assert!(stdout.contains("already_absent_files: 0\n"));
     assert!(stdout.contains("removable_bytes: 10\n"));
     assert!(stdout.contains("deleted_bytes: 0\n"));
+    assert!(stdout.contains("already_absent_bytes: 0\n"));
     assert!(
         stdout.contains("artifact: disposition=removable reason=invalid_or_unreadable_parquet")
     );
@@ -881,8 +883,10 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
     assert!(stdout.contains("mode: apply\n"));
     assert!(stdout.contains("removable_files: 0\n"));
     assert!(stdout.contains("deleted_files: 1\n"));
+    assert!(stdout.contains("already_absent_files: 0\n"));
     assert!(stdout.contains("removable_bytes: 0\n"));
     assert!(stdout.contains("deleted_bytes: 10\n"));
+    assert!(stdout.contains("already_absent_bytes: 0\n"));
     assert!(stdout.contains("artifact: disposition=deleted reason=invalid_or_unreadable_parquet"));
     assert!(!orphan.exists());
     assert_eq!(open_table_blocking(&table_root)?.state().version, 1);

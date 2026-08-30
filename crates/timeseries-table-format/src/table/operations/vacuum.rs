@@ -45,6 +45,8 @@ pub enum VacuumArtifactDisposition {
     Removable,
     /// Apply mode removed the file.
     Deleted,
+    /// Apply mode found the file already absent.
+    AlreadyAbsent,
 }
 
 impl VacuumArtifactDisposition {
@@ -54,6 +56,7 @@ impl VacuumArtifactDisposition {
             Self::Retained => "retained",
             Self::Removable => "removable",
             Self::Deleted => "deleted",
+            Self::AlreadyAbsent => "already_absent",
         }
     }
 }
@@ -69,7 +72,7 @@ pub enum VacuumArtifactReason {
     },
     /// The file modification time is at or after the required cutoff.
     WithinRetention,
-    /// The file changed after vacuum planned it, so apply preserved it.
+    /// The file's size or modification time differed from the planned metadata.
     ChangedSincePlanning,
     /// The file is below a scanned directory but does not have a reserved managed shape.
     UnrecognizedArtifact,
@@ -127,6 +130,8 @@ pub struct VacuumReport {
     pub removable_files: usize,
     /// Number of files removed by apply mode.
     pub deleted_files: usize,
+    /// Number of candidates already absent when apply checked or removed them.
+    pub already_absent_files: usize,
     /// Bytes across every considered file.
     pub considered_bytes: u128,
     /// Bytes retained by this invocation.
@@ -135,6 +140,8 @@ pub struct VacuumReport {
     pub removable_bytes: u128,
     /// Bytes removed by apply mode.
     pub deleted_bytes: u128,
+    /// Bytes last observed for candidates already absent during apply.
+    pub already_absent_bytes: u128,
 }
 
 impl VacuumReport {
@@ -148,10 +155,12 @@ impl VacuumReport {
         let mut retained_files = 0usize;
         let mut removable_files = 0usize;
         let mut deleted_files = 0usize;
+        let mut already_absent_files = 0usize;
         let mut considered_bytes = 0u128;
         let mut retained_bytes = 0u128;
         let mut removable_bytes = 0u128;
         let mut deleted_bytes = 0u128;
+        let mut already_absent_bytes = 0u128;
         for artifact in &artifacts {
             let bytes = u128::from(artifact.size_bytes);
             considered_bytes += bytes;
@@ -168,6 +177,10 @@ impl VacuumReport {
                     deleted_files += 1;
                     deleted_bytes += bytes;
                 }
+                VacuumArtifactDisposition::AlreadyAbsent => {
+                    already_absent_files += 1;
+                    already_absent_bytes += bytes;
+                }
             }
         }
         Self {
@@ -179,10 +192,12 @@ impl VacuumReport {
             retained_files,
             removable_files,
             deleted_files,
+            already_absent_files,
             considered_bytes,
             retained_bytes,
             removable_bytes,
             deleted_bytes,
+            already_absent_bytes,
         }
     }
 }
@@ -402,7 +417,7 @@ async fn prepare_candidate_for_delete(
         {
             Ok(fresh) => fresh,
             Err(StorageError::NotFound { .. }) => {
-                artifact.disposition = VacuumArtifactDisposition::Deleted;
+                artifact.disposition = VacuumArtifactDisposition::AlreadyAbsent;
                 return Ok(false);
             }
             Err(source) => return Err(source),
@@ -429,6 +444,10 @@ impl TimeSeriesTable {
     /// cutoff are retained, and a future cutoff is rejected. Choose a cutoff
     /// older than the longest expected writer duration so active writers remain
     /// inside the retention window.
+    ///
+    /// Apply rechecks each candidate's size and modification time immediately
+    /// before deletion. The retention cutoff remains the safety boundary because
+    /// that check and deletion are not atomic.
     ///
     /// Apply mode may delete earlier candidates before a later deletion error.
     /// [`VacuumError::Delete`] includes the partial report from that attempt.
@@ -486,16 +505,20 @@ impl TimeSeriesTable {
                             break;
                         }
                     }
-                    if let Err(source) = storage::remove_file_if_exists(
-                        self.location().as_ref(),
-                        Path::new(&artifact.path),
-                    )
-                    .await
+                    match storage::remove_file(self.location().as_ref(), Path::new(&artifact.path))
+                        .await
                     {
-                        delete_failure = Some((artifact.path.clone(), source));
-                        break;
+                        Ok(()) => {
+                            artifact.disposition = VacuumArtifactDisposition::Deleted;
+                        }
+                        Err(StorageError::NotFound { .. }) => {
+                            artifact.disposition = VacuumArtifactDisposition::AlreadyAbsent;
+                        }
+                        Err(source) => {
+                            delete_failure = Some((artifact.path.clone(), source));
+                            break;
+                        }
                     }
-                    artifact.disposition = VacuumArtifactDisposition::Deleted;
                 }
                 if let Some((path, source)) = delete_failure {
                     return Err(VacuumError::Delete {
@@ -834,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_preserves_a_candidate_that_changed_after_planning() -> TestResult {
+    async fn apply_preserves_changed_and_reports_missing_candidates() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -857,7 +880,15 @@ mod tests {
 
         fs::remove_file(temp.path().join(path))?;
         assert!(!prepare_candidate_for_delete(&table, &mut candidate).await?);
-        assert_eq!(candidate.disposition, VacuumArtifactDisposition::Deleted);
+        assert_eq!(
+            candidate.disposition,
+            VacuumArtifactDisposition::AlreadyAbsent
+        );
+        let report = VacuumReport::new(1, expired_cutoff(), VacuumMode::Apply, vec![candidate]);
+        assert_eq!(report.deleted_files, 0);
+        assert_eq!(report.deleted_bytes, 0);
+        assert_eq!(report.already_absent_files, 1);
+        assert_eq!(report.already_absent_bytes, b"new contents".len() as u128);
         Ok(())
     }
 
