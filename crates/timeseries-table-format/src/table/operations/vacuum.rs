@@ -1,0 +1,646 @@
+//! Retention-aware removal of unreferenced table-managed artifacts.
+
+use std::{collections::HashMap, path::Path};
+
+use chrono::{DateTime, Utc};
+use parquet::arrow::async_reader::AsyncFileReader;
+use snafu::{Backtrace, ResultExt, Snafu};
+
+use crate::{
+    coverage::layout::{COVERAGE_EXT, SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR},
+    metadata::protocol::TableProtocolError,
+    storage::{self, StorageError, StorageFileMetadata},
+    table::{TableError, TimeSeriesTable},
+    transaction_log::{CommitError, LogAction, TableKind},
+};
+
+/// Whether vacuum reports candidates or removes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VacuumMode {
+    /// Inspect the table without deleting files.
+    DryRun,
+    /// Delete expired, unreferenced table-managed files.
+    Apply,
+}
+
+impl VacuumMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::DryRun => "dry_run",
+            Self::Apply => "apply",
+        }
+    }
+}
+
+/// The action vacuum took or would take for one considered file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VacuumArtifactDisposition {
+    /// Vacuum preserved the file.
+    Retained,
+    /// Dry-run identified the file as removable.
+    Removable,
+    /// Apply mode removed the file.
+    Deleted,
+}
+
+/// Why vacuum retained or selected one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VacuumArtifactReason {
+    /// A retained commit references this path.
+    ReferencedByCommit {
+        /// Earliest retained commit that references the path.
+        version: u64,
+    },
+    /// The file modification time is at or after the required cutoff.
+    WithinRetention,
+    /// The file is below a managed directory but does not have a managed shape.
+    UnrecognizedArtifact,
+    /// The file is expired and no retained commit references it.
+    Unreferenced,
+    /// The expired, unreferenced Parquet file has no readable valid footer.
+    InvalidOrUnreadableParquet,
+}
+
+/// Vacuum classification for one table-managed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VacuumArtifact {
+    /// Canonical table-relative path.
+    pub path: String,
+    /// File size observed during planning.
+    pub size_bytes: u64,
+    /// Modification time observed during planning.
+    pub modified_at: DateTime<Utc>,
+    /// Action taken or proposed by this invocation.
+    pub disposition: VacuumArtifactDisposition,
+    /// Reason for the disposition.
+    pub reason: VacuumArtifactReason,
+}
+
+/// Structured result of one vacuum invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VacuumReport {
+    /// Latest validated transaction-log version used for deletion safety.
+    pub table_version: u64,
+    /// Required exclusive upper bound on removable file modification times.
+    pub older_than: DateTime<Utc>,
+    /// Requested vacuum behavior.
+    pub mode: VacuumMode,
+    /// Every regular file considered below `data/` and `_coverage/`.
+    pub artifacts: Vec<VacuumArtifact>,
+    /// Bytes across every considered file.
+    pub considered_bytes: u128,
+    /// Bytes retained by this invocation.
+    pub retained_bytes: u128,
+    /// Bytes reported as removable by dry-run.
+    pub removable_bytes: u128,
+    /// Bytes removed by apply mode.
+    pub deleted_bytes: u128,
+}
+
+impl VacuumReport {
+    fn new(
+        table_version: u64,
+        older_than: DateTime<Utc>,
+        mode: VacuumMode,
+        artifacts: Vec<VacuumArtifact>,
+    ) -> Self {
+        let mut considered_bytes = 0u128;
+        let mut retained_bytes = 0u128;
+        let mut removable_bytes = 0u128;
+        let mut deleted_bytes = 0u128;
+        for artifact in &artifacts {
+            let bytes = u128::from(artifact.size_bytes);
+            considered_bytes += bytes;
+            match artifact.disposition {
+                VacuumArtifactDisposition::Retained => retained_bytes += bytes,
+                VacuumArtifactDisposition::Removable => removable_bytes += bytes,
+                VacuumArtifactDisposition::Deleted => deleted_bytes += bytes,
+            }
+        }
+        Self {
+            table_version,
+            older_than,
+            mode,
+            artifacts,
+            considered_bytes,
+            retained_bytes,
+            removable_bytes,
+            deleted_bytes,
+        }
+    }
+}
+
+/// Errors owned by a vacuum operation.
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+#[non_exhaustive]
+pub enum VacuumError {
+    /// The latest table protocol does not permit this client to vacuum.
+    #[snafu(context(false), display("Table protocol error: {source}"))]
+    Protocol {
+        /// Complete table protocol failure.
+        #[snafu(source)]
+        source: TableProtocolError,
+        /// Backtrace captured at the vacuum boundary.
+        backtrace: Backtrace,
+    },
+
+    /// The latest metadata no longer describes a time-series table.
+    #[snafu(display("Latest table kind is {kind:?}, expected a time-series table"))]
+    NotTimeSeries {
+        /// Rejected table kind.
+        kind: TableKind,
+    },
+
+    /// Reading or validating retained transaction-log history failed.
+    #[snafu(context(false), display("Vacuum transaction-log error: {source}"))]
+    Commit {
+        /// Complete transaction-log failure.
+        #[snafu(source, backtrace)]
+        source: CommitError,
+    },
+
+    /// Listing or inspecting table-managed storage failed.
+    #[snafu(context(false), display("Vacuum storage error: {source}"))]
+    Storage {
+        /// Complete storage failure.
+        #[snafu(source, backtrace)]
+        source: StorageError,
+    },
+
+    /// Removing one selected file failed.
+    #[snafu(display("Failed to delete vacuum candidate {path}: {source}"))]
+    Delete {
+        /// Canonical table-relative path selected for deletion.
+        path: String,
+        /// Complete storage failure.
+        #[snafu(source, backtrace)]
+        source: StorageError,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactKind {
+    Parquet,
+    Coverage,
+    Unrecognized,
+}
+
+fn artifact_kind(path: &str) -> ArtifactKind {
+    let path = Path::new(path);
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    if path.starts_with("data") && extension == Some("parquet") {
+        ArtifactKind::Parquet
+    } else if (path.starts_with(SEGMENT_COVERAGE_DIR) || path.starts_with(TABLE_SNAPSHOT_DIR))
+        && extension == Some(COVERAGE_EXT)
+    {
+        ArtifactKind::Coverage
+    } else {
+        ArtifactKind::Unrecognized
+    }
+}
+
+async fn parquet_footer_is_valid(table: &TimeSeriesTable, path: &str) -> bool {
+    let Ok(mut file) =
+        storage::open_parquet_reader(table.location().as_ref(), Path::new(path)).await
+    else {
+        return false;
+    };
+    file.get_metadata(None).await.is_ok()
+}
+
+async fn retained_paths(
+    table: &TimeSeriesTable,
+) -> Result<(u64, HashMap<String, u64>), VacuumError> {
+    let state = table
+        .log
+        .rebuild_table_state()
+        .await
+        .map_err(VacuumError::from)?;
+    state
+        .table_meta
+        .ensure_write_compatible()
+        .map_err(VacuumError::from)?;
+    if !matches!(state.table_meta.kind, TableKind::TimeSeries(_)) {
+        return Err(VacuumError::NotTimeSeries {
+            kind: state.table_meta.kind,
+        });
+    }
+
+    let mut paths = HashMap::new();
+    // ponytail: replay retained history here; add log checkpoints if measured I/O requires it.
+    for version in 1..=state.version {
+        let commit = table
+            .log
+            .load_commit(version)
+            .await
+            .map_err(VacuumError::from)?;
+        if commit.version != version {
+            return Err(VacuumError::from(CommitError::CommitVersionMismatch {
+                expected: version,
+                found: commit.version,
+                backtrace: Backtrace::capture(),
+            }));
+        }
+        for action in commit.actions {
+            match action {
+                LogAction::AddSegment(segment) => {
+                    paths.entry(segment.path).or_insert(version);
+                    if let Some(path) = segment.coverage_path {
+                        paths.entry(path).or_insert(version);
+                    }
+                }
+                LogAction::RemoveSegment { path } => {
+                    paths.entry(path).or_insert(version);
+                }
+                LogAction::UpdateTableCoverage { coverage_path, .. } => {
+                    paths.entry(coverage_path).or_insert(version);
+                }
+                LogAction::UpdateTableMeta(_) => {}
+            }
+        }
+    }
+    Ok((state.version, paths))
+}
+
+async fn classify_artifact(
+    table: &TimeSeriesTable,
+    file: StorageFileMetadata,
+    older_than: DateTime<Utc>,
+    retained: &HashMap<String, u64>,
+) -> VacuumArtifact {
+    let modified_at = DateTime::<Utc>::from(file.modified_at);
+    let (disposition, reason) = if let Some(version) = retained.get(&file.path) {
+        (
+            VacuumArtifactDisposition::Retained,
+            VacuumArtifactReason::ReferencedByCommit { version: *version },
+        )
+    } else if modified_at >= older_than {
+        (
+            VacuumArtifactDisposition::Retained,
+            VacuumArtifactReason::WithinRetention,
+        )
+    } else {
+        match artifact_kind(&file.path) {
+            ArtifactKind::Unrecognized => (
+                VacuumArtifactDisposition::Retained,
+                VacuumArtifactReason::UnrecognizedArtifact,
+            ),
+            ArtifactKind::Parquet if !parquet_footer_is_valid(table, &file.path).await => (
+                VacuumArtifactDisposition::Removable,
+                VacuumArtifactReason::InvalidOrUnreadableParquet,
+            ),
+            ArtifactKind::Parquet | ArtifactKind::Coverage => (
+                VacuumArtifactDisposition::Removable,
+                VacuumArtifactReason::Unreferenced,
+            ),
+        }
+    };
+    VacuumArtifact {
+        path: file.path,
+        size_bytes: file.size_bytes,
+        modified_at,
+        disposition,
+        reason,
+    }
+}
+
+impl TimeSeriesTable {
+    /// Inspect or delete expired files unreachable from retained table history.
+    ///
+    /// Vacuum considers regular files below `data/` and `_coverage/`. It never
+    /// deletes transaction-log files, expires snapshots, or rewrites history.
+    /// `older_than` is required and exclusive: files modified at or after the
+    /// cutoff are retained. Choose a cutoff older than the longest expected
+    /// writer duration so active writers remain inside the retention window.
+    ///
+    /// Apply mode may delete earlier candidates before a later deletion error.
+    #[tracing::instrument(
+        name = "table.vacuum",
+        target = "timeseries_table_format::table::vacuum",
+        level = "debug",
+        skip_all,
+        fields(
+            mode = mode.name(),
+            table_version = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        )
+    )]
+    pub async fn vacuum(
+        &self,
+        older_than: DateTime<Utc>,
+        mode: VacuumMode,
+    ) -> Result<VacuumReport, TableError> {
+        let result: Result<VacuumReport, VacuumError> = async {
+            let (mut table_version, mut retained) = retained_paths(self).await?;
+            let mut files =
+                storage::list_files(self.location().as_ref(), Path::new("data")).await?;
+            files.extend(
+                storage::list_files(self.location().as_ref(), Path::new("_coverage")).await?,
+            );
+            files.sort_by(|left, right| left.path.cmp(&right.path));
+
+            let mut artifacts = Vec::with_capacity(files.len());
+            for file in files {
+                artifacts.push(classify_artifact(self, file, older_than, &retained).await);
+            }
+
+            if mode == VacuumMode::Apply {
+                (table_version, retained) = retained_paths(self).await?;
+                for artifact in &mut artifacts {
+                    if artifact.disposition != VacuumArtifactDisposition::Removable {
+                        continue;
+                    }
+                    if let Some(version) = retained.get(&artifact.path) {
+                        artifact.disposition = VacuumArtifactDisposition::Retained;
+                        artifact.reason =
+                            VacuumArtifactReason::ReferencedByCommit { version: *version };
+                        continue;
+                    }
+                    storage::remove_file(self.location().as_ref(), Path::new(&artifact.path))
+                        .await
+                        .map_err(|source| VacuumError::Delete {
+                            path: artifact.path.clone(),
+                            source,
+                        })?;
+                    artifact.disposition = VacuumArtifactDisposition::Deleted;
+                }
+            }
+
+            Ok(VacuumReport::new(
+                table_version,
+                older_than,
+                mode,
+                artifacts,
+            ))
+        }
+        .await;
+
+        let span = tracing::Span::current();
+        match &result {
+            Ok(report) => {
+                span.record("table_version", report.table_version);
+                span.record(
+                    "outcome",
+                    match mode {
+                        VacuumMode::DryRun => "dry_run",
+                        VacuumMode::Apply => "applied",
+                    },
+                );
+            }
+            Err(_) => {
+                span.record("outcome", "failed");
+            }
+        }
+        result.context(crate::table::error::VacuumSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io::Write as _};
+
+    use chrono::Duration;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        coverage::EntityIdentity,
+        storage::{TableLocation, layout, open_new_output_sink, write_new},
+        table::test_util::{
+            TestResult, TestRow, make_basic_table_meta, utc_datetime, write_test_parquet,
+        },
+        transaction_log::{
+            FileFormat, IndexValue, SegmentEntityLayout, SegmentMeta, TransactionLogStore,
+        },
+    };
+
+    fn artifact<'a>(report: &'a VacuumReport, path: &str) -> &'a VacuumArtifact {
+        report
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .unwrap_or_else(|| panic!("missing vacuum artifact {path}"))
+    }
+
+    fn referenced_segment(
+        path: &str,
+        coverage_path: &str,
+    ) -> Result<SegmentMeta, Box<dyn std::error::Error>> {
+        Ok(SegmentMeta {
+            path: path.to_string(),
+            format: FileFormat::Parquet,
+            entity_layout: SegmentEntityLayout::Single(EntityIdentity::try_new(vec!["A".into()])?),
+            index_min: IndexValue::Timestamp(utc_datetime(2025, 1, 1, 0, 0, 0)),
+            index_max: IndexValue::Timestamp(utc_datetime(2025, 1, 1, 0, 1, 0)),
+            row_count: 2,
+            file_size: None,
+            coverage_path: Some(coverage_path.to_string()),
+        })
+    }
+
+    #[tokio::test]
+    async fn vacuum_dry_run_and_apply_preserve_retained_history_and_logs() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let historical_data = "data/historical.parquet";
+        let historical_coverage = "_coverage/segments/historical.roar";
+        let historical_snapshot = "_coverage/table/2-historical.roar";
+        for (path, bytes) in [
+            (historical_data, b"historical data".as_slice()),
+            (historical_coverage, b"historical coverage".as_slice()),
+            (historical_snapshot, b"historical snapshot".as_slice()),
+        ] {
+            write_new(location.as_ref(), Path::new(path), bytes).await?;
+        }
+
+        let log = TransactionLogStore::new(location.clone());
+        log.commit_with_expected_version(
+            1,
+            vec![
+                LogAction::AddSegment(referenced_segment(historical_data, historical_coverage)?),
+                LogAction::UpdateTableCoverage {
+                    index_kind: table.index_spec().kind.clone(),
+                    coverage_path: historical_snapshot.to_string(),
+                },
+            ],
+        )
+        .await?;
+        log.commit_with_expected_version(
+            2,
+            vec![LogAction::RemoveSegment {
+                path: historical_data.to_string(),
+            }],
+        )
+        .await?;
+
+        let invalid_orphan = "data/invalid-orphan.parquet";
+        let valid_orphan = "data/valid-orphan.parquet";
+        let coverage_orphan = "_coverage/segments/orphan.roar";
+        let unrecognized = "data/keep.txt";
+        let outside_managed_directories = "incoming.parquet";
+        write_new(location.as_ref(), Path::new(invalid_orphan), b"incomplete").await?;
+        write_test_parquet(
+            &temp.path().join(valid_orphan),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 0,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )?;
+        write_new(
+            location.as_ref(),
+            Path::new(coverage_orphan),
+            b"orphan coverage",
+        )
+        .await?;
+        write_new(location.as_ref(), Path::new(unrecognized), b"keep").await?;
+        write_new(
+            location.as_ref(),
+            Path::new(outside_managed_directories),
+            b"external source",
+        )
+        .await?;
+
+        let log_paths = [
+            layout::current_rel_path(),
+            layout::commit_rel_path(1),
+            layout::commit_rel_path(2),
+            layout::commit_rel_path(3),
+        ];
+        let log_before = log_paths
+            .iter()
+            .map(|path| fs::read(temp.path().join(path)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let older_than = Utc::now() + Duration::hours(1);
+
+        let dry_run = table.vacuum(older_than, VacuumMode::DryRun).await?;
+
+        assert_eq!(dry_run.table_version, 3);
+        assert_eq!(dry_run.mode, VacuumMode::DryRun);
+        assert_eq!(dry_run.deleted_bytes, 0);
+        let historical = artifact(&dry_run, historical_data);
+        assert_eq!(historical.size_bytes, b"historical data".len() as u64);
+        assert_eq!(historical.disposition, VacuumArtifactDisposition::Retained);
+        assert_eq!(
+            historical.reason,
+            VacuumArtifactReason::ReferencedByCommit { version: 2 }
+        );
+        assert_eq!(
+            artifact(&dry_run, invalid_orphan).disposition,
+            VacuumArtifactDisposition::Removable
+        );
+        assert_eq!(
+            artifact(&dry_run, invalid_orphan).reason,
+            VacuumArtifactReason::InvalidOrUnreadableParquet
+        );
+        assert_eq!(
+            artifact(&dry_run, valid_orphan).reason,
+            VacuumArtifactReason::Unreferenced
+        );
+        assert_eq!(
+            artifact(&dry_run, coverage_orphan).disposition,
+            VacuumArtifactDisposition::Removable
+        );
+        assert_eq!(
+            artifact(&dry_run, unrecognized).reason,
+            VacuumArtifactReason::UnrecognizedArtifact
+        );
+        let removable_bytes = u128::from(b"incomplete".len() as u64)
+            + u128::from(fs::metadata(temp.path().join(valid_orphan))?.len())
+            + u128::from(b"orphan coverage".len() as u64);
+        assert_eq!(dry_run.removable_bytes, removable_bytes);
+        for path in [invalid_orphan, valid_orphan, coverage_orphan] {
+            assert!(temp.path().join(path).exists());
+        }
+
+        let applied = table.vacuum(older_than, VacuumMode::Apply).await?;
+
+        assert_eq!(applied.table_version, 3);
+        assert_eq!(applied.removable_bytes, 0);
+        assert_eq!(applied.deleted_bytes, removable_bytes);
+        for path in [invalid_orphan, valid_orphan, coverage_orphan] {
+            assert_eq!(
+                artifact(&applied, path).disposition,
+                VacuumArtifactDisposition::Deleted
+            );
+            assert!(!temp.path().join(path).exists());
+        }
+        for path in [
+            historical_data,
+            historical_coverage,
+            historical_snapshot,
+            unrecognized,
+            outside_managed_directories,
+        ] {
+            assert!(temp.path().join(path).exists(), "vacuum removed {path}");
+        }
+        let log_after = log_paths
+            .iter()
+            .map(|path| fs::read(temp.path().join(path)))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(log_after, log_before);
+        assert_eq!(table.current_version().await?, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vacuum_preserves_a_recent_reserved_writer_path() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let path = "data/inflight.parquet";
+        let mut sink = open_new_output_sink(location.as_ref(), Path::new(path)).await?;
+        sink.write_all(b"incomplete")?;
+        sink.flush()?;
+
+        let report = table
+            .vacuum(Utc::now() - Duration::hours(1), VacuumMode::Apply)
+            .await?;
+
+        assert_eq!(
+            artifact(&report, path).disposition,
+            VacuumArtifactDisposition::Retained
+        );
+        assert_eq!(
+            artifact(&report, path).reason,
+            VacuumArtifactReason::WithinRetention
+        );
+        assert!(temp.path().join(path).exists());
+        drop(sink);
+        assert!(!temp.path().join(path).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vacuum_fails_closed_when_retained_history_is_corrupt() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let orphan = "data/orphan.parquet";
+        write_new(location.as_ref(), Path::new(orphan), b"incomplete").await?;
+        fs::write(temp.path().join(layout::commit_rel_path(1)), b"{invalid")?;
+
+        let error = table
+            .vacuum(Utc::now() + Duration::hours(1), VacuumMode::Apply)
+            .await
+            .expect_err("corrupt retained history must stop vacuum");
+
+        assert!(matches!(
+            error,
+            TableError::Vacuum {
+                source: VacuumError::Commit {
+                    source: CommitError::CommitDeserialization { version: 1, .. }
+                }
+            }
+        ));
+        assert!(temp.path().join(orphan).exists());
+        Ok(())
+    }
+}

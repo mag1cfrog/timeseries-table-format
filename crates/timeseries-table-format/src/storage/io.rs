@@ -20,13 +20,6 @@ use crate::storage::{
 };
 
 /// Metadata for one file stored below a table-relative directory.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the vacuum operation in the next reviewable slice"
-    )
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StorageFileMetadata {
     pub(crate) path: String,
@@ -605,13 +598,6 @@ pub(crate) async fn file_size(location: &StorageLocation, rel_path: &Path) -> St
 }
 
 /// List regular files recursively below a table-relative directory.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the vacuum operation in the next reviewable slice"
-    )
-)]
 pub(crate) async fn list_files(
     location: &StorageLocation,
     rel_dir: &Path,

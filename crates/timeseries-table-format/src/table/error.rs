@@ -9,7 +9,7 @@ use snafu::prelude::*;
 
 use super::operations::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError, ScanError,
-    TableStateAccessError,
+    TableStateAccessError, VacuumError,
 };
 
 /// Errors from high-level time-series table operations.
@@ -75,6 +75,14 @@ pub enum TableError {
         /// Complete optimization-owned failure.
         #[snafu(source, backtrace)]
         source: OptimizeError,
+    },
+
+    /// A vacuum operation failed.
+    #[snafu(display("Vacuum failed: {source}"))]
+    Vacuum {
+        /// Complete vacuum-owned failure.
+        #[snafu(source, backtrace)]
+        source: VacuumError,
     },
 }
 
