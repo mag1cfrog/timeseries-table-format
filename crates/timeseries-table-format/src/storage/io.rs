@@ -106,6 +106,10 @@ static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
+static LIST_FILE_TYPE_NOT_FOUND: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
 struct AtomicWritePausePoint {
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
@@ -211,6 +215,14 @@ pub(crate) fn inject_cleanup_failure(path: PathBuf) {
 }
 
 #[cfg(test)]
+fn inject_list_file_type_not_found(path: PathBuf) {
+    LIST_FILE_TYPE_NOT_FOUND
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
 fn take_write_new_failure(path: &Path) -> bool {
     let mut failures = WRITE_NEW_FAILURES
         .lock()
@@ -247,6 +259,14 @@ fn has_cleanup_failure(path: &Path) -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
         .any(|target| path.starts_with(target))
+}
+
+#[cfg(test)]
+fn take_list_file_type_not_found(path: &Path) -> bool {
+    LIST_FILE_TYPE_NOT_FOUND
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
 }
 
 #[cfg(test)]
@@ -690,11 +710,22 @@ pub(crate) async fn list_files(
                             backtrace: Box::new(Backtrace::capture()),
                         });
                     }
-                    let file_type = entry
-                        .file_type()
-                        .await
-                        .map_err(StorageBackendError::from)
-                        .context(OtherIoSnafu { path: path.clone() })?;
+                    #[cfg(test)]
+                    let file_type = if take_list_file_type_not_found(&entry.path()) {
+                        Err(io::Error::from(io::ErrorKind::NotFound))
+                    } else {
+                        entry.file_type().await
+                    };
+                    #[cfg(not(test))]
+                    let file_type = entry.file_type().await;
+                    let file_type = match file_type {
+                        Ok(file_type) => file_type,
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                        Err(source) => {
+                            return Err(StorageBackendError::from(source))
+                                .context(OtherIoSnafu { path });
+                        }
+                    };
 
                     if file_type.is_dir() {
                         pending.push((entry.path(), relative_path));
@@ -1043,6 +1074,18 @@ mod tests {
                 .is_empty()
         );
         assert!(!tmp.path().join("missing").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_files_ignores_not_found_from_entry_type_lookup() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let path = tmp.path().join("data/vanished.parquet");
+        write_new(&location, Path::new("data/vanished.parquet"), b"data").await?;
+        inject_list_file_type_not_found(path);
+
+        assert!(list_files(&location, Path::new("data")).await?.is_empty());
         Ok(())
     }
 

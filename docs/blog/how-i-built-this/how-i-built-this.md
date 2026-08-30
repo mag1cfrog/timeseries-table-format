@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory() as d:
 >
 > - prices_tbl/_timeseries_log/CURRENT
 > - prices_tbl/_timeseries_log/0000000001.json (table metadata commit)
-> - `prices_tbl/data/<generated UUID>.parquet`
+> - `prices_tbl/data/_managed/append/<generated UUID>.parquet`
 > - prices_tbl/_timeseries_log/0000000002.json (append commit)
 > - prices_tbl/_timeseries_log/CURRENT now points to version 2
 
@@ -112,7 +112,7 @@ identifiers are abbreviated for readability:
 ```json
 {
   "AddSegment": {
-    "path": "data/<generated UUID>.parquet",
+    "path": "data/_managed/append/<generated UUID>.parquet",
     "format": "parquet",
     "entity_layout": {"Single": ["NVDA"]},
     "index_min": {"type": "timestamp", "value": "2024-06-01T00:00:00Z"},
