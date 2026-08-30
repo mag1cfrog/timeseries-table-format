@@ -629,7 +629,14 @@ pub(crate) async fn list_files(
                     })?
                 {
                     let relative_path = relative_dir.join(entry.file_name());
-                    let (path, _) = normalize_relative_storage_path(&relative_path)?;
+                    let (path, native_path) = normalize_relative_storage_path(&relative_path)?;
+                    if native_path != relative_path {
+                        return Err(StorageError::InvalidRelativePath {
+                            path: relative_path.display().to_string(),
+                            reason: format!("native path aliases canonical storage path {path:?}"),
+                            backtrace: Box::new(Backtrace::capture()),
+                        });
+                    }
                     let file_type = entry
                         .file_type()
                         .await
@@ -983,6 +990,29 @@ mod tests {
                 .is_empty()
         );
         assert!(!tmp.path().join("missing").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_files_rejects_native_paths_that_alias_portable_keys() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        write_new(&location, Path::new("data/a/b.parquet"), b"nested").await?;
+        let alias = tmp.path().join("data").join(r"a\b.parquet");
+        tokio::fs::write(&alias, b"alias").await?;
+
+        let error = list_files(&location, Path::new("data"))
+            .await
+            .expect_err("native path alias must fail closed");
+
+        assert!(matches!(error, StorageError::InvalidRelativePath { .. }));
+        assert!(error.to_string().contains("data/a/b.parquet"));
+        assert_eq!(tokio::fs::read(alias).await?, b"alias");
+        assert_eq!(
+            tokio::fs::read(tmp.path().join("data/a/b.parquet")).await?,
+            b"nested"
+        );
         Ok(())
     }
 }
