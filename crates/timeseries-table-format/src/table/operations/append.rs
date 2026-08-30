@@ -194,52 +194,32 @@ impl AppendTelemetry {
         span.record("batches_consumed", self.batches_consumed);
         span.record("rows_consumed", self.rows_consumed);
 
-        if let Some(cleanup_outcome) = self.cleanup_outcome {
+        let (cleanup_duration_ms, cleanup_outcome, retained_path) =
+            if let Some(cleanup_outcome) = self.cleanup_outcome {
+                (Some(self.cleanup_duration_ms), Some(cleanup_outcome), None)
+            } else if let AppendError::CommitAmbiguous { segment_path, .. } = error {
+                (None, Some("not_attempted"), Some(segment_path.as_str()))
+            } else {
+                (None, None, None)
+            };
+        if let Some(cleanup_outcome) = cleanup_outcome {
             span.record("cleanup_outcome", cleanup_outcome);
-            tracing::debug!(
-                name: "table.append",
-                target: "timeseries_table_format::table::append",
-                phase = self.phase,
-                last_completed_phase,
-                duration_ms = phase_duration_ms,
-                total_duration_ms = elapsed_ms(self.append_started),
-                batches_consumed = self.batches_consumed,
-                rows_consumed = self.rows_consumed,
-                cleanup_duration_ms = self.cleanup_duration_ms,
-                cleanup_outcome,
-                outcome,
-                "Append phase failed"
-            );
-        } else if let AppendError::CommitAmbiguous { segment_path, .. } = error {
-            span.record("cleanup_outcome", "not_attempted");
-            tracing::debug!(
-                name: "table.append",
-                target: "timeseries_table_format::table::append",
-                phase = self.phase,
-                last_completed_phase,
-                duration_ms = phase_duration_ms,
-                total_duration_ms = elapsed_ms(self.append_started),
-                batches_consumed = self.batches_consumed,
-                rows_consumed = self.rows_consumed,
-                cleanup_outcome = "not_attempted",
-                retained_path = segment_path,
-                outcome,
-                "Append phase failed"
-            );
-        } else {
-            tracing::debug!(
-                name: "table.append",
-                target: "timeseries_table_format::table::append",
-                phase = self.phase,
-                last_completed_phase,
-                duration_ms = phase_duration_ms,
-                total_duration_ms = elapsed_ms(self.append_started),
-                batches_consumed = self.batches_consumed,
-                rows_consumed = self.rows_consumed,
-                outcome,
-                "Append phase failed"
-            );
         }
+        tracing::debug!(
+            name: "table.append",
+            target: "timeseries_table_format::table::append",
+            phase = self.phase,
+            last_completed_phase,
+            duration_ms = phase_duration_ms,
+            total_duration_ms = elapsed_ms(self.append_started),
+            batches_consumed = self.batches_consumed,
+            rows_consumed = self.rows_consumed,
+            cleanup_duration_ms,
+            cleanup_outcome,
+            retained_path,
+            outcome,
+            "Append phase failed"
+        );
     }
 }
 
@@ -2319,6 +2299,8 @@ mod tests {
         assert_eq!(segment.file_size, Some(file_size_bytes));
         let parquet = ParquetRecordBatchReaderBuilder::try_new(File::open(&segment_path)?)?;
         let row_group_count = parquet.metadata().row_groups().len();
+        let parquet_row_count = u64::try_from(parquet.metadata().file_metadata().num_rows())?;
+        assert_eq!(segment.row_count, parquet_row_count);
 
         let events = capture.events();
         let phase_events = events
@@ -2363,7 +2345,7 @@ mod tests {
         for (field, expected) in [
             ("expected_version", expected_version.to_string()),
             ("committed_version", committed_version.to_string()),
-            ("row_count", segment.row_count.to_string()),
+            ("row_count", parquet_row_count.to_string()),
             ("batches_consumed", batches_consumed.to_string()),
             ("row_group_count", row_group_count.to_string()),
             ("file_size_bytes", file_size_bytes.to_string()),
@@ -2383,7 +2365,7 @@ mod tests {
         completion.fields["total_duration_ms"].parse::<u64>()?;
         assert_eq!(
             span.fields.get("rows_consumed"),
-            Some(&segment.row_count.to_string())
+            Some(&parquet_row_count.to_string())
         );
         Ok(())
     }
