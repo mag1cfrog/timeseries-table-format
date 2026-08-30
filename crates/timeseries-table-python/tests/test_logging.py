@@ -467,5 +467,14 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
             "table.scan.plan",
         ):
             assert event_name in messages
+
+        append_completed = [
+            record.getMessage()
+            for record in records
+            if "Appended Parquet segment" in record.getMessage()
+        ]
+        assert len(append_completed) == 1
+        assert "batches_consumed=1" in append_completed[0]
+        assert "row_count=2" in append_completed[0]
         """
     )

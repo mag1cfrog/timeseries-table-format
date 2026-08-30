@@ -83,9 +83,10 @@ async fn append_once(
     let temp = TempDir::new()?;
     let mut table =
         TimeSeriesTable::create(TableLocation::local(temp.path()), table_meta()?).await?;
+    let batches = batches.to_vec();
     let started = Instant::now();
     table
-        .append(batches.to_vec())
+        .append(batches)
         .with_subscriber(dispatch.clone())
         .await?;
     Ok(started.elapsed())

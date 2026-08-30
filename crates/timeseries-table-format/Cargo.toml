@@ -52,6 +52,7 @@ clap = { version = "4.5.54", features = ["derive"], optional = true }
 datafusion = { workspace = true, optional = true }
 futures = { workspace = true }
 futures-util = { workspace = true, optional = true }
+log = "0.4.33"
 object_store = { version = "0.13.2", optional = true }
 parquet = { workspace = true, features = ["async"] }
 rayon = "1.11.0"
@@ -73,7 +74,7 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "registry"] }
 
 [[bin]]
 name = "tstable"
@@ -97,7 +98,6 @@ required-features = ["cli"]
 
 [[example]]
 name = "append_telemetry_bench"
-required-features = ["cli"]
 
 [[example]]
 name = "query_nvda_ma"

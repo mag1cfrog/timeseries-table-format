@@ -102,6 +102,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 struct AppendTelemetry {
+    track_input_counts: bool,
     append_started: Instant,
     phase_started: Instant,
     phase: &'static str,
@@ -114,9 +115,10 @@ struct AppendTelemetry {
 }
 
 impl AppendTelemetry {
-    fn new() -> Self {
+    fn new(track_input_counts: bool) -> Self {
         let now = Instant::now();
         Self {
+            track_input_counts,
             append_started: now,
             phase_started: now,
             phase: "source_schema_preparation",
@@ -147,6 +149,9 @@ impl AppendTelemetry {
     }
 
     fn record_batch(&mut self, batch: &ArrowRecordBatch) {
+        if !self.track_input_counts {
+            return;
+        }
         self.batches_consumed = self.batches_consumed.saturating_add(1);
         self.rows_consumed = self
             .rows_consumed
@@ -206,6 +211,7 @@ impl AppendTelemetry {
                 "Append phase failed"
             );
         } else if let AppendError::CommitAmbiguous { segment_path, .. } = error {
+            span.record("cleanup_outcome", "not_attempted");
             tracing::debug!(
                 name: "table.append",
                 target: "timeseries_table_format::table::append",
@@ -940,7 +946,22 @@ impl TimeSeriesTable {
     where
         S: IntoRecordBatchReader<SourceKind>,
     {
-        let mut telemetry = AppendTelemetry::new();
+        let tracing_enabled = tracing::enabled!(
+            target: "timeseries_table_format::table::append",
+            tracing::Level::INFO
+        ) || tracing::enabled!(
+            target: "timeseries_table_format::table::append",
+            tracing::Level::DEBUG
+        );
+        // Python receives tracing's log fallback when no subscriber is installed.
+        let log_enabled = log::log_enabled!(
+            target: "timeseries_table_format::table::append",
+            log::Level::Info
+        ) || log::log_enabled!(
+            target: "timeseries_table_format::table::append",
+            log::Level::Debug
+        );
+        let mut telemetry = AppendTelemetry::new(tracing_enabled || log_enabled);
         let append_result: Result<u64, AppendError> = async {
             self.ensure_write_compatible().map_err(AppendError::from)?;
 
@@ -2269,20 +2290,35 @@ mod tests {
                 .await?;
         let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
         let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        let batches = vec![first, second];
+        let batches_consumed = batches.len();
+        let expected_version = table.state().version;
         let capture = TraceCapture::default();
 
-        assert_eq!(
-            capture
-                .run(
-                    table.append(
-                        AppendRequest::new(vec![first, second])
-                            .compression(ParquetCompression::Snappy)
-                            .max_rows_per_row_group(1),
-                    ),
-                )
-                .await?,
-            2
-        );
+        let committed_version = capture
+            .run(
+                table.append(
+                    AppendRequest::new(batches)
+                        .compression(ParquetCompression::Snappy)
+                        .max_rows_per_row_group(1)
+                        .max_bytes_per_row_group(1_024),
+                ),
+            )
+            .await?;
+        assert_eq!(committed_version, expected_version + 1);
+        assert_eq!(table.state().version, committed_version);
+
+        let segment = table
+            .state()
+            .segments
+            .values()
+            .next()
+            .ok_or("missing committed segment")?;
+        let segment_path = temp.path().join(&segment.path);
+        let file_size_bytes = std::fs::metadata(&segment_path)?.len();
+        assert_eq!(segment.file_size, Some(file_size_bytes));
+        let parquet = ParquetRecordBatchReaderBuilder::try_new(File::open(&segment_path)?)?;
+        let row_group_count = parquet.metadata().row_groups().len();
 
         let events = capture.events();
         let phase_events = events
@@ -2323,36 +2359,43 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(completion_events.len(), 1);
         let completion = completion_events[0];
-        assert_eq!(completion.fields.get("row_count"), Some(&"2".to_string()));
-        assert_eq!(
-            completion.fields.get("batches_consumed"),
-            Some(&"2".to_string())
-        );
-        assert_eq!(
-            completion.fields.get("row_group_count"),
-            Some(&"2".to_string())
-        );
-        assert_eq!(
-            completion.fields.get("compression"),
-            Some(&"snappy".to_string())
-        );
-        assert_eq!(
-            completion.fields.get("max_rows_per_row_group"),
-            Some(&"1".to_string())
-        );
-        assert!(completion.fields["file_size_bytes"].parse::<u64>()? > 0);
-        completion.fields["total_duration_ms"].parse::<u64>()?;
-
         let span = captured_span(&capture, "table.append");
-        assert_eq!(span.fields.get("compression"), Some(&"snappy".to_string()));
+        for (field, expected) in [
+            ("expected_version", expected_version.to_string()),
+            ("committed_version", committed_version.to_string()),
+            ("row_count", segment.row_count.to_string()),
+            ("batches_consumed", batches_consumed.to_string()),
+            ("row_group_count", row_group_count.to_string()),
+            ("file_size_bytes", file_size_bytes.to_string()),
+            ("entity_layout", "single".to_string()),
+            ("compression", "snappy".to_string()),
+            ("max_rows_per_row_group", "1".to_string()),
+            ("max_bytes_per_row_group", "1024".to_string()),
+            ("outcome", "succeeded".to_string()),
+        ] {
+            assert_eq!(
+                completion.fields.get(field),
+                Some(&expected),
+                "event.{field}"
+            );
+            assert_eq!(span.fields.get(field), Some(&expected), "span.{field}");
+        }
+        completion.fields["total_duration_ms"].parse::<u64>()?;
         assert_eq!(
-            span.fields.get("max_rows_per_row_group"),
-            Some(&"1".to_string())
+            span.fields.get("rows_consumed"),
+            Some(&segment.row_count.to_string())
         );
-        assert_eq!(span.fields.get("batches_consumed"), Some(&"2".to_string()));
-        assert_eq!(span.fields.get("rows_consumed"), Some(&"2".to_string()));
-        assert_eq!(span.fields.get("row_group_count"), Some(&"2".to_string()));
-        assert!(span.fields["file_size_bytes"].parse::<u64>()? > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_append_telemetry_skips_input_counting() -> TestResult {
+        let mut telemetry = AppendTelemetry::new(false);
+
+        telemetry.record_batch(&timestamp_only_batch(1)?);
+
+        assert_eq!(telemetry.batches_consumed, 0);
+        assert_eq!(telemetry.rows_consumed, 0);
         Ok(())
     }
 
@@ -2892,9 +2935,10 @@ mod tests {
         let data_dir = temp.path().join("data");
         crate::storage::inject_output_write_failure(data_dir.clone(), 1);
         crate::storage::inject_cleanup_failure(data_dir.clone());
+        let capture = TraceCapture::default();
 
-        let error = table
-            .append(timestamp_only_batch(1)?)
+        let error = capture
+            .run(table.append(timestamp_only_batch(1)?))
             .await
             .expect_err("writer and cleanup failures must fail append");
         let TableError::Append {
@@ -2925,6 +2969,29 @@ mod tests {
         assert!(table.state().segments.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
         assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+
+        let failures = capture
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.name == "table.append"
+                    && event.fields.get("outcome").map(String::as_str) == Some("failed")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 1);
+        for (field, expected) in [
+            ("phase", "writer_finalize_and_sync"),
+            (
+                "last_completed_phase",
+                "source_consumption_and_parquet_write",
+            ),
+            ("cleanup_outcome", "failed"),
+        ] {
+            assert_eq!(
+                failures[0].fields.get(field).map(String::as_str),
+                Some(expected)
+            );
+        }
         Ok(())
     }
 
@@ -3088,6 +3155,13 @@ mod tests {
         assert_eq!(
             append_span.fields.get("outcome").map(String::as_str),
             Some("ambiguous")
+        );
+        assert_eq!(
+            append_span
+                .fields
+                .get("cleanup_outcome")
+                .map(String::as_str),
+            Some("not_attempted")
         );
         let failures = capture
             .events()
@@ -5152,7 +5226,7 @@ mod tests {
             Path::new(segment_path),
         )?;
         data_guard.arm();
-        let mut telemetry = AppendTelemetry::new();
+        let mut telemetry = AppendTelemetry::new(false);
         let source = table
             .publish_generated_parquet_segment(
                 segment_path,
