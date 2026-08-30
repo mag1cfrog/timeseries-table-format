@@ -277,9 +277,24 @@ async fn parquet_footer_is_valid(table: &TimeSeriesTable, path: &str) -> bool {
 async fn retained_paths(
     table: &TimeSeriesTable,
 ) -> Result<(u64, HashMap<String, u64>), VacuumError> {
+    let mut paths = HashMap::new();
     let state = table
         .log
-        .rebuild_table_state()
+        .replay_table_state(|version, action| match action {
+            LogAction::AddSegment(segment) => {
+                paths.entry(segment.path.clone()).or_insert(version);
+                if let Some(path) = &segment.coverage_path {
+                    paths.entry(path.clone()).or_insert(version);
+                }
+            }
+            LogAction::RemoveSegment { path } => {
+                paths.entry(path.clone()).or_insert(version);
+            }
+            LogAction::UpdateTableCoverage { coverage_path, .. } => {
+                paths.entry(coverage_path.clone()).or_insert(version);
+            }
+            LogAction::UpdateTableMeta(_) => {}
+        })
         .await
         .map_err(VacuumError::from)?;
     state
@@ -292,39 +307,6 @@ async fn retained_paths(
         });
     }
 
-    let mut paths = HashMap::new();
-    // ponytail: replay retained history here; add log checkpoints if measured I/O requires it.
-    for version in 1..=state.version {
-        let commit = table
-            .log
-            .load_commit(version)
-            .await
-            .map_err(VacuumError::from)?;
-        if commit.version != version {
-            return Err(VacuumError::from(CommitError::CommitVersionMismatch {
-                expected: version,
-                found: commit.version,
-                backtrace: Backtrace::capture(),
-            }));
-        }
-        for action in commit.actions {
-            match action {
-                LogAction::AddSegment(segment) => {
-                    paths.entry(segment.path).or_insert(version);
-                    if let Some(path) = segment.coverage_path {
-                        paths.entry(path).or_insert(version);
-                    }
-                }
-                LogAction::RemoveSegment { path } => {
-                    paths.entry(path).or_insert(version);
-                }
-                LogAction::UpdateTableCoverage { coverage_path, .. } => {
-                    paths.entry(coverage_path).or_insert(version);
-                }
-                LogAction::UpdateTableMeta(_) => {}
-            }
-        }
-    }
     Ok((state.version, paths))
 }
 
