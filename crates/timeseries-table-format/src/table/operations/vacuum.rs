@@ -118,6 +118,14 @@ pub struct VacuumReport {
     pub mode: VacuumMode,
     /// Every regular file considered below `data/` and `_coverage/`.
     pub artifacts: Vec<VacuumArtifact>,
+    /// Number of files considered by this invocation.
+    pub considered_files: usize,
+    /// Number of files retained by this invocation.
+    pub retained_files: usize,
+    /// Number of files reported as removable by dry-run.
+    pub removable_files: usize,
+    /// Number of files removed by apply mode.
+    pub deleted_files: usize,
     /// Bytes across every considered file.
     pub considered_bytes: u128,
     /// Bytes retained by this invocation.
@@ -135,6 +143,10 @@ impl VacuumReport {
         mode: VacuumMode,
         artifacts: Vec<VacuumArtifact>,
     ) -> Self {
+        let considered_files = artifacts.len();
+        let mut retained_files = 0usize;
+        let mut removable_files = 0usize;
+        let mut deleted_files = 0usize;
         let mut considered_bytes = 0u128;
         let mut retained_bytes = 0u128;
         let mut removable_bytes = 0u128;
@@ -143,9 +155,18 @@ impl VacuumReport {
             let bytes = u128::from(artifact.size_bytes);
             considered_bytes += bytes;
             match artifact.disposition {
-                VacuumArtifactDisposition::Retained => retained_bytes += bytes,
-                VacuumArtifactDisposition::Removable => removable_bytes += bytes,
-                VacuumArtifactDisposition::Deleted => deleted_bytes += bytes,
+                VacuumArtifactDisposition::Retained => {
+                    retained_files += 1;
+                    retained_bytes += bytes;
+                }
+                VacuumArtifactDisposition::Removable => {
+                    removable_files += 1;
+                    removable_bytes += bytes;
+                }
+                VacuumArtifactDisposition::Deleted => {
+                    deleted_files += 1;
+                    deleted_bytes += bytes;
+                }
             }
         }
         Self {
@@ -153,6 +174,10 @@ impl VacuumReport {
             older_than,
             mode,
             artifacts,
+            considered_files,
+            retained_files,
+            removable_files,
+            deleted_files,
             considered_bytes,
             retained_bytes,
             removable_bytes,
@@ -166,6 +191,13 @@ impl VacuumReport {
 #[snafu(module, visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum VacuumError {
+    /// The retention cutoff is later than the current time.
+    #[snafu(display("Vacuum cutoff {older_than} is in the future"))]
+    FutureCutoff {
+        /// Rejected exclusive retention cutoff.
+        older_than: DateTime<Utc>,
+    },
+
     /// The latest table protocol does not permit this client to vacuum.
     #[snafu(context(false), display("Table protocol error: {source}"))]
     Protocol {
@@ -303,10 +335,16 @@ async fn classify_artifact(
     retained: &HashMap<String, u64>,
 ) -> VacuumArtifact {
     let modified_at = DateTime::<Utc>::from(file.modified_at);
+    let kind = artifact_kind(&file.path);
     let (disposition, reason) = if let Some(version) = retained.get(&file.path) {
         (
             VacuumArtifactDisposition::Retained,
             VacuumArtifactReason::ReferencedByCommit { version: *version },
+        )
+    } else if kind == ArtifactKind::Unrecognized {
+        (
+            VacuumArtifactDisposition::Retained,
+            VacuumArtifactReason::UnrecognizedArtifact,
         )
     } else if modified_at >= older_than {
         (
@@ -314,7 +352,7 @@ async fn classify_artifact(
             VacuumArtifactReason::WithinRetention,
         )
     } else {
-        match artifact_kind(&file.path) {
+        match kind {
             ArtifactKind::Unrecognized => (
                 VacuumArtifactDisposition::Retained,
                 VacuumArtifactReason::UnrecognizedArtifact,
@@ -393,6 +431,9 @@ impl TimeSeriesTable {
         mode: VacuumMode,
     ) -> Result<VacuumReport, TableError> {
         let result: Result<VacuumReport, VacuumError> = async {
+            if older_than > Utc::now() {
+                return Err(VacuumError::FutureCutoff { older_than });
+            }
             let (mut table_version, mut retained) = retained_paths(self).await?;
             let mut files =
                 storage::list_files(self.location().as_ref(), Path::new("data")).await?;
@@ -483,7 +524,11 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Write as _};
+    use std::{
+        fs::{self, FileTimes},
+        io::Write as _,
+        time::{Duration as StdDuration, SystemTime},
+    };
 
     use chrono::Duration;
     use tempfile::TempDir;
@@ -506,6 +551,17 @@ mod tests {
             .iter()
             .find(|artifact| artifact.path == path)
             .unwrap_or_else(|| panic!("missing vacuum artifact {path}"))
+    }
+
+    fn mark_expired(path: &Path) -> std::io::Result<()> {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+    }
+
+    fn expired_cutoff() -> DateTime<Utc> {
+        DateTime::from(SystemTime::UNIX_EPOCH + StdDuration::from_secs(1))
     }
 
     fn referenced_segment(
@@ -589,6 +645,9 @@ mod tests {
             b"external source",
         )
         .await?;
+        for path in [invalid_orphan, valid_orphan, coverage_orphan, unrecognized] {
+            mark_expired(&temp.path().join(path))?;
+        }
 
         let log_paths = [
             layout::current_rel_path(),
@@ -600,12 +659,16 @@ mod tests {
             .iter()
             .map(|path| fs::read(temp.path().join(path)))
             .collect::<Result<Vec<_>, _>>()?;
-        let older_than = Utc::now() + Duration::hours(1);
+        let older_than = expired_cutoff();
 
         let dry_run = table.vacuum(older_than, VacuumMode::DryRun).await?;
 
         assert_eq!(dry_run.table_version, 3);
         assert_eq!(dry_run.mode, VacuumMode::DryRun);
+        assert_eq!(dry_run.considered_files, 7);
+        assert_eq!(dry_run.retained_files, 4);
+        assert_eq!(dry_run.removable_files, 3);
+        assert_eq!(dry_run.deleted_files, 0);
         assert_eq!(dry_run.deleted_bytes, 0);
         let historical = artifact(&dry_run, historical_data);
         assert_eq!(historical.size_bytes, b"historical data".len() as u64);
@@ -645,6 +708,10 @@ mod tests {
         let applied = table.vacuum(older_than, VacuumMode::Apply).await?;
 
         assert_eq!(applied.table_version, 3);
+        assert_eq!(applied.considered_files, 7);
+        assert_eq!(applied.retained_files, 4);
+        assert_eq!(applied.removable_files, 0);
+        assert_eq!(applied.deleted_files, 3);
         assert_eq!(applied.removable_bytes, 0);
         assert_eq!(applied.deleted_bytes, removable_bytes);
         for path in [invalid_orphan, valid_orphan, coverage_orphan] {
@@ -678,9 +745,11 @@ mod tests {
         let location = TableLocation::local(temp.path());
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
         let path = "data/inflight.parquet";
+        let unrecognized = "data/keep.txt";
         let mut sink = open_new_output_sink(location.as_ref(), Path::new(path)).await?;
         sink.write_all(b"incomplete")?;
         sink.flush()?;
+        write_new(location.as_ref(), Path::new(unrecognized), b"keep").await?;
 
         let report = table
             .vacuum(Utc::now() - Duration::hours(1), VacuumMode::Apply)
@@ -694,7 +763,12 @@ mod tests {
             artifact(&report, path).reason,
             VacuumArtifactReason::WithinRetention
         );
+        assert_eq!(
+            artifact(&report, unrecognized).reason,
+            VacuumArtifactReason::UnrecognizedArtifact
+        );
         assert!(temp.path().join(path).exists());
+        assert!(temp.path().join(unrecognized).exists());
         drop(sink);
         assert!(!temp.path().join(path).exists());
         Ok(())
@@ -710,7 +784,7 @@ mod tests {
         fs::write(temp.path().join(layout::commit_rel_path(1)), b"{invalid")?;
 
         let error = table
-            .vacuum(Utc::now() + Duration::hours(1), VacuumMode::Apply)
+            .vacuum(expired_cutoff(), VacuumMode::Apply)
             .await
             .expect_err("corrupt retained history must stop vacuum");
 
@@ -733,17 +807,13 @@ mod tests {
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
         let path = "data/changing.parquet";
         write_new(location.as_ref(), Path::new(path), b"old").await?;
+        mark_expired(&temp.path().join(path))?;
         let file = storage::list_files(location.as_ref(), Path::new("data"))
             .await?
             .pop()
             .ok_or("missing planned file")?;
-        let mut candidate = classify_artifact(
-            &table,
-            file,
-            Utc::now() + Duration::hours(1),
-            &HashMap::new(),
-        )
-        .await;
+        let mut candidate =
+            classify_artifact(&table, file, expired_cutoff(), &HashMap::new()).await;
         fs::write(temp.path().join(path), b"new contents")?;
 
         assert!(!prepare_candidate_for_delete(&table, &mut candidate).await?);
@@ -767,11 +837,12 @@ mod tests {
         let failed = "data/b.parquet";
         for path in [first, failed] {
             write_new(location.as_ref(), Path::new(path), b"incomplete").await?;
+            mark_expired(&temp.path().join(path))?;
         }
         inject_cleanup_failure(temp.path().join(failed));
 
         let error = table
-            .vacuum(Utc::now() + Duration::hours(1), VacuumMode::Apply)
+            .vacuum(expired_cutoff(), VacuumMode::Apply)
             .await
             .expect_err("injected deletion failure must fail apply");
 
@@ -797,6 +868,29 @@ mod tests {
         );
         assert!(!temp.path().join(first).exists());
         assert!(temp.path().join(failed).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vacuum_rejects_a_future_cutoff_before_inspecting_storage() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location, make_basic_table_meta()).await?;
+        let older_than = Utc::now() + Duration::hours(1);
+
+        let error = table
+            .vacuum(older_than, VacuumMode::DryRun)
+            .await
+            .expect_err("a future retention cutoff must fail");
+
+        assert!(matches!(
+            error,
+            TableError::Vacuum {
+                source: VacuumError::FutureCutoff {
+                    older_than: rejected
+                }
+            } if rejected == older_than
+        ));
         Ok(())
     }
 }

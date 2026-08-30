@@ -1490,6 +1490,18 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         mode: String,
         artifacts: Vec<VacuumArtifact>,
         #[pyo3(get)]
+        /// Number of files considered by this invocation.
+        considered_files: usize,
+        #[pyo3(get)]
+        /// Number of files retained by this invocation.
+        retained_files: usize,
+        #[pyo3(get)]
+        /// Number of files reported as removable by dry-run.
+        removable_files: usize,
+        #[pyo3(get)]
+        /// Number of files removed by apply mode.
+        deleted_files: usize,
+        #[pyo3(get)]
         /// Bytes across every considered file.
         considered_bytes: u128,
         #[pyo3(get)]
@@ -1523,6 +1535,10 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                 older_than: report.older_than,
                 mode: report.mode.as_str().to_string(),
                 artifacts: report.artifacts.into_iter().map(Into::into).collect(),
+                considered_files: report.considered_files,
+                retained_files: report.retained_files,
+                removable_files: report.removable_files,
+                deleted_files: report.deleted_files,
                 considered_bytes: report.considered_bytes,
                 retained_bytes: report.retained_bytes,
                 removable_bytes: report.removable_bytes,
@@ -1537,6 +1553,20 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         entity_columns: &[String],
         error: timeseries_table_format::table::TableError,
     ) -> PyErr {
+        if matches!(
+            error,
+            timeseries_table_format::table::TableError::Vacuum {
+                source: CoreVacuumError::FutureCutoff { .. }
+            }
+        ) {
+            let message = error.to_string();
+            return py_error_with_table_root(
+                py,
+                table_root,
+                message.clone(),
+                PyValueError::new_err(message),
+            );
+        }
         let partial = match &error {
             timeseries_table_format::table::TableError::Vacuum {
                 source:

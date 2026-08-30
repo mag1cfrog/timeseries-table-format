@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -19,11 +20,14 @@ def test_vacuum_defaults_to_dry_run_and_requires_apply_to_delete(tmp_path):
     orphan = root / "data" / "orphan.parquet"
     orphan.parent.mkdir(parents=True)
     orphan.write_bytes(b"incomplete")
+    os.utime(orphan, (0, 0))
     current_before = (root / "_timeseries_log" / "CURRENT").read_bytes()
-    older_than = datetime.now(ZoneInfo("America/Phoenix")) + timedelta(hours=1)
+    older_than = datetime(2000, 1, 1, tzinfo=ZoneInfo("America/Phoenix"))
 
     with pytest.raises(TypeError, match="timezone-aware"):
         table.vacuum(datetime.now())
+    with pytest.raises(ValueError, match="future"):
+        table.vacuum(datetime.now(timezone.utc) + timedelta(hours=1))
 
     dry_run = table.vacuum(older_than)
 
@@ -32,6 +36,10 @@ def test_vacuum_defaults_to_dry_run_and_requires_apply_to_delete(tmp_path):
     assert dry_run.older_than == older_than
     assert dry_run.older_than.tzinfo == timezone.utc
     assert dry_run.mode == "dry_run"
+    assert dry_run.considered_files == 1
+    assert dry_run.retained_files == 0
+    assert dry_run.removable_files == 1
+    assert dry_run.deleted_files == 0
     assert dry_run.considered_bytes == 10
     assert dry_run.retained_bytes == 0
     assert dry_run.removable_bytes == 10
@@ -50,6 +58,8 @@ def test_vacuum_defaults_to_dry_run_and_requires_apply_to_delete(tmp_path):
     applied = table.vacuum(older_than, apply=True)
 
     assert applied.mode == "apply"
+    assert applied.removable_files == 0
+    assert applied.deleted_files == 1
     assert applied.removable_bytes == 0
     assert applied.deleted_bytes == 10
     assert applied.artifacts[0].disposition == "deleted"

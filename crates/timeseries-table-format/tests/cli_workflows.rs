@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::{
+    fs::FileTimes,
     io::{self, Seek, SeekFrom, Write},
     result::Result as StdResult,
+    time::SystemTime,
 };
 
 use arrow::array::{
@@ -835,13 +837,17 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
             .ok_or_else(|| io::Error::other("missing parent"))?,
     )?;
     std::fs::write(&orphan, b"incomplete")?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&orphan)?
+        .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))?;
     let table_root_arg = table_root.to_string_lossy();
     let args = [
         "vacuum",
         "--table",
         table_root_arg.as_ref(),
         "--older-than",
-        "2099-01-01T00:00:00Z",
+        "1970-01-01T00:00:01Z",
     ];
 
     let dry_run = run_cli(&args)?;
@@ -849,12 +855,16 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
     assert_cli_success(&dry_run);
     let stdout = String::from_utf8(dry_run.stdout)?;
     assert!(stdout.contains("mode: dry_run\n"));
+    assert!(stdout.contains("considered_files: 1\n"));
+    assert!(stdout.contains("retained_files: 0\n"));
+    assert!(stdout.contains("removable_files: 1\n"));
+    assert!(stdout.contains("deleted_files: 0\n"));
     assert!(stdout.contains("removable_bytes: 10\n"));
     assert!(stdout.contains("deleted_bytes: 0\n"));
     assert!(
         stdout.contains("artifact: disposition=removable reason=invalid_or_unreadable_parquet")
     );
-    assert!(stdout.contains("path=data/orphan.parquet\n"));
+    assert!(stdout.contains("path=\"data/orphan.parquet\"\n"));
     assert!(orphan.exists());
 
     let mut apply_args = args.to_vec();
@@ -864,6 +874,8 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
     assert_cli_success(&applied);
     let stdout = String::from_utf8(applied.stdout)?;
     assert!(stdout.contains("mode: apply\n"));
+    assert!(stdout.contains("removable_files: 0\n"));
+    assert!(stdout.contains("deleted_files: 1\n"));
     assert!(stdout.contains("removable_bytes: 0\n"));
     assert!(stdout.contains("deleted_bytes: 10\n"));
     assert!(stdout.contains("artifact: disposition=deleted reason=invalid_or_unreadable_parquet"));

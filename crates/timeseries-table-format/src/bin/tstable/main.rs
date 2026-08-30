@@ -394,6 +394,10 @@ fn print_vacuum_report(report: &VacuumReport) {
     println!("table_version: {}", report.table_version);
     println!("older_than: {}", report.older_than.to_rfc3339());
     println!("mode: {}", report.mode.as_str());
+    println!("considered_files: {}", report.considered_files);
+    println!("retained_files: {}", report.retained_files);
+    println!("removable_files: {}", report.removable_files);
+    println!("deleted_files: {}", report.deleted_files);
     println!("considered_bytes: {}", report.considered_bytes);
     println!("retained_bytes: {}", report.retained_bytes);
     println!("removable_bytes: {}", report.removable_bytes);
@@ -404,7 +408,7 @@ fn print_vacuum_report(report: &VacuumReport) {
             _ => "-".to_string(),
         };
         println!(
-            "artifact: disposition={} reason={} referenced_by_commit_version={} size_bytes={} modified_at={} path={}",
+            "artifact: disposition={} reason={} referenced_by_commit_version={} size_bytes={} modified_at={} path={:?}",
             artifact.disposition.as_str(),
             artifact.reason.as_str(),
             referenced_by_commit_version,
