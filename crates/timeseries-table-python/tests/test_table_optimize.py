@@ -90,7 +90,7 @@ def test_optimize_preserves_failed_source_context(tmp_path):
     source = tmp_path / "mixed.parquet"
     _write_mixed_segment(source)
     table.append(parquet_reader(source))
-    managed_path = next((root / "data").glob("*.parquet"))
+    managed_path = next((root / "data" / "_managed" / "append").glob("*.parquet"))
     managed_path.unlink()
 
     with pytest.raises(ttf.TimeseriesTableError, match=managed_path.name) as excinfo:

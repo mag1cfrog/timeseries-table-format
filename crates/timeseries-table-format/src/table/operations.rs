@@ -8,6 +8,7 @@ mod open;
 mod optimize;
 mod scan;
 mod state_access;
+mod vacuum;
 
 pub use append::error::AppendError;
 pub use coverage::CoverageQueryError;
@@ -16,3 +17,7 @@ pub use open::OpenTableError;
 pub use optimize::{OptimizeError, OptimizeReport};
 pub use scan::ScanError;
 pub use state_access::TableStateAccessError;
+pub use vacuum::{
+    VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode,
+    VacuumReport,
+};

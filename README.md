@@ -44,6 +44,7 @@ have at most one row per interval, both within and across appends.
 | Know whether a time range is covered | Coverage indexes and gap queries |
 | Enforce one row per identity and interval | Validation within and across appends |
 | Query many Parquet segments | DataFusion SQL with segment pruning |
+| Inspect or remove interrupted-write artifacts | Retention-aware vacuum with dry-run and apply modes |
 | Run without Spark or a database server | Rust core, Python package, and CLI |
 
 It is a good fit for market data, sensor pipelines, backtesting systems, and

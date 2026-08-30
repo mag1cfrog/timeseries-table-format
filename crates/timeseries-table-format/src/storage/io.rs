@@ -10,6 +10,7 @@ use std::{
 use std::{
     io,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -17,6 +18,14 @@ use crate::storage::{
     NotFoundSnafu, OtherIoSnafu, StorageBackendError, StorageError, StorageLocation, StorageResult,
     normalize_relative_storage_path,
 };
+
+/// Metadata for one file stored below a table-relative directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StorageFileMetadata {
+    pub(crate) path: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) modified_at: SystemTime,
+}
 
 /// Guard that removes a file on drop unless disarmed.
 pub(crate) struct FileCleanupGuard {
@@ -94,6 +103,10 @@ static WRITE_NEW_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
 
 #[cfg(test)]
 static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+static LIST_FILE_TYPE_NOT_FOUND: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
@@ -202,6 +215,14 @@ pub(crate) fn inject_cleanup_failure(path: PathBuf) {
 }
 
 #[cfg(test)]
+fn inject_list_file_type_not_found(path: PathBuf) {
+    LIST_FILE_TYPE_NOT_FOUND
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
 fn take_write_new_failure(path: &Path) -> bool {
     let mut failures = WRITE_NEW_FAILURES
         .lock()
@@ -238,6 +259,14 @@ fn has_cleanup_failure(path: &Path) -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
         .any(|target| path.starts_with(target))
+}
+
+#[cfg(test)]
+fn take_list_file_type_not_found(path: &Path) -> bool {
+    LIST_FILE_TYPE_NOT_FOUND
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
 }
 
 #[cfg(test)]
@@ -588,6 +617,146 @@ pub(crate) async fn file_size(location: &StorageLocation, rel_path: &Path) -> St
     }
 }
 
+/// Read fresh metadata for one regular file without following symbolic links.
+pub(crate) async fn regular_file_metadata(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<StorageFileMetadata> {
+    let (path, native_path) = normalize_relative_storage_path(rel_path)?;
+
+    match location {
+        StorageLocation::Local(root) => {
+            let metadata = match fs::symlink_metadata(root.join(native_path)).await {
+                Ok(metadata) => metadata,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    return Err(StorageError::NotFound {
+                        path,
+                        source: source.into(),
+                        backtrace: Backtrace::capture(),
+                    });
+                }
+                Err(source) => {
+                    return Err(StorageError::OtherIo {
+                        path,
+                        source: source.into(),
+                        backtrace: Backtrace::capture(),
+                    });
+                }
+            };
+            if !metadata.file_type().is_file() {
+                return Err(StorageError::OtherIo {
+                    path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "path is no longer a regular file",
+                    )
+                    .into(),
+                    backtrace: Backtrace::capture(),
+                });
+            }
+            let modified_at = metadata
+                .modified()
+                .map_err(|source| StorageError::OtherIo {
+                    path: path.clone(),
+                    source: source.into(),
+                    backtrace: Backtrace::capture(),
+                })?;
+            Ok(StorageFileMetadata {
+                path,
+                size_bytes: metadata.len(),
+                modified_at,
+            })
+        }
+    }
+}
+
+/// List regular files recursively below a table-relative directory.
+pub(crate) async fn list_files(
+    location: &StorageLocation,
+    rel_dir: &Path,
+) -> StorageResult<Vec<StorageFileMetadata>> {
+    let (canonical_dir, native_dir) = normalize_relative_storage_path(rel_dir)?;
+
+    match location {
+        StorageLocation::Local(root) => {
+            let mut pending = vec![(root.join(native_dir), PathBuf::from(canonical_dir))];
+            let mut files = Vec::new();
+
+            while let Some((absolute_dir, relative_dir)) = pending.pop() {
+                let mut entries = match fs::read_dir(&absolute_dir).await {
+                    Ok(entries) => entries,
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                    Err(source) => {
+                        return Err(StorageBackendError::from(source)).context(OtherIoSnafu {
+                            path: relative_dir.display().to_string(),
+                        });
+                    }
+                };
+
+                while let Some(entry) = entries
+                    .next_entry()
+                    .await
+                    .map_err(StorageBackendError::from)
+                    .context(OtherIoSnafu {
+                        path: relative_dir.display().to_string(),
+                    })?
+                {
+                    let relative_path = relative_dir.join(entry.file_name());
+                    let (path, native_path) = normalize_relative_storage_path(&relative_path)?;
+                    if native_path != relative_path {
+                        return Err(StorageError::InvalidRelativePath {
+                            path: relative_path.display().to_string(),
+                            reason: format!("native path aliases canonical storage path {path:?}"),
+                            backtrace: Box::new(Backtrace::capture()),
+                        });
+                    }
+                    #[cfg(test)]
+                    let file_type = if take_list_file_type_not_found(&entry.path()) {
+                        Err(io::Error::from(io::ErrorKind::NotFound))
+                    } else {
+                        entry.file_type().await
+                    };
+                    #[cfg(not(test))]
+                    let file_type = entry.file_type().await;
+                    let file_type = match file_type {
+                        Ok(file_type) => file_type,
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                        Err(source) => {
+                            return Err(StorageBackendError::from(source))
+                                .context(OtherIoSnafu { path });
+                        }
+                    };
+
+                    if file_type.is_dir() {
+                        pending.push((entry.path(), relative_path));
+                    } else if file_type.is_file() {
+                        let metadata = match entry.metadata().await {
+                            Ok(metadata) => metadata,
+                            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                            Err(source) => {
+                                return Err(StorageBackendError::from(source))
+                                    .context(OtherIoSnafu { path });
+                            }
+                        };
+                        let modified_at = metadata
+                            .modified()
+                            .map_err(StorageBackendError::from)
+                            .context(OtherIoSnafu { path: path.clone() })?;
+                        files.push(StorageFileMetadata {
+                            path,
+                            size_bytes: metadata.len(),
+                            modified_at,
+                        });
+                    }
+                }
+            }
+
+            files.sort_by(|left, right| left.path.cmp(&right.path));
+            Ok(files)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -861,9 +1030,85 @@ mod tests {
                 read_error,
                 StorageError::InvalidRelativePath { .. }
             ));
+
+            let list_error = list_files(&location, &path)
+                .await
+                .expect_err("outside list path must be rejected");
+            assert!(matches!(
+                list_error,
+                StorageError::InvalidRelativePath { .. }
+            ));
         }
 
         assert!(!outside.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_files_returns_recursive_metadata_without_creating_missing_directories()
+    -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        write_new(&location, Path::new("data/b.parquet"), b"second").await?;
+        write_new(&location, Path::new("data/nested/a.parquet"), b"first").await?;
+
+        let files = list_files(&location, Path::new("data")).await?;
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| (file.path.as_str(), file.size_bytes))
+                .collect::<Vec<_>>(),
+            [("data/b.parquet", 6), ("data/nested/a.parquet", 5)]
+        );
+        for file in &files {
+            assert_eq!(
+                file.modified_at,
+                std::fs::metadata(tmp.path().join(&file.path))?.modified()?
+            );
+        }
+
+        assert!(
+            list_files(&location, Path::new("missing"))
+                .await?
+                .is_empty()
+        );
+        assert!(!tmp.path().join("missing").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_files_ignores_not_found_from_entry_type_lookup() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        let path = tmp.path().join("data/vanished.parquet");
+        write_new(&location, Path::new("data/vanished.parquet"), b"data").await?;
+        inject_list_file_type_not_found(path);
+
+        assert!(list_files(&location, Path::new("data")).await?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_files_rejects_native_paths_that_alias_portable_keys() -> TestResult {
+        let tmp = TempDir::new()?;
+        let location = StorageLocation::local(tmp.path());
+        write_new(&location, Path::new("data/a/b.parquet"), b"nested").await?;
+        let alias = tmp.path().join("data").join(r"a\b.parquet");
+        tokio::fs::write(&alias, b"alias").await?;
+
+        let error = list_files(&location, Path::new("data"))
+            .await
+            .expect_err("native path alias must fail closed");
+
+        assert!(matches!(error, StorageError::InvalidRelativePath { .. }));
+        assert!(error.to_string().contains("data/a/b.parquet"));
+        assert_eq!(tokio::fs::read(alias).await?, b"alias");
+        assert_eq!(
+            tokio::fs::read(tmp.path().join("data/a/b.parquet")).await?,
+            b"nested"
+        );
         Ok(())
     }
 }

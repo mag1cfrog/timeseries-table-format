@@ -1,6 +1,7 @@
 //! On-disk layout helpers for a table root.
 //!
 //! This module centralizes all *relative* path conventions under a table root:
+//! - reserved directories for table-created Parquet files,
 //! - transaction log directory / commit file naming (`_timeseries_log/`)
 //!
 //! The functions here return relative [`std::path::PathBuf`] values. Callers are
@@ -8,6 +9,16 @@
 //! [`crate::storage::TableLocation`] / backend root) before doing IO.
 
 use std::path::PathBuf;
+
+// ====================
+// Data layout
+// ====================
+
+/// Reserved directory for Parquet segments created by append.
+pub(crate) const APPEND_DATA_DIR: &str = "data/_managed/append";
+
+/// Reserved directory for Parquet segments created by entity rewrites.
+pub(crate) const ENTITY_REWRITE_DATA_DIR: &str = "data/_staged/entity-rewrite";
 
 // ====================
 // Transaction log layout

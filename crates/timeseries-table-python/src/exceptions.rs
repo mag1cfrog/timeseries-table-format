@@ -18,6 +18,13 @@ create_exception!(
 
 create_exception!(
     _native,
+    VacuumApplyError,
+    StorageError,
+    "Raised when vacuum apply fails after planning or deletion starts."
+);
+
+create_exception!(
+    _native,
     ConflictError,
     TimeseriesTableError,
     "Raised when an optimistic concurrency control (OCC) conflict is detected."

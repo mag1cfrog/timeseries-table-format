@@ -10,5 +10,6 @@ pub use crate::{
     LogicalField, LogicalSchema, OpenTableError, OptimizeError, OptimizeReport, ParquetCompression,
     ParseTimeIndexGranularityError, ScanError, TableError, TableLocation, TableMeta,
     TableProtocolError, TableStateAccessError, TimeIndexGranularity, TimeSeriesTable,
-    validate_index_range,
+    VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode,
+    VacuumReport, validate_index_range,
 };

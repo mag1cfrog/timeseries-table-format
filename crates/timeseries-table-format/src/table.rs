@@ -9,7 +9,8 @@ mod operations;
 pub use operations::append;
 pub use operations::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
-    OptimizeReport, ScanError, TableStateAccessError,
+    OptimizeReport, ScanError, TableStateAccessError, VacuumArtifact, VacuumArtifactDisposition,
+    VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
 };
 
 #[cfg(test)]

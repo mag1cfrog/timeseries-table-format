@@ -34,7 +34,7 @@
 //! facade for applications that install a logger.
 //!
 //! The initial operation names include `table.open`, `table.create`,
-//! `table.refresh`, `table.append`, `table.optimize`, `table.scan.plan`,
+//! `table.refresh`, `table.append`, `table.optimize`, `table.vacuum`, `table.scan.plan`,
 //! `transaction.commit`, and `coverage.recover`. Diagnostics exclude SQL,
 //! entity identities, record values, complete schemas, credentials, and
 //! environment variables. `table.scan.plan` covers physical plan construction
@@ -61,7 +61,8 @@ pub use metadata::table::TableMeta;
 pub use storage::TableLocation;
 pub use table::{
     AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
-    OptimizeReport, ScanError, TableError, TableStateAccessError, TimeSeriesTable,
+    OptimizeReport, ScanError, TableError, TableStateAccessError, TimeSeriesTable, VacuumArtifact,
+    VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
     append::{AppendRequest, IntoRecordBatchReader, ParquetCompression},
 };
 

@@ -18,6 +18,9 @@ from ._native import (
     StorageError,
     TimeSeriesTable,
     TimeseriesTableError,
+    VacuumArtifact,
+    VacuumApplyError,
+    VacuumReport,
 )
 
 __doc__ = _native.__doc__
@@ -35,6 +38,9 @@ __all__ = [
     "SchemaMismatchError",
     "DataFusionError",
     "OptimizeReport",
+    "VacuumArtifact",
+    "VacuumApplyError",
+    "VacuumReport",
     "refresh_logging_cache",
     "Session",
     "TimeSeriesTable",

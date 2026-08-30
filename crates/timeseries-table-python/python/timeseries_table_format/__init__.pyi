@@ -11,6 +11,9 @@ from ._native import (
     StorageError,
     TimeSeriesTable,
     TimeseriesTableError,
+    VacuumArtifact,
+    VacuumApplyError,
+    VacuumReport,
 )
 
 def enable_notebook_display(
@@ -33,6 +36,9 @@ __all__ = [
     "SchemaMismatchError",
     "DataFusionError",
     "OptimizeReport",
+    "VacuumArtifact",
+    "VacuumApplyError",
+    "VacuumReport",
     "refresh_logging_cache",
     "Session",
     "TimeSeriesTable",

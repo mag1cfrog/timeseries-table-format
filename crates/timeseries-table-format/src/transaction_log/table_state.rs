@@ -100,6 +100,17 @@ impl TransactionLogStore {
     /// - The first commit must include at least one UpdateTableMeta action
     ///   to bootstrap TableMeta; the last UpdateTableMeta wins.
     pub async fn rebuild_table_state(&self) -> Result<TableState, CommitError> {
+        self.replay_table_state(|_, _| {}).await
+    }
+
+    /// Rebuild table state while observing each decoded action once.
+    pub(crate) async fn replay_table_state<F>(
+        &self,
+        mut observe: F,
+    ) -> Result<TableState, CommitError>
+    where
+        F: FnMut(u64, &LogAction),
+    {
         #[cfg(feature = "test-counters")]
         REBUILD_TABLE_STATE_COUNT.with(|c| c.set(c.get() + 1));
 
@@ -131,6 +142,7 @@ impl TransactionLogStore {
             }
 
             for action in commit.actions {
+                observe(v, &action);
                 match action {
                     LogAction::AddSegment(meta) => {
                         validate_persisted_storage_path(&meta.path, "segment path")?;
@@ -449,6 +461,33 @@ mod tests {
         assert_eq!(state.table_meta, meta);
         assert!(state.segments.contains_key(&seg2.path));
         assert!(!state.segments.contains_key(&seg1.path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_table_state_observes_each_action_once() -> TestResult {
+        let (_tmp, store) = create_test_log_store();
+        let segment = sample_segment("seg1");
+        store
+            .commit_with_expected_version(
+                0,
+                vec![
+                    LogAction::UpdateTableMeta(sample_table_meta()),
+                    LogAction::AddSegment(segment.clone()),
+                ],
+            )
+            .await?;
+        store
+            .commit_with_expected_version(1, vec![LogAction::RemoveSegment { path: segment.path }])
+            .await?;
+        let mut observed_versions = Vec::new();
+
+        let state = store
+            .replay_table_state(|version, _| observed_versions.push(version))
+            .await?;
+
+        assert_eq!(state.version, 2);
+        assert_eq!(observed_versions, [1, 1, 2]);
         Ok(())
     }
 

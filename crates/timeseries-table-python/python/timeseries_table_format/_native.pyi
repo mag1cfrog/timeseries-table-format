@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import ModuleType
 from typing import Literal, Protocol
 
@@ -86,6 +87,71 @@ class OptimizeReport:
     def no_op(self) -> bool:
         """Whether no mixed live segments required rewriting."""
         ...
+
+class VacuumArtifact:
+    """Vacuum classification for one file below a scanned directory."""
+
+    @property
+    def path(self) -> str: ...
+    @property
+    def size_bytes(self) -> int: ...
+    @property
+    def modified_at(self) -> datetime: ...
+    @property
+    def disposition(
+        self,
+    ) -> Literal["retained", "removable", "deleted", "already_absent"]: ...
+    @property
+    def reason(
+        self,
+    ) -> Literal[
+        "referenced_by_commit",
+        "within_retention",
+        "changed_since_planning",
+        "unrecognized_artifact",
+        "unreferenced",
+        "invalid_or_unreadable_parquet",
+    ]: ...
+    @property
+    def referenced_by_commit_version(self) -> int | None: ...
+
+class VacuumReport:
+    """Structured result of one vacuum invocation."""
+
+    @property
+    def table_version(self) -> int: ...
+    @property
+    def older_than(self) -> datetime: ...
+    @property
+    def mode(self) -> Literal["dry_run", "apply"]: ...
+    @property
+    def artifacts(self) -> list[VacuumArtifact]: ...
+    @property
+    def considered_files(self) -> int: ...
+    @property
+    def retained_files(self) -> int: ...
+    @property
+    def removable_files(self) -> int: ...
+    @property
+    def deleted_files(self) -> int: ...
+    @property
+    def already_absent_files(self) -> int: ...
+    @property
+    def considered_bytes(self) -> int: ...
+    @property
+    def retained_bytes(self) -> int: ...
+    @property
+    def removable_bytes(self) -> int: ...
+    @property
+    def deleted_bytes(self) -> int: ...
+    @property
+    def already_absent_bytes(self) -> int: ...
+
+class VacuumApplyError(StorageError):
+    """Vacuum apply failure with the completed portion of the report."""
+
+    path: str
+    partial_report: VacuumReport
 
 class Session:
     def __init__(self) -> None:
@@ -305,6 +371,18 @@ class TimeSeriesTable:
         TimeseriesTableError
             If optimization is not applicable or rewriting, validation, commit, or cleanup
             fails. The exception includes a `table_root` attribute.
+        """
+        ...
+
+    def vacuum(self, older_than: datetime, *, apply: bool = False) -> VacuumReport:
+        """Inspect or delete expired files unreachable from retained table history.
+
+        `older_than` must be timezone-aware, must not be in the future, and should be older
+        than the longest expected writer duration. The default is a non-mutating dry-run.
+        Vacuum does not expire snapshots, rewrite history, or delete transaction-log files.
+
+        A deletion failure raises `VacuumApplyError`; its `partial_report` records deletions
+        completed before the failure.
         """
         ...
 

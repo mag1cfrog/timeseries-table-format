@@ -129,8 +129,8 @@ tstable append \
 **Notes:**
 - The source file is read lazily and remains unchanged, including when it is already under the
   table root
-- The table writes the rows to a generated path under `data/`; it does not adopt the source path
-  or filename
+- The table writes the rows to a generated path under `data/_managed/append/`; this directory is
+  reserved for table output. The table does not adopt the source path or filename
 - Success prints `Appended table version: <VERSION>`; `--timing` adds elapsed milliseconds on the
   same line
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
@@ -179,6 +179,69 @@ files or accept a target file size. Replaced source files may remain on disk unt
 operation removes unreferenced files.
 
 Optimization may change physical row order.
+
+---
+
+### `vacuum` - Remove expired unreferenced files
+
+An interrupted append can leave an incomplete Parquet file under `data/_managed/append/` without
+committing it to the transaction log. An interrupted entity rewrite can do the same under
+`data/_staged/entity-rewrite/`. Vacuum finds expired files in these reserved directories, along
+with unreferenced coverage artifacts. It is a dry-run unless you pass `--apply`.
+
+Start by choosing a cutoff older than the longest writer operation you expect:
+
+```bash
+tstable vacuum \
+  --table ./data/my_table \
+  --older-than 2026-08-01T00:00:00Z
+```
+
+Review the removable files, then run the same command with `--apply`:
+
+```bash
+tstable vacuum \
+  --table ./data/my_table \
+  --older-than 2026-08-01T00:00:00Z \
+  --apply
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--table` | Yes | Path to an existing table |
+| `--older-than` | Yes | Exclusive RFC3339 cutoff; must not be in the future |
+| `--apply` | | Delete removable files; omit for a dry-run |
+
+Files modified at or after the cutoff are retained. Vacuum also retains files referenced by any
+valid retained commit and files whose names are not recognized as table-managed artifacts. Apply
+rechecks each candidate's size and modification time before deletion and retains it if either value
+differs from planning. This check is best effort, not atomic with deletion, so leave enough
+retention time for the longest expected write to finish.
+
+Parquet files elsewhere under `data/` are not vacuum candidates. This includes source files passed
+to `append`, even when the source is inside the table root.
+
+The report includes file counts, byte counts, and one line per file. Artifact paths are quoted and
+escaped. The reason values are:
+
+| Reason | Meaning |
+|--------|---------|
+| `referenced_by_commit` | A retained commit references the file |
+| `within_retention` | The file is not older than the cutoff |
+| `changed_since_planning` | The file's size or modification time differed from planning |
+| `unrecognized_artifact` | The file is inside a scanned directory but its path is not reserved |
+| `unreferenced` | An expired managed file has no retained reference |
+| `invalid_or_unreadable_parquet` | An expired unreferenced Parquet file has no readable valid footer |
+
+If apply mode stops on a deletion error, the CLI prints a partial report before exiting nonzero.
+Files marked `deleted` were completed before the failure. Files still marked `removable` were not
+deleted and can be retried. `already_absent` means vacuum found a candidate missing before
+deletion; its last observed size is counted in `already_absent_bytes`, not `deleted_bytes`.
+
+Vacuum is orphan-file cleanup. It does not expire snapshots, choose a transaction-log retention
+boundary, rewrite table history, or delete transaction-log files. It scans regular files under
+`data/` and `_coverage/`, but only the reserved Parquet paths above and recognized coverage paths
+can be removed.
 
 ---
 

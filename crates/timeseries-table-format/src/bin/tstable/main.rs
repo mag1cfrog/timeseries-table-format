@@ -11,6 +11,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use chrono::{DateTime, FixedOffset, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use parquet::{
     arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
@@ -23,14 +24,17 @@ use timeseries_table_format::{
         table::TableMeta,
     },
     storage::TableLocation,
-    table::{OptimizeReport, TimeSeriesTable},
+    table::{
+        OptimizeReport, TimeSeriesTable, VacuumArtifactReason, VacuumError, VacuumMode,
+        VacuumReport,
+    },
 };
 
 use crate::{
     error::{
         AppendSegmentSnafu, CliError, CliResult, CreateTableSnafu,
         InvalidTimeIndexGranularitySnafu, OpenTableSnafu, OptimizeTableSnafu,
-        ReadParquetSourceSnafu, StorageSnafu,
+        ReadParquetSourceSnafu, StorageSnafu, VacuumTableSnafu,
     },
     query::{
         QueryOpts, page_output, preview_message, print_query_result, render_preview,
@@ -144,6 +148,20 @@ enum Command {
     Optimize {
         #[arg(long)]
         table: PathBuf,
+    },
+
+    /// Inspect or remove expired unreferenced table-managed files
+    Vacuum {
+        #[arg(long)]
+        table: PathBuf,
+
+        /// Exclusive retention cutoff in RFC3339 format; must not be in the future
+        #[arg(long, value_name = "RFC3339")]
+        older_than: DateTime<FixedOffset>,
+
+        /// Delete candidates; omit for a dry-run
+        #[arg(long, default_value_t = false)]
+        apply: bool,
     },
 
     /// Execute a SQL query via DataFusion against the table
@@ -372,6 +390,66 @@ async fn cmd_optimize(table: &Path) -> CliResult<()> {
     Ok(())
 }
 
+fn print_vacuum_report(report: &VacuumReport) {
+    println!("table_version: {}", report.table_version);
+    println!("older_than: {}", report.older_than.to_rfc3339());
+    println!("mode: {}", report.mode.as_str());
+    println!("considered_files: {}", report.considered_files);
+    println!("retained_files: {}", report.retained_files);
+    println!("removable_files: {}", report.removable_files);
+    println!("deleted_files: {}", report.deleted_files);
+    println!("already_absent_files: {}", report.already_absent_files);
+    println!("considered_bytes: {}", report.considered_bytes);
+    println!("retained_bytes: {}", report.retained_bytes);
+    println!("removable_bytes: {}", report.removable_bytes);
+    println!("deleted_bytes: {}", report.deleted_bytes);
+    println!("already_absent_bytes: {}", report.already_absent_bytes);
+    for artifact in &report.artifacts {
+        let referenced_by_commit_version = match artifact.reason {
+            VacuumArtifactReason::ReferencedByCommit { version } => version.to_string(),
+            _ => "-".to_string(),
+        };
+        println!(
+            "artifact: disposition={} reason={} referenced_by_commit_version={} size_bytes={} modified_at={} path={:?}",
+            artifact.disposition.as_str(),
+            artifact.reason.as_str(),
+            referenced_by_commit_version,
+            artifact.size_bytes,
+            artifact.modified_at.to_rfc3339(),
+            artifact.path
+        );
+    }
+}
+
+async fn cmd_vacuum(table: &Path, older_than: DateTime<FixedOffset>, apply: bool) -> CliResult<()> {
+    let location = TableLocation::parse(table.to_string_lossy().as_ref()).context(StorageSnafu)?;
+    let table_handle = open_table(location, table).await?;
+    let mode = if apply {
+        VacuumMode::Apply
+    } else {
+        VacuumMode::DryRun
+    };
+    let report = match table_handle
+        .vacuum(older_than.with_timezone(&Utc), mode)
+        .await
+    {
+        Ok(report) => report,
+        Err(source) => {
+            if let timeseries_table_format::table::TableError::Vacuum {
+                source: VacuumError::Delete { partial_report, .. },
+            } = &source
+            {
+                print_vacuum_report(partial_report);
+            }
+            return Err(source).context(VacuumTableSnafu {
+                table: table.display().to_string(),
+            });
+        }
+    };
+    print_vacuum_report(&report);
+    Ok(())
+}
+
 async fn cmd_query_with_engine(
     engine: &dyn engine::Engine<Error = CliError>,
     sql: String,
@@ -443,6 +521,12 @@ async fn run() -> CliResult<()> {
         } => cmd_append(&table, &parquet, timing).await,
 
         Command::Optimize { table } => cmd_optimize(&table).await,
+
+        Command::Vacuum {
+            table,
+            older_than,
+            apply,
+        } => cmd_vacuum(&table, older_than, apply).await,
 
         Command::Query {
             table,
