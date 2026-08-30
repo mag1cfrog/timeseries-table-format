@@ -12,7 +12,7 @@ pub(super) mod error;
 
 use error::AppendError;
 
-use std::{marker::PhantomData, path::Path, sync::Arc};
+use std::{marker::PhantomData, path::Path, sync::Arc, time::Instant};
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
@@ -97,19 +97,129 @@ fn ensure_existing_segments_have_coverage(state: &TableState) -> Result<(), Appe
     Ok(())
 }
 
-fn record_append_failure<T>(result: &Result<T, TableError>) {
-    if let Err(error) = result {
-        let outcome = if matches!(
-            error,
-            TableError::Append {
-                source: AppendError::CommitAmbiguous { .. }
-            }
-        ) {
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+struct AppendTelemetry {
+    track_input_counts: bool,
+    append_started: Instant,
+    phase_started: Instant,
+    phase: &'static str,
+    last_completed_phase: Option<&'static str>,
+    batches_consumed: u64,
+    rows_consumed: u64,
+    failed_phase_duration_ms: Option<u64>,
+    cleanup_duration_ms: u64,
+    cleanup_outcome: Option<&'static str>,
+}
+
+impl AppendTelemetry {
+    fn new(track_input_counts: bool) -> Self {
+        let now = Instant::now();
+        Self {
+            track_input_counts,
+            append_started: now,
+            phase_started: now,
+            phase: "source_schema_preparation",
+            last_completed_phase: None,
+            batches_consumed: 0,
+            rows_consumed: 0,
+            failed_phase_duration_ms: None,
+            cleanup_duration_ms: 0,
+            cleanup_outcome: None,
+        }
+    }
+
+    fn start_phase(&mut self, phase: &'static str) {
+        self.phase = phase;
+        self.phase_started = Instant::now();
+    }
+
+    fn complete_phase(&mut self) {
+        tracing::debug!(
+            name: "table.append",
+            target: "timeseries_table_format::table::append",
+            phase = self.phase,
+            duration_ms = elapsed_ms(self.phase_started),
+            outcome = "succeeded",
+            "Completed append phase"
+        );
+        self.last_completed_phase = Some(self.phase);
+    }
+
+    fn record_batch(&mut self, batch: &ArrowRecordBatch) {
+        if !self.track_input_counts {
+            return;
+        }
+        self.batches_consumed = self.batches_consumed.saturating_add(1);
+        self.rows_consumed = self
+            .rows_consumed
+            .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+    }
+
+    fn record_cleanup(&mut self, started: Instant, error: &AppendError) {
+        let phase_duration_ms = u64::try_from(
+            started
+                .saturating_duration_since(self.phase_started)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        self.failed_phase_duration_ms
+            .get_or_insert(phase_duration_ms);
+        self.cleanup_duration_ms = self.cleanup_duration_ms.saturating_add(elapsed_ms(started));
+        if self.cleanup_outcome != Some("failed") {
+            self.cleanup_outcome = Some(if matches!(error, AppendError::Rollback { .. }) {
+                "failed"
+            } else {
+                "succeeded"
+            });
+        }
+    }
+
+    fn record_failure(&self, error: &AppendError) {
+        let outcome = if matches!(error, AppendError::CommitAmbiguous { .. }) {
             "ambiguous"
         } else {
             "failed"
         };
-        tracing::Span::current().record("outcome", outcome);
+        let last_completed_phase = self.last_completed_phase.unwrap_or("none");
+        let phase_duration_ms = self
+            .failed_phase_duration_ms
+            .unwrap_or_else(|| elapsed_ms(self.phase_started));
+        let span = tracing::Span::current();
+        span.record("outcome", outcome);
+        span.record("failed_phase", self.phase);
+        span.record("last_completed_phase", last_completed_phase);
+        span.record("batches_consumed", self.batches_consumed);
+        span.record("rows_consumed", self.rows_consumed);
+
+        let (cleanup_duration_ms, cleanup_outcome, retained_path) =
+            if let Some(cleanup_outcome) = self.cleanup_outcome {
+                (Some(self.cleanup_duration_ms), Some(cleanup_outcome), None)
+            } else if let AppendError::CommitAmbiguous { segment_path, .. } = error {
+                (None, Some("not_attempted"), Some(segment_path.as_str()))
+            } else {
+                (None, None, None)
+            };
+        if let Some(cleanup_outcome) = cleanup_outcome {
+            span.record("cleanup_outcome", cleanup_outcome);
+        }
+        tracing::debug!(
+            name: "table.append",
+            target: "timeseries_table_format::table::append",
+            phase = self.phase,
+            last_completed_phase,
+            duration_ms = phase_duration_ms,
+            total_duration_ms = elapsed_ms(self.append_started),
+            batches_consumed = self.batches_consumed,
+            rows_consumed = self.rows_consumed,
+            cleanup_duration_ms,
+            cleanup_outcome,
+            retained_path,
+            outcome,
+            "Append phase failed"
+        );
     }
 }
 
@@ -139,6 +249,16 @@ impl From<ParquetCompression> for Compression {
             ParquetCompression::Uncompressed => Self::UNCOMPRESSED,
             ParquetCompression::Snappy => Self::SNAPPY,
             ParquetCompression::Zstd => Self::ZSTD(Default::default()),
+        }
+    }
+}
+
+impl ParquetCompression {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Uncompressed => "uncompressed",
+            Self::Snappy => "snappy",
+            Self::Zstd => "zstd",
         }
     }
 }
@@ -439,24 +559,26 @@ impl TimeSeriesTable {
         relative_path: &str,
         next_version: u64,
         owned_data_guard: &mut storage::FileCleanupGuard,
+        telemetry: &mut AppendTelemetry,
+        writer_settings: AppendWriterSettings,
     ) -> Result<u64, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
 
         // 0) Coverage readiness checks.
+        telemetry.start_phase("segment_validation");
         ensure_existing_segments_have_coverage(&self.state)?;
 
         // 1) Segment meta + schema.
-        let (mut segment_meta, _) =
+        let (mut segment_meta, meta_report) =
             segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
                 .map_err(AppendError::from)?;
         let row_count = segment_meta.row_count;
+        let file_size_bytes = segment_meta.file_size.unwrap_or_default();
         let span = tracing::Span::current();
         span.record("row_count", row_count);
-        if let Some(file_size) = segment_meta.file_size {
-            span.record("file_size_bytes", file_size);
-        }
+        span.record("file_size_bytes", file_size_bytes);
 
         let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
             .await
@@ -495,10 +617,12 @@ impl TimeSeriesTable {
                 None
             }
         };
+        telemetry.complete_phase();
 
         let has_entity_columns = !self.index.entity_columns.is_empty();
 
         // 3-5) Load, compute, and compare coverage using the entity-column mode.
+        telemetry.start_phase("coverage_and_overlap");
         let (seg_cov_bytes, new_snap_cov_bytes, entity_layout) = if has_entity_columns {
             let table_cov = self
                 .load_entity_coverage_with_recovery::<AppendError>()
@@ -574,8 +698,11 @@ impl TimeSeriesTable {
             SegmentEntityLayout::Mixed => "mixed",
         };
         span.record("entity_layout", entity_layout_name);
+        span.record("row_group_count", meta_report.row_groups);
+        telemetry.complete_phase();
 
         // 6) Give this append private sidecar paths, then write them before commit.
+        telemetry.start_phase("sidecar_write");
         let attempt_id = Uuid::new_v4();
         let segment_content_id = if has_entity_columns {
             segment_entity_coverage_id_v1(&self.index, &seg_cov_bytes)
@@ -613,9 +740,11 @@ impl TimeSeriesTable {
             if source.storage_cleanup_failed() {
                 created_sidecars.push(seg_cov_path.clone());
             }
+            let cleanup_started = Instant::now();
             let error = self
                 .rollback_created_artifacts(&created_sidecars, AppendError::from(source))
                 .await;
+            telemetry.record_cleanup(cleanup_started, &error);
             return Err(error);
         }
         segment_sidecar_guard.arm();
@@ -637,14 +766,17 @@ impl TimeSeriesTable {
                 created_sidecars.push(snapshot_path.clone());
             }
             let error = AppendError::from(source);
+            let cleanup_started = Instant::now();
             let error = self
                 .rollback_created_artifacts(&created_sidecars, error)
                 .await;
+            telemetry.record_cleanup(cleanup_started, &error);
             segment_sidecar_guard.disarm();
             return Err(error);
         }
         snapshot_sidecar_guard.arm();
         created_sidecars.push(snapshot_path.clone());
+        telemetry.complete_phase();
 
         // 7) Build actions and atomically publish the commit.
         segment_meta.coverage_path = Some(seg_cov_path);
@@ -661,6 +793,7 @@ impl TimeSeriesTable {
             coverage_path: snapshot_path.clone(),
         });
 
+        telemetry.start_phase("transaction_commit");
         let new_version = match self
             .log
             .commit_with_path_preservation(expected_version, actions, || {
@@ -679,14 +812,17 @@ impl TimeSeriesTable {
             }
             Err(source) => {
                 let error = AppendError::from(source);
+                let cleanup_started = Instant::now();
                 let error = self
                     .rollback_created_artifacts(&created_sidecars, error)
                     .await;
+                telemetry.record_cleanup(cleanup_started, &error);
                 segment_sidecar_guard.disarm();
                 snapshot_sidecar_guard.disarm();
                 return Err(error);
             }
         };
+        telemetry.complete_phase();
 
         // OCC invariant: a successful transaction commit must return
         // the same "next" version we predicted when constructing `snapshot_path`.
@@ -725,7 +861,14 @@ impl TimeSeriesTable {
             expected_version,
             committed_version = new_version,
             row_count,
+            batches_consumed = telemetry.batches_consumed,
+            row_group_count = meta_report.row_groups,
+            file_size_bytes,
             entity_layout = entity_layout_name,
+            compression = writer_settings.compression.name(),
+            max_rows_per_row_group = writer_settings.max_rows_per_row_group,
+            max_bytes_per_row_group = writer_settings.max_bytes_per_row_group,
+            total_duration_ms = elapsed_ms(telemetry.append_started),
             outcome = "succeeded",
             "Appended Parquet segment"
         );
@@ -765,8 +908,17 @@ impl TimeSeriesTable {
             segment_path = tracing::field::Empty,
             row_count = tracing::field::Empty,
             file_size_bytes = tracing::field::Empty,
+            row_group_count = tracing::field::Empty,
+            batches_consumed = tracing::field::Empty,
+            rows_consumed = tracing::field::Empty,
+            compression = tracing::field::Empty,
+            max_rows_per_row_group = tracing::field::Empty,
+            max_bytes_per_row_group = tracing::field::Empty,
             committed_version = tracing::field::Empty,
             entity_layout = tracing::field::Empty,
+            failed_phase = tracing::field::Empty,
+            last_completed_phase = tracing::field::Empty,
+            cleanup_outcome = tracing::field::Empty,
             outcome = tracing::field::Empty
         )
     )]
@@ -774,10 +926,36 @@ impl TimeSeriesTable {
     where
         S: IntoRecordBatchReader<SourceKind>,
     {
+        let tracing_enabled = tracing::enabled!(
+            target: "timeseries_table_format::table::append",
+            tracing::Level::INFO
+        ) || tracing::enabled!(
+            target: "timeseries_table_format::table::append",
+            tracing::Level::DEBUG
+        );
+        // Python receives tracing's log fallback when no subscriber is installed.
+        let log_enabled = log::log_enabled!(
+            target: "timeseries_table_format::table::append",
+            log::Level::Info
+        ) || log::log_enabled!(
+            target: "timeseries_table_format::table::append",
+            log::Level::Debug
+        );
+        let mut telemetry = AppendTelemetry::new(tracing_enabled || log_enabled);
         let append_result: Result<u64, AppendError> = async {
             self.ensure_write_compatible().map_err(AppendError::from)?;
 
             let writer_settings = AppendWriterSettings::from_source(&source).validate()?;
+            let span = tracing::Span::current();
+            span.record("compression", writer_settings.compression.name());
+            span.record(
+                "max_rows_per_row_group",
+                writer_settings.max_rows_per_row_group,
+            );
+            span.record(
+                "max_bytes_per_row_group",
+                writer_settings.max_bytes_per_row_group,
+            );
             let next_version =
                 checked_next_version(self.state.version).map_err(AppendError::from)?;
             let mut reader = source.into_record_batch_reader()?;
@@ -785,11 +963,14 @@ impl TimeSeriesTable {
             let schema_normalizer =
                 self.build_append_schema_normalizer(Arc::clone(&incoming_schema))?;
             let output_schema = Arc::clone(schema_normalizer.output_schema());
+            telemetry.complete_phase();
 
+            telemetry.start_phase("source_consumption_and_parquet_write");
             let first_batch = loop {
                 let Some(batch) = reader.next().transpose().context(ArrowInputSnafu)? else {
                     return Err(AppendError::EmptyInput);
                 };
+                telemetry.record_batch(&batch);
                 ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                 if batch.num_rows() != 0 {
                     break schema_normalizer
@@ -825,6 +1006,7 @@ impl TimeSeriesTable {
 
                 for batch in reader {
                     let batch = batch.context(ArrowInputSnafu)?;
+                    telemetry.record_batch(&batch);
                     ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
                     if batch.num_rows() != 0 {
                         let batch = schema_normalizer
@@ -836,38 +1018,56 @@ impl TimeSeriesTable {
                     tokio::task::yield_now().await;
                 }
 
+                telemetry.complete_phase();
+                telemetry.start_phase("writer_finalize_and_sync");
                 let sink = writer.into_inner().context(ParquetWriteSnafu)?;
-                sink.finish().await.map_err(AppendError::from)
+                sink.finish().await.map_err(AppendError::from)?;
+                telemetry.complete_phase();
+                Ok(())
             }
             .await;
             if let Err(source) = write_result {
+                let cleanup_started = Instant::now();
                 let error = self
                     .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
                     .await;
+                telemetry.record_cleanup(cleanup_started, &error);
                 data_guard.disarm();
                 return Err(error);
             }
             data_guard.arm();
 
             match self
-                .publish_generated_parquet_segment(&relative_path, next_version, &mut data_guard)
+                .publish_generated_parquet_segment(
+                    &relative_path,
+                    next_version,
+                    &mut data_guard,
+                    &mut telemetry,
+                    writer_settings,
+                )
                 .await
             {
                 Ok(version) => Ok(version),
                 Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
                 Err(source) => {
+                    let cleanup_started = Instant::now();
                     let error = self
                         .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
                         .await;
+                    telemetry.record_cleanup(cleanup_started, &error);
                     data_guard.disarm();
                     Err(error)
                 }
             }
         }
         .await;
-        let result = append_result.context(crate::table::error::AppendSnafu);
-        record_append_failure(&result);
-        result
+        let span = tracing::Span::current();
+        span.record("batches_consumed", telemetry.batches_consumed);
+        span.record("rows_consumed", telemetry.rows_consumed);
+        if let Err(error) = &append_result {
+            telemetry.record_failure(error);
+        }
+        append_result.context(crate::table::error::AppendSnafu)
     }
 }
 
@@ -2067,6 +2267,248 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_append_reports_ordered_phase_durations() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        let batches = vec![first, second];
+        let batches_consumed = batches.len();
+        let expected_version = table.state().version;
+        let capture = TraceCapture::default();
+
+        let committed_version = capture
+            .run(
+                table.append(
+                    AppendRequest::new(batches)
+                        .compression(ParquetCompression::Snappy)
+                        .max_rows_per_row_group(1)
+                        .max_bytes_per_row_group(1_024),
+                ),
+            )
+            .await?;
+        assert_eq!(committed_version, expected_version + 1);
+        assert_eq!(table.state().version, committed_version);
+
+        let segment = table
+            .state()
+            .segments
+            .values()
+            .next()
+            .ok_or("missing committed segment")?;
+        let segment_path = temp.path().join(&segment.path);
+        let file_size_bytes = std::fs::metadata(&segment_path)?.len();
+        assert_eq!(segment.file_size, Some(file_size_bytes));
+        let parquet = ParquetRecordBatchReaderBuilder::try_new(File::open(&segment_path)?)?;
+        let row_group_count = parquet.metadata().row_groups().len();
+        let parquet_row_count = u64::try_from(parquet.metadata().file_metadata().num_rows())?;
+        assert_eq!(segment.row_count, parquet_row_count);
+
+        let events = capture.events();
+        let phase_events = events
+            .iter()
+            .filter(|event| {
+                event.name == "table.append"
+                    && event.level == tracing::Level::DEBUG
+                    && event.fields.contains_key("phase")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phase_events
+                .iter()
+                .map(|event| event.fields["phase"].as_str())
+                .collect::<Vec<_>>(),
+            [
+                "source_schema_preparation",
+                "source_consumption_and_parquet_write",
+                "writer_finalize_and_sync",
+                "segment_validation",
+                "coverage_and_overlap",
+                "sidecar_write",
+                "transaction_commit",
+            ]
+        );
+        for event in phase_events {
+            assert_eq!(event.target, "timeseries_table_format::table::append");
+            assert_eq!(
+                event.fields.get("outcome").map(String::as_str),
+                Some("succeeded")
+            );
+            event.fields["duration_ms"].parse::<u64>()?;
+        }
+
+        let completion_events = events
+            .iter()
+            .filter(|event| event.name == "table.append" && event.level == tracing::Level::INFO)
+            .collect::<Vec<_>>();
+        assert_eq!(completion_events.len(), 1);
+        let completion = completion_events[0];
+        let span = captured_span(&capture, "table.append");
+        for (field, expected) in [
+            ("expected_version", expected_version.to_string()),
+            ("committed_version", committed_version.to_string()),
+            ("row_count", parquet_row_count.to_string()),
+            ("batches_consumed", batches_consumed.to_string()),
+            ("row_group_count", row_group_count.to_string()),
+            ("file_size_bytes", file_size_bytes.to_string()),
+            ("entity_layout", "single".to_string()),
+            ("compression", "snappy".to_string()),
+            ("max_rows_per_row_group", "1".to_string()),
+            ("max_bytes_per_row_group", "1024".to_string()),
+            ("outcome", "succeeded".to_string()),
+        ] {
+            assert_eq!(
+                completion.fields.get(field),
+                Some(&expected),
+                "event.{field}"
+            );
+            assert_eq!(span.fields.get(field), Some(&expected), "span.{field}");
+        }
+        completion.fields["total_duration_ms"].parse::<u64>()?;
+        assert_eq!(
+            span.fields.get("rows_consumed"),
+            Some(&parquet_row_count.to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_append_telemetry_skips_input_counting() -> TestResult {
+        let mut telemetry = AppendTelemetry::new(false);
+
+        telemetry.record_batch(&timestamp_only_batch(1)?);
+
+        assert_eq!(telemetry.batches_consumed, 0);
+        assert_eq!(telemetry.rows_consumed, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn midstream_source_failure_reports_phase_and_cleanup() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+                .await?;
+        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
+        let reader = InstrumentedReader::new(
+            first.schema(),
+            vec![
+                Ok(first),
+                Err(ArrowError::ComputeError(
+                    "injected batch source failure".to_string(),
+                )),
+            ],
+        )
+        .0;
+        let capture = TraceCapture::default();
+
+        let error = capture
+            .run(table.append(reader))
+            .await
+            .expect_err("source failure must fail append");
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::ArrowInput { .. }
+            }
+        ));
+
+        let events = capture.events();
+        let failures = events
+            .iter()
+            .filter(|event| {
+                event.name == "table.append"
+                    && event.fields.get("outcome").map(String::as_str) == Some("failed")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 1);
+        let failure = failures[0];
+        assert_eq!(
+            failure.fields.get("phase").map(String::as_str),
+            Some("source_consumption_and_parquet_write")
+        );
+        assert_eq!(
+            failure
+                .fields
+                .get("last_completed_phase")
+                .map(String::as_str),
+            Some("source_schema_preparation")
+        );
+        assert_eq!(
+            failure.fields.get("cleanup_outcome").map(String::as_str),
+            Some("succeeded")
+        );
+        assert_eq!(
+            failure.fields.get("batches_consumed"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(failure.fields.get("rows_consumed"), Some(&"1".to_string()));
+        failure.fields["duration_ms"].parse::<u64>()?;
+        failure.fields["cleanup_duration_ms"].parse::<u64>()?;
+        failure.fields["total_duration_ms"].parse::<u64>()?;
+        assert!(!events.iter().any(|event| {
+            event.name == "table.append"
+                && event.fields.get("outcome").map(String::as_str) == Some("succeeded")
+                && event.fields.get("phase").map(String::as_str)
+                    == Some("source_consumption_and_parquet_write")
+        }));
+        assert_capture_excludes(&capture, &["injected batch source failure"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_finalization_failure_reports_last_completed_phase() -> TestResult {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), timestamp_only_meta())
+                .await?;
+        crate::storage::inject_output_finish_failure(temp.path().join("data"));
+        let capture = TraceCapture::default();
+
+        let error = capture
+            .run(table.append(timestamp_only_batch(1)?))
+            .await
+            .expect_err("writer finalization must fail");
+        assert!(matches!(
+            error,
+            TableError::Append {
+                source: AppendError::Storage { .. }
+            }
+        ));
+
+        let failures = capture
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.name == "table.append"
+                    && event.fields.get("outcome").map(String::as_str) == Some("failed")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].fields.get("phase").map(String::as_str),
+            Some("writer_finalize_and_sync")
+        );
+        assert_eq!(
+            failures[0]
+                .fields
+                .get("last_completed_phase")
+                .map(String::as_str),
+            Some("source_consumption_and_parquet_write")
+        );
+        assert_eq!(
+            failures[0]
+                .fields
+                .get("cleanup_outcome")
+                .map(String::as_str),
+            Some("succeeded")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn append_consumes_non_send_reader_one_batch_at_a_time() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
@@ -2471,9 +2913,10 @@ mod tests {
         let data_dir = temp.path().join("data");
         crate::storage::inject_output_write_failure(data_dir.clone(), 1);
         crate::storage::inject_cleanup_failure(data_dir.clone());
+        let capture = TraceCapture::default();
 
-        let error = table
-            .append(timestamp_only_batch(1)?)
+        let error = capture
+            .run(table.append(timestamp_only_batch(1)?))
             .await
             .expect_err("writer and cleanup failures must fail append");
         let TableError::Append {
@@ -2504,6 +2947,29 @@ mod tests {
         assert!(table.state().segments.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
         assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
+
+        let failures = capture
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.name == "table.append"
+                    && event.fields.get("outcome").map(String::as_str) == Some("failed")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 1);
+        for (field, expected) in [
+            ("phase", "writer_finalize_and_sync"),
+            (
+                "last_completed_phase",
+                "source_consumption_and_parquet_write",
+            ),
+            ("cleanup_outcome", "failed"),
+        ] {
+            assert_eq!(
+                failures[0].fields.get(field).map(String::as_str),
+                Some(expected)
+            );
+        }
         Ok(())
     }
 
@@ -2668,6 +3134,41 @@ mod tests {
             append_span.fields.get("outcome").map(String::as_str),
             Some("ambiguous")
         );
+        assert_eq!(
+            append_span
+                .fields
+                .get("cleanup_outcome")
+                .map(String::as_str),
+            Some("not_attempted")
+        );
+        let failures = capture
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.name == "table.append"
+                    && event.fields.get("outcome").map(String::as_str) == Some("ambiguous")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].fields.get("phase").map(String::as_str),
+            Some("transaction_commit")
+        );
+        assert_eq!(
+            failures[0]
+                .fields
+                .get("last_completed_phase")
+                .map(String::as_str),
+            Some("sidecar_write")
+        );
+        assert_eq!(
+            failures[0]
+                .fields
+                .get("cleanup_outcome")
+                .map(String::as_str),
+            Some("not_attempted")
+        );
+        assert_eq!(failures[0].fields.get("retained_path"), Some(&segment_path));
 
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state().version, 1);
@@ -4707,8 +5208,15 @@ mod tests {
             Path::new(segment_path),
         )?;
         data_guard.arm();
+        let mut telemetry = AppendTelemetry::new(false);
         let source = table
-            .publish_generated_parquet_segment(segment_path, 2, &mut data_guard)
+            .publish_generated_parquet_segment(
+                segment_path,
+                2,
+                &mut data_guard,
+                &mut telemetry,
+                AppendWriterSettings::default(),
+            )
             .await
             .expect_err("corrupt generated Parquet must fail metadata loading");
         let source = table
