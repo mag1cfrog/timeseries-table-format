@@ -96,6 +96,10 @@ name = "append_widening_bench"
 required-features = ["cli"]
 
 [[example]]
+name = "append_telemetry_bench"
+required-features = ["cli"]
+
+[[example]]
 name = "query_nvda_ma"
 required-features = ["datafusion"]
 
