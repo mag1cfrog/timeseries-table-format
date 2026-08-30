@@ -44,7 +44,8 @@ use crate::{
     },
     storage::{
         OutputSink, StorageError, TableLocation, ensure_canonical_relative_storage_path,
-        open_new_output_sink, open_parquet_reader, remove_file_if_exists,
+        layout::ENTITY_REWRITE_DATA_DIR, open_new_output_sink, open_parquet_reader,
+        remove_file_if_exists,
     },
     transaction_log::segments::SegmentError,
 };
@@ -500,7 +501,7 @@ async fn rewrite_inner(
     // Processing one identity at a time bounds the handle count and memory use.
     // Batch identities only if repeated scan cost becomes material.
     for (ordinal, (identity, expected_coverage)) in source_coverage.iter().enumerate() {
-        let data_path = format!("data/_staged/entity-rewrite/{attempt_id}/{ordinal:010}.parquet");
+        let data_path = format!("{ENTITY_REWRITE_DATA_DIR}/{attempt_id}/{ordinal:010}.parquet");
         let (identity_rows_read, identity_rows_written) = stage_identity_data(
             location,
             &source.path,
@@ -819,7 +820,7 @@ mod tests {
     }
 
     fn staged_data_path(attempt_id: Uuid, ordinal: usize) -> String {
-        format!("data/_staged/entity-rewrite/{attempt_id}/{ordinal:010}.parquet")
+        format!("{ENTITY_REWRITE_DATA_DIR}/{attempt_id}/{ordinal:010}.parquet")
     }
 
     fn staged_coverage_path(

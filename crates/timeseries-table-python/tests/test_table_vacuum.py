@@ -17,7 +17,13 @@ def test_vacuum_defaults_to_dry_run_and_requires_apply_to_delete(tmp_path):
         index_type="uint64",
         index_granularity=10,
     )
-    orphan = root / "data" / "orphan.parquet"
+    orphan = (
+        root
+        / "data"
+        / "_managed"
+        / "append"
+        / "00000000-0000-0000-0000-000000000001.parquet"
+    )
     orphan.parent.mkdir(parents=True)
     orphan.write_bytes(b"incomplete")
     os.utime(orphan, (0, 0))
@@ -47,7 +53,10 @@ def test_vacuum_defaults_to_dry_run_and_requires_apply_to_delete(tmp_path):
     assert len(dry_run.artifacts) == 1
     artifact = dry_run.artifacts[0]
     assert isinstance(artifact, ttf.VacuumArtifact)
-    assert artifact.path == "data/orphan.parquet"
+    assert (
+        artifact.path
+        == "data/_managed/append/00000000-0000-0000-0000-000000000001.parquet"
+    )
     assert artifact.size_bytes == 10
     assert artifact.disposition == "removable"
     assert artifact.reason == "invalid_or_unreadable_parquet"

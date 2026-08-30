@@ -10,7 +10,7 @@ You typically create it with `TimeSeriesTable.create(table_root=...)` and later 
 At a high level, you'll see directories like:
 
 - `_timeseries_log/` - transaction log / table metadata history
-- `data/` - table-managed Parquet segment paths
+- `data/` - Parquet files, including generated segments under `data/_managed/append/`
 - `_coverage/` - coverage/overlap tracking data (created after appends)
 
 Example (after a first append):
@@ -22,7 +22,9 @@ my_table/
     0000000001.json
     0000000002.json
   data/
-    some_segment.parquet
+    _managed/
+      append/
+        <generated-id>.parquet
   _coverage/
     table/
       ...
@@ -31,9 +33,10 @@ my_table/
 ```
 
 !!! note
-    Exact filenames under `_coverage/` are implementation details and may change. Table metadata
-    records paths relative to the table root, and the local filesystem resolves those paths,
-    including symlinks.
+    `data/_managed/append/` and `data/_staged/entity-rewrite/` are reserved for table output.
+    Vacuum does not remove Parquet files elsewhere under `data/`. Exact filenames under
+    `_coverage/` are implementation details and may change. Table metadata records paths relative
+    to the table root, and the local filesystem resolves those paths, including symlinks.
 
 ## Protect the table root
 

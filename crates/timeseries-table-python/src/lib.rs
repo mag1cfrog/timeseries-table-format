@@ -1441,7 +1441,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
-    /// Vacuum classification for one table-managed file.
+    /// Vacuum classification for one file below a scanned directory.
     #[derive(Clone)]
     #[pyclass(frozen, get_all, skip_from_py_object)]
     struct VacuumArtifact {

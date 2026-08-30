@@ -799,7 +799,11 @@ impl TimeSeriesTable {
                 tokio::task::yield_now().await;
             };
 
-            let relative_path = format!("data/{}.parquet", Uuid::new_v4());
+            let relative_path = format!(
+                "{}/{}.parquet",
+                storage::layout::APPEND_DATA_DIR,
+                Uuid::new_v4()
+            );
             tracing::Span::current().record("segment_path", relative_path.as_str());
             let mut data_guard = storage::FileCleanupGuard::new_disarmed(
                 self.location().as_ref(),
@@ -2139,11 +2143,11 @@ mod tests {
         }
 
         assert!(observations.next_calls.get() < BATCH_COUNT);
-        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 1);
+        assert_eq!(data_files(temp.path())?.len(), 1);
         drop(append);
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
-        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 0);
+        assert!(data_files(temp.path())?.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
         assert!(!temp.path().join(layout::commit_rel_path(2)).exists());
         Ok(())
@@ -2229,9 +2233,7 @@ mod tests {
                 "configured={configured}, source_error={source_error}"
             );
             assert!(
-                std::fs::read_dir(temp.path().join("data"))?
-                    .next()
-                    .is_none(),
+                data_files(temp.path())?.is_empty(),
                 "configured={configured}, source_error={source_error}"
             );
             assert!(
@@ -2299,7 +2301,7 @@ mod tests {
             }
             assert_eq!(table.state().version, 1, "{stage:?}");
             assert!(table.state().segments.is_empty(), "{stage:?}");
-            assert!(std::fs::read_dir(&data_dir)?.next().is_none(), "{stage:?}");
+            assert!(data_files(temp.path())?.is_empty(), "{stage:?}");
             assert!(coverage_files(temp.path())?.is_empty(), "{stage:?}");
             assert!(
                 !temp.path().join(layout::commit_rel_path(2)).exists(),
@@ -2327,7 +2329,7 @@ mod tests {
 
         assert!(commit_path.is_file());
         assert!(current_temp_path.is_file());
-        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 1);
+        assert_eq!(data_files(temp.path())?.len(), 1);
         assert_eq!(coverage_files(temp.path())?.len(), 2);
         let before_publication = TimeSeriesTable::open(location.clone()).await?;
         assert_eq!(before_publication.state().version, 1);
@@ -2338,7 +2340,7 @@ mod tests {
 
         assert!(!commit_path.exists());
         assert!(!current_temp_path.exists());
-        assert_eq!(std::fs::read_dir(temp.path().join("data"))?.count(), 0);
+        assert!(data_files(temp.path())?.is_empty());
         assert!(coverage_files(temp.path())?.is_empty());
         assert_eq!(table.state().version, 1);
         assert!(table.state().segments.is_empty());
@@ -2397,10 +2399,7 @@ mod tests {
             result = &mut winner_append => panic!("winner completed before race: {result:?}"),
         }
 
-        let mut data_before = std::fs::read_dir(temp.path().join("data"))?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Result<Vec<_>, _>>()?;
-        data_before.sort();
+        let data_before = data_files(temp.path())?;
         let coverage_before = coverage_files(temp.path())?;
         let commit_before = std::fs::read(&commit_path)?;
 
@@ -2420,10 +2419,7 @@ mod tests {
         ));
         assert_eq!(loser.state(), &loser_state_before);
 
-        let mut data_after = std::fs::read_dir(temp.path().join("data"))?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Result<Vec<_>, _>>()?;
-        data_after.sort();
+        let data_after = data_files(temp.path())?;
         assert_eq!(data_after, data_before);
         assert_eq!(coverage_files(temp.path())?, coverage_before);
         assert_eq!(std::fs::read(&commit_path)?, commit_before);
@@ -2492,9 +2488,9 @@ mod tests {
         };
         assert!(matches!(*source, AppendError::ParquetWrite { .. }));
         assert_eq!(cleanup_errors.len(), 1);
-        let remaining = std::fs::read_dir(&data_dir)?.collect::<Result<Vec<_>, _>>()?;
+        let remaining = data_files(temp.path())?;
         assert_eq!(remaining.len(), 1);
-        let remaining_path = remaining[0].path();
+        let remaining_path = &remaining[0];
         let remaining_name = remaining_path
             .file_name()
             .expect("remaining data filename")
@@ -2801,12 +2797,7 @@ mod tests {
             })
         ));
         assert_eq!(table.state().version, 2);
-        assert_eq!(
-            std::fs::read_dir(temp.path().join("data"))?
-                .collect::<Result<Vec<_>, _>>()?
-                .len(),
-            1
-        );
+        assert_eq!(data_files(temp.path())?.len(), 1);
         Ok(())
     }
 
@@ -3019,9 +3010,18 @@ mod tests {
         if !dir.exists() {
             return Ok(Vec::new());
         }
-        let mut files = std::fs::read_dir(dir)?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut pending = vec![dir];
+        let mut files = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files.push(entry.path());
+                }
+            }
+        }
         files.sort();
         Ok(files)
     }

@@ -5,6 +5,7 @@ use std::{collections::HashMap, path::Path};
 use chrono::{DateTime, Utc};
 use parquet::arrow::async_reader::AsyncFileReader;
 use snafu::{Backtrace, ResultExt, Snafu};
+use uuid::Uuid;
 
 use crate::{
     coverage::layout::{COVERAGE_EXT, SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR},
@@ -70,7 +71,7 @@ pub enum VacuumArtifactReason {
     WithinRetention,
     /// The file changed after vacuum planned it, so apply preserved it.
     ChangedSincePlanning,
-    /// The file is below a managed directory but does not have a managed shape.
+    /// The file is below a scanned directory but does not have a reserved managed shape.
     UnrecognizedArtifact,
     /// The file is expired and no retained commit references it.
     Unreferenced,
@@ -92,7 +93,7 @@ impl VacuumArtifactReason {
     }
 }
 
-/// Vacuum classification for one table-managed file.
+/// Vacuum classification for one file below a scanned directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VacuumArtifact {
     /// Canonical table-relative path.
@@ -251,12 +252,45 @@ enum ArtifactKind {
     Unrecognized,
 }
 
+fn is_canonical_uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|uuid| uuid.hyphenated().to_string() == value)
+}
+
+fn is_managed_parquet_path(path: &str) -> bool {
+    let Some(path) = path.strip_suffix(".parquet") else {
+        return false;
+    };
+
+    if let Some(id) = path
+        .strip_prefix(storage::layout::APPEND_DATA_DIR)
+        .and_then(|path| path.strip_prefix('/'))
+    {
+        return !id.contains('/') && is_canonical_uuid(id);
+    }
+
+    let Some(path) = path
+        .strip_prefix(storage::layout::ENTITY_REWRITE_DATA_DIR)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some((attempt_id, ordinal)) = path.split_once('/') else {
+        return false;
+    };
+    !ordinal.contains('/')
+        && is_canonical_uuid(attempt_id)
+        && ordinal
+            .parse::<usize>()
+            .is_ok_and(|value| format!("{value:010}") == ordinal)
+}
+
 fn artifact_kind(path: &str) -> ArtifactKind {
+    if is_managed_parquet_path(path) {
+        return ArtifactKind::Parquet;
+    }
     let path = Path::new(path);
     let extension = path.extension().and_then(|extension| extension.to_str());
-    if path.starts_with("data") && extension == Some("parquet") {
-        ArtifactKind::Parquet
-    } else if (path.starts_with(SEGMENT_COVERAGE_DIR) || path.starts_with(TABLE_SNAPSHOT_DIR))
+    if (path.starts_with(SEGMENT_COVERAGE_DIR) || path.starts_with(TABLE_SNAPSHOT_DIR))
         && extension == Some(COVERAGE_EXT)
     {
         ArtifactKind::Coverage
@@ -600,11 +634,12 @@ mod tests {
         )
         .await?;
 
-        let invalid_orphan = "data/invalid-orphan.parquet";
-        let valid_orphan = "data/valid-orphan.parquet";
+        let invalid_orphan = "data/_managed/append/00000000-0000-0000-0000-000000000001.parquet";
+        let valid_orphan =
+            "data/_staged/entity-rewrite/00000000-0000-0000-0000-000000000002/0000000000.parquet";
         let coverage_orphan = "_coverage/segments/orphan.roar";
         let unrecognized = "data/keep.txt";
-        let outside_managed_directories = "incoming.parquet";
+        let external_source = "data/00000000-0000-0000-0000-000000000009.parquet";
         write_new(location.as_ref(), Path::new(invalid_orphan), b"incomplete").await?;
         write_test_parquet(
             &temp.path().join(valid_orphan),
@@ -623,13 +658,23 @@ mod tests {
         )
         .await?;
         write_new(location.as_ref(), Path::new(unrecognized), b"keep").await?;
-        write_new(
-            location.as_ref(),
-            Path::new(outside_managed_directories),
-            b"external source",
-        )
-        .await?;
-        for path in [invalid_orphan, valid_orphan, coverage_orphan, unrecognized] {
+        write_test_parquet(
+            &temp.path().join(external_source),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 60_000,
+                symbol: "A",
+                price: 2.0,
+            }],
+        )?;
+        for path in [
+            invalid_orphan,
+            valid_orphan,
+            coverage_orphan,
+            unrecognized,
+            external_source,
+        ] {
             mark_expired(&temp.path().join(path))?;
         }
 
@@ -649,8 +694,8 @@ mod tests {
 
         assert_eq!(dry_run.table_version, 3);
         assert_eq!(dry_run.mode, VacuumMode::DryRun);
-        assert_eq!(dry_run.considered_files, 7);
-        assert_eq!(dry_run.retained_files, 4);
+        assert_eq!(dry_run.considered_files, 8);
+        assert_eq!(dry_run.retained_files, 5);
         assert_eq!(dry_run.removable_files, 3);
         assert_eq!(dry_run.deleted_files, 0);
         assert_eq!(dry_run.deleted_bytes, 0);
@@ -681,6 +726,10 @@ mod tests {
             artifact(&dry_run, unrecognized).reason,
             VacuumArtifactReason::UnrecognizedArtifact
         );
+        assert_eq!(
+            artifact(&dry_run, external_source).reason,
+            VacuumArtifactReason::UnrecognizedArtifact
+        );
         let removable_bytes = u128::from(b"incomplete".len() as u64)
             + u128::from(fs::metadata(temp.path().join(valid_orphan))?.len())
             + u128::from(b"orphan coverage".len() as u64);
@@ -692,8 +741,8 @@ mod tests {
         let applied = table.vacuum(older_than, VacuumMode::Apply).await?;
 
         assert_eq!(applied.table_version, 3);
-        assert_eq!(applied.considered_files, 7);
-        assert_eq!(applied.retained_files, 4);
+        assert_eq!(applied.considered_files, 8);
+        assert_eq!(applied.retained_files, 5);
         assert_eq!(applied.removable_files, 0);
         assert_eq!(applied.deleted_files, 3);
         assert_eq!(applied.removable_bytes, 0);
@@ -710,7 +759,7 @@ mod tests {
             historical_coverage,
             historical_snapshot,
             unrecognized,
-            outside_managed_directories,
+            external_source,
         ] {
             assert!(temp.path().join(path).exists(), "vacuum removed {path}");
         }
@@ -728,7 +777,7 @@ mod tests {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-        let path = "data/inflight.parquet";
+        let path = "data/_managed/append/00000000-0000-0000-0000-000000000003.parquet";
         let unrecognized = "data/keep.txt";
         let mut sink = open_new_output_sink(location.as_ref(), Path::new(path)).await?;
         sink.write_all(b"incomplete")?;
@@ -763,7 +812,7 @@ mod tests {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-        let orphan = "data/orphan.parquet";
+        let orphan = "data/_managed/append/00000000-0000-0000-0000-000000000004.parquet";
         write_new(location.as_ref(), Path::new(orphan), b"incomplete").await?;
         fs::write(temp.path().join(layout::commit_rel_path(1)), b"{invalid")?;
 
@@ -789,7 +838,7 @@ mod tests {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-        let path = "data/changing.parquet";
+        let path = "data/_managed/append/00000000-0000-0000-0000-000000000005.parquet";
         write_new(location.as_ref(), Path::new(path), b"old").await?;
         mark_expired(&temp.path().join(path))?;
         let file = storage::list_files(location.as_ref(), Path::new("data"))
@@ -817,8 +866,8 @@ mod tests {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
-        let first = "data/a.parquet";
-        let failed = "data/b.parquet";
+        let first = "data/_managed/append/00000000-0000-0000-0000-000000000006.parquet";
+        let failed = "data/_managed/append/00000000-0000-0000-0000-000000000007.parquet";
         for path in [first, failed] {
             write_new(location.as_ref(), Path::new(path), b"incomplete").await?;
             mark_expired(&temp.path().join(path))?;

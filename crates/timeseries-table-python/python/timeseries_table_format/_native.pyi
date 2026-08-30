@@ -89,7 +89,7 @@ class OptimizeReport:
         ...
 
 class VacuumArtifact:
-    """Vacuum classification for one table-managed file."""
+    """Vacuum classification for one file below a scanned directory."""
 
     @property
     def path(self) -> str: ...
@@ -100,7 +100,9 @@ class VacuumArtifact:
     @property
     def disposition(self) -> Literal["retained", "removable", "deleted"]: ...
     @property
-    def reason(self) -> Literal[
+    def reason(
+        self,
+    ) -> Literal[
         "referenced_by_commit",
         "within_retention",
         "changed_since_planning",

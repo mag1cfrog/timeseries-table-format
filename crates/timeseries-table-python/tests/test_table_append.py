@@ -56,7 +56,7 @@ def _data_and_coverage_files(root: str) -> list[Path]:
 
 
 def _only_data_file(root: str) -> Path:
-    files = sorted((Path(root) / "data").glob("*.parquet"))
+    files = sorted((Path(root) / "data" / "_managed" / "append").glob("*.parquet"))
     assert len(files) == 1
     return files[0]
 

@@ -830,7 +830,8 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
     let tmp = TempDir::new()?;
     let table_root = tmp.path().join("table");
     create_table_via_cli(&table_root, "1m", &[])?;
-    let orphan = table_root.join("data/orphan.parquet");
+    let orphan =
+        table_root.join("data/_managed/append/00000000-0000-0000-0000-000000000001.parquet");
     std::fs::create_dir_all(
         orphan
             .parent()
@@ -864,7 +865,11 @@ fn cli_vacuum_defaults_to_dry_run_and_requires_apply_to_delete()
     assert!(
         stdout.contains("artifact: disposition=removable reason=invalid_or_unreadable_parquet")
     );
-    assert!(stdout.contains("path=\"data/orphan.parquet\"\n"));
+    assert!(
+        stdout.contains(
+            "path=\"data/_managed/append/00000000-0000-0000-0000-000000000001.parquet\"\n"
+        )
+    );
     assert!(orphan.exists());
 
     let mut apply_args = args.to_vec();
@@ -970,7 +975,26 @@ fn cli_append_under_root_succeeds() -> StdResult<(), Box<dyn std::error::Error>>
         .next()
         .ok_or_else(|| io::Error::other("segment missing"))?;
     assert_ne!(segment.path, rel_path.to_string_lossy());
+    assert!(segment.path.starts_with("data/_managed/append/"));
     assert!(table_root.join(&segment.path).exists());
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&parquet_path)?
+        .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))?;
+    let vacuum = run_cli(&[
+        "vacuum",
+        "--table",
+        table_root.to_string_lossy().as_ref(),
+        "--older-than",
+        "1970-01-01T00:00:01Z",
+        "--apply",
+    ])?;
+    assert_cli_success(&vacuum);
+    let stdout = String::from_utf8(vacuum.stdout)?;
+    assert!(stdout.contains("disposition=retained reason=unrecognized_artifact"));
+    assert!(stdout.contains("path=\"data/seg-under-root.parquet\"\n"));
+    assert_eq!(std::fs::read(&parquet_path)?, source_before);
     Ok(())
 }
 
@@ -1176,8 +1200,8 @@ fn cli_append_late_decode_failure_leaves_no_partial_append()
     assert!(stderr.contains(&table_root.display().to_string()));
     assert_eq!(std::fs::read(&source)?, source_before);
     assert_eq!(open_table_blocking(&table_root)?.state(), &state_before);
-    let data_dir = table_root.join("data");
-    assert!(!data_dir.exists() || std::fs::read_dir(data_dir)?.next().is_none());
+    let append_dir = table_root.join("data/_managed/append");
+    assert!(!append_dir.exists() || std::fs::read_dir(append_dir)?.next().is_none());
     Ok(())
 }
 

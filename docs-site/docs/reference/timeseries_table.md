@@ -117,9 +117,11 @@ may remain on disk until a future vacuum operation removes unreferenced files.
 
 ## Vacuum expired orphan files
 
-An interrupted append can leave an incomplete Parquet file under `data/` without adding it to the
-transaction log. `TimeSeriesTable.vacuum(older_than, *, apply=False)` finds expired files that no
-valid retained commit references. The default dry-run does not modify the table.
+An interrupted append can leave an incomplete Parquet file under `data/_managed/append/` without
+adding it to the transaction log. An interrupted entity rewrite can leave files under
+`data/_staged/entity-rewrite/`. `TimeSeriesTable.vacuum(older_than, *, apply=False)` finds expired
+files in these reserved directories that no valid retained commit references. The default dry-run
+does not modify the table.
 
 Choose a timezone-aware cutoff older than the longest writer operation you expect, then inspect
 the plan:
@@ -147,6 +149,9 @@ The cutoff is exclusive. Files modified at or after it are retained, and a futur
 unrecognized files, and files that change while apply mode is running. Leave enough retention
 time for active writers to finish before their files become eligible.
 
+Parquet files elsewhere under `data/` are not vacuum candidates. This includes append source files
+inside the table root.
+
 `VacuumReport.artifacts` contains every regular file considered under `data/` and `_coverage/`.
 Each artifact has a disposition (`retained`, `removable`, or `deleted`) and a reason. The report
 also provides matching file and byte totals.
@@ -157,8 +162,8 @@ Apply mode can remove some files before a later deletion fails. In that case,
 so existing storage-error handlers continue to catch it.
 
 Vacuum is orphan-file cleanup. It does not expire snapshots, choose a transaction-log retention
-boundary, rewrite history, or delete transaction-log files. Files outside `data/` and `_coverage/`
-are not candidates.
+boundary, rewrite history, or delete transaction-log files. It scans `data/` and `_coverage/`, but
+only reserved Parquet paths and recognized coverage paths can be removed.
 
 ::: timeseries_table_format.VacuumArtifact
     options:

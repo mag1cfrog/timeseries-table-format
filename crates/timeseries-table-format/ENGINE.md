@@ -36,7 +36,8 @@ See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
   _coverage/
     segments/<id>.roar       # per-segment RoaringBitmap coverage
     table/<ver>-<id>.roar    # table snapshot coverage
-  data/...                   # Parquet segments (convention)
+  data/_managed/append/...   # append-generated Parquet segments
+  data/_staged/entity-rewrite/... # entity-rewrite Parquet segments
 ```
 
 ## Transaction log and OCC

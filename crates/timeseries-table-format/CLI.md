@@ -129,8 +129,8 @@ tstable append \
 **Notes:**
 - The source file is read lazily and remains unchanged, including when it is already under the
   table root
-- The table writes the rows to a generated path under `data/`; it does not adopt the source path
-  or filename
+- The table writes the rows to a generated path under `data/_managed/append/`; this directory is
+  reserved for table output. The table does not adopt the source path or filename
 - Success prints `Appended table version: <VERSION>`; `--timing` adds elapsed milliseconds on the
   same line
 - The index column must be Arrow Timestamp, Int64, or UInt64 exactly as configured
@@ -184,9 +184,10 @@ Optimization may change physical row order.
 
 ### `vacuum` - Remove expired unreferenced files
 
-An interrupted append can leave an incomplete Parquet file under `data/` without committing it
-to the transaction log. Vacuum finds these files, along with other unreferenced Parquet and
-coverage artifacts. It is a dry-run unless you pass `--apply`.
+An interrupted append can leave an incomplete Parquet file under `data/_managed/append/` without
+committing it to the transaction log. An interrupted entity rewrite can do the same under
+`data/_staged/entity-rewrite/`. Vacuum finds expired files in these reserved directories, along
+with unreferenced coverage artifacts. It is a dry-run unless you pass `--apply`.
 
 Start by choosing a cutoff older than the longest writer operation you expect:
 
@@ -216,6 +217,9 @@ valid retained commit, files whose names are not recognized as table-managed art
 that change while apply mode is running. A cutoff that is too recent can select an active writer's
 uncommitted file, so leave enough time for the longest expected write to finish.
 
+Parquet files elsewhere under `data/` are not vacuum candidates. This includes source files passed
+to `append`, even when the source is inside the table root.
+
 The report includes file counts, byte counts, and one line per file. Artifact paths are quoted and
 escaped. The reason values are:
 
@@ -224,7 +228,7 @@ escaped. The reason values are:
 | `referenced_by_commit` | A retained commit references the file |
 | `within_retention` | The file is not older than the cutoff |
 | `changed_since_planning` | The file changed before apply could delete it |
-| `unrecognized_artifact` | The file is inside a managed directory but its name is not managed |
+| `unrecognized_artifact` | The file is inside a scanned directory but its path is not reserved |
 | `unreferenced` | An expired managed file has no retained reference |
 | `invalid_or_unreadable_parquet` | An expired unreferenced Parquet file has no readable valid footer |
 
@@ -233,8 +237,9 @@ Files marked `deleted` were completed before the failure. Files still marked `re
 deleted and can be retried.
 
 Vacuum is orphan-file cleanup. It does not expire snapshots, choose a transaction-log retention
-boundary, rewrite table history, or delete transaction-log files. It only considers regular files
-under `data/` and `_coverage/`; source files outside those directories are never candidates.
+boundary, rewrite table history, or delete transaction-log files. It scans regular files under
+`data/` and `_coverage/`, but only the reserved Parquet paths above and recognized coverage paths
+can be removed.
 
 ---
 
