@@ -200,13 +200,12 @@ def test_table_introspection_version_updates_after_append(tmp_path):
         close=[1.0, 2.0],
     )
 
-    v = tbl.append(parquet_reader(seg))
-    assert isinstance(v, int)
-    assert v > 1
-    assert tbl.version() == v
+    report = tbl.append(parquet_reader(seg))
+    assert report.committed_version > 1
+    assert tbl.version() == report.committed_version
 
     reopened = ttf.TimeSeriesTable.open(str(root))
-    assert reopened.version() == v
+    assert reopened.version() == report.committed_version
 
 
 def test_table_introspection_returns_python_native_types(tmp_path):

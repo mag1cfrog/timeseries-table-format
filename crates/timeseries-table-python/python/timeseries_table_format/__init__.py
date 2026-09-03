@@ -7,6 +7,7 @@ from timeseries_table_format.notebook_display import (
 from . import _native as _native
 from ._native import (
     __version__,
+    AppendReport,
     ConflictError,
     DataFusionError,
     DuplicateIndexIntervalError,
@@ -30,6 +31,7 @@ del _auto_enable_notebook_display
 
 __all__ = [
     "__version__",
+    "AppendReport",
     "TimeseriesTableError",
     "StorageError",
     "ConflictError",

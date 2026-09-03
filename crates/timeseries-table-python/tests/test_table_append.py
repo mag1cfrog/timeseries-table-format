@@ -86,11 +86,30 @@ def test_append_runtime_signature_exposes_keyword_only_writer_settings():
         assert parameters[name].default is None
 
 
-def test_append_record_batch_returns_version_and_preserves_source(tmp_path):
+def test_append_record_batch_returns_frozen_report_for_committed_segment(tmp_path):
     table, root = _create_table(tmp_path)
     source = _batch()
 
-    assert table.append(source) == 2
+    report = table.append(source)
+
+    assert isinstance(report, ttf.AppendReport)
+    assert native.AppendReport is ttf.AppendReport
+    assert report.starting_version == 1
+    assert report.committed_version == 2
+    assert report.row_count == 2
+    assert report.row_group_count == 1
+    assert report.compression == "zstd"
+    assert report.max_rows_per_row_group == 1024 * 1024
+    assert report.max_bytes_per_row_group == 128 * 1024 * 1024
+    segment_path = Path(root) / report.segment_path
+    assert segment_path == _only_data_file(root)
+    assert report.file_size_bytes == segment_path.stat().st_size
+    metadata = pq.ParquetFile(segment_path).metadata
+    assert report.row_count == metadata.num_rows
+    assert report.row_group_count == metadata.num_row_groups
+    with pytest.raises(AttributeError):
+        setattr(report, "row_count", 0)
+
     assert source.column("value").to_pylist() == [1.0, 2.0]
     _assert_default_rows(root)
 
@@ -98,7 +117,7 @@ def test_append_record_batch_returns_version_and_preserves_source(tmp_path):
 def test_append_defaults_to_zstd_compression(tmp_path):
     table, root = _create_table(tmp_path)
 
-    assert table.append(_batch()) == 2
+    assert table.append(_batch()).committed_version == 2
 
     metadata = pq.ParquetFile(_only_data_file(root)).metadata
     assert metadata.num_row_groups == 1
@@ -119,7 +138,7 @@ def test_append_compression_override_reaches_parquet_metadata(
 ):
     table, root = _create_table(tmp_path)
 
-    assert table.append(_batch(), compression=compression) == 2
+    assert table.append(_batch(), compression=compression).committed_version == 2
 
     metadata = pq.ParquetFile(_only_data_file(root)).metadata
     for column_index in range(metadata.num_columns):
@@ -136,17 +155,21 @@ def test_append_row_limit_splits_groups_and_round_trips(tmp_path):
         }
     )
 
-    assert (
-        table.append(
-            source,
-            compression="uncompressed",
-            max_rows_per_row_group=2,
-            max_bytes_per_row_group=1024 * 1024,
-        )
-        == 2
+    report = table.append(
+        source,
+        compression="uncompressed",
+        max_rows_per_row_group=2,
+        max_bytes_per_row_group=1024 * 1024,
     )
+    assert isinstance(report, ttf.AppendReport)
+    assert report.committed_version == 2
+    assert report.compression == "uncompressed"
+    assert report.max_rows_per_row_group == 2
+    assert report.max_bytes_per_row_group == 1024 * 1024
 
     metadata = pq.ParquetFile(_only_data_file(root)).metadata
+    assert report.row_count == metadata.num_rows
+    assert report.row_group_count == metadata.num_row_groups
     assert [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)] == [
         2,
         2,
@@ -190,7 +213,7 @@ def test_append_byte_limit_splits_binary_batches_and_round_trips(tmp_path):
             compression="zstd",
             max_rows_per_row_group=100,
             max_bytes_per_row_group=1,
-        )
+        ).committed_version
         == 2
     )
 
@@ -263,7 +286,7 @@ def test_append_multichunk_table_preserves_chunks_and_source(tmp_path):
     source = pa.Table.from_batches([_batch().slice(0, 1), _batch().slice(1, 1)])
     chunk_counts = [column.num_chunks for column in source.columns]
 
-    assert table.append(source) == 2
+    assert table.append(source).committed_version == 2
     assert [column.num_chunks for column in source.columns] == chunk_counts
     assert source.column("value").to_pylist() == [1.0, 2.0]
     _assert_default_rows(root)
@@ -276,7 +299,7 @@ def test_append_record_batch_reader_consumes_all_batches(tmp_path):
         batch.schema, [batch.slice(0, 1), batch.slice(1, 1)]
     )
 
-    assert table.append(source) == 2
+    assert table.append(source).committed_version == 2
     _assert_default_rows(root)
     with pytest.raises(StopIteration):
         source.read_next_batch()
@@ -295,7 +318,7 @@ def test_append_arrow_stream_protocol_object_calls_exporter_once(tmp_path):
     table, root = _create_table(tmp_path)
     source = StreamSource(_batch())
 
-    assert table.append(source) == 2
+    assert table.append(source).committed_version == 2
     assert source.calls == 1
     _assert_default_rows(root)
 
@@ -430,7 +453,7 @@ def test_append_midstream_error_rolls_back_data_and_version(tmp_path):
 
 def test_append_schema_error_preserves_exception_type_and_table_root(tmp_path):
     table, root = _create_table(tmp_path)
-    assert table.append(_batch()) == 2
+    assert table.append(_batch()).committed_version == 2
     files_before = _data_and_coverage_files(root)
     mismatched = pa.record_batch(
         {
@@ -450,7 +473,7 @@ def test_append_schema_error_preserves_exception_type_and_table_root(tmp_path):
 
 def test_append_overlap_preserves_exception_type_and_table_root(tmp_path):
     table, root = _create_table(tmp_path)
-    assert table.append(_batch()) == 2
+    assert table.append(_batch()).committed_version == 2
     files_before = _data_and_coverage_files(root)
 
     with pytest.raises(ttf.IndexIntervalOverlapError) as excinfo:
@@ -499,7 +522,7 @@ def test_append_duplicate_interval_rolls_back_and_allows_retry(tmp_path):
     assert ttf.TimeSeriesTable.open(root).version() == 1
     assert _data_and_coverage_files(root) == []
 
-    assert table.append(_batch()) == 2
+    assert table.append(_batch()).committed_version == 2
     _assert_default_rows(root)
 
 
@@ -528,7 +551,7 @@ def test_interval_conflicts_without_entity_columns_have_no_example_identity(tmp_
     overlap = pa.record_batch(
         {"ts": pa.array([9], type=pa.int64()), "value": pa.array([2.0])}
     )
-    assert table.append(first) == 2
+    assert table.append(first).committed_version == 2
     with pytest.raises(ttf.IndexIntervalOverlapError) as overlap_error:
         table.append(overlap)
     assert overlap_error.value.example_identity is None
@@ -538,7 +561,8 @@ def test_interval_conflicts_without_entity_columns_have_no_example_identity(tmp_
 def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
     winner, root = _create_table(tmp_path)
     stale = ttf.TimeSeriesTable.open(root)
-    assert winner.append(_batch()) == 2
+    winner_report = winner.append(_batch())
+    assert winner_report.committed_version == 2
     files_before = _data_and_coverage_files(root)
 
     with pytest.raises(ttf.ConflictError) as excinfo:
@@ -575,7 +599,7 @@ def test_append_releases_native_stream_exactly_once(tmp_path, fail_after_first):
         assert table.version() == 1
         assert _data_and_coverage_files(str(root)) == []
     else:
-        assert table.append(source) == 2
+        assert table.append(source).committed_version == 2
 
     assert counter.count == 1
     del source
@@ -676,7 +700,7 @@ def test_append_round_trips_index_domains_through_c_stream(
     root = tmp_path / name
     table = ttf.TimeSeriesTable.create(table_root=str(root), **create_options)
 
-    assert table.append(batch) == 2
+    assert table.append(batch).committed_version == 2
 
     session = ttf.Session()
     session.register_tstable("series", str(root))
