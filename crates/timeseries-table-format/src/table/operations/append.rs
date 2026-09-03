@@ -599,8 +599,8 @@ impl TimeSeriesTable {
             segment_meta_from_parquet(self.location(), rel_path, &self.index)
                 .await
                 .map_err(AppendError::from)?;
-        let row_count = segment_meta.row_count;
-        let file_size_bytes = segment_meta.file_size.unwrap_or_default();
+        let row_count = meta_report.row_count;
+        let file_size_bytes = meta_report.file_size_bytes;
         let span = tracing::Span::current();
         span.record("row_count", row_count);
         span.record("file_size_bytes", file_size_bytes);
