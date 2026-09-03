@@ -5,8 +5,8 @@
 
 pub use crate::coverage;
 pub use crate::{
-    AppendError, AppendRequest, CoverageQueryError, CreateTableError, IndexKind, IndexSpec,
-    IndexSpecError, IndexValue, IndexValueError, IntoRecordBatchReader, LogicalDataType,
+    AppendError, AppendReport, AppendRequest, CoverageQueryError, CreateTableError, IndexKind,
+    IndexSpec, IndexSpecError, IndexValue, IndexValueError, IntoRecordBatchReader, LogicalDataType,
     LogicalField, LogicalSchema, OpenTableError, OptimizeError, OptimizeReport, ParquetCompression,
     ParseTimeIndexGranularityError, ScanError, TableError, TableLocation, TableMeta,
     TableProtocolError, TableStateAccessError, TimeIndexGranularity, TimeSeriesTable,

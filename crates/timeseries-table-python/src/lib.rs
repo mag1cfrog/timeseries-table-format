@@ -1991,7 +1991,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             tokio_runner::run_blocking_map_err(
                 py,
                 rt.as_ref(),
-                async move { table.append(request).await },
+                async move {
+                    table
+                        .append(request)
+                        .await
+                        .map(|report| report.committed_version)
+                },
                 move |py, err| {
                     table_error_to_py_with_root(
                         py,

@@ -64,6 +64,7 @@ where
     table
         .append(AppendRequest::new(source).max_rows_per_row_group(1))
         .await
+        .map(|report| report.committed_version)
 }
 
 static FIXTURE_NAME_MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -101,17 +102,11 @@ async fn append_parquet_fixture(
     root: &Path,
     relative_path: &str,
 ) -> TestResult<(u64, String)> {
-    let existing_paths = table.state().segments.keys().cloned().collect::<Vec<_>>();
     let reader =
         ParquetRecordBatchReaderBuilder::try_new(File::open(root.join(relative_path))?)?.build()?;
-    let version = table.append(reader).await?;
-    let committed_path = table
-        .state()
-        .segments
-        .keys()
-        .find(|path| !existing_paths.contains(path))
-        .expect("newly committed segment")
-        .clone();
+    let report = table.append(reader).await?;
+    let version = report.committed_version;
+    let committed_path = report.segment_path;
     let committed_name = Path::new(&committed_path)
         .file_name()
         .expect("committed segment filename")
@@ -1258,7 +1253,8 @@ async fn append_public_sources_round_trip_exact_rows() -> TestResult {
                 (480_000, "A", 18.0),
                 (540_000, "B", 19.0),
             ])?)
-            .await?,
+            .await?
+            .committed_version,
         8
     );
     let unconfigured_path = table
@@ -1673,7 +1669,11 @@ async fn append_randomized_partitions_preserve_exact_rows() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_table_meta(false)?).await?;
-        assert_eq!(table.append(batches).await?, 2, "seed {case_seed:#x}");
+        assert_eq!(
+            table.append(batches).await?.committed_version,
+            2,
+            "seed {case_seed:#x}"
+        );
 
         drop(table);
         let reopened = Arc::new(TimeSeriesTable::open(location).await?);

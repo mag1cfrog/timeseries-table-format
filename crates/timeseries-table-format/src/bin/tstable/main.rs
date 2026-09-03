@@ -333,10 +333,14 @@ async fn append_parquet_file(
             parquet: parquet.display().to_string(),
         })?;
     let reader = open_parquet_batch_reader(parquet)?;
-    table.append(reader).await.context(AppendSegmentSnafu {
-        table: table_root.display().to_string(),
-        parquet: parquet.display().to_string(),
-    })
+    table
+        .append(reader)
+        .await
+        .map(|report| report.committed_version)
+        .context(AppendSegmentSnafu {
+            table: table_root.display().to_string(),
+            parquet: parquet.display().to_string(),
+        })
 }
 
 async fn cmd_append(table: &Path, parquet: &Path, timing: bool) -> CliResult<()> {

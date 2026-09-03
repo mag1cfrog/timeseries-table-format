@@ -60,7 +60,7 @@ pub use metadata::protocol::TableProtocolError;
 pub use metadata::table::TableMeta;
 pub use storage::TableLocation;
 pub use table::{
-    AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
+    AppendError, AppendReport, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
     OptimizeReport, ScanError, TableError, TableStateAccessError, TimeSeriesTable, VacuumArtifact,
     VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
     append::{AppendRequest, IntoRecordBatchReader, ParquetCompression},

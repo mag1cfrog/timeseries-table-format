@@ -57,7 +57,10 @@ pub(crate) async fn append_parquet_fixture(
         ParquetRecordBatchReaderBuilder::try_new(File::open(path).expect("open Parquet fixture"))
             .and_then(|builder| builder.build())
             .expect("read Parquet fixture metadata");
-    table.append(reader).await
+    table
+        .append(reader)
+        .await
+        .map(|report| report.committed_version)
 }
 
 #[derive(Clone)]

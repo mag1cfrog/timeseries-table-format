@@ -10,7 +10,7 @@ mod scan;
 mod state_access;
 mod vacuum;
 
-pub use append::error::AppendError;
+pub use append::{AppendReport, error::AppendError};
 pub use coverage::CoverageQueryError;
 pub use create::CreateTableError;
 pub use open::OpenTableError;

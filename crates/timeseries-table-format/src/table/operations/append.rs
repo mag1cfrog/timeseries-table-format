@@ -254,7 +254,8 @@ impl From<ParquetCompression> for Compression {
 }
 
 impl ParquetCompression {
-    fn name(self) -> &'static str {
+    /// Return the canonical lowercase compression name.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Uncompressed => "uncompressed",
             Self::Snappy => "snappy",
@@ -320,6 +321,30 @@ impl AppendWriterSettings {
             .set_max_row_group_bytes(Some(self.max_bytes_per_row_group))
             .build()
     }
+}
+
+/// Result of one successfully committed append operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AppendReport {
+    /// Table version used as the optimistic commit base.
+    pub starting_version: u64,
+    /// Version created by the successful append commit.
+    pub committed_version: u64,
+    /// Canonical table-relative path of the committed Parquet segment.
+    pub segment_path: String,
+    /// Logical rows recorded in the committed segment metadata.
+    pub row_count: u64,
+    /// Row groups recorded in the completed Parquet footer.
+    pub row_group_count: usize,
+    /// Completed Parquet segment size in bytes.
+    pub file_size_bytes: u64,
+    /// Effective Parquet compression setting used by this append.
+    pub compression: ParquetCompression,
+    /// Effective maximum rows per output row group.
+    pub max_rows_per_row_group: usize,
+    /// Effective maximum estimated encoded bytes per output row group.
+    pub max_bytes_per_row_group: usize,
 }
 
 /// Convert an Arrow batch source into a schema-bearing [`RecordBatchReader`].
@@ -561,7 +586,7 @@ impl TimeSeriesTable {
         owned_data_guard: &mut storage::FileCleanupGuard,
         telemetry: &mut AppendTelemetry,
         writer_settings: AppendWriterSettings,
-    ) -> Result<u64, AppendError> {
+    ) -> Result<AppendReport, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
 
@@ -865,14 +890,24 @@ impl TimeSeriesTable {
             row_group_count = meta_report.row_groups,
             file_size_bytes,
             entity_layout = entity_layout_name,
-            compression = writer_settings.compression.name(),
+            compression = writer_settings.compression.as_str(),
             max_rows_per_row_group = writer_settings.max_rows_per_row_group,
             max_bytes_per_row_group = writer_settings.max_bytes_per_row_group,
             total_duration_ms = elapsed_ms(telemetry.append_started),
             outcome = "succeeded",
             "Appended Parquet segment"
         );
-        Ok(new_version)
+        Ok(AppendReport {
+            starting_version: expected_version,
+            committed_version: new_version,
+            segment_path: relative_path.to_string(),
+            row_count,
+            row_group_count: meta_report.row_groups,
+            file_size_bytes,
+            compression: writer_settings.compression,
+            max_rows_per_row_group: writer_settings.max_rows_per_row_group,
+            max_bytes_per_row_group: writer_settings.max_bytes_per_row_group,
+        })
     }
 
     /// Check whether this client supports appending to the current table.
@@ -922,7 +957,7 @@ impl TimeSeriesTable {
             outcome = tracing::field::Empty
         )
     )]
-    pub async fn append<S, SourceKind>(&mut self, source: S) -> Result<u64, TableError>
+    pub async fn append<S, SourceKind>(&mut self, source: S) -> Result<AppendReport, TableError>
     where
         S: IntoRecordBatchReader<SourceKind>,
     {
@@ -942,12 +977,12 @@ impl TimeSeriesTable {
             log::Level::Debug
         );
         let mut telemetry = AppendTelemetry::new(tracing_enabled || log_enabled);
-        let append_result: Result<u64, AppendError> = async {
+        let append_result: Result<AppendReport, AppendError> = async {
             self.ensure_write_compatible().map_err(AppendError::from)?;
 
             let writer_settings = AppendWriterSettings::from_source(&source).validate()?;
             let span = tracing::Span::current();
-            span.record("compression", writer_settings.compression.name());
+            span.record("compression", writer_settings.compression.as_str());
             span.record(
                 "max_rows_per_row_group",
                 writer_settings.max_rows_per_row_group,
@@ -1047,7 +1082,7 @@ impl TimeSeriesTable {
                 )
                 .await
             {
-                Ok(version) => Ok(version),
+                Ok(report) => Ok(report),
                 Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
                 Err(source) => {
                     let cleanup_started = Instant::now();
@@ -1507,7 +1542,7 @@ mod tests {
         let (reader, observations) =
             InstrumentedReader::new(first.schema(), vec![Ok(first), Ok(second)]);
 
-        assert_eq!(table.append(reader).await?, 2);
+        assert_eq!(table.append(reader).await?.committed_version, 2);
         assert!(!observations.previous_batch_alive.get());
         assert_eq!(table.state().segments.len(), 1);
         let segment = table
@@ -1978,7 +2013,8 @@ mod tests {
                         .max_rows_per_row_group(100)
                         .max_bytes_per_row_group(1),
                 )
-                .await?,
+                .await?
+                .committed_version,
             2
         );
 
@@ -2038,7 +2074,7 @@ mod tests {
                 None => request,
             };
 
-            assert_eq!(table.append(request).await?, 2);
+            assert_eq!(table.append(request).await?.committed_version, 2);
 
             let (segment_path, row_count) = table
                 .state()
@@ -2142,8 +2178,14 @@ mod tests {
             time_series_batch(vec![60_000], vec!["A"], vec![2.0])?,
         ];
 
-        assert_eq!(direct.append(source.clone()).await?, 2);
-        assert_eq!(requested.append(AppendRequest::new(source)).await?, 2);
+        assert_eq!(direct.append(source.clone()).await?.committed_version, 2);
+        assert_eq!(
+            requested
+                .append(AppendRequest::new(source))
+                .await?
+                .committed_version,
+            2
+        );
 
         let direct_path = &direct
             .state()
@@ -2233,23 +2275,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_writes_one_segment_and_returns_versions() -> TestResult {
+    async fn append_report_matches_committed_segment_and_parquet_footer() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
 
         let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
         let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
-        assert_eq!(table.append(vec![first, second]).await?, 2);
+        let report = table
+            .append(
+                AppendRequest::new(vec![first, second])
+                    .compression(ParquetCompression::Snappy)
+                    .max_rows_per_row_group(1)
+                    .max_bytes_per_row_group(1_024),
+            )
+            .await?;
+
+        assert_eq!(report.starting_version, 1);
+        assert_eq!(report.committed_version, 2);
+        assert_eq!(report.row_count, 2);
+        assert_eq!(report.row_group_count, 2);
+        assert_eq!(report.compression, ParquetCompression::Snappy);
+        assert_eq!(report.max_rows_per_row_group, 1);
+        assert_eq!(report.max_bytes_per_row_group, 1_024);
         assert_eq!(table.state().segments.len(), 1);
-        let Some(segment) = table.state().segments.values().next() else {
-            return Err("missing streamed segment".into());
-        };
-        assert_eq!(segment.row_count, 2);
-        assert!(temp.path().join(&segment.path).is_file());
+        let segment = table
+            .state()
+            .segments
+            .get(&report.segment_path)
+            .ok_or("reported segment is not committed")?;
+        assert_eq!(report.row_count, segment.row_count);
+        assert_eq!(
+            report.file_size_bytes,
+            segment.file_size.unwrap_or_default()
+        );
+
+        let segment_path = temp.path().join(&report.segment_path);
+        assert_eq!(
+            report.file_size_bytes,
+            std::fs::metadata(&segment_path)?.len()
+        );
+        let parquet = ParquetRecordBatchReaderBuilder::try_new(File::open(segment_path)?)?;
+        assert_eq!(report.row_group_count, parquet.metadata().num_row_groups());
+        assert!(parquet.metadata().row_groups().iter().all(|row_group| {
+            row_group
+                .columns()
+                .iter()
+                .all(|column| column.compression() == Compression::SNAPPY)
+        }));
 
         let third = time_series_batch(vec![120_000], vec!["A"], vec![3.0])?;
-        assert_eq!(table.append(third).await?, 3);
+        let direct_report = table.append(third).await?;
+        assert_eq!(direct_report.starting_version, 2);
+        assert_eq!(direct_report.committed_version, 3);
+        assert_eq!(direct_report.compression, ParquetCompression::Zstd);
+        assert_eq!(
+            direct_report.max_rows_per_row_group,
+            DEFAULT_MAX_ROWS_PER_ROW_GROUP
+        );
+        assert_eq!(
+            direct_report.max_bytes_per_row_group,
+            DEFAULT_MAX_BYTES_PER_ROW_GROUP
+        );
         assert_eq!(table.state().segments.len(), 2);
 
         let reopened = TimeSeriesTable::open(location).await?;
@@ -2279,7 +2366,7 @@ mod tests {
         let expected_version = table.state().version;
         let capture = TraceCapture::default();
 
-        let committed_version = capture
+        let report = capture
             .run(
                 table.append(
                     AppendRequest::new(batches)
@@ -2289,6 +2376,7 @@ mod tests {
                 ),
             )
             .await?;
+        let committed_version = report.committed_version;
         assert_eq!(committed_version, expected_version + 1);
         assert_eq!(table.state().version, committed_version);
 
@@ -2519,7 +2607,7 @@ mod tests {
         let (reader, observations) =
             InstrumentedReader::new(first.schema(), vec![Ok(first), Ok(second)]);
 
-        assert_eq!(table.append(reader).await?, 2);
+        assert_eq!(table.append(reader).await?.committed_version, 2);
         assert!(observations.schema_calls.get() > 0);
         assert!(!observations.next_before_schema.get());
         assert!(!observations.previous_batch_alive.get());
@@ -2623,7 +2711,13 @@ mod tests {
 
         let data = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
         let leading_zero = time_series_batch(Vec::new(), Vec::new(), Vec::new())?;
-        assert_eq!(table.append(vec![leading_zero, data]).await?, 2);
+        assert_eq!(
+            table
+                .append(vec![leading_zero, data])
+                .await?
+                .committed_version,
+            2
+        );
         assert_eq!(table.state().version, 2);
         assert_eq!(table.state().segments.len(), 1);
         Ok(())
@@ -2867,7 +2961,7 @@ mod tests {
         assert_eq!(std::fs::read(&commit_path)?, commit_before);
 
         pause.release();
-        assert_eq!(winner_append.await?, 2);
+        assert_eq!(winner_append.await?.committed_version, 2);
         assert_eq!(winner.state().version, 2);
         assert_eq!(winner.state().segments.len(), 1);
         assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
@@ -3015,7 +3109,7 @@ mod tests {
         let mut loser = TimeSeriesTable::open(location.clone()).await?;
         let loser_state_before = loser.state().clone();
 
-        winner
+        let winner_report = winner
             .append(widening_batch(
                 vec![0],
                 vec![1],
@@ -3025,6 +3119,9 @@ mod tests {
             .await?;
         let data_before = data_files(temp.path())?;
         let coverage_before = coverage_files(temp.path())?;
+        assert_eq!(winner_report.starting_version, 1);
+        assert_eq!(winner_report.committed_version, 2);
+        assert_eq!(data_before, [temp.path().join(&winner_report.segment_path)]);
 
         let error = loser
             .append(
@@ -3287,7 +3384,7 @@ mod tests {
             TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
                 .await?;
         let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
-        assert_eq!(table.append(batch.clone()).await?, 2);
+        assert_eq!(table.append(batch.clone()).await?.committed_version, 2);
 
         assert!(matches!(
             table
@@ -3310,7 +3407,7 @@ mod tests {
         let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
 
         let batch = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
-        assert_eq!(table.append(batch).await?, 2);
+        assert_eq!(table.append(batch).await?.committed_version, 2);
         assert!(table.state().table_meta.logical_schema.is_some());
         Ok(())
     }
@@ -3376,7 +3473,7 @@ mod tests {
             }
             let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
 
-            assert_eq!(table.append(batch.clone()).await?, 2);
+            assert_eq!(table.append(batch.clone()).await?.committed_version, 2);
             assert_eq!(
                 table.state().table_meta.logical_schema.as_ref(),
                 Some(&expected)
@@ -3394,7 +3491,7 @@ mod tests {
                     new_null_array(schema.field(3).data_type(), 2),
                 ],
             )?;
-            assert_eq!(table.append(later_batch).await?, 3);
+            assert_eq!(table.append(later_batch).await?.committed_version, 3);
 
             let report = table.optimize().await?;
             assert_eq!(report.committed_version, 4);
@@ -3586,7 +3683,13 @@ mod tests {
             &state_before
         );
 
-        assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+        assert_eq!(
+            table
+                .append(timestamp_only_batch(1)?)
+                .await?
+                .committed_version,
+            2
+        );
         assert!(table.state().table_meta.logical_schema.is_some());
         Ok(())
     }
@@ -3655,7 +3758,8 @@ mod tests {
                     (0, "A", "X", 1.0),
                     (0, "A", "Y", 2.0),
                 ])?)
-                .await?,
+                .await?
+                .committed_version,
             2
         );
         let state_before = table.state().clone();
@@ -3692,7 +3796,8 @@ mod tests {
         assert_eq!(
             table
                 .append(time_series_batch(vec![0], vec!["A"], vec![1.0])?)
-                .await?,
+                .await?
+                .committed_version,
             2
         );
         let state_before = table.state().clone();
@@ -5239,7 +5344,13 @@ mod tests {
         assert!(data_files(tmp.path())?.is_empty());
         assert!(coverage_files(tmp.path())?.is_empty());
 
-        assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+        assert_eq!(
+            table
+                .append(timestamp_only_batch(1)?)
+                .await?
+                .committed_version,
+            2
+        );
         Ok(())
     }
 
@@ -5257,7 +5368,13 @@ mod tests {
             let location = TableLocation::local(tmp.path());
             let mut table =
                 TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
-            assert_eq!(table.append(timestamp_only_batch(1)?).await?, 2);
+            assert_eq!(
+                table
+                    .append(timestamp_only_batch(1)?)
+                    .await?
+                    .committed_version,
+                2
+            );
 
             let (segment_path, coverage_path) = table
                 .state()
@@ -5324,7 +5441,8 @@ mod tests {
             assert_eq!(
                 table
                     .append(timestamp_only_batch_starting_at_minute_offset(2, 1)?)
-                    .await?,
+                    .await?
+                    .committed_version,
                 3,
                 "{damage:?}"
             );
