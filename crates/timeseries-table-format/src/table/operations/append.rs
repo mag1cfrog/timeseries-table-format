@@ -2284,15 +2284,19 @@ mod tests {
 
         let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
         let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
+        let (reader, observations) =
+            InstrumentedReader::new(first.schema(), vec![Ok(first), Ok(second)]);
         let report = table
             .append(
-                AppendRequest::new(vec![first, second])
+                AppendRequest::new(reader)
                     .compression(ParquetCompression::Snappy)
                     .max_rows_per_row_group(1)
                     .max_bytes_per_row_group(1_024),
             )
             .await?;
 
+        assert_eq!(observations.next_calls.get(), 3);
+        assert!(!observations.next_before_schema.get());
         assert_eq!(report.starting_version, 1);
         assert_eq!(report.committed_version, 2);
         assert_eq!(report.row_count, 2);
@@ -2963,14 +2967,32 @@ mod tests {
         assert_eq!(std::fs::read(&commit_path)?, commit_before);
 
         pause.release();
-        assert_eq!(winner_append.await?.committed_version, 2);
+        let winner_report = winner_append.await?;
+        assert_eq!(winner_report.starting_version, 1);
+        assert_eq!(winner_report.committed_version, 2);
         assert_eq!(winner.state().version, 2);
         assert_eq!(winner.state().segments.len(), 1);
+        assert!(
+            winner
+                .state()
+                .segments
+                .contains_key(&winner_report.segment_path)
+        );
+        assert_eq!(
+            data_files(temp.path())?,
+            [temp.path().join(&winner_report.segment_path)]
+        );
         assert!(!temp.path().join(layout::commit_rel_path(3)).exists());
 
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state().version, 2);
         assert_eq!(reopened.state().segments.len(), 1);
+        assert!(
+            reopened
+                .state()
+                .segments
+                .contains_key(&winner_report.segment_path)
+        );
         assert_eq!(
             reopened
                 .state()
