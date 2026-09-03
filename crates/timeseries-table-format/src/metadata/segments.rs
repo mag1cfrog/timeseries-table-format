@@ -206,19 +206,6 @@ pub enum SegmentMetaError {
         detail: String,
     },
 
-    /// A row group reports an invalid row count or physical byte size.
-    #[snafu(display(
-        "Invalid metadata for row group {row_group_index} in segment at {path}: {detail}"
-    ))]
-    InvalidRowGroupMetadata {
-        /// Path to the segment file.
-        path: String,
-        /// Zero-based row-group position in the Parquet footer.
-        row_group_index: usize,
-        /// Description of the invalid value.
-        detail: String,
-    },
-
     /// The file contains no non-null value for the registered ordered index.
     #[snafu(display(
         "No observed {expected_domain} value for ordered-index column {column} in segment at {path}"
@@ -254,6 +241,19 @@ pub enum SegmentMetaError {
         source: Box<ArrowToLogicalSchemaError>,
         /// Backtrace captured with segment path context.
         backtrace: Backtrace,
+    },
+
+    /// A row group reports an invalid row count or physical byte size.
+    #[snafu(display(
+        "Invalid metadata for row group {row_group_index} in segment at {path}: {detail}"
+    ))]
+    InvalidRowGroupMetadata {
+        /// Path to the segment file.
+        path: String,
+        /// Zero-based row-group position in the Parquet footer.
+        row_group_index: usize,
+        /// Description of the invalid value.
+        detail: String,
     },
 }
 
