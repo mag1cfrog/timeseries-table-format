@@ -23,6 +23,7 @@ jobs:
     concurrency:
       group: release-plz-release
       queue: max
+    environment: production-release
     permissions:
       contents: write
     env:
