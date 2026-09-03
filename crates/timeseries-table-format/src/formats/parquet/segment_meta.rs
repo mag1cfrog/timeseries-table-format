@@ -12,7 +12,7 @@ use parquet::arrow::{
     arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
     async_reader::ParquetRecordBatchStreamBuilder,
 };
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 
 use snafu::Backtrace;
@@ -43,6 +43,133 @@ struct IndexBounds {
 struct IndexStatsPlan {
     bounds: Option<IndexBounds>,
     row_groups_to_scan: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowGroupMetricSummary {
+    pub(crate) min: u64,
+    pub(crate) median: u64,
+    pub(crate) max: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowGroupStatistics {
+    pub(crate) rows: RowGroupMetricSummary,
+    pub(crate) compressed_bytes: RowGroupMetricSummary,
+    pub(crate) uncompressed_bytes: RowGroupMetricSummary,
+}
+
+fn summarize_row_group_values(mut values: Vec<u64>) -> Option<RowGroupMetricSummary> {
+    if values.is_empty() {
+        return None;
+    }
+
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    let median = if values.len().is_multiple_of(2) {
+        let lower = values[middle - 1];
+        lower + (values[middle] - lower) / 2
+    } else {
+        values[middle]
+    };
+
+    Some(RowGroupMetricSummary {
+        min: values[0],
+        median,
+        max: values[values.len() - 1],
+    })
+}
+
+fn invalid_row_group_metadata(
+    path: &str,
+    row_group_index: usize,
+    detail: impl Into<String>,
+) -> SegmentMetaError {
+    SegmentMetaError::InvalidRowGroupMetadata {
+        path: path.to_string(),
+        row_group_index,
+        detail: detail.into(),
+    }
+}
+
+fn nonnegative_row_group_value(
+    path: &str,
+    row_group_index: usize,
+    name: &str,
+    value: i64,
+) -> Result<u64, SegmentMetaError> {
+    value.try_into().map_err(|_| {
+        invalid_row_group_metadata(path, row_group_index, format!("negative {name} {value}"))
+    })
+}
+
+fn compressed_row_group_bytes(
+    path: &str,
+    row_group_index: usize,
+    row_group: &RowGroupMetaData,
+) -> Result<u64, SegmentMetaError> {
+    let mut checked_total = 0_i64;
+    for (column_index, column) in row_group.columns().iter().enumerate() {
+        let bytes = column.compressed_size();
+        if bytes < 0 {
+            return Err(invalid_row_group_metadata(
+                path,
+                row_group_index,
+                format!("column {column_index} has negative compressed byte size {bytes}"),
+            ));
+        }
+        checked_total = checked_total.checked_add(bytes).ok_or_else(|| {
+            invalid_row_group_metadata(path, row_group_index, "compressed byte size overflow")
+        })?;
+    }
+
+    debug_assert_eq!(checked_total, row_group.compressed_size());
+    Ok(checked_total as u64)
+}
+
+fn row_group_statistics_from_footer(
+    path: &str,
+    metadata: &ParquetMetaData,
+) -> Result<Option<RowGroupStatistics>, SegmentMetaError> {
+    let mut rows = Vec::with_capacity(metadata.num_row_groups());
+    let mut compressed_bytes = Vec::with_capacity(metadata.num_row_groups());
+    let mut uncompressed_bytes = Vec::with_capacity(metadata.num_row_groups());
+
+    for (row_group_index, row_group) in metadata.row_groups().iter().enumerate() {
+        rows.push(nonnegative_row_group_value(
+            path,
+            row_group_index,
+            "row count",
+            row_group.num_rows(),
+        )?);
+        compressed_bytes.push(compressed_row_group_bytes(
+            path,
+            row_group_index,
+            row_group,
+        )?);
+        uncompressed_bytes.push(nonnegative_row_group_value(
+            path,
+            row_group_index,
+            "uncompressed byte size",
+            row_group.total_byte_size(),
+        )?);
+    }
+
+    let Some(rows) = summarize_row_group_values(rows) else {
+        return Ok(None);
+    };
+    let Some(compressed_bytes) = summarize_row_group_values(compressed_bytes) else {
+        return Ok(None);
+    };
+    let Some(uncompressed_bytes) = summarize_row_group_values(uncompressed_bytes) else {
+        return Ok(None);
+    };
+
+    Ok(Some(RowGroupStatistics {
+        rows,
+        compressed_bytes,
+        uncompressed_bytes,
+    }))
 }
 
 fn compare_index_values(
@@ -396,7 +523,9 @@ pub(crate) struct SegmentMetaReport {
     /// Completed Parquet file size in bytes.
     pub(crate) file_size_bytes: u64,
     /// Number of row groups reported by Parquet metadata.
-    pub(crate) row_groups: usize,
+    pub(crate) row_group_count: usize,
+    /// Physical row-group statistics from the completed Parquet footer.
+    pub(crate) row_group_statistics: RowGroupStatistics,
     /// Total row count from file metadata.
     pub(crate) row_count: u64,
     /// True if no ordered-index rows needed to be scanned.
@@ -434,30 +563,32 @@ pub(crate) async fn segment_meta_from_parquet(
             backtrace: Backtrace::capture(),
         })?;
 
-    let (row_count, row_groups, stats_plan) =
-        {
-            let parquet_metadata = metadata.metadata();
-            let file_meta = parquet_metadata.file_metadata();
-            let row_count: u64 = file_meta.num_rows().try_into().map_err(|_| {
-                SegmentMetaError::ParquetStatsShape {
+    let (row_count, row_group_count, row_group_statistics, stats_plan) = {
+        let parquet_metadata = metadata.metadata();
+        let file_meta = parquet_metadata.file_metadata();
+        let row_count: u64 =
+            file_meta
+                .num_rows()
+                .try_into()
+                .map_err(|_| SegmentMetaError::ParquetStatsShape {
                     path: path_str.clone(),
                     column: index.column.clone(),
                     detail: format!("negative row count {}", file_meta.num_rows()),
-                }
-            })?;
-            let row_groups = parquet_metadata.num_row_groups();
-            let schema = file_meta.schema_descr();
-            let validated = validate_parquet_index(&path_str, schema, index)
-                .map_err(|source| SegmentMetaError::OrderedIndexColumn { source })?;
-            let stats_plan = plan_index_scan(
-                &path_str,
-                &index.column,
-                validated.leaf_index,
-                validated.kind,
-                parquet_metadata,
-            )?;
-            (row_count, row_groups, stats_plan)
-        };
+                })?;
+        let row_group_count = parquet_metadata.num_row_groups();
+        let row_group_statistics = row_group_statistics_from_footer(&path_str, parquet_metadata)?;
+        let schema = file_meta.schema_descr();
+        let validated = validate_parquet_index(&path_str, schema, index)
+            .map_err(|source| SegmentMetaError::OrderedIndexColumn { source })?;
+        let stats_plan = plan_index_scan(
+            &path_str,
+            &index.column,
+            validated.leaf_index,
+            validated.kind,
+            parquet_metadata,
+        )?;
+        (row_count, row_group_count, row_group_statistics, stats_plan)
+    };
     drop(file);
 
     let IndexStatsPlan {
@@ -482,6 +613,12 @@ pub(crate) async fn segment_meta_from_parquet(
         }
         scanned_rows
     };
+    let row_group_statistics =
+        row_group_statistics.ok_or_else(|| SegmentMetaError::NoObservedIndexValue {
+            path: path_str.clone(),
+            column: index.column.clone(),
+            expected_domain: index.kind.name(),
+        })?;
     let bounds = bounds.ok_or_else(|| SegmentMetaError::NoObservedIndexValue {
         path: path_str.clone(),
         column: index.column.clone(),
@@ -502,7 +639,8 @@ pub(crate) async fn segment_meta_from_parquet(
 
     let report = SegmentMetaReport {
         file_size_bytes: file_size,
-        row_groups,
+        row_group_count,
+        row_group_statistics,
         row_count,
         used_stats,
         scanned_rows,
@@ -838,6 +976,152 @@ mod tests {
         Ok(ParquetMetaData::new(file, vec![row_group]))
     }
 
+    fn metadata_with_row_group_sizes(
+        sizes: &[(i64, i64, i64)],
+    ) -> Result<ParquetMetaData, Box<dyn std::error::Error>> {
+        let column = Arc::new(
+            Type::primitive_type_builder("value", PhysicalType::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()?,
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![column])
+                .build()?,
+        );
+        let schema = Arc::new(SchemaDescriptor::new(schema));
+        let mut row_groups = Vec::with_capacity(sizes.len());
+        for &(rows, compressed_bytes, uncompressed_bytes) in sizes {
+            let column = ColumnChunkMetaData::builder(schema.column(0))
+                .set_num_values(rows)
+                .set_total_compressed_size(compressed_bytes)
+                .set_total_uncompressed_size(uncompressed_bytes)
+                .build()?;
+            row_groups.push(
+                RowGroupMetaData::builder(Arc::clone(&schema))
+                    .set_num_rows(rows)
+                    .set_total_byte_size(uncompressed_bytes)
+                    .add_column_metadata(column)
+                    .build()?,
+            );
+        }
+        let total_rows = sizes.iter().map(|(rows, _, _)| rows).sum();
+        let file = FileMetaData::new(1, total_rows, None, None, schema, None);
+        Ok(ParquetMetaData::new(file, row_groups))
+    }
+
+    fn metric_summary(min: u64, median: u64, max: u64) -> RowGroupMetricSummary {
+        RowGroupMetricSummary { min, median, max }
+    }
+
+    #[test]
+    fn row_group_value_summary_handles_odd_even_and_large_values() {
+        assert_eq!(
+            summarize_row_group_values(vec![9, 1, 5]),
+            Some(metric_summary(1, 5, 9))
+        );
+        assert_eq!(
+            summarize_row_group_values(vec![4, 1]),
+            Some(metric_summary(1, 2, 4))
+        );
+        assert_eq!(
+            summarize_row_group_values(vec![u64::MAX, u64::MAX - 2]),
+            Some(metric_summary(u64::MAX - 2, u64::MAX - 1, u64::MAX))
+        );
+        assert_eq!(summarize_row_group_values(Vec::new()), None);
+    }
+
+    #[test]
+    fn row_group_statistics_summarize_footer_values() -> TestResult {
+        let metadata =
+            metadata_with_row_group_sizes(&[(30, 300, 3_000), (10, 100, 1_000), (20, 200, 2_000)])?;
+
+        assert_eq!(
+            row_group_statistics_from_footer("data/segment.parquet", &metadata)?,
+            Some(RowGroupStatistics {
+                rows: metric_summary(10, 20, 30),
+                compressed_bytes: metric_summary(100, 200, 300),
+                uncompressed_bytes: metric_summary(1_000, 2_000, 3_000),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn row_group_statistics_reject_negative_footer_values() -> TestResult {
+        for (sizes, expected_detail) in [
+            (vec![(-1, 10, 100)], "negative row count -1"),
+            (
+                vec![(1, -10, 100)],
+                "column 0 has negative compressed byte size -10",
+            ),
+            (vec![(1, 10, -100)], "negative uncompressed byte size -100"),
+        ] {
+            let metadata = metadata_with_row_group_sizes(&sizes)?;
+            let error = row_group_statistics_from_footer("data/invalid.parquet", &metadata)
+                .expect_err("negative footer values must fail");
+            assert!(matches!(
+                error,
+                SegmentMetaError::InvalidRowGroupMetadata {
+                    path,
+                    row_group_index: 0,
+                    detail,
+                } if path == "data/invalid.parquet" && detail == expected_detail
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn row_group_statistics_reject_compressed_size_overflow() -> TestResult {
+        let fields = ["left", "right"]
+            .map(|name| {
+                Type::primitive_type_builder(name, PhysicalType::INT64)
+                    .with_repetition(Repetition::REQUIRED)
+                    .build()
+                    .map(Arc::new)
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = Arc::new(SchemaDescriptor::new(Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()?,
+        )));
+        let columns = [i64::MAX, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(column_index, compressed_bytes)| {
+                ColumnChunkMetaData::builder(schema.column(column_index))
+                    .set_num_values(1)
+                    .set_total_compressed_size(compressed_bytes)
+                    .set_total_uncompressed_size(1)
+                    .build()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let row_group = RowGroupMetaData::builder(Arc::clone(&schema))
+            .set_num_rows(1)
+            .set_total_byte_size(2)
+            .set_column_metadata(columns)
+            .build()?;
+        let metadata = ParquetMetaData::new(
+            FileMetaData::new(1, 1, None, None, schema, None),
+            vec![row_group],
+        );
+
+        let error = row_group_statistics_from_footer("data/overflow.parquet", &metadata)
+            .expect_err("overflowing compressed size must fail");
+        assert!(matches!(
+            error,
+            SegmentMetaError::InvalidRowGroupMetadata {
+                path,
+                row_group_index: 0,
+                detail,
+            } if path == "data/overflow.parquet" && detail == "compressed byte size overflow"
+        ));
+        Ok(())
+    }
+
     #[test]
     fn ts_from_i64_out_of_range_is_error() {
         let err = ts_from_i64("path", "ts", TimestampUnit::Millis, i64::MAX).unwrap_err();
@@ -921,8 +1205,9 @@ mod tests {
         let len = fs::metadata(&abs).await?.len();
         assert_eq!(meta.file_size, Some(len));
         assert_eq!(report.file_size_bytes, len);
-        assert_eq!(report.row_groups, 1);
+        assert_eq!(report.row_group_count, 1);
         assert_eq!(report.row_count, 3);
+        assert_eq!(report.row_group_statistics.rows, metric_summary(3, 3, 3));
         assert!(report.used_stats);
         assert_eq!(report.scanned_rows, 0);
         Ok(())
@@ -1020,7 +1305,7 @@ mod tests {
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -50);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 400);
         assert_eq!(meta.row_count, 6);
-        assert_eq!(report.row_groups, 3);
+        assert_eq!(report.row_group_count, 3);
         assert!(report.used_stats);
         assert_eq!(report.scanned_rows, 0);
         Ok(())
@@ -1077,7 +1362,7 @@ mod tests {
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -100);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 300);
         assert_eq!(meta.row_count, 6);
-        assert_eq!(report.row_groups, 3);
+        assert_eq!(report.row_group_count, 3);
         assert!(!report.used_stats);
         assert_eq!(report.scanned_rows, 2);
         Ok(())
@@ -1132,7 +1417,7 @@ mod tests {
         assert_eq!(timestamp(&meta.index_min).timestamp_millis(), -5);
         assert_eq!(timestamp(&meta.index_max).timestamp_millis(), 30);
         assert_eq!(meta.row_count, 4);
-        assert_eq!(report.row_groups, 3);
+        assert_eq!(report.row_group_count, 3);
         assert!(report.used_stats);
         assert_eq!(report.scanned_rows, 0);
         Ok(())

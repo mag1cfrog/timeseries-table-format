@@ -474,7 +474,13 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
             if "Appended Parquet segment" in record.getMessage()
         ]
         assert len(append_completed) == 1
-        assert "batches_consumed=1" in append_completed[0]
-        assert "row_count=2" in append_completed[0]
+        append_message = append_completed[0]
+        assert "batches_consumed=1" in append_message
+        assert "row_count=2" in append_message
+        assert "row_group_rows_min=2" in append_message
+        assert "row_group_rows_median=2" in append_message
+        assert "row_group_rows_max=2" in append_message
+        assert "row_group_compressed_bytes_min=" in append_message
+        assert "row_group_uncompressed_bytes_min=" in append_message
         """
     )

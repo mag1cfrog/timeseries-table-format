@@ -723,7 +723,7 @@ impl TimeSeriesTable {
             SegmentEntityLayout::Mixed => "mixed",
         };
         span.record("entity_layout", entity_layout_name);
-        span.record("row_group_count", meta_report.row_groups);
+        span.record("row_group_count", meta_report.row_group_count);
         telemetry.complete_phase();
 
         // 6) Give this append private sidecar paths, then write them before commit.
@@ -880,6 +880,7 @@ impl TimeSeriesTable {
 
         span.record("committed_version", new_version);
         span.record("outcome", "succeeded");
+        let row_group_statistics = meta_report.row_group_statistics;
         tracing::info!(
             name: "table.append",
             target: "timeseries_table_format::table::append",
@@ -887,7 +888,16 @@ impl TimeSeriesTable {
             committed_version = new_version,
             row_count,
             batches_consumed = telemetry.batches_consumed,
-            row_group_count = meta_report.row_groups,
+            row_group_count = meta_report.row_group_count,
+            row_group_rows_min = row_group_statistics.rows.min,
+            row_group_rows_median = row_group_statistics.rows.median,
+            row_group_rows_max = row_group_statistics.rows.max,
+            row_group_compressed_bytes_min = row_group_statistics.compressed_bytes.min,
+            row_group_compressed_bytes_median = row_group_statistics.compressed_bytes.median,
+            row_group_compressed_bytes_max = row_group_statistics.compressed_bytes.max,
+            row_group_uncompressed_bytes_min = row_group_statistics.uncompressed_bytes.min,
+            row_group_uncompressed_bytes_median = row_group_statistics.uncompressed_bytes.median,
+            row_group_uncompressed_bytes_max = row_group_statistics.uncompressed_bytes.max,
             file_size_bytes,
             entity_layout = entity_layout_name,
             compression = writer_settings.compression.as_str(),
@@ -902,7 +912,7 @@ impl TimeSeriesTable {
             committed_version: new_version,
             segment_path: relative_path.to_string(),
             row_count,
-            row_group_count: meta_report.row_groups,
+            row_group_count: meta_report.row_group_count,
             file_size_bytes,
             compression: writer_settings.compression,
             max_rows_per_row_group: writer_settings.max_rows_per_row_group,
@@ -1158,6 +1168,24 @@ mod tests {
         registry::LookupSpan,
     };
 
+    const ROW_GROUP_STATISTIC_FIELDS: [&str; 9] = [
+        "row_group_rows_min",
+        "row_group_rows_median",
+        "row_group_rows_max",
+        "row_group_compressed_bytes_min",
+        "row_group_compressed_bytes_median",
+        "row_group_compressed_bytes_max",
+        "row_group_uncompressed_bytes_min",
+        "row_group_uncompressed_bytes_median",
+        "row_group_uncompressed_bytes_max",
+    ];
+
+    fn assert_no_row_group_statistics(fields: &BTreeMap<&'static str, String>) {
+        for field in ROW_GROUP_STATISTIC_FIELDS {
+            assert!(!fields.contains_key(field), "unexpected {field}");
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct PanicOnCommitClose;
 
@@ -1283,6 +1311,46 @@ mod tests {
                 Arc::new(Float64Array::from(prices)),
             ],
         )
+    }
+
+    fn binary_heavy_time_series_batch() -> Result<RecordBatch, ArrowError> {
+        let payloads = (0_u64..3)
+            .map(|row| {
+                let mut payload = vec![0; 64 * 1_024];
+                payload[..8].copy_from_slice(&row.to_le_bytes());
+                payload
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("payload", DataType::Binary, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, 60_000, 120_000])),
+                Arc::new(StringArray::from(vec!["A"; 3])),
+                Arc::new(BinaryArray::from_iter_values(
+                    payloads.iter().map(Vec::as_slice),
+                )),
+            ],
+        )
+    }
+
+    fn binary_heavy_table_meta() -> TableMeta {
+        TableMeta::new_time_series(IndexSpec {
+            column: "ts".to_string(),
+            entity_columns: vec!["symbol".to_string()],
+            kind: IndexKind::Timestamp {
+                index_granularity: TimeIndexGranularity::Minutes(1),
+                timezone: None,
+            },
+        })
     }
 
     fn timestamp_only_index() -> IndexSpec {
@@ -2360,22 +2428,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_append_reports_ordered_phase_durations() -> TestResult {
+    async fn successful_append_reports_phases_and_footer_statistics() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
-            TimeSeriesTable::create(TableLocation::local(temp.path()), make_basic_table_meta())
+            TimeSeriesTable::create(TableLocation::local(temp.path()), binary_heavy_table_meta())
                 .await?;
-        let first = time_series_batch(vec![0], vec!["A"], vec![1.0])?;
-        let second = time_series_batch(vec![60_000], vec!["A"], vec![2.0])?;
-        let batches = vec![first, second];
-        let batches_consumed = batches.len();
+        let reader = InstrumentedReader::one(binary_heavy_time_series_batch()?);
+        let batches_consumed = 1;
         let expected_version = table.state().version;
         let capture = TraceCapture::default();
 
         let report = capture
             .run(
                 table.append(
-                    AppendRequest::new(batches)
+                    AppendRequest::new(reader)
                         .compression(ParquetCompression::Snappy)
                         .max_rows_per_row_group(1)
                         .max_bytes_per_row_group(1_024),
@@ -2398,7 +2464,51 @@ mod tests {
         let parquet = ParquetRecordBatchReaderBuilder::try_new(File::open(&segment_path)?)?;
         let row_group_count = parquet.metadata().row_groups().len();
         let parquet_row_count = u64::try_from(parquet.metadata().file_metadata().num_rows())?;
+        let summarize = |mut values: Vec<u64>| {
+            values.sort_unstable();
+            assert_eq!(values.len(), 3);
+            [values[0], values[1], values[2]]
+        };
+        let [
+            row_group_rows_min,
+            row_group_rows_median,
+            row_group_rows_max,
+        ] = summarize(
+            parquet
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|row_group| u64::try_from(row_group.num_rows()))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let [
+            row_group_compressed_bytes_min,
+            row_group_compressed_bytes_median,
+            row_group_compressed_bytes_max,
+        ] = summarize(
+            parquet
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|row_group| u64::try_from(row_group.compressed_size()))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let [
+            row_group_uncompressed_bytes_min,
+            row_group_uncompressed_bytes_median,
+            row_group_uncompressed_bytes_max,
+        ] = summarize(
+            parquet
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|row_group| u64::try_from(row_group.total_byte_size()))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         assert_eq!(segment.row_count, parquet_row_count);
+        assert!(
+            row_group_uncompressed_bytes_min >= row_group_compressed_bytes_max.saturating_mul(2)
+        );
 
         let events = capture.events();
         let phase_events = events
@@ -2425,6 +2535,7 @@ mod tests {
             ]
         );
         for event in phase_events {
+            assert_no_row_group_statistics(&event.fields);
             assert_eq!(event.target, "timeseries_table_format::table::append");
             assert_eq!(
                 event.fields.get("outcome").map(String::as_str),
@@ -2440,6 +2551,7 @@ mod tests {
         assert_eq!(completion_events.len(), 1);
         let completion = completion_events[0];
         let span = captured_span(&capture, "table.append");
+        assert_no_row_group_statistics(&span.fields);
         for (field, expected) in [
             ("expected_version", expected_version.to_string()),
             ("committed_version", committed_version.to_string()),
@@ -2459,6 +2571,41 @@ mod tests {
                 "event.{field}"
             );
             assert_eq!(span.fields.get(field), Some(&expected), "span.{field}");
+        }
+        for (field, expected) in [
+            ("row_group_rows_min", row_group_rows_min),
+            ("row_group_rows_median", row_group_rows_median),
+            ("row_group_rows_max", row_group_rows_max),
+            (
+                "row_group_compressed_bytes_min",
+                row_group_compressed_bytes_min,
+            ),
+            (
+                "row_group_compressed_bytes_median",
+                row_group_compressed_bytes_median,
+            ),
+            (
+                "row_group_compressed_bytes_max",
+                row_group_compressed_bytes_max,
+            ),
+            (
+                "row_group_uncompressed_bytes_min",
+                row_group_uncompressed_bytes_min,
+            ),
+            (
+                "row_group_uncompressed_bytes_median",
+                row_group_uncompressed_bytes_median,
+            ),
+            (
+                "row_group_uncompressed_bytes_max",
+                row_group_uncompressed_bytes_max,
+            ),
+        ] {
+            assert_eq!(
+                completion.fields.get(field),
+                Some(&expected.to_string()),
+                "event.{field}"
+            );
         }
         completion.fields["total_duration_ms"].parse::<u64>()?;
         assert_eq!(
@@ -2510,6 +2657,9 @@ mod tests {
         ));
 
         let events = capture.events();
+        for event in &events {
+            assert_no_row_group_statistics(&event.fields);
+        }
         let failures = events
             .iter()
             .filter(|event| {
@@ -3250,6 +3400,7 @@ mod tests {
             .into_iter()
             .find(|span| span.name == "table.append")
             .expect("table.append span");
+        assert_no_row_group_statistics(&append_span.fields);
         assert_eq!(append_span.fields.get("segment_path"), Some(&segment_path));
         assert_eq!(
             append_span.fields.get("outcome").map(String::as_str),
@@ -3262,8 +3413,11 @@ mod tests {
                 .map(String::as_str),
             Some("not_attempted")
         );
-        let failures = capture
-            .events()
+        let events = capture.events();
+        for event in &events {
+            assert_no_row_group_statistics(&event.fields);
+        }
+        let failures = events
             .into_iter()
             .filter(|event| {
                 event.name == "table.append"
@@ -3290,7 +3444,6 @@ mod tests {
             Some("not_attempted")
         );
         assert_eq!(failures[0].fields.get("retained_path"), Some(&segment_path));
-
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state().version, 1);
         assert!(reopened.state().segments.is_empty());

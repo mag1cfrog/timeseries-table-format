@@ -39,6 +39,7 @@ fn cli_append_uses_registered_time_column() -> Result<(), Box<dyn std::error::Er
         .success();
 
     cli()
+        .env("RUST_LOG", "timeseries_table_format=info")
         .args([
             "append",
             "--table",
@@ -48,7 +49,17 @@ fn cli_append_uses_registered_time_column() -> Result<(), Box<dyn std::error::Er
         ])
         .assert()
         .success()
-        .stdout(contains("Appended table version: 2"));
+        .stdout("Appended table version: 2\n")
+        .stderr(contains("Appended Parquet segment"))
+        .stderr(contains("row_group_rows_min=2"))
+        .stderr(contains("row_group_rows_median=2"))
+        .stderr(contains("row_group_rows_max=2"))
+        .stderr(contains("row_group_compressed_bytes_min="))
+        .stderr(contains("row_group_compressed_bytes_median="))
+        .stderr(contains("row_group_compressed_bytes_max="))
+        .stderr(contains("row_group_uncompressed_bytes_min="))
+        .stderr(contains("row_group_uncompressed_bytes_median="))
+        .stderr(contains("row_group_uncompressed_bytes_max="));
 
     Ok(())
 }
