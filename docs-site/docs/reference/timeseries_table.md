@@ -29,9 +29,10 @@ max_bytes_per_row_group=None)` accepts these sources:
 | `pyarrow.RecordBatchReader` | Batches are consumed lazily |
 | Object implementing `__arrow_c_stream__` | One schema-bearing Arrow C Stream is requested and consumed |
 
-The method returns the newly committed table version as an `int`. It does not accept file paths,
-pandas or NumPy objects, mappings, row iterables, or arbitrary iterables of batches. Convert those
-inputs to one of the supported Arrow forms explicitly.
+The method returns an immutable `AppendReport` describing the committed segment and its effective
+writer settings. Use `table.append(source).committed_version` when only the new table version is
+needed. The method does not accept file paths, pandas or NumPy objects, mappings, row iterables, or
+arbitrary iterables of batches. Convert those inputs to one of the supported Arrow forms explicitly.
 
 The keyword-only settings control the physical layout of the new table-owned Parquet segment:
 
@@ -64,7 +65,8 @@ source = pa.table(
         "value": pa.array([1.0, 2.0]),
     }
 )
-new_version = table.append(source)
+report = table.append(source)
+new_version = report.committed_version
 ```
 
 For streaming ingestion, pass a `RecordBatchReader`:
@@ -83,7 +85,7 @@ new_version = table.append(
     compression="zstd",
     max_rows_per_row_group=4_096,
     max_bytes_per_row_group=128 * 1024 * 1024,
-)
+).committed_version
 ```
 
 Append imports the source through Arrow C Stream and writes a table-owned Parquet segment. It does
@@ -97,6 +99,17 @@ Table failures use the library's existing [exception hierarchy](exceptions.md). 
 mid-stream source failures do not commit a new version.
 
 ::: timeseries_table_format.TimeSeriesTable
+    options:
+      members: true
+      show_source: false
+
+## AppendReport
+
+`TimeSeriesTable.append(...)` returns this immutable report after a successful commit. Its segment
+path is table-relative. The row count and file size match the committed segment metadata, while the
+row-group count comes from the completed Parquet footer.
+
+::: timeseries_table_format.AppendReport
     options:
       members: true
       show_source: false

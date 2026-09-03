@@ -35,7 +35,7 @@ def test_optimize_returns_read_only_report_and_updates_table(tmp_path):
     table = _create_entity_table(root)
     source = tmp_path / "mixed.parquet"
     _write_mixed_segment(source)
-    assert table.append(parquet_reader(source)) == 2
+    assert table.append(parquet_reader(source)).committed_version == 2
 
     report = table.optimize()
 

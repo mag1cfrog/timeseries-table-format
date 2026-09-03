@@ -73,7 +73,14 @@ async fn coverage_pipeline_survives_create_open_and_append() -> TestResult {
     let v4 = table
         .append(open_parquet_batches(tmp.path().join(rel3))?)
         .await?;
-    assert_eq!((v2, v3, v4), (2, 3, 4));
+    assert_eq!(
+        (
+            v2.committed_version,
+            v3.committed_version,
+            v4.committed_version
+        ),
+        (2, 3, 4)
+    );
     assert_eq!(table.state().version, 4);
 
     for seg in table.state().segments.values() {

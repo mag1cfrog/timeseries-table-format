@@ -696,7 +696,8 @@ async fn run_append_mode(args: &RunArgs) -> Result<BenchmarkReport, Box<dyn std:
                     AppendRequest::new(external_reader)
                         .max_rows_per_row_group(workload.row_group_rows),
                 )
-                .await?;
+                .await?
+                .committed_version;
             (
                 Some(normalization_ns),
                 elapsed_ns(append_started.elapsed())?,
@@ -711,7 +712,8 @@ async fn run_append_mode(args: &RunArgs) -> Result<BenchmarkReport, Box<dyn std:
                     AppendRequest::new(DeterministicBatchReader::new(workload)?)
                         .max_rows_per_row_group(workload.row_group_rows),
                 )
-                .await?;
+                .await?
+                .committed_version;
             (None, elapsed_ns(append_started.elapsed())?, None, version)
         }
     };

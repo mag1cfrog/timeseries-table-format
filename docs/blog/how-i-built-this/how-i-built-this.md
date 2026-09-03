@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory() as d:
         parquet_file.schema_arrow,
         parquet_file.iter_batches(),
     )
-    print("new version:", tbl.append(reader))
+    print("new version:", tbl.append(reader).committed_version)
 ```
 
 > What landed on disk (conceptually):

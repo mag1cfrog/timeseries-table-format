@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut table = TimeSeriesTable::create(location, meta).await?;
 
     // 3) Stream the CSV batches into a table-managed Parquet segment.
-    let version = table.append(reader).await?;
+    let version = table.append(reader).await?.committed_version;
 
     println!("Table root     : {}", table_root.display());
     println!("Committed ver. : {}", version);

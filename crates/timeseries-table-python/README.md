@@ -61,12 +61,13 @@ table = ttf.TimeSeriesTable.create(
     entity_columns=["symbol"],
 )
 parquet_file = pq.ParquetFile("prices.parquet")
-version = table.append(
+report = table.append(
     pa.RecordBatchReader.from_batches(
         parquet_file.schema_arrow,
         parquet_file.iter_batches(),
     )
 )
+version = report.committed_version
 
 session = ttf.Session()
 session.register_tstable("prices", "prices")

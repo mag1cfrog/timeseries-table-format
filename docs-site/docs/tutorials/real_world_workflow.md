@@ -50,8 +50,11 @@ def ingest_files(new_files: list[Path]) -> None:
             parquet_file.schema_arrow,
             parquet_file.iter_batches(),
         )
-        version = table.append(reader)
-        print(f"appended {segment.name} at table version {version}")
+        report = table.append(reader)
+        print(
+            f"appended {segment.name} as {report.segment_path} "
+            f"at table version {report.committed_version}"
+        )
 ```
 
 If a file conflicts with committed coverage, `append(...)` raises

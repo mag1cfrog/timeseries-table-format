@@ -8,7 +8,7 @@ mod operations;
 
 pub use operations::append;
 pub use operations::{
-    AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
+    AppendError, AppendReport, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
     OptimizeReport, ScanError, TableStateAccessError, VacuumArtifact, VacuumArtifactDisposition,
     VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
 };

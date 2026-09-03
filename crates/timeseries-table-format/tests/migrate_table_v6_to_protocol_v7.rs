@@ -182,7 +182,13 @@ async fn published_v6_fixture_migrates_and_operates_through_protocol_v7_core() -
 
     copy_tree(&destination, &disposable)?;
     let mut writable = TimeSeriesTable::open(TableLocation::local(&disposable)).await?;
-    assert_eq!(writable.append(batch(&[10_800_000_000], &[40])?).await?, 3);
+    assert_eq!(
+        writable
+            .append(batch(&[10_800_000_000], &[40])?)
+            .await?
+            .committed_version,
+        3
+    );
     let reopened = TimeSeriesTable::open(TableLocation::local(&disposable)).await?;
     assert_eq!(
         scan_rows(&reopened, hour(0)?, hour(4)?).await?,

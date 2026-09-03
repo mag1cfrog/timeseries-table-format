@@ -40,7 +40,7 @@ mod _native {
     };
 
     use timeseries_table_format::{
-        AppendRequest, ParquetCompression,
+        AppendReport as CoreAppendReport, AppendRequest, ParquetCompression,
         datafusion::TsTableProvider,
         table::{
             OptimizeReport as CoreOptimizeReport, VacuumArtifact as CoreVacuumArtifact,
@@ -1391,6 +1391,45 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
+    /// Result of one successfully committed append operation.
+    #[pyclass(frozen, get_all)]
+    struct AppendReport {
+        /// Table version used as the optimistic commit base.
+        starting_version: u64,
+        /// Version created by the successful append commit.
+        committed_version: u64,
+        /// Canonical table-relative path of the committed Parquet segment.
+        segment_path: String,
+        /// Logical rows recorded in the committed segment metadata.
+        row_count: u64,
+        /// Row groups recorded in the completed Parquet footer.
+        row_group_count: usize,
+        /// Completed Parquet segment size in bytes.
+        file_size_bytes: u64,
+        /// Canonical lowercase Parquet compression name.
+        compression: String,
+        /// Effective maximum rows per output row group.
+        max_rows_per_row_group: usize,
+        /// Effective maximum estimated encoded bytes per output row group.
+        max_bytes_per_row_group: usize,
+    }
+
+    impl From<CoreAppendReport> for AppendReport {
+        fn from(report: CoreAppendReport) -> Self {
+            Self {
+                starting_version: report.starting_version,
+                committed_version: report.committed_version,
+                segment_path: report.segment_path,
+                row_count: report.row_count,
+                row_group_count: report.row_group_count,
+                file_size_bytes: report.file_size_bytes,
+                compression: report.compression.as_str().to_string(),
+                max_rows_per_row_group: report.max_rows_per_row_group,
+                max_bytes_per_row_group: report.max_bytes_per_row_group,
+            }
+        }
+    }
+
     /// Result of one entity-layout optimization operation.
     #[pyclass(frozen, get_all)]
     struct OptimizeReport {
@@ -1936,7 +1975,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             Ok(d)
         }
 
-        /// Append Arrow data to the table and return the committed version.
+        /// Append Arrow data to the table and return its commit report.
         ///
         /// `source` must be a `pyarrow.RecordBatch`, `pyarrow.Table`,
         /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
@@ -1949,7 +1988,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             compression: Option<&str>,
             max_rows_per_row_group: Option<isize>,
             max_bytes_per_row_group: Option<isize>,
-        ) -> PyResult<u64> {
+        ) -> PyResult<AppendReport> {
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
             self.inner.ensure_append_supported().map_err(|error| {
@@ -1991,7 +2030,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             tokio_runner::run_blocking_map_err(
                 py,
                 rt.as_ref(),
-                async move { table.append(request).await },
+                async move { table.append(request).await.map(AppendReport::from) },
                 move |py, err| {
                     table_error_to_py_with_root(
                         py,
@@ -2761,6 +2800,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
 
         // Export classes
         m.add_class::<Session>()?;
+        m.add_class::<AppendReport>()?;
         m.add_class::<OptimizeReport>()?;
         m.add_class::<VacuumArtifact>()?;
         m.add_class::<VacuumReport>()?;

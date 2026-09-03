@@ -355,7 +355,7 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
                     first_parquet.schema_arrow,
                     first_parquet.iter_batches(),
                 )
-            ) == 2
+            ).committed_version == 2
 
             snapshots = list((table_root / "_coverage" / "table").glob("*.roar"))
             assert len(snapshots) == 1
@@ -372,7 +372,7 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
                     second_parquet.schema_arrow,
                     second_parquet.iter_batches(),
                 )
-            ) == 3
+            ).committed_version == 3
 
         warnings = [
             record
@@ -443,7 +443,7 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
                     parquet.schema_arrow,
                     parquet.iter_batches(),
                 )
-            ) == 2
+            ).committed_version == 2
             assert table.optimize().no_op is False
 
             session = ttf.Session()

@@ -393,6 +393,8 @@ fn ts_from_i64(
 #[derive(Debug, Clone)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SegmentMetaReport {
+    /// Completed Parquet file size in bytes.
+    pub(crate) file_size_bytes: u64,
     /// Number of row groups reported by Parquet metadata.
     pub(crate) row_groups: usize,
     /// Total row count from file metadata.
@@ -499,6 +501,7 @@ pub(crate) async fn segment_meta_from_parquet(
     };
 
     let report = SegmentMetaReport {
+        file_size_bytes: file_size,
         row_groups,
         row_count,
         used_stats,
@@ -917,6 +920,7 @@ mod tests {
         assert_eq!(meta.row_count, 3);
         let len = fs::metadata(&abs).await?.len();
         assert_eq!(meta.file_size, Some(len));
+        assert_eq!(report.file_size_bytes, len);
         assert_eq!(report.row_groups, 1);
         assert_eq!(report.row_count, 3);
         assert!(report.used_stats);

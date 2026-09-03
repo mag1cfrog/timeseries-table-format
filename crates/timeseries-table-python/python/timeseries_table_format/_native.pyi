@@ -40,6 +40,54 @@ class DuplicateIndexIntervalError(TimeseriesTableError):
 class SchemaMismatchError(TimeseriesTableError): ...
 class DataFusionError(TimeseriesTableError): ...
 
+class AppendReport:
+    """Result of one successfully committed append operation."""
+
+    @property
+    def starting_version(self) -> int:
+        """Table version used as the optimistic commit base."""
+        ...
+
+    @property
+    def committed_version(self) -> int:
+        """Version created by the successful append commit."""
+        ...
+
+    @property
+    def segment_path(self) -> str:
+        """Canonical table-relative path of the committed Parquet segment."""
+        ...
+
+    @property
+    def row_count(self) -> int:
+        """Logical rows recorded in the committed segment metadata."""
+        ...
+
+    @property
+    def row_group_count(self) -> int:
+        """Row groups recorded in the completed Parquet footer."""
+        ...
+
+    @property
+    def file_size_bytes(self) -> int:
+        """Completed Parquet segment size in bytes."""
+        ...
+
+    @property
+    def compression(self) -> Literal["uncompressed", "snappy", "zstd"]:
+        """Parquet compression used by this append."""
+        ...
+
+    @property
+    def max_rows_per_row_group(self) -> int:
+        """Effective maximum rows per output row group."""
+        ...
+
+    @property
+    def max_bytes_per_row_group(self) -> int:
+        """Effective maximum estimated encoded bytes per output row group."""
+        ...
+
 class OptimizeReport:
     """Result of one entity-layout optimization operation."""
 
@@ -310,8 +358,8 @@ class TimeSeriesTable:
         compression: Literal["uncompressed", "snappy", "zstd"] | None = None,
         max_rows_per_row_group: int | None = None,
         max_bytes_per_row_group: int | None = None,
-    ) -> int:
-        """Append Arrow data and return the committed table version.
+    ) -> AppendReport:
+        """Append Arrow data and return its commit report.
 
         Parameters
         ----------
@@ -328,8 +376,8 @@ class TimeSeriesTable:
 
         Returns
         -------
-        int
-            The newly committed table version.
+        AppendReport
+            Metadata for the segment and table version committed by this call.
 
         Notes
         -----
