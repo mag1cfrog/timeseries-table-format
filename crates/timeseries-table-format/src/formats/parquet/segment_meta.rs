@@ -1073,6 +1073,56 @@ mod tests {
     }
 
     #[test]
+    fn row_group_statistics_reject_compressed_size_overflow() -> TestResult {
+        let fields = ["left", "right"]
+            .map(|name| {
+                Type::primitive_type_builder(name, PhysicalType::INT64)
+                    .with_repetition(Repetition::REQUIRED)
+                    .build()
+                    .map(Arc::new)
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = Arc::new(SchemaDescriptor::new(Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()?,
+        )));
+        let columns = [i64::MAX, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(column_index, compressed_bytes)| {
+                ColumnChunkMetaData::builder(schema.column(column_index))
+                    .set_num_values(1)
+                    .set_total_compressed_size(compressed_bytes)
+                    .set_total_uncompressed_size(1)
+                    .build()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let row_group = RowGroupMetaData::builder(Arc::clone(&schema))
+            .set_num_rows(1)
+            .set_total_byte_size(2)
+            .set_column_metadata(columns)
+            .build()?;
+        let metadata = ParquetMetaData::new(
+            FileMetaData::new(1, 1, None, None, schema, None),
+            vec![row_group],
+        );
+
+        let error = row_group_statistics_from_footer("data/overflow.parquet", &metadata)
+            .expect_err("overflowing compressed size must fail");
+        assert!(matches!(
+            error,
+            SegmentMetaError::InvalidRowGroupMetadata {
+                path,
+                row_group_index: 0,
+                detail,
+            } if path == "data/overflow.parquet" && detail == "compressed byte size overflow"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn ts_from_i64_out_of_range_is_error() {
         let err = ts_from_i64("path", "ts", TimestampUnit::Millis, i64::MAX).unwrap_err();
         assert!(matches!(err, SegmentMetaError::ParquetStatsShape { .. }));

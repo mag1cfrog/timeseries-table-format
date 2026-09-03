@@ -1180,9 +1180,9 @@ mod tests {
         "row_group_uncompressed_bytes_max",
     ];
 
-    fn assert_no_row_group_statistics(event: &CapturedEvent) {
+    fn assert_no_row_group_statistics(fields: &BTreeMap<&'static str, String>) {
         for field in ROW_GROUP_STATISTIC_FIELDS {
-            assert!(!event.fields.contains_key(field), "unexpected {field}");
+            assert!(!fields.contains_key(field), "unexpected {field}");
         }
     }
 
@@ -2428,7 +2428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_append_reports_ordered_phase_durations() -> TestResult {
+    async fn successful_append_reports_phases_and_footer_statistics() -> TestResult {
         let temp = TempDir::new()?;
         let mut table =
             TimeSeriesTable::create(TableLocation::local(temp.path()), binary_heavy_table_meta())
@@ -2535,6 +2535,7 @@ mod tests {
             ]
         );
         for event in phase_events {
+            assert_no_row_group_statistics(&event.fields);
             assert_eq!(event.target, "timeseries_table_format::table::append");
             assert_eq!(
                 event.fields.get("outcome").map(String::as_str),
@@ -2550,6 +2551,7 @@ mod tests {
         assert_eq!(completion_events.len(), 1);
         let completion = completion_events[0];
         let span = captured_span(&capture, "table.append");
+        assert_no_row_group_statistics(&span.fields);
         for (field, expected) in [
             ("expected_version", expected_version.to_string()),
             ("committed_version", committed_version.to_string()),
@@ -2655,6 +2657,9 @@ mod tests {
         ));
 
         let events = capture.events();
+        for event in &events {
+            assert_no_row_group_statistics(&event.fields);
+        }
         let failures = events
             .iter()
             .filter(|event| {
@@ -2684,7 +2689,6 @@ mod tests {
             Some(&"1".to_string())
         );
         assert_eq!(failure.fields.get("rows_consumed"), Some(&"1".to_string()));
-        assert_no_row_group_statistics(failure);
         failure.fields["duration_ms"].parse::<u64>()?;
         failure.fields["cleanup_duration_ms"].parse::<u64>()?;
         failure.fields["total_duration_ms"].parse::<u64>()?;
@@ -3396,6 +3400,7 @@ mod tests {
             .into_iter()
             .find(|span| span.name == "table.append")
             .expect("table.append span");
+        assert_no_row_group_statistics(&append_span.fields);
         assert_eq!(append_span.fields.get("segment_path"), Some(&segment_path));
         assert_eq!(
             append_span.fields.get("outcome").map(String::as_str),
@@ -3408,8 +3413,11 @@ mod tests {
                 .map(String::as_str),
             Some("not_attempted")
         );
-        let failures = capture
-            .events()
+        let events = capture.events();
+        for event in &events {
+            assert_no_row_group_statistics(&event.fields);
+        }
+        let failures = events
             .into_iter()
             .filter(|event| {
                 event.name == "table.append"
@@ -3436,8 +3444,6 @@ mod tests {
             Some("not_attempted")
         );
         assert_eq!(failures[0].fields.get("retained_path"), Some(&segment_path));
-        assert_no_row_group_statistics(&failures[0]);
-
         let reopened = TimeSeriesTable::open(location).await?;
         assert_eq!(reopened.state().version, 1);
         assert!(reopened.state().segments.is_empty());
