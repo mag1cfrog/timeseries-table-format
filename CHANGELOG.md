@@ -4,6 +4,21 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.7.0
+
+
+### Bug Fixes
+
+- Preserve segment metadata error discriminants ([#423](https://github.com/mag1cfrog/timeseries-table-format/pull/423)) ([1418593](https://github.com/mag1cfrog/timeseries-table-format/commit/141859317d3d586a6ebdc58a116c93f596318d05))
+
+
+### Features
+
+- Return structured reports from append ([#419](https://github.com/mag1cfrog/timeseries-table-format/pull/419)) ([032f609](https://github.com/mag1cfrog/timeseries-table-format/commit/032f609589e2ac85e4214417515fee3bd7dd45c5)) - **Breaking:** return structured reports from append ([#419](https://github.com/mag1cfrog/timeseries-table-format/pull/419))
+
+- Expose physical row group statistics in append diagnostics ([#421](https://github.com/mag1cfrog/timeseries-table-format/pull/421)) ([f84cfd7](https://github.com/mag1cfrog/timeseries-table-format/commit/f84cfd726e8853ef8ccf62516d7da551265589a6))
+
+
 ## 0.6.1
 
 
