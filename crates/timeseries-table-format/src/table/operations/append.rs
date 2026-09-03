@@ -723,7 +723,7 @@ impl TimeSeriesTable {
             SegmentEntityLayout::Mixed => "mixed",
         };
         span.record("entity_layout", entity_layout_name);
-        span.record("row_group_count", meta_report.row_groups);
+        span.record("row_group_count", meta_report.row_group_count);
         telemetry.complete_phase();
 
         // 6) Give this append private sidecar paths, then write them before commit.
@@ -887,7 +887,7 @@ impl TimeSeriesTable {
             committed_version = new_version,
             row_count,
             batches_consumed = telemetry.batches_consumed,
-            row_group_count = meta_report.row_groups,
+            row_group_count = meta_report.row_group_count,
             file_size_bytes,
             entity_layout = entity_layout_name,
             compression = writer_settings.compression.as_str(),
@@ -902,7 +902,7 @@ impl TimeSeriesTable {
             committed_version: new_version,
             segment_path: relative_path.to_string(),
             row_count,
-            row_group_count: meta_report.row_groups,
+            row_group_count: meta_report.row_group_count,
             file_size_bytes,
             compression: writer_settings.compression,
             max_rows_per_row_group: writer_settings.max_rows_per_row_group,
