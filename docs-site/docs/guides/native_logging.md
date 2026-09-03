@@ -60,6 +60,23 @@ ttf.refresh_logging_cache()
 The next native record uses the current Python levels. Changing handlers or
 formatters does not require a cache refresh.
 
+## Append row-group diagnostics
+
+A successful append emits one `table.append` completion record with these
+physical row-group summaries from the completed Parquet footer:
+
+| Fields | Meaning |
+|---|---|
+| `row_group_rows_min`, `row_group_rows_median`, `row_group_rows_max` | Rows per row group |
+| `row_group_compressed_bytes_min`, `row_group_compressed_bytes_median`, `row_group_compressed_bytes_max` | Compressed column-chunk bytes per row group |
+| `row_group_uncompressed_bytes_min`, `row_group_uncompressed_bytes_median`, `row_group_uncompressed_bytes_max` | Uncompressed column-chunk bytes per row group |
+
+Compare the observed row counts with `max_rows_per_row_group`. Compare the
+byte summaries with `max_bytes_per_row_group`, keeping in mind that this
+setting limits estimated encoded bytes while writing. It is not a strict
+compressed-size, uncompressed-size, or process-memory limit. Compression and
+the data itself can make the footer values differ from the configured target.
+
 ## Diagnostics and operation errors
 
 Operation exceptions remain the authoritative failure channel. A returned
