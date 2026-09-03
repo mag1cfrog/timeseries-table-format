@@ -43,13 +43,16 @@ def run(*, table_root: Path, rows: int) -> pa.Table:
     seg_path.parent.mkdir(parents=True, exist_ok=True)
     _write_tiny_prices_parquet(seg_path)
     parquet_file = pq.ParquetFile(seg_path)
-    new_version = tbl.append(
+    report = tbl.append(
         pa.RecordBatchReader.from_batches(
             parquet_file.schema_arrow,
             parquet_file.iter_batches(),
         )
     )
-    print(f"Appended segment, table version is now {new_version}")
+    print(
+        f"Appended {report.segment_path}, table version is now "
+        f"{report.committed_version}"
+    )
 
     sess = ttf.Session()
     sess.register_tstable("prices", str(table_root))

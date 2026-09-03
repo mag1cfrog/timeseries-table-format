@@ -932,7 +932,9 @@ impl TimeSeriesTable {
     /// New segments use Zstandard compression and row groups bounded by
     /// 1,048,576 rows and 128 MiB estimated encoded bytes. Wrap the source in
     /// [`AppendRequest`] to override those physical settings for only this
-    /// append.
+    /// append. The returned [`AppendReport`] describes the committed segment
+    /// and effective settings. Call `.committed_version` on the report when
+    /// only the new table version is needed.
     #[tracing::instrument(
         name = "table.append",
         target = "timeseries_table_format::table::append",

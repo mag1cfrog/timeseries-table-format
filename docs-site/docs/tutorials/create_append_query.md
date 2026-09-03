@@ -38,6 +38,9 @@ hourly intervals; a segment does not need to contain only one identity. The
 Parquet `ts` column must be an Arrow timestamp because that is the index type
 stored in the table metadata.
 
+Append returns an `AppendReport` containing the committed version, generated
+segment path, row and row-group counts, file size, and effective writer settings.
+
 If another file uses an existing interval for NVDA, the append raises
 `IndexIntervalOverlapError`. AAPL may independently use that same interval.
 Two NVDA rows in the same incoming interval raise `DuplicateIndexIntervalError`.
