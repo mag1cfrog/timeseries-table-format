@@ -17,6 +17,7 @@ use snafu::{Backtrace, Snafu};
 use uuid::Uuid;
 
 use crate::{
+    batch_schema::{BatchSchemaAlignment, MissingColumnPolicy},
     coverage::{
         EntityCoverage, EntityIdentity,
         io::{
@@ -201,8 +202,8 @@ pub enum EntityRewriteError {
         backtrace: Backtrace,
     },
 
-    /// Filtering a complete record batch failed.
-    #[snafu(display("Arrow row filtering failed for {path}: {source}"))]
+    /// Filtering or aligning a complete record batch failed.
+    #[snafu(display("Arrow batch processing failed for {path}: {source}"))]
     Arrow {
         /// Table-relative source path.
         path: String,
@@ -281,6 +282,7 @@ async fn stage_identity_data(
     identity: &EntityIdentity,
     output_path: &str,
     created_paths: &mut Vec<String>,
+    alignment: Option<&BatchSchemaAlignment>,
 ) -> Result<(u64, u64), EntityRewriteError> {
     let source_rel = Path::new(source_path);
     let mut metadata_file = open_parquet_reader(location.as_ref(), source_rel)
@@ -294,7 +296,10 @@ async fn stage_identity_data(
                 source,
                 backtrace: Backtrace::capture(),
             })?;
-    let schema = metadata.schema().clone();
+    let schema = alignment.map_or_else(
+        || metadata.schema().clone(),
+        |alignment| alignment.output_schema().clone(),
+    );
     drop(metadata_file);
 
     let source_file = open_parquet_reader(location.as_ref(), source_rel)
@@ -355,6 +360,17 @@ async fn stage_identity_data(
         if filtered.num_rows() == 0 {
             continue;
         }
+        let filtered =
+            match alignment {
+                Some(alignment) => alignment.align_batch(&filtered).map_err(|source| {
+                    EntityRewriteError::Arrow {
+                        path: source_path.to_string(),
+                        source,
+                        backtrace: Backtrace::capture(),
+                    }
+                })?,
+                None => filtered,
+            };
         rows_written = rows_written
             .checked_add(filtered.num_rows() as u64)
             .ok_or_else(|| invalid_output("rows-written counter overflow"))?;
@@ -381,12 +397,14 @@ async fn stage_identity_data(
     Ok((rows_read, rows_written))
 }
 
-async fn validate_source(
+/// Validate committed metadata and coverage, and prepare historical batch alignment.
+async fn prepare_rewrite_source(
     location: &TableLocation,
     table_schema: &LogicalSchema,
     index: &IndexSpec,
     source: &SegmentMeta,
-) -> Result<EntityCoverage, EntityRewriteError> {
+    policy: MissingColumnPolicy,
+) -> Result<(EntityCoverage, Option<BatchSchemaAlignment>), EntityRewriteError> {
     index
         .validate()
         .map_err(|source| EntityRewriteError::IndexSpecValidation {
@@ -422,15 +440,40 @@ async fn validate_source(
         .ok_or_else(|| invalid_input("source has no committed entity-coverage sidecar"))?;
     validate_rewrite_path(coverage_path, "source coverage")?;
 
-    let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
-        .await
-        .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
-    ensure_schema_fields_match_by_name(table_schema, &source_schema, index).map_err(|error| {
-        EntityRewriteError::SegmentSchemaValidation {
-            path: source.path.clone(),
-            source: Box::new(error),
-        }
-    })?;
+    let alignment = if policy == MissingColumnPolicy::FillNullableWithNull {
+        let reader = open_parquet_reader(location.as_ref(), Path::new(&source.path))
+            .await
+            .map_err(|source| EntityRewriteError::Storage { source })?;
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .map_err(|error| EntityRewriteError::Parquet {
+                path: source.path.clone(),
+                source: error,
+                backtrace: Backtrace::capture(),
+            })?;
+        Some(
+            BatchSchemaAlignment::for_historical_segment(
+                builder.schema().clone(),
+                table_schema,
+                index,
+            )
+            .map_err(|error| EntityRewriteError::SegmentSchemaValidation {
+                path: source.path.clone(),
+                source: Box::new(error),
+            })?,
+        )
+    } else {
+        let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
+            .await
+            .map_err(|source| EntityRewriteError::SegmentInspection { source })?;
+        ensure_schema_fields_match_by_name(table_schema, &source_schema, index).map_err(
+            |error| EntityRewriteError::SegmentSchemaValidation {
+                path: source.path.clone(),
+                source: Box::new(error),
+            },
+        )?;
+        None
+    };
 
     let (actual_meta, _) = segment_meta_from_parquet(location, Path::new(&source.path), index)
         .await
@@ -480,7 +523,7 @@ async fn validate_source(
             "committed source coverage does not match the source Parquet rows",
         ));
     }
-    Ok(committed_coverage)
+    Ok((committed_coverage, alignment))
 }
 
 async fn rewrite_inner(
@@ -490,8 +533,10 @@ async fn rewrite_inner(
     source: &SegmentMeta,
     attempt_id: Uuid,
     created_paths: &mut Vec<String>,
+    policy: MissingColumnPolicy,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
-    let source_coverage = validate_source(location, table_schema, index, source).await?;
+    let (source_coverage, alignment) =
+        prepare_rewrite_source(location, table_schema, index, source, policy).await?;
     let mut replacements = Vec::with_capacity(source_coverage.identity_count());
     let mut materialized_identities = Vec::with_capacity(source_coverage.identity_count());
     let mut output_coverage = EntityCoverage::empty();
@@ -509,6 +554,7 @@ async fn rewrite_inner(
             identity,
             &data_path,
             created_paths,
+            alignment.as_ref(),
         )
         .await?;
         rows_read = rows_read
@@ -636,6 +682,7 @@ async fn rewrite_with_attempt_id(
     index: &IndexSpec,
     source: &SegmentMeta,
     attempt_id: Uuid,
+    policy: MissingColumnPolicy,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
     let mut created_paths = Vec::new();
     match rewrite_inner(
@@ -645,6 +692,7 @@ async fn rewrite_with_attempt_id(
         source,
         attempt_id,
         &mut created_paths,
+        policy,
     )
     .await
     {
@@ -669,18 +717,30 @@ async fn rewrite_with_attempt_id(
 /// This implementation intentionally opens one output writer at a time. Each
 /// source scan streams complete record batches, so memory and open handles are
 /// bounded independently of identity cardinality.
+/// With the reserved nullable-column policy, historical inputs are aligned by
+/// name without casts and every replacement has the current canonical schema.
+/// The caller must pass its table's policy after protocol compatibility checks.
 ///
 /// # Errors
 ///
 /// Returns [`EntityRewriteError`] when input validation, reading, writing,
 /// output verification, sidecar creation, or pre-return cleanup fails.
-pub async fn rewrite_mixed_parquet_segment(
+pub(crate) async fn rewrite_mixed_parquet_segment(
     location: &TableLocation,
     table_schema: &LogicalSchema,
     index: &IndexSpec,
     source: &SegmentMeta,
+    policy: MissingColumnPolicy,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
-    rewrite_with_attempt_id(location, table_schema, index, source, Uuid::new_v4()).await
+    rewrite_with_attempt_id(
+        location,
+        table_schema,
+        index,
+        source,
+        Uuid::new_v4(),
+        policy,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -856,6 +916,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evolved_rewrite_materializes_canonical_schema_and_preserves_rows_and_coverage()
+    -> TestResult {
+        let fixture = rewrite_fixture().await?;
+        let original_bytes = std::fs::read(fixture.temp.path().join(&fixture.source.path))?;
+        let original = read_batch(&fixture.temp.path().join(&fixture.source.path))?;
+        let mut fields = fixture
+            .table_schema
+            .to_arrow_schema_ref()?
+            .fields()
+            .to_vec();
+        fields.swap(0, 2);
+        fields.insert(1, Arc::new(Field::new("score", DataType::Float64, true)));
+        fields.push(Arc::new(Field::new(
+            "details",
+            DataType::Struct(vec![Field::new("label", DataType::Utf8, false)].into()),
+            true,
+        )));
+        let canonical = LogicalSchema::try_from_arrow_schema(&Schema::new(fields))?;
+
+        // The public table gate still rejects this feature. Exercise only the
+        // internal staging path against a historical committed source.
+        let rewrite = rewrite_mixed_parquet_segment(
+            &fixture.location,
+            &canonical,
+            &fixture.index,
+            &fixture.source,
+            MissingColumnPolicy::FillNullableWithNull,
+        )
+        .await?;
+        let mut coverage = EntityCoverage::empty();
+        let mut rows = Vec::new();
+        for replacement in &rewrite.replacements {
+            let batch = read_batch(&fixture.temp.path().join(&replacement.meta.path))?;
+            assert_eq!(batch.schema(), canonical.to_arrow_schema_ref()?);
+            assert_eq!(
+                batch.column_by_name("score").unwrap().null_count(),
+                batch.num_rows()
+            );
+            assert_eq!(
+                batch.column_by_name("details").unwrap().null_count(),
+                batch.num_rows()
+            );
+            assert_eq!(
+                replacement.meta.entity_layout,
+                SegmentEntityLayout::Single(replacement.identity.clone())
+            );
+            coverage.union_inplace(&replacement.coverage);
+            let ts = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let symbol = batch
+                .column_by_name("symbol")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let price = batch
+                .column_by_name("price")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    ts.value(row),
+                    symbol.value(row).to_owned(),
+                    price.value(row),
+                ));
+            }
+        }
+        rows.sort_by_key(|row| row.0);
+        let mut expected = read_rows(&fixture.temp.path().join(&fixture.source.path))?;
+        expected.sort_by_key(|row| row.0);
+        assert_eq!(rows, expected);
+        assert_eq!(coverage, fixture.source_coverage);
+        assert_eq!(rewrite.rows_written, original.num_rows() as u64);
+        assert_eq!(
+            std::fs::read(fixture.temp.path().join(&fixture.source.path))?,
+            original_bytes
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evolved_rewrite_validates_historical_fields_before_staging() -> TestResult {
+        for field in [
+            Field::new("required", DataType::Boolean, false),
+            Field::new("price", DataType::Float32, false),
+            Field::new("price", DataType::Float64, true),
+        ] {
+            let fixture = rewrite_fixture().await?;
+            let mut fields = fixture
+                .table_schema
+                .to_arrow_schema_ref()?
+                .fields()
+                .to_vec();
+            if field.name() == "price" {
+                fields.pop();
+            }
+            fields.push(Arc::new(field));
+            let canonical = LogicalSchema::try_from_arrow_schema(&Schema::new(fields))?;
+            assert!(matches!(
+                rewrite_mixed_parquet_segment(
+                    &fixture.location,
+                    &canonical,
+                    &fixture.index,
+                    &fixture.source,
+                    MissingColumnPolicy::FillNullableWithNull
+                )
+                .await,
+                Err(EntityRewriteError::SegmentSchemaValidation { .. })
+            ));
+            assert_nothing_staged(&fixture);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn mixed_rewrite_stages_exactly_two_verified_outputs() -> TestResult {
         let fixture = rewrite_fixture().await?;
 
@@ -864,6 +1045,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await?;
 
@@ -941,8 +1123,14 @@ mod tests {
         let source_bytes = std::fs::read(temp.path().join(source_path))?;
         let source_coverage_bytes = std::fs::read(temp.path().join(source_coverage_path))?;
 
-        let rewrite =
-            rewrite_mixed_parquet_segment(&location, table_schema, index, &source).await?;
+        let rewrite = rewrite_mixed_parquet_segment(
+            &location,
+            table_schema,
+            index,
+            &source,
+            MissingColumnPolicy::Reject,
+        )
+        .await?;
 
         assert_eq!(rewrite.source_path, source_path);
         assert_eq!(rewrite.replacements.len(), 3);
@@ -1120,8 +1308,14 @@ mod tests {
         source.entity_layout = SegmentEntityLayout::Mixed;
         source.coverage_path = Some(source_coverage_path.to_string());
 
-        let rewrite =
-            rewrite_mixed_parquet_segment(&location, &table_schema, &index, &source).await?;
+        let rewrite = rewrite_mixed_parquet_segment(
+            &location,
+            &table_schema,
+            &index,
+            &source,
+            MissingColumnPolicy::Reject,
+        )
+        .await?;
 
         assert_eq!(rewrite.replacements.len(), 4);
         assert_eq!(rewrite.rows_read, source.row_count * 4);
@@ -1154,6 +1348,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("data collision must fail");
@@ -1189,6 +1384,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("sidecar collision must fail");
@@ -1232,6 +1428,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("rewrite and cleanup must fail");
@@ -1256,7 +1453,7 @@ mod tests {
             assert!(
                 cleanup_errors
                     .iter()
-                    .any(|error| error.to_string().contains(path)),
+                    .any(|error| error.to_string().replace('\\', "/").contains(path)),
                 "cleanup failure omitted {path}"
             );
             assert!(fixture.temp.path().join(path).exists());
@@ -1282,6 +1479,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("sidecar write and its first cleanup must fail");
@@ -1316,6 +1514,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("second output finish must fail");
@@ -1356,6 +1555,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("missing source must fail");
@@ -1397,6 +1597,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("single-entity source must be rejected");
@@ -1409,6 +1610,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("missing coverage pointer must be rejected");
@@ -1427,6 +1629,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &stale_source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("stale row count must be rejected");
@@ -1440,6 +1643,7 @@ mod tests {
             &wrong_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("schema mismatch must be rejected");
@@ -1466,6 +1670,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("missing coverage object must fail");
@@ -1484,6 +1689,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("corrupt coverage object must fail");
@@ -1512,6 +1718,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("stale coverage object must fail");
@@ -1537,6 +1744,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("identity without a covered index interval must fail");

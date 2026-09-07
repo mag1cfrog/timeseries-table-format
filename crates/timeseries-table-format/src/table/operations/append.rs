@@ -57,7 +57,7 @@ use self::error::{
     ArrowInputSnafu, ArrowToLogicalSchemaSnafu, GeneratedSegmentSchemaCompatibilitySnafu,
     ParquetWriteSnafu,
 };
-use super::append_schema::AppendSchemaNormalizer;
+use crate::batch_schema::{BatchSchemaAlignment, MissingColumnPolicy};
 
 fn classify_entity_layout(
     segment_path: &str,
@@ -503,20 +503,6 @@ impl IntoRecordBatchReader<Vec<ArrowRecordBatch>> for Vec<ArrowRecordBatch> {
     }
 }
 
-fn ensure_batch_matches_reader_schema(
-    reader_schema: &SchemaRef,
-    batch: &ArrowRecordBatch,
-) -> Result<(), AppendError> {
-    if batch.schema() == *reader_schema {
-        Ok(())
-    } else {
-        Err(ArrowError::SchemaError(
-            "record batch schema does not match its reader schema".to_string(),
-        ))
-        .context(ArrowInputSnafu)
-    }
-}
-
 impl TimeSeriesTable {
     async fn rollback_created_artifacts(
         &self,
@@ -548,10 +534,10 @@ impl TimeSeriesTable {
         }
     }
 
-    fn build_append_schema_normalizer(
+    fn build_append_schema_alignment(
         &self,
         incoming_schema: SchemaRef,
-    ) -> Result<AppendSchemaNormalizer, AppendError> {
+    ) -> Result<BatchSchemaAlignment, AppendError> {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         match self.state.table_meta.logical_schema.as_ref() {
@@ -561,7 +547,7 @@ impl TimeSeriesTable {
                         .context(ArrowToLogicalSchemaSnafu)?;
                 ensure_index_spec_matches_schema(&incoming_logical_schema, &self.index)
                     .map_err(AppendError::from)?;
-                Ok(AppendSchemaNormalizer::without_conversion(incoming_schema))
+                Ok(BatchSchemaAlignment::for_schema_adoption(incoming_schema))
             }
             None => Err(AppendError::MissingCanonicalTableSchema {
                 version: self.state.version,
@@ -569,12 +555,14 @@ impl TimeSeriesTable {
             Some(table_schema) => {
                 ensure_index_spec_matches_schema(table_schema, &self.index)
                     .map_err(AppendError::from)?;
-                let normalizer = AppendSchemaNormalizer::for_registered_schema(
-                    incoming_schema.as_ref(),
+                let alignment = BatchSchemaAlignment::for_append(
+                    incoming_schema,
                     table_schema,
+                    &self.index,
+                    MissingColumnPolicy::from_table_requirements(&self.state.table_meta),
                 )
                 .map_err(AppendError::from)?;
-                Ok(normalizer)
+                Ok(alignment)
             }
         }
     }
@@ -1006,10 +994,8 @@ impl TimeSeriesTable {
             let next_version =
                 checked_next_version(self.state.version).map_err(AppendError::from)?;
             let mut reader = source.into_record_batch_reader()?;
-            let incoming_schema = reader.schema();
-            let schema_normalizer =
-                self.build_append_schema_normalizer(Arc::clone(&incoming_schema))?;
-            let output_schema = Arc::clone(schema_normalizer.output_schema());
+            let schema_alignment = self.build_append_schema_alignment(reader.schema())?;
+            let output_schema = Arc::clone(schema_alignment.output_schema());
             telemetry.complete_phase();
 
             telemetry.start_phase("source_consumption_and_parquet_write");
@@ -1018,11 +1004,11 @@ impl TimeSeriesTable {
                     return Err(AppendError::EmptyInput);
                 };
                 telemetry.record_batch(&batch);
-                ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
+                let batch = schema_alignment
+                    .align_batch(&batch)
+                    .context(ArrowInputSnafu)?;
                 if batch.num_rows() != 0 {
-                    break schema_normalizer
-                        .normalize_batch(&batch)
-                        .context(ArrowInputSnafu)?;
+                    break batch;
                 }
                 tokio::task::yield_now().await;
             };
@@ -1054,11 +1040,10 @@ impl TimeSeriesTable {
                 for batch in reader {
                     let batch = batch.context(ArrowInputSnafu)?;
                     telemetry.record_batch(&batch);
-                    ensure_batch_matches_reader_schema(&incoming_schema, &batch)?;
+                    let batch = schema_alignment
+                        .align_batch(&batch)
+                        .context(ArrowInputSnafu)?;
                     if batch.num_rows() != 0 {
-                        let batch = schema_normalizer
-                            .normalize_batch(&batch)
-                            .context(ArrowInputSnafu)?;
                         writer.write(&batch).context(ParquetWriteSnafu)?;
                     }
                     drop(batch);
@@ -1184,6 +1169,70 @@ mod tests {
         for field in ROW_GROUP_STATISTIC_FIELDS {
             assert!(!fields.contains_key(field), "unexpected {field}");
         }
+    }
+
+    #[tokio::test]
+    async fn nullable_omission_is_strict_by_default_and_internal_alignment_writes_full_schema()
+    -> TestResult {
+        let temp = TempDir::new()?;
+        let mut meta = make_basic_table_meta();
+        let mut fields = meta.logical_schema.as_ref().unwrap().columns().to_vec();
+        fields.push(LogicalField {
+            name: "label".into(),
+            data_type: LogicalDataType::Bool,
+            nullable: true,
+        });
+        meta.logical_schema = Some(LogicalSchema::new(fields)?);
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+        let incoming = time_series_batch(vec![0, 60_000], vec!["A", "B"], vec![1.0, 2.0])?;
+        let (reader, observations) =
+            InstrumentedReader::new(incoming.schema(), vec![Ok(incoming.clone())]);
+        assert!(matches!(
+            table.append(reader).await,
+            Err(TableError::Append {
+                source: AppendError::SchemaValidation { .. }
+            })
+        ));
+        assert_eq!(observations.next_calls.get(), 0);
+        assert!(data_files(temp.path())?.is_empty());
+
+        // Exercise the prepared batch path without admitting the feature or
+        // weakening the public append gate.
+        table
+            .state_mut()
+            .table_meta
+            .required_reader_features
+            .insert("schema_add_columns".into());
+        table
+            .state_mut()
+            .table_meta
+            .required_writer_features
+            .insert("schema_add_columns".into());
+        let alignment = table.build_append_schema_alignment(incoming.schema())?;
+        let normalized = alignment.align_batch(&incoming)?;
+        assert_eq!(normalized.column(3).null_count(), 2);
+        let mut writer = ArrowWriter::try_new(Vec::new(), alignment.output_schema().clone(), None)?;
+        writer.write(&normalized)?;
+        let bytes = bytes::Bytes::from(writer.into_inner()?);
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
+        let persisted = reader.next().transpose()?.unwrap();
+        assert_eq!(persisted, normalized);
+        for column in 0..3 {
+            assert_eq!(persisted.column(column), incoming.column(column));
+        }
+
+        let (reader, observations) = InstrumentedReader::new(incoming.schema(), vec![Ok(incoming)]);
+        assert!(matches!(
+            table.append(reader).await,
+            Err(TableError::Append {
+                source: AppendError::Protocol { .. }
+            })
+        ));
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        Ok(())
     }
 
     #[derive(Clone, Copy)]

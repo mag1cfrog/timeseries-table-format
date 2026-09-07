@@ -214,7 +214,6 @@ pub fn page_output(text: &str) -> CliResult<()> {
 mod tests {
     use super::{default_table_name, render_table};
     use std::path::Path;
-    use std::time::Duration;
 
     #[test]
     fn render_table_aligns_columns() {
@@ -261,6 +260,7 @@ mod tests {
     fn page_output_closes_stdin_to_pager() {
         use std::sync::mpsc;
         use std::thread;
+        use std::time::Duration;
 
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {

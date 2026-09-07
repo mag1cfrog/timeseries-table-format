@@ -140,6 +140,49 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    async fn reserved_schema_add_columns_feature_still_rejects_open_and_refresh() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let before = table.state().clone();
+        let mut meta = before.table_meta.clone();
+        meta.required_reader_features
+            .insert("schema_add_columns".into());
+        meta.required_writer_features
+            .insert("schema_add_columns".into());
+        assert!(matches!(
+            meta.ensure_write_compatible(),
+            Err(TableProtocolError::UnsupportedReaderFeatures { .. })
+        ));
+        TransactionLogStore::new(location.clone())
+            .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(meta)])
+            .await?;
+        assert!(
+            matches!(TimeSeriesTable::open(location).await, Err(TableError::Open {
+            source: crate::table::OpenTableError::Commit { source: CommitError::Protocol {
+                source: TableProtocolError::UnsupportedReaderFeatures { features }, ..
+            } }
+        }) if features == ["schema_add_columns"])
+        );
+        assert!(
+            matches!(table.refresh().await, Err(TableError::StateAccess {
+            source: TableStateAccessError::Commit { source: CommitError::Protocol {
+                source: TableProtocolError::UnsupportedReaderFeatures { features }, ..
+            } }
+        }) if features == ["schema_add_columns"])
+        );
+        assert_eq!(table.state(), &before);
+        let mut writer_only = before.table_meta;
+        writer_only
+            .required_writer_features
+            .insert("schema_add_columns".into());
+        assert!(
+            matches!(writer_only.ensure_write_compatible(), Err(TableProtocolError::UnsupportedWriterFeatures { features }) if features == ["schema_add_columns"])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn refresh_reports_no_change_and_applies_a_new_index() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
