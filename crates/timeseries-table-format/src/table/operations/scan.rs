@@ -34,7 +34,7 @@ use parquet::{
 };
 use snafu::{Backtrace, IntoError, prelude::*};
 
-use crate::batch_schema::{BatchSchemaNormalizer, SchemaPolicy};
+use crate::batch_schema::{BatchSchemaAlignment, MissingColumnPolicy};
 use crate::metadata::{
     index::{IndexSpec, IndexValue, IndexValueError, validate_index_range},
     logical_schema::LogicalSchema,
@@ -288,10 +288,10 @@ fn timestamp_bounds_for_field(
 async fn build_segment_scan_stream<S, E>(
     reader: impl AsyncFileReader + Unpin + 'static,
     path: String,
-    index_column: &str,
+    index: &IndexSpec,
     start: S,
     end: E,
-    canonical: Option<&(LogicalSchema, IndexSpec)>,
+    canonical_schema: Option<&LogicalSchema>,
 ) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
@@ -300,6 +300,7 @@ where
     let start = start.into();
     let end = end.into();
     let expected = start.kind_name();
+    let index_column = index.column.as_str();
 
     let builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
@@ -311,9 +312,9 @@ where
     // Locate the index column and compute native bounds before moving the
     // builder into the directly-polled record-batch stream.
     let schema = builder.schema();
-    let normalizer = canonical
-        .map(|(table_schema, index)| {
-            BatchSchemaNormalizer::for_segment(schema, table_schema, index)
+    let alignment = canonical_schema
+        .map(|table_schema| {
+            BatchSchemaAlignment::for_historical_segment(Arc::clone(schema), table_schema, index)
                 .map(Arc::new)
                 .map_err(|source| ScanError::Schema {
                     path: Some(path.clone()),
@@ -366,7 +367,7 @@ where
             let path = path.clone();
             let index_column = index_column.clone();
             let index_field = index_field.clone();
-            let normalizer = normalizer.clone();
+            let alignment = alignment.clone();
 
             async move {
                 let batch = batch_res.context(ParquetSnafu {
@@ -430,8 +431,8 @@ where
 
                 filtered
                     .map(|batch| {
-                        if let Some(normalizer) = normalizer {
-                            normalizer.normalize_batch(&batch).context(ArrowSnafu {
+                        if let Some(alignment) = alignment {
+                            alignment.align_batch(&batch).context(ArrowSnafu {
                                 path: &path,
                                 column: "record batch",
                                 operation: "aligning the canonical schema",
@@ -451,10 +452,10 @@ where
 async fn open_segment_scan<S, E>(
     location: &TableLocation,
     segment: &SegmentMeta,
-    index_column: &str,
+    index: &IndexSpec,
     start: S,
     end: E,
-    canonical: Option<&(LogicalSchema, IndexSpec)>,
+    canonical_schema: Option<&LogicalSchema>,
 ) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
@@ -470,10 +471,10 @@ where
     build_segment_scan_stream(
         reader,
         segment.path.clone(),
-        index_column,
+        index,
         start,
         end,
-        canonical,
+        canonical_schema,
     )
     .await
 }
@@ -482,10 +483,10 @@ struct ScanState {
     candidates: std::vec::IntoIter<SegmentMeta>,
     current: Option<SegmentScanStream>,
     location: TableLocation,
-    index_column: String,
+    index: IndexSpec,
     start: IndexValue,
     end: IndexValue,
-    canonical: Option<(LogicalSchema, IndexSpec)>,
+    canonical_schema: Option<LogicalSchema>,
 }
 
 impl TimeSeriesTable {
@@ -507,21 +508,21 @@ impl TimeSeriesTable {
             candidates: candidates.into_iter(),
             current: None,
             location: self.location().clone(),
-            index_column: self.index.column.clone(),
+            index: self.index.clone(),
             start,
             end,
-            canonical: if SchemaPolicy::for_table(&self.state.table_meta)
-                == SchemaPolicy::AddNullable
+            canonical_schema: if MissingColumnPolicy::from_table_requirements(
+                &self.state.table_meta,
+            ) == MissingColumnPolicy::FillNullableWithNull
             {
-                Some((
+                Some(
                     require_table_schema(&self.state.table_meta)
                         .map_err(|source| ScanError::Schema {
                             path: None,
                             source: Box::new(source),
                         })?
                         .clone(),
-                    self.index.clone(),
-                ))
+                )
             } else {
                 None
             },
@@ -547,10 +548,10 @@ impl TimeSeriesTable {
                     open_segment_scan(
                         &state.location,
                         &segment,
-                        &state.index_column,
+                        &state.index,
                         state.start.clone(),
                         state.end.clone(),
-                        state.canonical.as_ref(),
+                        state.canonical_schema.as_ref(),
                     )
                     .await?,
                 );
@@ -735,6 +736,25 @@ mod tests {
         }
     }
 
+    fn signed_scan_index() -> IndexSpec {
+        IndexSpec {
+            column: "ts".into(),
+            entity_columns: Vec::new(),
+            kind: IndexKind::Int64 {
+                index_granularity: NonZeroU64::new(1).unwrap(),
+            },
+        }
+    }
+
+    fn timestamp_scan_index() -> IndexSpec {
+        let crate::transaction_log::TableKind::TimeSeries(mut index) = make_basic_table_meta().kind
+        else {
+            unreachable!("time-series fixture");
+        };
+        index.entity_columns.clear();
+        index
+    }
+
     fn indexed_segment(path: &str, min: IndexValue, max: IndexValue) -> SegmentMeta {
         SegmentMeta {
             path: path.to_string(),
@@ -901,24 +921,15 @@ mod tests {
         let path = temp.path().join("source.parquet");
         write_index_parquet(&path, Arc::new(Int64Array::from(vec![0, 1])))?;
         let data = bytes::Bytes::from(std::fs::read(path)?);
-        let canonical = (
-            LogicalSchema::try_from_arrow_schema(&Schema::new(vec![
-                Field::new("ts", DataType::Int64, false),
-                Field::new("extra", DataType::Boolean, true),
-            ]))?,
-            IndexSpec {
-                column: "ts".into(),
-                entity_columns: vec![],
-                kind: IndexKind::Int64 {
-                    index_granularity: NonZeroU64::new(1).unwrap(),
-                },
-            },
-        );
+        let canonical = LogicalSchema::try_from_arrow_schema(&Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("extra", DataType::Boolean, true),
+        ]))?;
         let (reader, stats, release) = TrackingReader::with_gate(data.clone(), 2);
         let mut stream = build_segment_scan_stream(
             reader,
             "source.parquet".into(),
-            "ts",
+            &signed_scan_index(),
             0i64,
             2i64,
             Some(&canonical),
@@ -940,7 +951,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "source.parquet".into(),
-            "ts",
+            &signed_scan_index(),
             0i64,
             2i64,
             Some(&canonical),
@@ -1283,7 +1294,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "data/int64-stream.parquet".to_string(),
-            "ts",
+            &signed_scan_index(),
             0i64,
             2i64,
             None,
@@ -1311,7 +1322,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "data/int64-stream.parquet".to_string(),
-            "ts",
+            &signed_scan_index(),
             0i64,
             2i64,
             None,
@@ -1352,7 +1363,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "data/lazy-read-failure.parquet".to_string(),
-            "ts",
+            &signed_scan_index(),
             0i64,
             2i64,
             None,
@@ -1587,7 +1598,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "data/multi-row-group.parquet".to_string(),
-            "ts",
+            &timestamp_scan_index(),
             Utc.timestamp_millis_opt(0).single().unwrap(),
             Utc.timestamp_millis_opt(4_000).single().unwrap(),
             None,
@@ -1617,7 +1628,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "data/multi-row-group.parquet".to_string(),
-            "ts",
+            &timestamp_scan_index(),
             Utc.timestamp_millis_opt(0).single().unwrap(),
             Utc.timestamp_millis_opt(4_000).single().unwrap(),
             None,
@@ -1681,7 +1692,7 @@ mod tests {
         let mut stream = build_segment_scan_stream(
             reader,
             "data/filtered-row-groups.parquet".to_string(),
-            "ts",
+            &timestamp_scan_index(),
             Utc.timestamp_millis_opt(10_000).single().unwrap(),
             Utc.timestamp_millis_opt(20_000).single().unwrap(),
             None,
@@ -1726,7 +1737,16 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = match open_segment_scan(&location, &segment, "ts", start, end, None).await {
+        let err = match open_segment_scan(
+            &location,
+            &segment,
+            &timestamp_scan_index(),
+            start,
+            end,
+            None,
+        )
+        .await
+        {
             Err(err) => err,
             Ok(_) => panic!("missing ts column should error"),
         };
@@ -1760,7 +1780,16 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = match open_segment_scan(&location, &segment, "ts", start, end, None).await {
+        let err = match open_segment_scan(
+            &location,
+            &segment,
+            &timestamp_scan_index(),
+            start,
+            end,
+            None,
+        )
+        .await
+        {
             Err(err) => err,
             Ok(_) => panic!("unsupported time type should error"),
         };

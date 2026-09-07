@@ -472,7 +472,9 @@ impl TimeSeriesTable {
                     &table_schema,
                     &self.index,
                     source,
-                    crate::batch_schema::SchemaPolicy::for_table(&self.state.table_meta),
+                    crate::batch_schema::MissingColumnPolicy::from_table_requirements(
+                        &self.state.table_meta,
+                    ),
                 )
                 .await
                 {

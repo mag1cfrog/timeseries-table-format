@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use arrow::{
     array::{RecordBatch, new_null_array},
     compute::cast,
-    datatypes::{DataType, Schema, SchemaRef},
+    datatypes::{DataType, SchemaRef},
     error::ArrowError,
 };
 
@@ -20,56 +20,71 @@ use crate::metadata::{
     table::TableMeta,
 };
 
-/// Internal policy, selected only after the caller's protocol compatibility gate.
-/// This does not advertise support for the reserved feature.
+/// What to do with missing columns; this does not control type conversions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SchemaPolicy {
-    Strict,
-    AddNullable,
+pub(crate) enum MissingColumnPolicy {
+    /// Require every registered column, including nullable payloads.
+    Reject,
+    /// Fill absent nullable payloads with nulls. Keys are always required.
+    FillNullableWithNull,
 }
 
-impl SchemaPolicy {
-    pub(crate) fn for_table(meta: &TableMeta) -> Self {
+impl MissingColumnPolicy {
+    /// Read requirements from a snapshot that passed the caller's protocol gate.
+    /// This does not advertise support for the reserved feature.
+    pub(crate) fn from_table_requirements(meta: &TableMeta) -> Self {
         if meta
             .required_reader_features()
             .contains("schema_add_columns")
         {
-            Self::AddNullable
+            Self::FillNullableWithNull
         } else {
-            Self::Strict
+            Self::Reject
         }
     }
 }
 
 /// Validated mapping reused across all batches from one declared source schema.
-pub(crate) struct BatchSchemaNormalizer {
+pub(crate) struct BatchSchemaAlignment {
+    input_schema: SchemaRef,
     output_schema: SchemaRef,
-    incoming_column_indices: Vec<Option<usize>>,
+    columns: Vec<ColumnAlignment>,
 }
 
-impl BatchSchemaNormalizer {
+/// Operations validated once against the declared input schema. A later batch
+/// cannot introduce a new cast merely by supplying a different array type.
+enum ColumnAlignment {
+    Reuse(usize),
+    Widen(usize),
+    Null,
+}
+
+impl BatchSchemaAlignment {
     /// Preserve an incoming schema when the table has no registered schema yet.
-    pub(crate) fn without_conversion(incoming_schema: SchemaRef) -> Self {
+    pub(crate) fn for_schema_adoption(incoming_schema: SchemaRef) -> Self {
         Self {
-            incoming_column_indices: (0..incoming_schema.fields().len()).map(Some).collect(),
+            columns: (0..incoming_schema.fields().len())
+                .map(ColumnAlignment::Reuse)
+                .collect(),
+            input_schema: Arc::clone(&incoming_schema),
             output_schema: incoming_schema,
         }
     }
 
     /// Validate and map an incoming schema into the registered table schema.
     pub(crate) fn for_append(
-        incoming_schema: &Schema,
+        incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
-        policy: SchemaPolicy,
+        policy: MissingColumnPolicy,
     ) -> SchemaResult<Self> {
         Self::build(incoming_schema, registered_schema, index, policy, true)
     }
 
     /// Historical data is reordered and null-filled, never cast. Called only
     /// for snapshots that select the nullable-column policy.
-    pub(crate) fn for_segment(
-        incoming_schema: &Schema,
+    pub(crate) fn for_historical_segment(
+        incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
     ) -> SchemaResult<Self> {
@@ -77,16 +92,16 @@ impl BatchSchemaNormalizer {
             incoming_schema,
             registered_schema,
             index,
-            SchemaPolicy::AddNullable,
+            MissingColumnPolicy::FillNullableWithNull,
             false,
         )
     }
 
     fn build(
-        incoming_schema: &Schema,
+        incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
-        policy: SchemaPolicy,
+        policy: MissingColumnPolicy,
         allow_widening: bool,
     ) -> SchemaResult<Self> {
         let output_schema = registered_schema.to_arrow_schema_ref().map_err(|source| {
@@ -107,15 +122,15 @@ impl BatchSchemaNormalizer {
             }
         }
 
-        let mut incoming_column_indices = Vec::with_capacity(output_schema.fields().len());
+        let mut columns = Vec::with_capacity(output_schema.fields().len());
         for table_field in output_schema.fields() {
-            let Some(&incoming_index) = incoming_by_name.get(table_field.name().as_str()) else {
-                if policy == SchemaPolicy::AddNullable
+            let Some(incoming_index) = incoming_by_name.remove(table_field.name().as_str()) else {
+                if policy == MissingColumnPolicy::FillNullableWithNull
                     && table_field.is_nullable()
                     && table_field.name() != &index.column
                     && !index.entity_columns.contains(table_field.name())
                 {
-                    incoming_column_indices.push(None);
+                    columns.push(ColumnAlignment::Null);
                     continue;
                 }
                 return Err(SchemaCompatibilityError::MissingIncomingColumn {
@@ -132,24 +147,26 @@ impl BatchSchemaNormalizer {
                 });
             }
 
-            if table_field.data_type() != incoming_field.data_type()
-                && !(allow_widening
-                    && is_allowlisted_widening(incoming_field.data_type(), table_field.data_type()))
+            let column = if table_field.data_type() == incoming_field.data_type() {
+                ColumnAlignment::Reuse(incoming_index)
+            } else if allow_widening
+                && is_allowlisted_widening(incoming_field.data_type(), table_field.data_type())
             {
+                ColumnAlignment::Widen(incoming_index)
+            } else {
                 return Err(SchemaCompatibilityError::IncomingTypeMismatch {
                     column: table_field.name().clone(),
                     table_type: table_field.data_type().clone(),
                     incoming_type: incoming_field.data_type().clone(),
                 });
-            }
-
-            incoming_column_indices.push(Some(incoming_index));
+            };
+            columns.push(column);
         }
 
         if let Some(field) = incoming_schema
             .fields()
             .iter()
-            .find(|field| output_schema.index_of(field.name()).is_err())
+            .find(|field| incoming_by_name.contains_key(field.name().as_str()))
         {
             return Err(SchemaCompatibilityError::ExtraIncomingColumn {
                 column: field.name().clone(),
@@ -157,8 +174,9 @@ impl BatchSchemaNormalizer {
         }
 
         Ok(Self {
+            input_schema: incoming_schema,
             output_schema,
-            incoming_column_indices,
+            columns,
         })
     }
 
@@ -168,27 +186,29 @@ impl BatchSchemaNormalizer {
 
     /// Align one batch without retaining it. Exact arrays are shared; absent
     /// nested fields get parent nulls via Arrow's typed-null constructor.
-    /// The caller must validate each batch against the declared source schema.
-    pub(crate) fn normalize_batch(
+    /// Reject schema drift before using the precomputed column positions, even
+    /// for empty batches. Only the casts validated at construction can run.
+    pub(crate) fn align_batch(
         &self,
         incoming_batch: &RecordBatch,
     ) -> Result<RecordBatch, ArrowError> {
+        if incoming_batch.schema() != self.input_schema {
+            return Err(ArrowError::SchemaError(
+                "record batch schema does not match its declared source schema".to_string(),
+            ));
+        }
         let columns = self
-            .incoming_column_indices
+            .columns
             .iter()
             .zip(self.output_schema.fields())
-            .map(|(incoming_index, output_field)| {
-                let Some(incoming_index) = incoming_index else {
-                    return Ok(new_null_array(
-                        output_field.data_type(),
-                        incoming_batch.num_rows(),
-                    ));
-                };
-                let incoming = incoming_batch.column(*incoming_index);
-                if incoming.data_type() == output_field.data_type() {
-                    Ok(Arc::clone(incoming))
-                } else {
-                    cast(incoming, output_field.data_type())
+            .map(|(column, output_field)| match column {
+                ColumnAlignment::Null => Ok(new_null_array(
+                    output_field.data_type(),
+                    incoming_batch.num_rows(),
+                )),
+                ColumnAlignment::Reuse(index) => Ok(Arc::clone(incoming_batch.column(*index))),
+                ColumnAlignment::Widen(index) => {
+                    cast(incoming_batch.column(*index), output_field.data_type())
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -218,11 +238,106 @@ mod tests {
             Array, ArrayRef, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
             Int64Array, StructArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
         },
-        datatypes::{Field, Fields},
+        datatypes::{Field, Fields, Schema},
     };
 
     use super::*;
     use crate::metadata::logical_schema::{LogicalDataType, LogicalField};
+
+    #[test]
+    fn rejects_batches_that_differ_from_the_declared_source_schema() {
+        let source_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("entity", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let canonical = LogicalSchema::try_from_arrow_schema(&source_schema).unwrap();
+        let alignment = BatchSchemaAlignment::for_historical_segment(
+            source_schema.clone(),
+            &canonical,
+            &test_index(),
+        )
+        .unwrap();
+        let original = RecordBatch::try_new(
+            source_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(Float64Array::from(vec![Some(3.0)])),
+            ],
+        )
+        .unwrap();
+        let changed_type = RecordBatch::try_from_iter_with_nullable([
+            ("ts", original.column(0).clone(), false),
+            ("entity", original.column(1).clone(), false),
+            (
+                "value",
+                Arc::new(Int64Array::from(vec![3])) as ArrayRef,
+                true,
+            ),
+        ])
+        .unwrap();
+        let extra = RecordBatch::try_from_iter_with_nullable([
+            ("ts", original.column(0).clone(), false),
+            ("entity", original.column(1).clone(), false),
+            ("value", original.column(2).clone(), true),
+            ("extra", original.column(0).clone(), false),
+        ])
+        .unwrap();
+        let changed_nullability = RecordBatch::try_from_iter_with_nullable([
+            ("ts", original.column(0).clone(), true),
+            ("entity", original.column(1).clone(), false),
+            ("value", original.column(2).clone(), true),
+        ])
+        .unwrap();
+        for invalid in [
+            original.project(&[1, 0, 2]).unwrap(),
+            changed_type,
+            extra,
+            changed_nullability,
+            original.project(&[0]).unwrap(),
+        ] {
+            assert!(
+                alignment.align_batch(&invalid).is_err(),
+                "changed source schema must be rejected"
+            );
+            assert!(
+                alignment.align_batch(&invalid.slice(0, 0)).is_err(),
+                "empty batches must also be validated"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_cast_nested_arrays_with_different_field_names() {
+        let fields = Fields::from(vec![Field::new("registered", DataType::Int64, false)]);
+        let source_schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Struct(fields),
+            true,
+        )]));
+        let canonical = LogicalSchema::try_from_arrow_schema(&source_schema).unwrap();
+        let array = StructArray::from(vec![(
+            Arc::new(Field::new("different", DataType::Int64, false)),
+            Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+        )]);
+        // This is a valid Arrow batch built with relaxed nested field-name
+        // matching. It must not broaden the table's scalar-only cast contract.
+        let batch = RecordBatch::try_new_with_options(
+            source_schema.clone(),
+            vec![Arc::new(array)],
+            &arrow::record_batch::RecordBatchOptions::new().with_match_field_names(false),
+        )
+        .unwrap();
+        let alignment = BatchSchemaAlignment::for_append(
+            source_schema.clone(),
+            &canonical,
+            &test_index(),
+            MissingColumnPolicy::Reject,
+        )
+        .unwrap();
+        assert!(alignment.align_batch(&batch).is_err());
+    }
 
     #[test]
     fn evolved_alignment_null_fills_whole_fields_and_shares_exact_arrays() {
@@ -280,19 +395,23 @@ mod tests {
         ])
         .unwrap();
         for historical in [false, true] {
-            let normalizer = if historical {
-                BatchSchemaNormalizer::for_segment(&incoming.schema(), &canonical, &test_index())
-            } else {
-                BatchSchemaNormalizer::for_append(
-                    &incoming.schema(),
+            let alignment = if historical {
+                BatchSchemaAlignment::for_historical_segment(
+                    incoming.schema(),
                     &canonical,
                     &test_index(),
-                    SchemaPolicy::AddNullable,
+                )
+            } else {
+                BatchSchemaAlignment::for_append(
+                    incoming.schema(),
+                    &canonical,
+                    &test_index(),
+                    MissingColumnPolicy::FillNullableWithNull,
                 )
             }
             .unwrap();
             for batch in [&incoming, &incoming.slice(0, 1)] {
-                let output = normalizer.normalize_batch(batch).unwrap();
+                let output = alignment.align_batch(batch).unwrap();
                 assert_eq!(output.schema(), canonical.to_arrow_schema_ref().unwrap());
                 for (out, src) in [(0, 2), (1, 1), (2, 0)] {
                     assert!(Arc::ptr_eq(output.column(out), batch.column(src)));
@@ -305,7 +424,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            strict_normalizer(&incoming.schema(), &canonical),
+            strict_alignment(&incoming.schema(), &canonical),
             Err(SchemaCompatibilityError::MissingIncomingColumn { .. })
         ));
     }
@@ -330,13 +449,17 @@ mod tests {
             );
             for historical in [false, true] {
                 let result = if historical {
-                    BatchSchemaNormalizer::for_segment(&incoming, &canonical, &test_index())
-                } else {
-                    BatchSchemaNormalizer::for_append(
-                        &incoming,
+                    BatchSchemaAlignment::for_historical_segment(
+                        Arc::new(incoming.clone()),
                         &canonical,
                         &test_index(),
-                        SchemaPolicy::AddNullable,
+                    )
+                } else {
+                    BatchSchemaAlignment::for_append(
+                        Arc::new(incoming.clone()),
+                        &canonical,
+                        &test_index(),
+                        MissingColumnPolicy::FillNullableWithNull,
                     )
                 };
                 assert!(
@@ -355,16 +478,21 @@ mod tests {
             incoming.push(replacement);
             let incoming = Schema::new(incoming);
             assert!(
-                BatchSchemaNormalizer::for_append(
-                    &incoming,
+                BatchSchemaAlignment::for_append(
+                    Arc::new(incoming.clone()),
                     &canonical,
                     &test_index(),
-                    SchemaPolicy::AddNullable
+                    MissingColumnPolicy::FillNullableWithNull
                 )
                 .is_err()
             );
             assert!(
-                BatchSchemaNormalizer::for_segment(&incoming, &canonical, &test_index()).is_err()
+                BatchSchemaAlignment::for_historical_segment(
+                    Arc::new(incoming.clone()),
+                    &canonical,
+                    &test_index()
+                )
+                .is_err()
             );
         }
         let mut narrowed = fields[..3].to_vec();
@@ -379,14 +507,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let normalizer = BatchSchemaNormalizer::for_append(
-            &incoming.schema(),
+        let alignment = BatchSchemaAlignment::for_append(
+            incoming.schema(),
             &canonical,
             &test_index(),
-            SchemaPolicy::AddNullable,
+            MissingColumnPolicy::FillNullableWithNull,
         )
         .unwrap();
-        let output = normalizer.normalize_batch(&incoming).unwrap();
+        let output = alignment.align_batch(&incoming).unwrap();
         assert_eq!(
             output
                 .column(3)
@@ -397,7 +525,11 @@ mod tests {
             i64::from(i32::MAX)
         );
         assert!(matches!(
-            BatchSchemaNormalizer::for_segment(&incoming.schema(), &canonical, &test_index()),
+            BatchSchemaAlignment::for_historical_segment(
+                incoming.schema(),
+                &canonical,
+                &test_index()
+            ),
             Err(SchemaCompatibilityError::IncomingTypeMismatch { .. })
         ));
     }
@@ -434,11 +566,14 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-        let output =
-            BatchSchemaNormalizer::for_segment(&incoming.schema(), &canonical, &test_index())
-                .unwrap()
-                .normalize_batch(&incoming)
-                .unwrap();
+        let output = BatchSchemaAlignment::for_historical_segment(
+            incoming.schema(),
+            &canonical,
+            &test_index(),
+        )
+        .unwrap()
+        .align_batch(&incoming)
+        .unwrap();
         for (column, expected) in output.columns().iter().zip([0, 10, 1, 2, 3, 4]) {
             assert_eq!(
                 column
@@ -451,11 +586,16 @@ mod tests {
         }
     }
 
-    fn strict_normalizer(
+    fn strict_alignment(
         incoming: &Schema,
         registered: &LogicalSchema,
-    ) -> SchemaResult<BatchSchemaNormalizer> {
-        BatchSchemaNormalizer::for_append(incoming, registered, &test_index(), SchemaPolicy::Strict)
+    ) -> SchemaResult<BatchSchemaAlignment> {
+        BatchSchemaAlignment::for_append(
+            Arc::new(incoming.clone()),
+            registered,
+            &test_index(),
+            MissingColumnPolicy::Reject,
+        )
     }
 
     struct WideningCase {
@@ -592,9 +732,9 @@ mod tests {
             )]));
             let batch =
                 RecordBatch::try_new(Arc::clone(&incoming_schema), vec![case.incoming]).unwrap();
-            let normalizer = strict_normalizer(incoming_schema.as_ref(), &registered).unwrap();
+            let alignment = strict_alignment(incoming_schema.as_ref(), &registered).unwrap();
 
-            let normalized = normalizer.normalize_batch(&batch).unwrap();
+            let normalized = alignment.align_batch(&batch).unwrap();
 
             assert_eq!(
                 normalized.schema(),
@@ -629,8 +769,8 @@ mod tests {
         )
         .unwrap();
 
-        let normalizer = strict_normalizer(incoming_schema.as_ref(), &registered).unwrap();
-        let normalized = normalizer.normalize_batch(&batch).unwrap();
+        let alignment = strict_alignment(incoming_schema.as_ref(), &registered).unwrap();
+        let normalized = alignment.align_batch(&batch).unwrap();
 
         assert_eq!(
             normalized.schema(),
@@ -665,9 +805,9 @@ mod tests {
         )]));
         let batch =
             RecordBatch::try_new(Arc::clone(&incoming_schema), vec![Arc::clone(&nested)]).unwrap();
-        let normalizer = strict_normalizer(incoming_schema.as_ref(), &registered).unwrap();
+        let alignment = strict_alignment(incoming_schema.as_ref(), &registered).unwrap();
 
-        let normalized = normalizer.normalize_batch(&batch).unwrap();
+        let normalized = alignment.align_batch(&batch).unwrap();
 
         assert!(Arc::ptr_eq(normalized.column(0), &nested));
     }
@@ -711,7 +851,7 @@ mod tests {
             let incoming = Schema::new(vec![Field::new("value", incoming_type.clone(), true)]);
 
             assert!(matches!(
-                strict_normalizer(&incoming, &registered),
+                strict_alignment(&incoming, &registered),
                 Err(SchemaCompatibilityError::IncomingTypeMismatch {
                     column,
                     incoming_type: actual,
@@ -730,7 +870,7 @@ mod tests {
         .unwrap();
         let missing = Schema::new(vec![Field::new("first", DataType::Int64, false)]);
         assert!(matches!(
-            strict_normalizer(&missing, &registered),
+            strict_alignment(&missing, &registered),
             Err(SchemaCompatibilityError::MissingIncomingColumn { column })
                 if column == "second"
         ));
@@ -741,7 +881,7 @@ mod tests {
             Field::new("third", DataType::Int64, false),
         ]);
         assert!(matches!(
-            strict_normalizer(&extra, &registered),
+            strict_alignment(&extra, &registered),
             Err(SchemaCompatibilityError::ExtraIncomingColumn { column })
                 if column == "third"
         ));
@@ -751,7 +891,7 @@ mod tests {
             Field::new("first", DataType::Int64, false),
         ]);
         assert!(matches!(
-            strict_normalizer(&duplicate, &registered),
+            strict_alignment(&duplicate, &registered),
             Err(SchemaCompatibilityError::DuplicateIncomingColumn { column })
                 if column == "first"
         ));
@@ -761,7 +901,7 @@ mod tests {
             Field::new("second", DataType::Int64, false),
         ]);
         assert!(matches!(
-            strict_normalizer(&nullable, &registered),
+            strict_alignment(&nullable, &registered),
             Err(SchemaCompatibilityError::IncomingNullabilityMismatch {
                 column,
                 table_nullable: false,

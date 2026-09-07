@@ -17,7 +17,7 @@ use snafu::{Backtrace, Snafu};
 use uuid::Uuid;
 
 use crate::{
-    batch_schema::{BatchSchemaNormalizer, SchemaPolicy},
+    batch_schema::{BatchSchemaAlignment, MissingColumnPolicy},
     coverage::{
         EntityCoverage, EntityIdentity,
         io::{
@@ -202,8 +202,8 @@ pub enum EntityRewriteError {
         backtrace: Backtrace,
     },
 
-    /// Filtering a complete record batch failed.
-    #[snafu(display("Arrow row filtering failed for {path}: {source}"))]
+    /// Filtering or aligning a complete record batch failed.
+    #[snafu(display("Arrow batch processing failed for {path}: {source}"))]
     Arrow {
         /// Table-relative source path.
         path: String,
@@ -282,7 +282,7 @@ async fn stage_identity_data(
     identity: &EntityIdentity,
     output_path: &str,
     created_paths: &mut Vec<String>,
-    normalizer: Option<&BatchSchemaNormalizer>,
+    alignment: Option<&BatchSchemaAlignment>,
 ) -> Result<(u64, u64), EntityRewriteError> {
     let source_rel = Path::new(source_path);
     let mut metadata_file = open_parquet_reader(location.as_ref(), source_rel)
@@ -296,8 +296,10 @@ async fn stage_identity_data(
                 source,
                 backtrace: Backtrace::capture(),
             })?;
-    let schema =
-        normalizer.map_or_else(|| metadata.schema().clone(), |n| n.output_schema().clone());
+    let schema = alignment.map_or_else(
+        || metadata.schema().clone(),
+        |alignment| alignment.output_schema().clone(),
+    );
     drop(metadata_file);
 
     let source_file = open_parquet_reader(location.as_ref(), source_rel)
@@ -358,16 +360,17 @@ async fn stage_identity_data(
         if filtered.num_rows() == 0 {
             continue;
         }
-        let filtered = match normalizer {
-            Some(normalizer) => normalizer.normalize_batch(&filtered).map_err(|source| {
-                EntityRewriteError::Arrow {
-                    path: source_path.to_string(),
-                    source,
-                    backtrace: Backtrace::capture(),
-                }
-            })?,
-            None => filtered,
-        };
+        let filtered =
+            match alignment {
+                Some(alignment) => alignment.align_batch(&filtered).map_err(|source| {
+                    EntityRewriteError::Arrow {
+                        path: source_path.to_string(),
+                        source,
+                        backtrace: Backtrace::capture(),
+                    }
+                })?,
+                None => filtered,
+            };
         rows_written = rows_written
             .checked_add(filtered.num_rows() as u64)
             .ok_or_else(|| invalid_output("rows-written counter overflow"))?;
@@ -394,13 +397,14 @@ async fn stage_identity_data(
     Ok((rows_read, rows_written))
 }
 
-async fn validate_source(
+/// Validate committed metadata and coverage, and prepare historical batch alignment.
+async fn prepare_rewrite_source(
     location: &TableLocation,
     table_schema: &LogicalSchema,
     index: &IndexSpec,
     source: &SegmentMeta,
-    policy: SchemaPolicy,
-) -> Result<(EntityCoverage, Option<BatchSchemaNormalizer>), EntityRewriteError> {
+    policy: MissingColumnPolicy,
+) -> Result<(EntityCoverage, Option<BatchSchemaAlignment>), EntityRewriteError> {
     index
         .validate()
         .map_err(|source| EntityRewriteError::IndexSpecValidation {
@@ -436,7 +440,7 @@ async fn validate_source(
         .ok_or_else(|| invalid_input("source has no committed entity-coverage sidecar"))?;
     validate_rewrite_path(coverage_path, "source coverage")?;
 
-    let normalizer = if policy == SchemaPolicy::AddNullable {
+    let alignment = if policy == MissingColumnPolicy::FillNullableWithNull {
         let reader = open_parquet_reader(location.as_ref(), Path::new(&source.path))
             .await
             .map_err(|source| EntityRewriteError::Storage { source })?;
@@ -448,12 +452,15 @@ async fn validate_source(
                 backtrace: Backtrace::capture(),
             })?;
         Some(
-            BatchSchemaNormalizer::for_segment(builder.schema(), table_schema, index).map_err(
-                |error| EntityRewriteError::SegmentSchemaValidation {
-                    path: source.path.clone(),
-                    source: Box::new(error),
-                },
-            )?,
+            BatchSchemaAlignment::for_historical_segment(
+                builder.schema().clone(),
+                table_schema,
+                index,
+            )
+            .map_err(|error| EntityRewriteError::SegmentSchemaValidation {
+                path: source.path.clone(),
+                source: Box::new(error),
+            })?,
         )
     } else {
         let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
@@ -516,7 +523,7 @@ async fn validate_source(
             "committed source coverage does not match the source Parquet rows",
         ));
     }
-    Ok((committed_coverage, normalizer))
+    Ok((committed_coverage, alignment))
 }
 
 async fn rewrite_inner(
@@ -526,10 +533,10 @@ async fn rewrite_inner(
     source: &SegmentMeta,
     attempt_id: Uuid,
     created_paths: &mut Vec<String>,
-    policy: SchemaPolicy,
+    policy: MissingColumnPolicy,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
-    let (source_coverage, normalizer) =
-        validate_source(location, table_schema, index, source, policy).await?;
+    let (source_coverage, alignment) =
+        prepare_rewrite_source(location, table_schema, index, source, policy).await?;
     let mut replacements = Vec::with_capacity(source_coverage.identity_count());
     let mut materialized_identities = Vec::with_capacity(source_coverage.identity_count());
     let mut output_coverage = EntityCoverage::empty();
@@ -547,7 +554,7 @@ async fn rewrite_inner(
             identity,
             &data_path,
             created_paths,
-            normalizer.as_ref(),
+            alignment.as_ref(),
         )
         .await?;
         rows_read = rows_read
@@ -675,7 +682,7 @@ async fn rewrite_with_attempt_id(
     index: &IndexSpec,
     source: &SegmentMeta,
     attempt_id: Uuid,
-    policy: SchemaPolicy,
+    policy: MissingColumnPolicy,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
     let mut created_paths = Vec::new();
     match rewrite_inner(
@@ -723,7 +730,7 @@ pub(crate) async fn rewrite_mixed_parquet_segment(
     table_schema: &LogicalSchema,
     index: &IndexSpec,
     source: &SegmentMeta,
-    policy: SchemaPolicy,
+    policy: MissingColumnPolicy,
 ) -> Result<StagedEntityRewrite, EntityRewriteError> {
     rewrite_with_attempt_id(
         location,
@@ -935,7 +942,7 @@ mod tests {
             &canonical,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::AddNullable,
+            MissingColumnPolicy::FillNullableWithNull,
         )
         .await?;
         let mut coverage = EntityCoverage::empty();
@@ -1019,7 +1026,7 @@ mod tests {
                     &canonical,
                     &fixture.index,
                     &fixture.source,
-                    SchemaPolicy::AddNullable
+                    MissingColumnPolicy::FillNullableWithNull
                 )
                 .await,
                 Err(EntityRewriteError::SegmentSchemaValidation { .. })
@@ -1038,7 +1045,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await?;
 
@@ -1121,7 +1128,7 @@ mod tests {
             table_schema,
             index,
             &source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await?;
 
@@ -1306,7 +1313,7 @@ mod tests {
             &table_schema,
             &index,
             &source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await?;
 
@@ -1341,7 +1348,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("data collision must fail");
@@ -1377,7 +1384,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("sidecar collision must fail");
@@ -1421,7 +1428,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("rewrite and cleanup must fail");
@@ -1472,7 +1479,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("sidecar write and its first cleanup must fail");
@@ -1507,7 +1514,7 @@ mod tests {
             &fixture.index,
             &fixture.source,
             attempt_id,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("second output finish must fail");
@@ -1548,7 +1555,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("missing source must fail");
@@ -1590,7 +1597,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("single-entity source must be rejected");
@@ -1603,7 +1610,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("missing coverage pointer must be rejected");
@@ -1622,7 +1629,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &stale_source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("stale row count must be rejected");
@@ -1636,7 +1643,7 @@ mod tests {
             &wrong_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("schema mismatch must be rejected");
@@ -1663,7 +1670,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("missing coverage object must fail");
@@ -1682,7 +1689,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("corrupt coverage object must fail");
@@ -1711,7 +1718,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("stale coverage object must fail");
@@ -1737,7 +1744,7 @@ mod tests {
             &fixture.table_schema,
             &fixture.index,
             &fixture.source,
-            SchemaPolicy::Strict,
+            MissingColumnPolicy::Reject,
         )
         .await
         .expect_err("identity without a covered index interval must fail");
