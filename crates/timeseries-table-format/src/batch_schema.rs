@@ -16,6 +16,7 @@ use arrow::{
 use crate::metadata::{
     index::IndexSpec,
     logical_schema::LogicalSchema,
+    protocol::SCHEMA_ADD_COLUMNS_FEATURE,
     schema_compat::{SchemaCompatibilityError, SchemaResult},
     table::TableMeta,
 };
@@ -31,11 +32,11 @@ pub(crate) enum MissingColumnPolicy {
 
 impl MissingColumnPolicy {
     /// Read requirements from a snapshot that passed the caller's protocol gate.
-    /// This does not advertise support for the reserved feature.
+    /// Compatibility checks remain the caller's responsibility.
     pub(crate) fn from_table_requirements(meta: &TableMeta) -> Self {
         if meta
             .required_reader_features()
-            .contains("schema_add_columns")
+            .contains(SCHEMA_ADD_COLUMNS_FEATURE)
         {
             Self::FillNullableWithNull
         } else {

@@ -93,6 +93,20 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum CommitError {
+    /// A persisted metadata update violates the nullable-addition contract.
+    #[snafu(
+        context(false),
+        display("Invalid persisted schema evolution: {source}")
+    )]
+    SchemaEvolution {
+        /// Original metadata transition validation failure.
+        #[snafu(
+            source(from(crate::metadata::schema_evolution::SchemaEvolutionError, Box::new)),
+            backtrace
+        )]
+        source: Box<crate::metadata::schema_evolution::SchemaEvolutionError>,
+    },
+
     /// The caller's expected_version does not match the CURRENT pointer.
     #[snafu(display("Commit conflict: expected version {expected}, but CURRENT is {found}"))]
     Conflict {

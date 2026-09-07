@@ -171,6 +171,9 @@ impl TransactionLogStore {
                             previous
                                 .ensure_valid_transition_to(&delta)
                                 .map_err(CommitError::from)?;
+                            previous
+                                .ensure_valid_schema_transition_to(&delta)
+                                .map_err(CommitError::from)?;
                         }
                         // Full replacement of TableMeta.
                         table_meta = Some(delta);

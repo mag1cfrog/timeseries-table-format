@@ -1196,8 +1196,8 @@ mod tests {
         assert_eq!(observations.next_calls.get(), 0);
         assert!(data_files(temp.path())?.is_empty());
 
-        // Exercise the prepared batch path without admitting the feature or
-        // weakening the public append gate.
+        // Alignment recognizes the reader feature, but a separate unsupported
+        // writer requirement must still reject public appends before input reads.
         table
             .state_mut()
             .table_meta

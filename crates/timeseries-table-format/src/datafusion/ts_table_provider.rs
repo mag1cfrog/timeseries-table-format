@@ -139,7 +139,11 @@ impl TsTableProvider {
     /// Creates a new provider backed by the given `TimeSeriesTable`.
     pub fn try_new(table: Arc<TimeSeriesTable>) -> DFResult<Self> {
         // Use the table's current in-memory snapshot to get schema.
-        // (No schema evolution in v0.1, so this is stable.)
+        table
+            .state()
+            .table_meta
+            .ensure_read_compatible()
+            .map_err(df_external)?;
         let schema = table
             .state()
             .table_meta
@@ -272,6 +276,20 @@ impl TableProvider for TsTableProvider {
 
         // 1) Get a snapshot (TableState) from core table
         let snapshot = self.latest_state().await?;
+        snapshot
+            .table_meta
+            .ensure_read_compatible()
+            .map_err(df_external)?;
+        if snapshot
+            .table_meta
+            .arrow_schema_ref()
+            .map_err(df_external)?
+            != self.schema
+        {
+            return Err(DataFusionError::Plan(
+                "Table schema changed; re-register the table with a new TsTableProvider before planning another scan".to_string()
+            ));
+        }
         span.record("snapshot_version", snapshot.version);
 
         for segment in snapshot.segments.values() {

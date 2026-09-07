@@ -563,14 +563,10 @@ async fn update_table_meta_last_one_wins() -> TestResult {
         },
     });
 
-    let meta2 = TableMeta::new_time_series(IndexSpec {
-        column: "event_time".to_string(), // Changed!
-        entity_columns: vec!["user_id".to_string()],
-        kind: IndexKind::Timestamp {
-            index_granularity: TimeIndexGranularity::Hours(1),
-            timezone: Some("UTC".to_string()),
-        },
-    });
+    let mut meta2 = meta1.clone();
+    meta2
+        .required_writer_features
+        .insert("future_writer".into());
 
     // Commit 1: First TableMeta
     store
@@ -584,23 +580,8 @@ async fn update_table_meta_last_one_wins() -> TestResult {
 
     let state = store.rebuild_table_state().await?;
 
-    // meta2 should win
-    match state.table_meta.kind() {
-        TableKind::TimeSeries(spec) => {
-            assert_eq!(spec.column, "event_time");
-            assert_eq!(spec.entity_columns, vec!["user_id".to_string()]);
-            assert_eq!(
-                spec.kind,
-                IndexKind::Timestamp {
-                    index_granularity: TimeIndexGranularity::Hours(1),
-                    timezone: Some("UTC".to_string())
-                }
-            );
-        }
-        _ => panic!("expected TimeSeries"),
-    }
-    // Protocol version is constant; this test focuses on "last one wins" for
-    // the index spec and related fields. We still sanity-check the version value.
+    // Full replacement still applies, while keys and existing fields are immutable.
+    assert_eq!(state.table_meta, meta2);
     assert_eq!(state.table_meta.protocol_version(), TABLE_PROTOCOL_VERSION);
 
     Ok(())

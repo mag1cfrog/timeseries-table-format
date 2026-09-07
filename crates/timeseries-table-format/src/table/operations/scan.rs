@@ -13,7 +13,7 @@
 //! allocating full-length bound arrays, and treats null index values as
 //! "drop row" via `filter_record_batch`. Input rows need not be ordered, and
 //! the returned batches and rows have no ordering guarantee.
-//! For the reserved nullable-column policy, the schema is captured with the
+//! For nullable-column evolution, the schema is captured with the
 //! selected segments. Each file gets one validated name mapping, applied after
 //! filtering, with typed nulls for absent nullable payload fields.
 use std::{path::Path, pin::Pin, sync::Arc};
