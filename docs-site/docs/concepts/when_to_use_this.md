@@ -18,7 +18,7 @@ Use it when:
 - You only need ad hoc queries over a few files. Query Parquet directly with a
   tool such as DuckDB or Polars.
 - You need row updates or a central database server. Use a database.
-- You need object storage, compaction, schema evolution, or merge operations.
+- You need object storage, small-file compaction, column dropping/renaming, automatic schema merging, or merge operations.
   Use a lakehouse format designed for those workflows.
 
 The current release supports local filesystems and append-only ingestion. If

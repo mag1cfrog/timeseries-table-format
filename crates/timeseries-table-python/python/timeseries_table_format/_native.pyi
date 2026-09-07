@@ -405,6 +405,39 @@ class TimeSeriesTable:
         """
         ...
 
+    def add_columns(self, columns: pyarrow.Schema) -> int:
+        """Add new nullable top-level fields and return the committed version.
+
+        `columns` describes only the new fields. Names, order, types, and nullable
+        annotations are preserved; schema/field metadata, including nested metadata,
+        is rejected. The table must already have a canonical schema, normally
+        established by its first successful append.
+
+        Historical rows read as null without rewriting data or coverage. Later appends
+        may omit nullable payload fields; all keys and the types/nullability of supplied
+        fields remain required. Re-register SQL tables with `Session.register_tstable`
+        after each addition.
+
+        Uses this handle's version without refreshing or retrying. Reopen and reconcile
+        before retrying a stale or ambiguous operation. An ambiguous outcome does not
+        guarantee rollback. The GIL is released during the Rust operation.
+
+        Raises
+        ------
+        TypeError
+            If `columns` is not a `pyarrow.Schema`.
+        ValueError
+            If Arrow metadata is present or the schema cannot be imported.
+        SchemaMismatchError
+            If fields violate the core nullable-addition contract.
+        ConflictError
+            If the selected version is stale; includes `expected` and `found`.
+        TimeseriesTableError
+            For protocol, storage, or publication failures. Table errors include
+            `table_root`; storage errors also preserve path context.
+        """
+        ...
+
     def optimize(self) -> OptimizeReport:
         """Rewrite every mixed-entity segment into single-entity segments.
 

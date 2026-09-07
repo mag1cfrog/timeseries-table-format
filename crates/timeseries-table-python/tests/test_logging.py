@@ -287,13 +287,14 @@ def test_native_records_exclude_sensitive_operation_inputs():
                 ),
                 segment,
             )
-            parquet = pq.ParquetFile(segment)
-            table.append(
-                pa.RecordBatchReader.from_batches(
-                    parquet.schema_arrow,
-                    parquet.iter_batches(),
+            with pq.ParquetFile(segment) as parquet:
+                table.append(
+                    pa.RecordBatchReader.from_batches(
+                        parquet.schema_arrow,
+                        parquet.iter_batches(),
+                    )
                 )
-            )
+            table.add_columns(pa.schema([pa.field("private_added_field_348", pa.int64())]))
 
             session = ttf.Session()
             session.register_tstable("private_table_348", str(table_root))
@@ -310,6 +311,7 @@ def test_native_records_exclude_sensitive_operation_inputs():
         assert "private_bound_value_348" not in messages
         assert "private_entity_value_348" not in messages
         assert "private_schema_field_348" not in messages
+        assert "private_added_field_348" not in messages
         """
     )
 
@@ -349,13 +351,13 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
 
             first = root / "first.parquet"
             pq.write_table(pa.table({"ts": pa.array([1], type=pa.int64())}), first)
-            first_parquet = pq.ParquetFile(first)
-            assert table.append(
-                pa.RecordBatchReader.from_batches(
-                    first_parquet.schema_arrow,
-                    first_parquet.iter_batches(),
-                )
-            ).committed_version == 2
+            with pq.ParquetFile(first) as first_parquet:
+                assert table.append(
+                    pa.RecordBatchReader.from_batches(
+                        first_parquet.schema_arrow,
+                        first_parquet.iter_batches(),
+                    )
+                ).committed_version == 2
 
             snapshots = list((table_root / "_coverage" / "table").glob("*.roar"))
             assert len(snapshots) == 1
@@ -366,13 +368,13 @@ def test_coverage_snapshot_recovery_emits_one_actionable_warning():
 
             second = root / "second.parquet"
             pq.write_table(pa.table({"ts": pa.array([11], type=pa.int64())}), second)
-            second_parquet = pq.ParquetFile(second)
-            assert table.append(
-                pa.RecordBatchReader.from_batches(
-                    second_parquet.schema_arrow,
-                    second_parquet.iter_batches(),
-                )
-            ).committed_version == 3
+            with pq.ParquetFile(second) as second_parquet:
+                assert table.append(
+                    pa.RecordBatchReader.from_batches(
+                        second_parquet.schema_arrow,
+                        second_parquet.iter_batches(),
+                    )
+                ).committed_version == 3
 
         warnings = [
             record
@@ -437,13 +439,14 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
                 ),
                 segment,
             )
-            parquet = pq.ParquetFile(segment)
-            assert table.append(
-                pa.RecordBatchReader.from_batches(
-                    parquet.schema_arrow,
-                    parquet.iter_batches(),
-                )
-            ).committed_version == 2
+            with pq.ParquetFile(segment) as parquet:
+                assert table.append(
+                    pa.RecordBatchReader.from_batches(
+                        parquet.schema_arrow,
+                        parquet.iter_batches(),
+                    )
+                ).committed_version == 2
+            assert table.add_columns(pa.schema([pa.field("quality", pa.float64())])) == 3
             assert table.optimize().no_op is False
 
             session = ttf.Session()

@@ -72,7 +72,11 @@ impl TimeSeriesTable {
         self.log.location()
     }
 
-    pub(crate) fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
+    /// Check this client's read/write compatibility with the selected snapshot.
+    ///
+    /// Wrappers may call this before converting mutation input. Each mutation
+    /// still performs its own mandatory compatibility check.
+    pub fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
         self.state.table_meta.ensure_write_compatible()
     }
 }

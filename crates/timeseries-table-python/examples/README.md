@@ -3,6 +3,12 @@
 These scripts are meant to be runnable in a normal Python environment where the
 `timeseries-table-format` wheel is installed (import `timeseries_table_format`).
 
+## `add_nullable_columns.py`
+
+Creates a temporary table, appends historical rows, adds nullable fields, replaces the SQL
+registration, and appends values and omissions. Run with
+`python crates/timeseries-table-python/examples/add_nullable_columns.py` from the repository root.
+
 ## `create_append_sql.py`
 
 Creates a table in a temporary directory, writes a tiny Parquet file with

@@ -390,6 +390,45 @@ mod _native {
         })
     }
 
+    fn schema_from_python(
+        columns: &Bound<'_, PyAny>,
+    ) -> PyResult<datafusion::arrow::datatypes::Schema> {
+        let schema_type = PyModule::import(columns.py(), "pyarrow")?.getattr("Schema")?;
+        if !columns.is_instance(&schema_type)? {
+            return Err(PyTypeError::new_err("columns must be a pyarrow.Schema"));
+        }
+        // Schema-only IPC produces owned Rust data without borrowing Python pointers.
+        let bytes = columns
+            .call_method0("serialize")?
+            .call_method0("to_pybytes")?;
+        let schema =
+            arrow_ipc::convert::try_schema_from_ipc_buffer(bytes.cast::<PyBytes>()?.as_bytes())
+                .map_err(|error| {
+                    PyValueError::new_err(format!("Cannot import Arrow schema: {error}"))
+                })?;
+        if !schema.metadata().is_empty() {
+            return Err(PyValueError::new_err(
+                "columns must not contain schema metadata",
+            ));
+        }
+        for field in schema.flattened_fields() {
+            let mut metadata_field = field;
+            // Arrow's flattened_fields omits the run-ends field.
+            if field.metadata().is_empty()
+                && let DataType::RunEndEncoded(run_ends, _) = field.data_type()
+            {
+                metadata_field = run_ends;
+            }
+            if !metadata_field.metadata().is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "columns must not contain field metadata: {:?}",
+                    metadata_field.name()
+                )));
+            }
+        }
+        Ok(schema)
+    }
+
     fn datafusion_error_to_py_with_name_and_path(
         py: Python<'_>,
         name: &str,
@@ -2039,6 +2078,75 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
                         err,
                     )
                 },
+            )
+        }
+
+        /// Add new nullable top-level fields and return the committed version.
+        ///
+        /// `columns` must be a `pyarrow.Schema` containing only new fields, with
+        /// no schema or field metadata (including nested fields). Names, order,
+        /// types, and nullability are preserved. The table must already have a
+        /// canonical schema, normally established by its first successful append.
+        ///
+        /// Historical rows read as null; no data or coverage files are rewritten.
+        /// Later appends may omit nullable payload fields, but must supply all
+        /// keys and preserve provided-field types/nullability. Re-register SQL
+        /// tables with `Session.register_tstable` after each schema change.
+        ///
+        /// Uses this handle's version without refreshing or retrying. Definite
+        /// validation/conflict failures leave the handle unchanged. Reopen and
+        /// reconcile before retrying a stale or ambiguous operation; an ambiguous
+        /// outcome does not guarantee rollback. The GIL is released during the
+        /// Rust operation.
+        ///
+        /// Raises
+        /// ------
+        /// TypeError
+        ///     If `columns` is not a `pyarrow.Schema`.
+        /// ValueError
+        ///     If Arrow metadata is present or the schema cannot be imported.
+        /// SchemaMismatchError
+        ///     If the fields violate the core nullable-addition contract.
+        /// ConflictError
+        ///     If the selected version is stale; includes `expected` and `found`.
+        /// TimeseriesTableError
+        ///     For protocol, storage, or publication failures. Table errors include
+        ///     `table_root`; storage errors also preserve path context.
+        fn add_columns(&mut self, py: Python<'_>, columns: &Bound<'_, PyAny>) -> PyResult<u64> {
+            use timeseries_table_format::{
+                AddColumnsError, LogicalSchema, SchemaEvolutionError, TableError,
+            };
+
+            let table_root = self.table_root.clone();
+            let entity_columns = self.inner.index_spec().entity_columns.clone();
+            let map_error = |py: Python<'_>, error: TableError| {
+                table_error_to_py_with_root(py, &table_root, &entity_columns, error)
+            };
+            self.inner.ensure_write_compatible().map_err(|source| {
+                map_error(
+                    py,
+                    TableError::AddColumns {
+                        source: source.into(),
+                    },
+                )
+            })?;
+            let schema = schema_from_python(columns).map_err(|error| {
+                py_error_with_table_root(py, &table_root, error.to_string(), error)
+            })?;
+            let logical = LogicalSchema::try_from_arrow_schema(&schema).map_err(|source| {
+                map_error(
+                    py,
+                    TableError::AddColumns {
+                        source: AddColumnsError::from(SchemaEvolutionError::from(source)),
+                    },
+                )
+            })?;
+            let rt = tokio_runner::global_runtime()?;
+            tokio_runner::run_blocking_map_err(
+                py,
+                rt.as_ref(),
+                self.inner.add_columns(logical.columns().to_vec()),
+                map_error,
             )
         }
 

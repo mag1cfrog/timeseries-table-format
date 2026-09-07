@@ -340,9 +340,11 @@ pub struct LogicalSchema {
 
 impl LogicalSchema {
     /// Convert an Arrow schema into this table's exact logical schema model.
-    pub(crate) fn try_from_arrow_schema(
-        schema: &Schema,
-    ) -> Result<Self, ArrowToLogicalSchemaError> {
+    ///
+    /// Preserves field names, order, supported types, and nullability. Arrow schema
+    /// and field metadata are outside this model and are not retained; callers
+    /// that must reject metadata loss should validate it before conversion.
+    pub fn try_from_arrow_schema(schema: &Schema) -> Result<Self, ArrowToLogicalSchemaError> {
         let fields = schema
             .fields()
             .iter()

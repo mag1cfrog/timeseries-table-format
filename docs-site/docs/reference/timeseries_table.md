@@ -1,6 +1,6 @@
 # TimeSeriesTable reference
 
-`TimeSeriesTable` manages table lifecycle (create/open/append/optimize/vacuum) on the local
+`TimeSeriesTable` manages table lifecycle (create/open/append/add_columns/optimize/vacuum) on the local
 filesystem.
 
 `entity_columns` is an ordered identity definition. A table may contain many identities, and one
@@ -52,6 +52,10 @@ canonical order. Nullability must match. Types must match except for these lossl
 or `uint32` to `uint64`, and `float32` to `float64`. Signedness changes, timestamp changes, and
 nested widening are rejected.
 
+After an explicit `add_columns` operation, append may omit nullable payload fields, including
+pre-existing nullable fields. Missing keys and non-nullable fields remain errors. Baseline tables
+retain their strict missing-field behavior until the first addition.
+
 For a materialized source, pass a table or record batch directly. This example assumes the target
 table expects the shown schema:
 
@@ -97,6 +101,30 @@ Unsupported sources raise `TypeError`. Invalid writer settings, stream exporters
 raise `ValueError`; writer settings are validated before the source is exported or consumed.
 Table failures use the library's existing [exception hierarchy](exceptions.md). Boundary and
 mid-stream source failures do not commit a new version.
+
+## Add nullable columns
+
+`TimeSeriesTable.add_columns(columns: pyarrow.Schema) -> int` adds the fields in one commit and
+updates the handle to that version. Pass only new nullable top-level fields. The table must have
+a canonical schema, normally established by its first successful append. Field order, exact
+case-sensitive names, types, and nullability are preserved. Dots are literal name characters;
+use SQL quoting when needed.
+
+Schema/field metadata, including nested metadata, raises `ValueError`. A non-schema argument raises
+`TypeError`. Core validation failures use `SchemaMismatchError`, including empty schemas,
+duplicates, existing/key names, unsupported types, and non-nullable additions. Existing fields and
+key definitions cannot change. Addition fills no historical values and rewrites no data or coverage.
+
+The operation uses the handle's selected version without refreshing or retrying. A stale handle
+raises `ConflictError` with `expected` and `found`. A create-only commit race retains `StorageError`
+and its `path`; it does not invent a newer observed version. Table failures preserve `table_root`.
+Reopen and reconcile before retrying a stale or ambiguous operation. `TimeseriesTableError` with
+an ambiguous-commit diagnostic does not guarantee rollback.
+
+After adding fields, replace SQL registrations with `Session.register_tstable(name, table_root)`.
+An old registration rejects newly planned scans when it detects a schema change. See
+[Add nullable columns](../guides/add_nullable_columns.md) for a complete runnable workflow and
+[Table protocol compatibility](../concepts/table_protocol.md) for unsupported-client rejection.
 
 ::: timeseries_table_format.TimeSeriesTable
     options:

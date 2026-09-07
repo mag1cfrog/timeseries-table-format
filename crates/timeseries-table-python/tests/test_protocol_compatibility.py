@@ -73,6 +73,15 @@ def test_python_protocol_distinguishes_reads_and_writes_before_input_inspection(
 
     with pytest.raises(
         ttf.TimeseriesTableError, match="unsupported table writer features"
+    ) as add_error:
+        opened.add_columns(pa.schema([]))
+    assert type(add_error.value) is ttf.TimeseriesTableError
+    assert getattr(add_error.value, "table_root") == str(root)
+    assert "Column addition" in str(add_error.value)
+    assert opened.version() == version_before
+
+    with pytest.raises(
+        ttf.TimeseriesTableError, match="unsupported table writer features"
     ) as optimize_error:
         opened.optimize()
     assert type(optimize_error.value) is ttf.TimeseriesTableError

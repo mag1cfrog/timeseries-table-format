@@ -40,3 +40,17 @@ def test_docs_example_parameterized_queries_runs():
     assert isinstance(outs, list)
     assert len(outs) == 2
     assert all(isinstance(t, pa.Table) for t in outs)
+
+
+def test_docs_example_add_nullable_columns_runs(tmp_path):
+    mod = runpy.run_path(
+        str(EXAMPLES_DIR / "add_nullable_columns.py"), run_name="__doc_example__"
+    )
+    out = mod["run"](table_root=tmp_path / "table")
+    assert out.to_pydict() == {
+        "tick": [0, 0, 1, 1, 2, 2],
+        "device": ["A", "B", "A", "B", "A", "B"],
+        "reading": [1.0, 2.0, 3.0, 4.0, None, None],
+        "quality": [None, None, 0.9, 0.8, None, None],
+        "reviewed": [None, None, True, False, None, None],
+    }

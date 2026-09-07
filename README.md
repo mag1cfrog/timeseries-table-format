@@ -113,9 +113,9 @@ workloads, environment, and full comparison.
 
 ## Current scope
 
-The current release focuses on local, append-only tables. It does not yet
-support object storage, compaction, schema evolution, row updates, merges, or
-time-travel queries.
+The current release focuses on local, append-only tables and supports explicit nullable-column
+addition without rewriting historical data. It does not yet support object storage, small-file
+compaction, column dropping/renaming, automatic schema merging, row updates, merges, or time-travel queries.
 
 For design details, read [How I built this](docs/blog/how-i-built-this/how-i-built-this.md)
 or view the [architecture diagram](docs/assets/high-level-architecture.png).
