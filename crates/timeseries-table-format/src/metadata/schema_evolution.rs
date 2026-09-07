@@ -44,7 +44,7 @@ pub enum SchemaEvolutionError {
     ExistingFieldsChanged,
     /// Table kind and all ordered-index/entity-key definitions are immutable.
     #[snafu(display("Schema evolution must preserve the table kind and key definitions"))]
-    KeysChanged,
+    TableKindOrKeysChanged,
     /// An addition was persisted without its required reader feature.
     #[snafu(display(
         "Nullable-column addition requires reader feature schema_add_columns in the same metadata update"
@@ -100,8 +100,11 @@ pub enum SchemaEvolutionError {
 }
 
 /// Validate only schema metadata, using the same embedded Arrow schema as our writer.
-fn validate_added_fields(fields: &[LogicalField]) -> Result<(), SchemaEvolutionError> {
-    for field in fields {
+fn validate_schema_addition(
+    schema: &LogicalSchema,
+    added_fields: &[LogicalField],
+) -> Result<(), SchemaEvolutionError> {
+    for field in added_fields {
         if field.name.trim().is_empty() {
             return Err(SchemaEvolutionError::EmptyName {
                 column: field.name.clone(),
@@ -113,7 +116,10 @@ fn validate_added_fields(fields: &[LogicalField]) -> Result<(), SchemaEvolutionE
             });
         }
     }
-    let logical = LogicalSchema::new(fields.to_vec())?;
+    // Replay may supply a deserialized schema that bypassed LogicalSchema::new.
+    // Activating historical alignment requires the entire canonical schema to
+    // be representable, including fields that predate this addition.
+    let logical = LogicalSchema::new(schema.columns().to_vec())?;
     let arrow = logical.to_arrow_schema()?;
     let parquet = ArrowSchemaConverter::new().convert(&arrow)?;
     let metadata = vec![KeyValue::new(
@@ -128,6 +134,7 @@ fn validate_added_fields(fields: &[LogicalField]) -> Result<(), SchemaEvolutionE
 }
 
 impl TableMeta {
+    /// Build a validated metadata replacement without changing this snapshot.
     pub(crate) fn with_added_columns(
         &self,
         columns: Vec<LogicalField>,
@@ -149,12 +156,13 @@ impl TableMeta {
         Ok(next)
     }
 
+    /// Validate keys and schema changes; protocol monotonicity is checked separately.
     pub(crate) fn ensure_valid_schema_transition_to(
         &self,
         next: &Self,
     ) -> Result<(), SchemaEvolutionError> {
         if self.kind != next.kind {
-            return Err(SchemaEvolutionError::KeysChanged);
+            return Err(SchemaEvolutionError::TableKindOrKeysChanged);
         }
         if let Some(schema) = &next.logical_schema
             && let TableKind::TimeSeries(index) = &next.kind
@@ -180,9 +188,7 @@ impl TableMeta {
             {
                 return Err(SchemaEvolutionError::MissingReaderFeature);
             }
-            // Deserialized LogicalSchema values also pass through this validation.
-            LogicalSchema::new(proposed.columns().to_vec())?;
-            validate_added_fields(additions)?;
+            validate_schema_addition(proposed, additions)?;
         }
         Ok(())
     }

@@ -49,8 +49,9 @@ impl TimeSeriesTable {
     /// are read or rewritten. New appends may omit nullable payload columns.
     ///
     /// Names are exact and case-sensitive, must not be blank, and must not collide
-    /// with existing fields or each other. All new fields must be nullable and
-    /// round-trip exactly through the existing Logical/Arrow/Parquet schema model.
+    /// with existing fields or each other. All new fields must be nullable, and
+    /// the complete resulting schema must round-trip exactly through the existing
+    /// Logical/Arrow/Parquet schema model.
     /// The table must already have a canonical schema, even if it has no rows.
     ///
     /// Uses this handle's version without refreshing or retrying. Other handles

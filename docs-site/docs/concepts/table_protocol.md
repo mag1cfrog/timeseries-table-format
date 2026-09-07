@@ -74,7 +74,8 @@ names, duplicates, collisions with existing fields, and non-nullable additions a
 Valid names retain their whitespace, and dots are literal characters rather than nested paths.
 Use SQL identifier quoting for names that need it.
 
-Types must round-trip exactly through the existing logical, Arrow, and Parquet schema model.
+The complete resulting schema, including existing fields, must round-trip exactly through the
+existing logical, Arrow, and Parquet schema model.
 This includes complete supported structs, lists, and maps as new nullable top-level fields;
 it excludes legacy `Int96`, placeholder `Other` types, invalid parameters, and definitions whose
 names or types would change during conversion. Existing fields keep their order, names, types,

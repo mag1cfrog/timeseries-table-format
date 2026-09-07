@@ -313,6 +313,54 @@ async fn invalid_requests_publish_nothing_and_preserve_the_handle() -> TestResul
 }
 
 #[tokio::test]
+async fn addition_rejects_unreadable_existing_schema_before_publication() -> TestResult {
+    // Logical metadata can contain legacy/placeholder types even though the
+    // Arrow reader cannot use them as an evolved canonical schema.
+    for data_type in [
+        LogicalDataType::Int96,
+        LogicalDataType::Other("legacy".into()),
+    ] {
+        let temp = TempDir::new()?;
+        let mut meta = table_meta();
+        let mut fields = meta.logical_schema().unwrap().columns().to_vec();
+        fields[2].data_type = data_type;
+        meta.logical_schema = Some(LogicalSchema::new(fields)?);
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+        let before = table.state().clone();
+        let objects = files(temp.path())?;
+        assert!(
+            matches!(
+                table
+                    .add_columns(vec![field("score", LogicalDataType::Int64)])
+                    .await,
+                Err(TableError::AddColumns {
+                    source: AddColumnsError::Schema { .. }
+                })
+            ),
+            "an unusable canonical schema must not be activated"
+        );
+        assert_eq!(table.state(), &before);
+        assert_eq!(files(temp.path())?, objects);
+        let mut next = before.table_meta.clone();
+        let mut fields = next.logical_schema().unwrap().columns().to_vec();
+        fields.push(field("score", LogicalDataType::Int64));
+        next.logical_schema = Some(LogicalSchema::new(fields)?);
+        next.required_reader_features
+            .insert("schema_add_columns".into());
+        table
+            .log
+            .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(next)])
+            .await?;
+        assert!(matches!(
+            table.log.rebuild_table_state().await,
+            Err(CommitError::SchemaEvolution { source })
+                if matches!(*source, SchemaEvolutionError::ArrowConversion { .. })
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn schemaless_tables_require_initial_adoption_and_names_are_exact() -> TestResult {
     let temp = TempDir::new()?;
     let mut meta = table_meta();
@@ -488,7 +536,7 @@ async fn stale_add_add_append_and_optimize_conflict_without_lost_updates() -> Te
 }
 
 #[tokio::test]
-async fn create_only_races_preserve_the_winning_schema_commit() -> TestResult {
+async fn create_only_races_preserve_the_winning_commit() -> TestResult {
     for (winner, loser) in [
         ("add", "add"),
         ("add", "append"),
@@ -875,6 +923,99 @@ async fn older_reader_capabilities_reject_evolved_open_refresh_and_payload_befor
         assert!(matches!(table.log.load_commit(table.state().version).await, Err(CommitError::Protocol { source: TableProtocolError::UnsupportedReaderFeatures { .. }, .. })));
         Ok::<_, Box<dyn std::error::Error>>(())
     }).await?;
+    Ok(())
+}
+
+#[cfg(feature = "datafusion")]
+#[tokio::test]
+async fn native_and_sql_reads_distinguish_literal_names_from_nested_fields() -> TestResult {
+    use crate::datafusion::TsTableProvider;
+    use arrow::array::StructArray;
+    use datafusion::prelude::SessionContext;
+
+    let temp = TempDir::new()?;
+    let mut table =
+        TimeSeriesTable::create(TableLocation::local(temp.path()), table_meta()).await?;
+    table.append(batch(0, None)).await?;
+    table
+        .add_columns(vec![
+            field("Value", LogicalDataType::Int64),
+            field(" value ", LogicalDataType::Int64),
+            field("nested.value", LogicalDataType::Int64),
+            field(
+                "nested",
+                LogicalDataType::Struct {
+                    fields: vec![LogicalField {
+                        nullable: false,
+                        ..field("value", LogicalDataType::Int64)
+                    }],
+                },
+            ),
+        ])
+        .await?;
+    let mut columns = batch(1, None).columns().to_vec();
+    for values in [[11, 12], [21, 22], [31, 32]] {
+        columns.push(Arc::new(Int64Array::from(values.to_vec())));
+    }
+    columns.push(Arc::new(StructArray::from(vec![(
+        Arc::new(Field::new("value", DataType::Int64, false)),
+        Arc::new(Int64Array::from(vec![41, 42])) as ArrayRef,
+    )])));
+    table
+        .append(RecordBatch::try_new(
+            table.state().table_meta.arrow_schema_ref()?,
+            columns,
+        )?)
+        .await?;
+
+    let native: Vec<_> = table.scan_range(0_i64, 2_i64).await?.try_collect().await?;
+    assert_eq!(native.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+    for column in 3..7 {
+        assert_eq!(
+            native
+                .iter()
+                .map(|batch| batch.column(column).null_count())
+                .sum::<usize>(),
+            2
+        );
+    }
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(TsTableProvider::try_new(Arc::new(table))?))?;
+    let result = ctx.sql(r#"SELECT "Value", " value ", "nested.value", nested.value AS child FROM t ORDER BY idx, entity"#).await?.collect().await?;
+    let result = arrow::compute::concat_batches(&result[0].schema(), &result)?;
+    for (index, values) in [[11, 12], [21, 22], [31, 32], [41, 42]]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            result
+                .column(index)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap(),
+            &Int64Array::from(vec![None, None, Some(values[0]), Some(values[1])])
+        );
+    }
+    for (predicate, expected) in [
+        ("nested IS NULL", 2),
+        ("nested.value IS NULL", 2),
+        (r#""nested.value" = 31 AND nested.value = 41"#, 1),
+    ] {
+        let result = ctx
+            .sql(&format!("SELECT count(*) FROM t WHERE {predicate}"))
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            result[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            expected
+        );
+    }
     Ok(())
 }
 
