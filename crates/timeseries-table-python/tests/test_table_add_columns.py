@@ -222,6 +222,33 @@ def test_metadata_is_rejected_without_publication(tmp_path, columns):
 
 
 @pytest.mark.parametrize(
+    "data_type",
+    [
+        pa.decimal128(10, -129),
+        pa.decimal256(40, 128),
+        pa.list_(pa.decimal128(10, 128)),
+        pa.dense_union(
+            [pa.field("a", pa.int64()), pa.field("b", pa.int64())],
+            type_codes=[0, 0],
+        ),
+    ],
+)
+def test_unimportable_arrow_parameters_are_atomic_value_errors(tmp_path, data_type):
+    root = tmp_path / "table"
+    table = _create(root)
+    before = _files(root)
+    columns = pa.schema([pa.field("valid", pa.int64()), pa.field("bad", data_type)])
+    with pytest.raises(ValueError, match="Cannot import Arrow schema") as error:
+        table.add_columns(columns)
+    assert type(error.value) is ValueError
+    assert getattr(error.value, "table_root") == str(root)
+    assert table.version() == ttf.TimeSeriesTable.open(str(root)).version() == 2
+    assert _files(root) == before
+    # A rejected representation must leave the same handle usable.
+    assert table.add_columns(ADDITIONS) == 3
+
+
+@pytest.mark.parametrize(
     "columns,context",
     [
         (pa.schema([]), "at least one"),

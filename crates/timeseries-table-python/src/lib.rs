@@ -401,8 +401,17 @@ mod _native {
         let bytes = columns
             .call_method0("serialize")?
             .call_method0("to_pybytes")?;
+        let bytes = bytes.cast::<PyBytes>()?.as_bytes();
+        // Arrow's fallible IPC importer can still panic on PyArrow-constructible
+        // parameters, such as decimal scales outside i8 or duplicate union IDs.
+        // Contain that conversion failure before any table state is touched.
         let schema =
-            arrow_ipc::convert::try_schema_from_ipc_buffer(bytes.cast::<PyBytes>()?.as_bytes())
+            std::panic::catch_unwind(|| arrow_ipc::convert::try_schema_from_ipc_buffer(bytes))
+                .map_err(|_| {
+                    PyValueError::new_err(
+                        "Cannot import Arrow schema: unsupported Arrow field parameters",
+                    )
+                })?
                 .map_err(|error| {
                     PyValueError::new_err(format!("Cannot import Arrow schema: {error}"))
                 })?;
