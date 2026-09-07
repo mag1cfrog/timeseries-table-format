@@ -57,7 +57,7 @@ use self::error::{
     ArrowInputSnafu, ArrowToLogicalSchemaSnafu, GeneratedSegmentSchemaCompatibilitySnafu,
     ParquetWriteSnafu,
 };
-use super::append_schema::AppendSchemaNormalizer;
+use crate::batch_schema::{BatchSchemaNormalizer, SchemaPolicy};
 
 fn classify_entity_layout(
     segment_path: &str,
@@ -551,7 +551,7 @@ impl TimeSeriesTable {
     fn build_append_schema_normalizer(
         &self,
         incoming_schema: SchemaRef,
-    ) -> Result<AppendSchemaNormalizer, AppendError> {
+    ) -> Result<BatchSchemaNormalizer, AppendError> {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         match self.state.table_meta.logical_schema.as_ref() {
@@ -561,7 +561,7 @@ impl TimeSeriesTable {
                         .context(ArrowToLogicalSchemaSnafu)?;
                 ensure_index_spec_matches_schema(&incoming_logical_schema, &self.index)
                     .map_err(AppendError::from)?;
-                Ok(AppendSchemaNormalizer::without_conversion(incoming_schema))
+                Ok(BatchSchemaNormalizer::without_conversion(incoming_schema))
             }
             None => Err(AppendError::MissingCanonicalTableSchema {
                 version: self.state.version,
@@ -569,9 +569,11 @@ impl TimeSeriesTable {
             Some(table_schema) => {
                 ensure_index_spec_matches_schema(table_schema, &self.index)
                     .map_err(AppendError::from)?;
-                let normalizer = AppendSchemaNormalizer::for_registered_schema(
+                let normalizer = BatchSchemaNormalizer::for_append(
                     incoming_schema.as_ref(),
                     table_schema,
+                    &self.index,
+                    SchemaPolicy::for_table(&self.state.table_meta),
                 )
                 .map_err(AppendError::from)?;
                 Ok(normalizer)
@@ -1184,6 +1186,71 @@ mod tests {
         for field in ROW_GROUP_STATISTIC_FIELDS {
             assert!(!fields.contains_key(field), "unexpected {field}");
         }
+    }
+
+    #[tokio::test]
+    async fn nullable_omission_is_strict_by_default_and_internal_alignment_writes_full_schema()
+    -> TestResult {
+        let temp = TempDir::new()?;
+        let mut meta = make_basic_table_meta();
+        let mut fields = meta.logical_schema.as_ref().unwrap().columns().to_vec();
+        fields.push(LogicalField {
+            name: "label".into(),
+            data_type: LogicalDataType::Bool,
+            nullable: true,
+        });
+        meta.logical_schema = Some(LogicalSchema::new(fields)?);
+        let mut table = TimeSeriesTable::create(TableLocation::local(temp.path()), meta).await?;
+        let incoming = time_series_batch(vec![0, 60_000], vec!["A", "B"], vec![1.0, 2.0])?;
+        let (reader, observations) =
+            InstrumentedReader::new(incoming.schema(), vec![Ok(incoming.clone())]);
+        assert!(matches!(
+            table.append(reader).await,
+            Err(TableError::Append {
+                source: AppendError::SchemaValidation { .. }
+            })
+        ));
+        assert_eq!(observations.next_calls.get(), 0);
+        assert!(data_files(temp.path())?.is_empty());
+
+        // Exercise the prepared batch path without admitting the feature or
+        // weakening the public append gate.
+        table
+            .state_mut()
+            .table_meta
+            .required_reader_features
+            .insert("schema_add_columns".into());
+        table
+            .state_mut()
+            .table_meta
+            .required_writer_features
+            .insert("schema_add_columns".into());
+        let normalizer = table.build_append_schema_normalizer(incoming.schema())?;
+        let normalized = normalizer.normalize_batch(&incoming)?;
+        assert_eq!(normalized.column(3).null_count(), 2);
+        let mut writer =
+            ArrowWriter::try_new(Vec::new(), normalizer.output_schema().clone(), None)?;
+        writer.write(&normalized)?;
+        let bytes = bytes::Bytes::from(writer.into_inner()?);
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
+        let persisted = reader.next().transpose()?.unwrap();
+        assert_eq!(persisted, normalized);
+        for column in 0..3 {
+            assert_eq!(persisted.column(column), incoming.column(column));
+        }
+
+        let (reader, observations) = InstrumentedReader::new(incoming.schema(), vec![Ok(incoming)]);
+        assert!(matches!(
+            table.append(reader).await,
+            Err(TableError::Append {
+                source: AppendError::Protocol { .. }
+            })
+        ));
+        assert_eq!(observations.next_calls.get(), 0);
+        assert_eq!(table.state().version, 1);
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        Ok(())
     }
 
     #[derive(Clone, Copy)]

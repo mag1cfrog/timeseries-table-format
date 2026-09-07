@@ -1,7 +1,6 @@
 //! High-level operations on [`TimeSeriesTable`](super::TimeSeriesTable).
 
 pub mod append;
-mod append_schema;
 mod coverage;
 mod create;
 mod open;

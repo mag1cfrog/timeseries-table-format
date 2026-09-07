@@ -127,7 +127,8 @@ pub enum SchemaCompatibilityError {
         incoming_nullable: bool,
     },
 
-    /// An incoming Arrow type is neither exact nor an allowlisted widening.
+    /// An incoming Arrow type is incompatible with the target for this operation.
+    /// Appends may allow scalar widening; historical segment reads require exact types.
     #[snafu(display(
         "Incompatible Arrow type for incoming column {column}: table has {table_type:?}, incoming schema has {incoming_type:?}"
     ))]

@@ -13,7 +13,10 @@
 //! allocating full-length bound arrays, and treats null index values as
 //! "drop row" via `filter_record_batch`. Input rows need not be ordered, and
 //! the returned batches and rows have no ordering guarantee.
-use std::{path::Path, pin::Pin};
+//! For the reserved nullable-column policy, the schema is captured with the
+//! selected segments. Each file gets one validated name mapping, applied after
+//! filtering, with typed nulls for absent nullable payload fields.
+use std::{path::Path, pin::Pin, sync::Arc};
 
 use arrow::array::{Datum, Scalar};
 use arrow::array::{
@@ -31,8 +34,11 @@ use parquet::{
 };
 use snafu::{Backtrace, IntoError, prelude::*};
 
+use crate::batch_schema::{BatchSchemaNormalizer, SchemaPolicy};
 use crate::metadata::{
-    index::{IndexValue, IndexValueError, validate_index_range},
+    index::{IndexSpec, IndexValue, IndexValueError, validate_index_range},
+    logical_schema::LogicalSchema,
+    schema_compat::{SchemaCompatibilityError, require_table_schema},
     segments::SegmentMeta,
 };
 use crate::storage::{self, TableLocation};
@@ -50,6 +56,15 @@ type SegmentScanStream =
 #[snafu(visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum ScanError {
+    /// A canonical or historical schema cannot be aligned for this scan.
+    #[snafu(display("Scan schema validation failed at {path:?}: {source}"))]
+    Schema {
+        /// Segment path, or `None` for the captured table schema.
+        path: Option<String>,
+        /// Complete schema compatibility failure.
+        #[snafu(source(from(SchemaCompatibilityError, Box::new)), backtrace)]
+        source: Box<SchemaCompatibilityError>,
+    },
     /// The requested half-open ordered-index range is invalid.
     #[snafu(display("Invalid scan range: {source}"))]
     InvalidRange {
@@ -276,6 +291,7 @@ async fn build_segment_scan_stream<S, E>(
     index_column: &str,
     start: S,
     end: E,
+    canonical: Option<&(LogicalSchema, IndexSpec)>,
 ) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
@@ -295,6 +311,16 @@ where
     // Locate the index column and compute native bounds before moving the
     // builder into the directly-polled record-batch stream.
     let schema = builder.schema();
+    let normalizer = canonical
+        .map(|(table_schema, index)| {
+            BatchSchemaNormalizer::for_segment(schema, table_schema, index)
+                .map(Arc::new)
+                .map_err(|source| ScanError::Schema {
+                    path: Some(path.clone()),
+                    source: Box::new(source),
+                })
+        })
+        .transpose()?;
     let index_idx = schema
         .index_of(index_column)
         .ok()
@@ -340,6 +366,7 @@ where
             let path = path.clone();
             let index_column = index_column.clone();
             let index_field = index_field.clone();
+            let normalizer = normalizer.clone();
 
             async move {
                 let batch = batch_res.context(ParquetSnafu {
@@ -401,7 +428,19 @@ where
                     tokio::task::yield_now().await;
                 }
 
-                Ok(filtered)
+                filtered
+                    .map(|batch| {
+                        if let Some(normalizer) = normalizer {
+                            normalizer.normalize_batch(&batch).context(ArrowSnafu {
+                                path: &path,
+                                column: "record batch",
+                                operation: "aligning the canonical schema",
+                            })
+                        } else {
+                            Ok(batch)
+                        }
+                    })
+                    .transpose()
             }
         })
         .try_filter_map(|batch| future::ready(Ok(batch)));
@@ -415,6 +454,7 @@ async fn open_segment_scan<S, E>(
     index_column: &str,
     start: S,
     end: E,
+    canonical: Option<&(LogicalSchema, IndexSpec)>,
 ) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
@@ -427,7 +467,15 @@ where
             path: &segment.path,
         })?;
 
-    build_segment_scan_stream(reader, segment.path.clone(), index_column, start, end).await
+    build_segment_scan_stream(
+        reader,
+        segment.path.clone(),
+        index_column,
+        start,
+        end,
+        canonical,
+    )
+    .await
 }
 
 struct ScanState {
@@ -437,6 +485,7 @@ struct ScanState {
     index_column: String,
     start: IndexValue,
     end: IndexValue,
+    canonical: Option<(LogicalSchema, IndexSpec)>,
 }
 
 impl TimeSeriesTable {
@@ -445,7 +494,7 @@ impl TimeSeriesTable {
         start: IndexValue,
         end: IndexValue,
     ) -> Result<
-        impl futures::Stream<Item = Result<RecordBatch, ScanError>> + Send + 'static,
+        impl futures::Stream<Item = Result<RecordBatch, ScanError>> + Send + 'static + use<>,
         ScanError,
     > {
         validate_index_range(&self.index.kind, &start, &end).context(InvalidRangeSnafu)?;
@@ -461,6 +510,21 @@ impl TimeSeriesTable {
             index_column: self.index.column.clone(),
             start,
             end,
+            canonical: if SchemaPolicy::for_table(&self.state.table_meta)
+                == SchemaPolicy::AddNullable
+            {
+                Some((
+                    require_table_schema(&self.state.table_meta)
+                        .map_err(|source| ScanError::Schema {
+                            path: None,
+                            source: Box::new(source),
+                        })?
+                        .clone(),
+                    self.index.clone(),
+                ))
+            } else {
+                None
+            },
         };
 
         // Process one lazily opened segment stream at a time. `try_unfold`
@@ -486,6 +550,7 @@ impl TimeSeriesTable {
                         &state.index_column,
                         state.start.clone(),
                         state.end.clone(),
+                        state.canonical.as_ref(),
                     )
                     .await?,
                 );
@@ -719,6 +784,218 @@ mod tests {
         let mut writer = ArrowWriter::try_new(File::create(path)?, schema, Some(properties))?;
         writer.write(&batch)?;
         writer.close()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evolved_scan_captures_schema_and_segments_and_aligns_historical_rows() -> TestResult {
+        use arrow::array::{Array, Float64Array, StringArray};
+        let temp = TempDir::new()?;
+        let index = IndexSpec {
+            column: "ts".into(),
+            entity_columns: vec!["entity".into()],
+            kind: IndexKind::Int64 {
+                index_granularity: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let mut table = TimeSeriesTable::create(
+            TableLocation::local(temp.path()),
+            TableMeta::new_time_series(index),
+        )
+        .await?;
+        let old = RecordBatch::try_from_iter_with_nullable([
+            (
+                "entity",
+                Arc::new(StringArray::from(vec!["A", "B"])) as ArrayRef,
+                false,
+            ),
+            (
+                "ts",
+                Arc::new(Int64Array::from(vec![0, 1])) as ArrayRef,
+                false,
+            ),
+        ])?;
+        let new = RecordBatch::try_from_iter_with_nullable([
+            (
+                "score",
+                Arc::new(Float64Array::from(vec![7.0, 8.0])) as ArrayRef,
+                true,
+            ),
+            (
+                "ts",
+                Arc::new(Int64Array::from(vec![2, 3])) as ArrayRef,
+                false,
+            ),
+            (
+                "entity",
+                Arc::new(StringArray::from(vec!["A", "B"])) as ArrayRef,
+                false,
+            ),
+        ])?;
+        let canonical = LogicalSchema::try_from_arrow_schema(&Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("entity", DataType::Utf8, false),
+            Field::new("score", DataType::Float64, true),
+        ]))?;
+        for (name, batch, min, max) in
+            [("old.parquet", old, 0i64, 1i64), ("new.parquet", new, 2, 3)]
+        {
+            let mut writer =
+                ArrowWriter::try_new(File::create(temp.path().join(name))?, batch.schema(), None)?;
+            writer.write(&batch)?;
+            writer.close()?;
+            table
+                .state_mut()
+                .segments
+                .insert(name.into(), indexed_segment(name, min.into(), max.into()));
+        }
+        // No protocol gate is bypassed: a synthetic snapshot exercises the
+        // crate-private scanner while normal open/refresh still reject it.
+        table.state_mut().table_meta.logical_schema = Some(canonical.clone());
+        table
+            .state_mut()
+            .table_meta
+            .required_reader_features
+            .insert("schema_add_columns".into());
+        let stream = table.build_scan_stream(1i64.into(), 3i64.into())?;
+        table.state_mut().segments.clear();
+        table.state_mut().table_meta.logical_schema = None;
+        futures::pin_mut!(stream);
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next().await.transpose()? {
+            assert_eq!(batch.schema(), canonical.to_arrow_schema_ref()?);
+            let ts = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let entity = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let score = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    ts.value(row),
+                    entity.value(row).to_owned(),
+                    (!score.is_null(row)).then(|| score.value(row)),
+                ));
+            }
+        }
+        rows.sort_by_key(|row| row.0);
+        assert_eq!(
+            rows,
+            vec![(1, "B".into(), None), (2, "A".into(), Some(7.0))]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evolved_scan_preserves_backpressure_cancellation_and_lazy_errors() -> TestResult {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("source.parquet");
+        write_index_parquet(&path, Arc::new(Int64Array::from(vec![0, 1])))?;
+        let data = bytes::Bytes::from(std::fs::read(path)?);
+        let canonical = (
+            LogicalSchema::try_from_arrow_schema(&Schema::new(vec![
+                Field::new("ts", DataType::Int64, false),
+                Field::new("extra", DataType::Boolean, true),
+            ]))?,
+            IndexSpec {
+                column: "ts".into(),
+                entity_columns: vec![],
+                kind: IndexKind::Int64 {
+                    index_granularity: NonZeroU64::new(1).unwrap(),
+                },
+            },
+        );
+        let (reader, stats, release) = TrackingReader::with_gate(data.clone(), 2);
+        let mut stream = build_segment_scan_stream(
+            reader,
+            "source.parquet".into(),
+            "ts",
+            0i64,
+            2i64,
+            Some(&canonical),
+        )
+        .await?;
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
+        let batch = stream.next().await.transpose()?.unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(1).null_count(), 1);
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 1);
+        let mut next = stream.next();
+        assert!(futures::poll!(&mut next).is_pending());
+        drop(next);
+        drop(stream);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+        assert!(release.send(()).is_err());
+
+        let (reader, stats) = TrackingReader::with_failure(data, 1);
+        let mut stream = build_segment_scan_stream(
+            reader,
+            "source.parquet".into(),
+            "ts",
+            0i64,
+            2i64,
+            Some(&canonical),
+        )
+        .await?;
+        assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Err(ScanError::Parquet {
+                operation: "reading a batch",
+                ..
+            })
+        ));
+        drop(stream);
+        assert!(stats.dropped.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evolved_scan_schema_failure_is_lazy_and_terminal() -> TestResult {
+        let temp = TempDir::new()?;
+        let kind = IndexKind::Int64 {
+            index_granularity: NonZeroU64::new(1).unwrap(),
+        };
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), integer_table_meta(kind))
+                .await?;
+        table
+            .state_mut()
+            .table_meta
+            .required_reader_features
+            .insert("schema_add_columns".into());
+        table.state_mut().table_meta.logical_schema =
+            Some(LogicalSchema::try_from_arrow_schema(&Schema::new(vec![
+                Field::new("ts", DataType::Int64, false),
+                Field::new("required", DataType::Boolean, false),
+            ]))?);
+        for path in ["a-invalid.parquet", "b-unopened.parquet"] {
+            table
+                .state_mut()
+                .segments
+                .insert(path.into(), indexed_segment(path, 0i64.into(), 1i64.into()));
+        }
+        let stream = table.build_scan_stream(0i64.into(), 2i64.into())?;
+        // Planning must succeed even though neither file exists yet.
+        write_index_parquet(
+            &temp.path().join("a-invalid.parquet"),
+            Arc::new(Int64Array::from(vec![0, 1])),
+        )?;
+        futures::pin_mut!(stream);
+        assert!(
+            matches!(stream.next().await.unwrap(), Err(ScanError::Schema { path: Some(path), source })
+            if path == "a-invalid.parquet" && matches!(&*source, SchemaCompatibilityError::MissingIncomingColumn { column } if column == "required"))
+        );
+        assert!(stream.next().await.is_none());
         Ok(())
     }
 
@@ -1009,6 +1286,7 @@ mod tests {
             "ts",
             0i64,
             2i64,
+            None,
         )
         .await?;
         assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
@@ -1036,6 +1314,7 @@ mod tests {
             "ts",
             0i64,
             2i64,
+            None,
         )
         .await?;
         assert_eq!(
@@ -1076,6 +1355,7 @@ mod tests {
             "ts",
             0i64,
             2i64,
+            None,
         )
         .await?;
 
@@ -1310,6 +1590,7 @@ mod tests {
             "ts",
             Utc.timestamp_millis_opt(0).single().unwrap(),
             Utc.timestamp_millis_opt(4_000).single().unwrap(),
+            None,
         )
         .await?;
 
@@ -1339,6 +1620,7 @@ mod tests {
             "ts",
             Utc.timestamp_millis_opt(0).single().unwrap(),
             Utc.timestamp_millis_opt(4_000).single().unwrap(),
+            None,
         )
         .await?;
         let mut timestamps = Vec::new();
@@ -1402,6 +1684,7 @@ mod tests {
             "ts",
             Utc.timestamp_millis_opt(10_000).single().unwrap(),
             Utc.timestamp_millis_opt(20_000).single().unwrap(),
+            None,
         )
         .await?;
 
@@ -1443,7 +1726,7 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = match open_segment_scan(&location, &segment, "ts", start, end).await {
+        let err = match open_segment_scan(&location, &segment, "ts", start, end, None).await {
             Err(err) => err,
             Ok(_) => panic!("missing ts column should error"),
         };
@@ -1477,7 +1760,7 @@ mod tests {
         let start = utc_datetime(2024, 1, 1, 0, 0, 0);
         let end = utc_datetime(2024, 1, 1, 0, 1, 0);
 
-        let err = match open_segment_scan(&location, &segment, "ts", start, end).await {
+        let err = match open_segment_scan(&location, &segment, "ts", start, end, None).await {
             Err(err) => err,
             Ok(_) => panic!("unsupported time type should error"),
         };

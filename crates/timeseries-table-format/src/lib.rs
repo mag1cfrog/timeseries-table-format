@@ -40,6 +40,7 @@
 //! environment variables. `table.scan.plan` covers physical plan construction
 //! only; DataFusion remains the source of query execution metrics.
 
+mod batch_schema;
 pub mod coverage;
 #[cfg(feature = "datafusion")]
 pub mod datafusion;
