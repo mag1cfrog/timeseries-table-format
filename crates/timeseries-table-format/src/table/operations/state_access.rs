@@ -140,7 +140,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn reserved_schema_add_columns_feature_still_rejects_open_and_refresh() -> TestResult {
+    async fn schema_add_columns_is_a_reader_feature_only() -> TestResult {
         let temp = TempDir::new()?;
         let location = TableLocation::local(temp.path());
         let mut table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
@@ -152,26 +152,14 @@ mod tests {
             .insert("schema_add_columns".into());
         assert!(matches!(
             meta.ensure_write_compatible(),
-            Err(TableProtocolError::UnsupportedReaderFeatures { .. })
+            Err(TableProtocolError::UnsupportedWriterFeatures { .. })
         ));
         TransactionLogStore::new(location.clone())
             .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(meta)])
             .await?;
-        assert!(
-            matches!(TimeSeriesTable::open(location).await, Err(TableError::Open {
-            source: crate::table::OpenTableError::Commit { source: CommitError::Protocol {
-                source: TableProtocolError::UnsupportedReaderFeatures { features }, ..
-            } }
-        }) if features == ["schema_add_columns"])
-        );
-        assert!(
-            matches!(table.refresh().await, Err(TableError::StateAccess {
-            source: TableStateAccessError::Commit { source: CommitError::Protocol {
-                source: TableProtocolError::UnsupportedReaderFeatures { features }, ..
-            } }
-        }) if features == ["schema_add_columns"])
-        );
-        assert_eq!(table.state(), &before);
+        let opened = TimeSeriesTable::open(location).await?;
+        assert!(table.refresh().await?);
+        assert_eq!(table.state(), opened.state());
         let mut writer_only = before.table_meta;
         writer_only
             .required_writer_features
@@ -183,7 +171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_reports_no_change_and_applies_a_new_index() -> TestResult {
+    async fn refresh_reports_no_change_and_applies_new_metadata() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -208,13 +196,9 @@ mod tests {
         );
 
         let mut updated_meta = meta;
-        let TableKind::TimeSeries(index) = &mut updated_meta.kind else {
-            unreachable!("test metadata is time-series");
-        };
-        index.kind = IndexKind::Timestamp {
-            index_granularity: TimeIndexGranularity::Minutes(5),
-            timezone: None,
-        };
+        updated_meta
+            .required_writer_features
+            .insert("future_writer".into());
         TransactionLogStore::new(location)
             .commit_with_expected_version(1, vec![LogAction::UpdateTableMeta(updated_meta)])
             .await?;
@@ -225,7 +209,7 @@ mod tests {
         assert!(matches!(
             table.index_spec().kind,
             IndexKind::Timestamp {
-                index_granularity: TimeIndexGranularity::Minutes(5),
+                index_granularity: TimeIndexGranularity::Minutes(1),
                 ..
             }
         ));
@@ -314,16 +298,16 @@ mod tests {
                 .await
                 .expect_err("generic update must fail"),
             TableError::StateAccess {
-                source: TableStateAccessError::NotTimeSeries {
-                    kind: TableKind::Generic
+                source: TableStateAccessError::Commit {
+                    source: CommitError::SchemaEvolution { .. }
                 }
             }
         ));
         assert!(matches!(
             table.refresh().await.expect_err("generic update must fail"),
             TableError::StateAccess {
-                source: TableStateAccessError::NotTimeSeries {
-                    kind: TableKind::Generic
+                source: TableStateAccessError::Commit {
+                    source: CommitError::SchemaEvolution { .. }
                 }
             }
         ));

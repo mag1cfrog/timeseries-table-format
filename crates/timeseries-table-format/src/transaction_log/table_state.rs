@@ -169,7 +169,10 @@ impl TransactionLogStore {
                     LogAction::UpdateTableMeta(delta) => {
                         if let Some(previous) = &table_meta {
                             previous
-                                .ensure_valid_transition_to(&delta)
+                                .ensure_valid_protocol_transition_to(&delta)
+                                .map_err(CommitError::from)?;
+                            previous
+                                .ensure_valid_schema_transition_to(&delta)
                                 .map_err(CommitError::from)?;
                         }
                         // Full replacement of TableMeta.

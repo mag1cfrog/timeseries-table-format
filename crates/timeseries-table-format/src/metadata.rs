@@ -10,6 +10,7 @@ pub mod index;
 pub mod logical_schema;
 pub mod protocol;
 pub mod schema_compat;
+pub mod schema_evolution;
 pub mod segments;
 pub mod table;
 

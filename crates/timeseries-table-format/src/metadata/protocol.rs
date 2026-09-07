@@ -14,8 +14,23 @@ use crate::metadata::table::TableMeta;
 /// declared separately in the reader and writer feature sets.
 pub const TABLE_PROTOCOL_VERSION: u32 = 7;
 
-const SUPPORTED_READER_FEATURES: &[&str] = &[];
+pub(crate) const SCHEMA_ADD_COLUMNS_FEATURE: &str = "schema_add_columns";
+const SUPPORTED_READER_FEATURES: &[&str] = &[SCHEMA_ADD_COLUMNS_FEATURE];
 const SUPPORTED_WRITER_FEATURES: &[&str] = &[];
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Override capabilities in one test future, including open/refresh/SQL replay.
+    pub(crate) static TEST_READER_FEATURES: &'static [&'static str];
+}
+
+fn supported_reader_features() -> &'static [&'static str] {
+    #[cfg(test)]
+    if let Ok(features) = TEST_READER_FEATURES.try_with(|features| *features) {
+        return features;
+    }
+    SUPPORTED_READER_FEATURES
+}
 
 #[derive(Deserialize)]
 pub(crate) struct RawTableProtocolRequirements {
@@ -128,11 +143,11 @@ impl TableMeta {
     }
 
     pub(crate) fn ensure_read_compatible(&self) -> Result<(), TableProtocolError> {
-        self.ensure_read_compatible_with(SUPPORTED_READER_FEATURES)
+        self.ensure_read_compatible_with(supported_reader_features())
     }
 
     pub(crate) fn ensure_write_compatible(&self) -> Result<(), TableProtocolError> {
-        self.ensure_write_compatible_with(SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES)
+        self.ensure_write_compatible_with(supported_reader_features(), SUPPORTED_WRITER_FEATURES)
     }
 
     fn ensure_read_compatible_with(
@@ -163,7 +178,11 @@ impl TableMeta {
         Ok(())
     }
 
-    pub(crate) fn ensure_valid_transition_to(&self, next: &Self) -> Result<(), TableProtocolError> {
+    /// Check monotonic protocol versions and feature requirements, without comparing schemas.
+    pub(crate) fn ensure_valid_protocol_transition_to(
+        &self,
+        next: &Self,
+    ) -> Result<(), TableProtocolError> {
         if next.protocol_version < self.protocol_version {
             return Err(TableProtocolError::ProtocolVersionDecreased {
                 previous: self.protocol_version,
@@ -201,7 +220,7 @@ impl RawTableProtocolRequirements {
         ensure_read_compatible(
             self.protocol_version,
             &self.required_reader_features,
-            SUPPORTED_READER_FEATURES,
+            supported_reader_features(),
         )
     }
 }
@@ -327,12 +346,16 @@ mod tests {
         additive
             .required_writer_features
             .insert("writer_b".to_string());
-        assert!(previous.ensure_valid_transition_to(&additive).is_ok());
+        assert!(
+            previous
+                .ensure_valid_protocol_transition_to(&additive)
+                .is_ok()
+        );
 
         let mut removed = previous.clone();
         removed.required_reader_features.clear();
         assert_eq!(
-            previous.ensure_valid_transition_to(&removed),
+            previous.ensure_valid_protocol_transition_to(&removed),
             Err(TableProtocolError::ReaderFeaturesRemoved {
                 features: vec!["reader_a".to_string(), "reader_b".to_string()],
             })
@@ -341,7 +364,7 @@ mod tests {
         let mut removed = previous.clone();
         removed.required_writer_features.clear();
         assert_eq!(
-            previous.ensure_valid_transition_to(&removed),
+            previous.ensure_valid_protocol_transition_to(&removed),
             Err(TableProtocolError::WriterFeaturesRemoved {
                 features: vec!["writer_a".to_string()],
             })
@@ -350,7 +373,7 @@ mod tests {
         let mut decreased = previous.clone();
         decreased.protocol_version -= 1;
         assert_eq!(
-            previous.ensure_valid_transition_to(&decreased),
+            previous.ensure_valid_protocol_transition_to(&decreased),
             Err(TableProtocolError::ProtocolVersionDecreased {
                 previous: TABLE_PROTOCOL_VERSION,
                 next: TABLE_PROTOCOL_VERSION - 1,

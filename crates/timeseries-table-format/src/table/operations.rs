@@ -1,5 +1,6 @@
 //! High-level operations on [`TimeSeriesTable`](super::TimeSeriesTable).
 
+mod add_columns;
 pub mod append;
 mod coverage;
 mod create;
@@ -9,6 +10,7 @@ mod scan;
 mod state_access;
 mod vacuum;
 
+pub use add_columns::AddColumnsError;
 pub use append::{AppendReport, error::AppendError};
 pub use coverage::CoverageQueryError;
 pub use create::CreateTableError;

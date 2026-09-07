@@ -8,8 +8,8 @@
 use snafu::prelude::*;
 
 use super::operations::{
-    AppendError, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError, ScanError,
-    TableStateAccessError, VacuumError,
+    AddColumnsError, AppendError, CoverageQueryError, CreateTableError, OpenTableError,
+    OptimizeError, ScanError, TableStateAccessError, VacuumError,
 };
 
 /// Errors from high-level time-series table operations.
@@ -21,6 +21,14 @@ use super::operations::{
 #[snafu(visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum TableError {
+    /// A nullable-column addition failed.
+    #[snafu(display("Column addition failed: {source}"))]
+    AddColumns {
+        /// Complete column-addition failure.
+        #[snafu(source, backtrace)]
+        source: AddColumnsError,
+    },
+
     /// A table creation operation failed.
     #[snafu(display("Table creation failed: {source}"))]
     Create {

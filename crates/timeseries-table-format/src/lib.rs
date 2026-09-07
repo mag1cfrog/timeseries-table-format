@@ -58,12 +58,14 @@ pub use metadata::index::{
 };
 pub use metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
 pub use metadata::protocol::TableProtocolError;
+pub use metadata::schema_evolution::SchemaEvolutionError;
 pub use metadata::table::TableMeta;
 pub use storage::TableLocation;
 pub use table::{
-    AppendError, AppendReport, CoverageQueryError, CreateTableError, OpenTableError, OptimizeError,
-    OptimizeReport, ScanError, TableError, TableStateAccessError, TimeSeriesTable, VacuumArtifact,
-    VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
+    AddColumnsError, AppendError, AppendReport, CoverageQueryError, CreateTableError,
+    OpenTableError, OptimizeError, OptimizeReport, ScanError, TableError, TableStateAccessError,
+    TimeSeriesTable, VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError,
+    VacuumMode, VacuumReport,
     append::{AppendRequest, IntoRecordBatchReader, ParquetCompression},
 };
 

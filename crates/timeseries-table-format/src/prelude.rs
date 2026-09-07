@@ -5,11 +5,12 @@
 
 pub use crate::coverage;
 pub use crate::{
-    AppendError, AppendReport, AppendRequest, CoverageQueryError, CreateTableError, IndexKind,
-    IndexSpec, IndexSpecError, IndexValue, IndexValueError, IntoRecordBatchReader, LogicalDataType,
-    LogicalField, LogicalSchema, OpenTableError, OptimizeError, OptimizeReport, ParquetCompression,
-    ParseTimeIndexGranularityError, ScanError, TableError, TableLocation, TableMeta,
-    TableProtocolError, TableStateAccessError, TimeIndexGranularity, TimeSeriesTable,
-    VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode,
-    VacuumReport, validate_index_range,
+    AddColumnsError, AppendError, AppendReport, AppendRequest, CoverageQueryError,
+    CreateTableError, IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
+    IntoRecordBatchReader, LogicalDataType, LogicalField, LogicalSchema, OpenTableError,
+    OptimizeError, OptimizeReport, ParquetCompression, ParseTimeIndexGranularityError, ScanError,
+    SchemaEvolutionError, TableError, TableLocation, TableMeta, TableProtocolError,
+    TableStateAccessError, TimeIndexGranularity, TimeSeriesTable, VacuumArtifact,
+    VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
+    validate_index_range,
 };

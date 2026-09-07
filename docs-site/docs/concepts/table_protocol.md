@@ -40,14 +40,76 @@ A write must pass the read check and support every required writer feature.
 | Unknown writer feature only | Allowed | Rejected |
 | Unknown reader and writer features | Rejected | Rejected |
 
-Opening, refreshing, scanning, and querying use the reader check. Append, optimize, and other
+Opening, refreshing, scanning, and querying use the reader check. Append, add-columns, optimize, and other
 mutations use the writer check before inspecting input or creating artifacts. A reader feature
 does not need to be repeated in the writer list because every write performs both checks.
 
 Rust callers can inspect `protocol_version()`, `required_reader_features()`, and
-`required_writer_features()` through `table.state().table_meta`. Higher-level integrations can
-call `TimeSeriesTable::ensure_write_compatible()` before preparing mutation input; the mutation
-itself checks again.
+`required_writer_features()` through `table.state().table_meta`. Each mutation checks compatibility
+before preparing its input or creating artifacts.
+
+## Nullable-column addition
+
+The `schema_add_columns` **reader feature** permits adding nullable top-level fields to an
+established canonical schema. Existing rows return null for those fields. The first successful
+addition declares the feature atomically in its `UpdateTableMeta` replacement; protocol version
+7 and existing reader/writer requirements remain unchanged. No writer-feature entry is needed.
+Installing a supporting client, creating a table, and ordinary appends do not activate it.
+
+Rust callers use `TimeSeriesTable::add_columns(Vec<LogicalField>)`:
+
+```rust
+use timeseries_table_format::metadata::logical_schema::{LogicalDataType, LogicalField};
+
+let version = table.add_columns(vec![LogicalField {
+    name: "score".to_string(),
+    data_type: LogicalDataType::Float64,
+    nullable: true,
+}]).await?;
+```
+
+The request must contain at least one field. An explicitly schematized empty table is eligible;
+a schemaless table must establish its schema first. Names are exact and case-sensitive: blank
+names, duplicates, collisions with existing fields, and non-nullable additions are rejected.
+Valid names retain their whitespace, and dots are literal characters rather than nested paths.
+Use SQL identifier quoting for names that need it.
+
+The complete resulting schema, including existing fields, must round-trip exactly through the
+existing logical, Arrow, and Parquet schema model. The serialized commit must also fit the log
+reader's JSON nesting limit; excessive nesting returns `CommitError::CommitSerialization` before
+any commit file is created or `CURRENT` changes.
+This includes complete supported structs, lists, and maps as new nullable top-level fields;
+it excludes legacy `Int96`, placeholder `Other` types, invalid parameters, and definitions whose
+names or types would change during conversion. Existing fields keep their order, names, types,
+and nullability. Index and entity-key definitions cannot change. Replay rejects undeclared
+additions, removed schemas, and non-additive changes, including invalid intermediate metadata
+replacements in a commit.
+
+An addition publishes one metadata-only commit. It does not read or rewrite historical Parquet
+data or coverage objects, and leaves segment metadata and coverage pointers intact. Appends to
+an evolved table may supply the new fields or omit nullable payload fields; the writer fills
+omissions with null and writes the complete canonical schema. Keys remain required. Optimization
+also writes the canonical schema while preserving historical nulls.
+
+The operation uses the handle's selected version without refreshing or retrying. On success it
+returns the committed version and updates only that handle. Concurrent additions, appends, or
+optimization may conflict, even when their changes seem disjoint. `AddColumnsError::Commit`
+preserves `CommitError::Conflict` for an observed version mismatch and
+`CommitError::Storage` with `StorageError::AlreadyExists` for a create-only race. Definite
+prepublication failures leave the handle and existing objects unchanged. On
+`CommitError::AmbiguousOutcome`, reopen and reconcile the log before retrying; do not assume
+success or rollback.
+
+DataFusion captures the schema when `TsTableProvider` is registered. If the selected scan
+snapshot has a different schema, planning fails with a schema-changed diagnostic directing the
+caller to re-register the table. A reference to a newly added column may fail earlier during
+normal name resolution. Refresh or reopen the Rust handle, construct a new provider, and replace
+the registration. Ordinary appends and optimization with the same schema still refresh normally.
+Existing Rust handles, native scans, and already built physical plans retain their snapshots.
+
+This feature does not permit dropping, renaming, reordering, or retyping columns, nested-field
+edits, defaults, automatic schema merging, or backfilling values. Its meaning will not be expanded
+to cover those operations.
 
 ## Adding a feature
 

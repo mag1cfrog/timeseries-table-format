@@ -93,6 +93,20 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum CommitError {
+    /// A persisted metadata update violates the nullable-addition contract.
+    #[snafu(
+        context(false),
+        display("Invalid persisted schema evolution: {source}")
+    )]
+    SchemaEvolution {
+        /// Original metadata transition validation failure.
+        #[snafu(
+            source(from(crate::metadata::schema_evolution::SchemaEvolutionError, Box::new)),
+            backtrace
+        )]
+        source: Box<crate::metadata::schema_evolution::SchemaEvolutionError>,
+    },
+
     /// The caller's expected_version does not match the CURRENT pointer.
     #[snafu(display("Commit conflict: expected version {expected}, but CURRENT is {found}"))]
     Conflict {
@@ -135,12 +149,12 @@ pub enum CommitError {
         backtrace: Backtrace,
     },
 
-    /// A commit payload could not be encoded as JSON.
-    #[snafu(display("Failed to serialize commit {version}: {source}"))]
+    /// A commit payload could not be encoded within the log reader's JSON limits.
+    #[snafu(display("Failed to encode a readable commit {version}: {source}"))]
     CommitSerialization {
         /// Commit version being encoded.
         version: u64,
-        /// JSON encoding failure.
+        /// JSON encoding or reader-limit validation failure.
         source: serde_json::Error,
         /// Backtrace captured at the transaction-log boundary.
         backtrace: Backtrace,
