@@ -204,7 +204,7 @@ impl TransactionLogStore {
     /// 2. If CURRENT != expected, return `CommitError::Conflict`.
     /// 3. Compute version = expected + 1 (with overflow check).
     /// 4. Build a `Commit` struct.
-    /// 5. Serialize to JSON.
+    /// 5. Serialize to JSON and verify it fits the log reader's JSON limits.
     /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
     ///    "create only if not exists" semantics (atomic guard).
     /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
@@ -298,7 +298,12 @@ impl TransactionLogStore {
             actions,
         };
 
-        let json = match serde_json::to_vec(&commit) {
+        let json = match serde_json::to_vec(&commit).and_then(|json| {
+            // Serialization permits deeper nesting than the JSON parser used
+            // by load_commit. Never publish a commit that the reader cannot parse.
+            serde_json::from_slice::<serde_json::Value>(&json)?;
+            Ok(json)
+        }) {
             Ok(json) => json,
             Err(error) => {
                 span.record("failure_stage", "serialization");
@@ -586,6 +591,52 @@ mod tests {
                 ("action_count", Some("0")),
                 ("failure_stage", Some("version_calculation")),
                 ("rollback_outcome", None),
+                ("outcome", Some("failed")),
+            ],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_unreadable_json_before_creating_files() -> TestResult {
+        use crate::metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
+
+        let (tmp, store) = create_test_log_store();
+        let mut meta = crate::table::test_util::make_basic_table_meta();
+        let mut nested = LogicalDataType::Int64;
+        for _ in 0..32 {
+            nested = LogicalDataType::Struct {
+                fields: vec![LogicalField {
+                    name: "child".into(),
+                    data_type: nested,
+                    nullable: true,
+                }],
+            };
+        }
+        let mut fields = meta.logical_schema().unwrap().columns().to_vec();
+        fields.push(LogicalField {
+            name: "nested".into(),
+            data_type: nested,
+            nullable: true,
+        });
+        meta.logical_schema = Some(LogicalSchema::new(fields)?);
+        let capture = TraceCapture::default();
+        let error = capture
+            .run(store.commit_with_expected_version(0, vec![LogAction::UpdateTableMeta(meta)]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CommitError::CommitSerialization { version: 1, source, .. } if source.is_syntax()
+        ));
+        assert_eq!(store.load_current_version().await?, 0);
+        assert_eq!(std::fs::read_dir(tmp.path())?.count(), 0);
+        assert_commit_span(
+            &capture,
+            &[
+                ("failure_stage", Some("serialization")),
+                ("committed_version", None),
                 ("outcome", Some("failed")),
             ],
         );

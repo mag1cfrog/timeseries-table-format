@@ -313,6 +313,54 @@ async fn invalid_requests_publish_nothing_and_preserve_the_handle() -> TestResul
 }
 
 #[tokio::test]
+async fn nested_additions_reopen_or_fail_before_publication() -> TestResult {
+    for (depth, accepted) in [(8, true), (24, true), (32, false)] {
+        let temp = TempDir::new()?;
+        let mut table =
+            TimeSeriesTable::create(TableLocation::local(temp.path()), table_meta()).await?;
+        let before = table.state().clone();
+        let objects = files(temp.path())?;
+        let mut nested = LogicalDataType::Int64;
+        for _ in 0..depth {
+            nested = LogicalDataType::Struct {
+                fields: vec![field("child", nested)],
+            };
+        }
+        let result = table.add_columns(vec![field("nested", nested)]).await;
+        if accepted {
+            assert_eq!(result?, 2);
+            assert_eq!(
+                TimeSeriesTable::open(table.location().clone())
+                    .await?
+                    .state(),
+                table.state()
+            );
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(TableError::AddColumns {
+                        source: AddColumnsError::Commit {
+                            source: CommitError::CommitSerialization { version: 2, source, .. }
+                        }
+                    }) if source.is_syntax()
+                ),
+                "depth {depth}: expected a JSON limit error before publication, got {result:?}"
+            );
+            assert_eq!(table.state(), &before);
+            assert_eq!(files(temp.path())?, objects);
+            assert_eq!(
+                TimeSeriesTable::open(table.location().clone())
+                    .await?
+                    .state(),
+                &before
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn addition_rejects_unreadable_existing_schema_before_publication() -> TestResult {
     // Logical metadata can contain legacy/placeholder types even though the
     // Arrow reader cannot use them as an evolved canonical schema.

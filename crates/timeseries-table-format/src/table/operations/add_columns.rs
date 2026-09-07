@@ -35,7 +35,7 @@ pub enum AddColumnsError {
     /// retrying. Neither success nor rollback can be assumed.
     #[snafu(context(false), display("Column addition commit error: {source}"))]
     Commit {
-        /// Original conflict, storage, or ambiguous-outcome failure.
+        /// Original encoding, conflict, storage, or ambiguous-outcome failure.
         #[snafu(backtrace)]
         source: CommitError,
     },
@@ -51,7 +51,8 @@ impl TimeSeriesTable {
     /// Names are exact and case-sensitive, must not be blank, and must not collide
     /// with existing fields or each other. All new fields must be nullable, and
     /// the complete resulting schema must round-trip exactly through the existing
-    /// Logical/Arrow/Parquet schema model.
+    /// Logical/Arrow/Parquet schema model and fit the transaction log's JSON
+    /// nesting limit. Excessive nesting is rejected before publication.
     /// The table must already have a canonical schema, even if it has no rows.
     ///
     /// Uses this handle's version without refreshing or retrying. Other handles

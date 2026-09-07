@@ -149,12 +149,12 @@ pub enum CommitError {
         backtrace: Backtrace,
     },
 
-    /// A commit payload could not be encoded as JSON.
-    #[snafu(display("Failed to serialize commit {version}: {source}"))]
+    /// A commit payload could not be encoded within the log reader's JSON limits.
+    #[snafu(display("Failed to encode a readable commit {version}: {source}"))]
     CommitSerialization {
         /// Commit version being encoded.
         version: u64,
-        /// JSON encoding failure.
+        /// JSON encoding or reader-limit validation failure.
         source: serde_json::Error,
         /// Backtrace captured at the transaction-log boundary.
         backtrace: Backtrace,

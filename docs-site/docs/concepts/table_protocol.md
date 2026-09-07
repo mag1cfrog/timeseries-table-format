@@ -75,7 +75,9 @@ Valid names retain their whitespace, and dots are literal characters rather than
 Use SQL identifier quoting for names that need it.
 
 The complete resulting schema, including existing fields, must round-trip exactly through the
-existing logical, Arrow, and Parquet schema model.
+existing logical, Arrow, and Parquet schema model. The serialized commit must also fit the log
+reader's JSON nesting limit; excessive nesting returns `CommitError::CommitSerialization` before
+any commit file is created or `CURRENT` changes.
 This includes complete supported structs, lists, and maps as new nullable top-level fields;
 it excludes legacy `Int96`, placeholder `Other` types, invalid parameters, and definitions whose
 names or types would change during conversion. Existing fields keep their order, names, types,
