@@ -8,6 +8,9 @@ mod open;
 mod optimize;
 mod scan;
 mod state_access;
+// Internal staging is consumed by the following transactional-update slices.
+#[allow(dead_code)]
+pub(crate) mod update_prepare;
 mod vacuum;
 
 pub use add_columns::AddColumnsError;

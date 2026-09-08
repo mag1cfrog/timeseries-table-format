@@ -1,0 +1,124 @@
+{
+  "os": "Microsoft Windows 10.0.26200",
+  "architecture": "X64",
+  "cpu": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "binary": "E:\\repo\\timeseries-table-format\\target\\debug\\deps\\timeseries_table_format-a5222c4fc29969b9.exe",
+  "git_base": "f1b90dbdbcde6783617095589f7c4a4909df27d6",
+  "dirty": true,
+  "rss_method": "Windows PeakWorkingSet64 sampled every 20 ms; ready sample includes allocator reuse from fixture generation",
+  "measurements": [
+    {
+      "parameters": {
+        "baseline_segment_metadata_bytes": 961,
+        "logical_source_batch_bytes": 4096,
+        "logical_update_bytes": 65536,
+        "mode": "shuffled",
+        "segment_descriptors": 4,
+        "sort_budget_bytes": 65536,
+        "source_batch_rows": 256,
+        "target_row_group_rows": 1024,
+        "target_rows": 16384,
+        "update_rows": 4096
+      },
+      "result": {
+        "elapsed_seconds": 1.0356115,
+        "initial_runs": 171,
+        "key_discovery_bytes_read": 397644,
+        "largest_record_bytes": 873,
+        "peak_scratch_bytes": 8191436,
+        "peak_sort_bytes": 65520,
+        "projected_column_bytes": 152352,
+        "target_rows_read": 16384
+      },
+      "peak_rss_bytes": 14270464,
+      "sampled_ready_rss_bytes": 12804096,
+      "peak_handles": 85,
+      "sampled_ready_handles": 82
+    },
+    {
+      "parameters": {
+        "baseline_segment_metadata_bytes": 961,
+        "logical_source_batch_bytes": 4096,
+        "logical_update_bytes": 65536,
+        "mode": "concentrated",
+        "segment_descriptors": 4,
+        "sort_budget_bytes": 65536,
+        "source_batch_rows": 256,
+        "target_row_group_rows": 1024,
+        "target_rows": 16384,
+        "update_rows": 4096
+      },
+      "result": {
+        "elapsed_seconds": 1.02792,
+        "initial_runs": 171,
+        "key_discovery_bytes_read": 397644,
+        "largest_record_bytes": 872,
+        "peak_scratch_bytes": 8184218,
+        "peak_sort_bytes": 65520,
+        "projected_column_bytes": 152352,
+        "target_rows_read": 16384
+      },
+      "peak_rss_bytes": 14295040,
+      "sampled_ready_rss_bytes": 12079104,
+      "peak_handles": 85,
+      "sampled_ready_handles": 82
+    },
+    {
+      "parameters": {
+        "baseline_segment_metadata_bytes": 965,
+        "logical_source_batch_bytes": 4096,
+        "logical_update_bytes": 262144,
+        "mode": "shuffled",
+        "segment_descriptors": 4,
+        "sort_budget_bytes": 65536,
+        "source_batch_rows": 256,
+        "target_row_group_rows": 1024,
+        "target_rows": 65536,
+        "update_rows": 16384
+      },
+      "result": {
+        "elapsed_seconds": 4.5565923,
+        "initial_runs": 679,
+        "key_discovery_bytes_read": 1664236,
+        "largest_record_bytes": 873,
+        "peak_scratch_bytes": 33048857,
+        "peak_sort_bytes": 65520,
+        "projected_column_bytes": 609408,
+        "target_rows_read": 65536
+      },
+      "peak_rss_bytes": 14286848,
+      "sampled_ready_rss_bytes": 12742656,
+      "peak_handles": 85,
+      "sampled_ready_handles": 82
+    },
+    {
+      "parameters": {
+        "baseline_segment_metadata_bytes": 965,
+        "logical_source_batch_bytes": 4096,
+        "logical_update_bytes": 262144,
+        "mode": "concentrated",
+        "segment_descriptors": 4,
+        "sort_budget_bytes": 65536,
+        "source_batch_rows": 256,
+        "target_row_group_rows": 1024,
+        "target_rows": 65536,
+        "update_rows": 16384
+      },
+      "result": {
+        "elapsed_seconds": 4.6498449,
+        "initial_runs": 679,
+        "key_discovery_bytes_read": 1664236,
+        "largest_record_bytes": 873,
+        "peak_scratch_bytes": 33023864,
+        "peak_sort_bytes": 65520,
+        "projected_column_bytes": 609408,
+        "target_rows_read": 65536
+      },
+      "peak_rss_bytes": 14831616,
+      "sampled_ready_rss_bytes": 12808192,
+      "peak_handles": 85,
+      "sampled_ready_handles": 83
+    }
+  ]
+}

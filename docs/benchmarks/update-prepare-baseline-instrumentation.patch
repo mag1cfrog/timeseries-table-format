@@ -1,0 +1,87 @@
+--- a/crates/timeseries-table-format/src/table/operations/update_prepare/spool.rs
++++ b/crates/timeseries-table-format/src/table/operations/update_prepare/spool.rs
+@@ -7,0 +8 @@
++    sync::{Arc, atomic::{AtomicU64, Ordering}},
+@@ -25,0 +27,2 @@
++    pub(crate) scratch_bytes_written: u64,
++    pub(crate) scratch_bytes_read: Arc<AtomicU64>,
+@@ -99,0 +103 @@
++        self.metrics.scratch_bytes_written += bytes;
+@@ -203,0 +208 @@
++    bytes_read: Arc<AtomicU64>,
+@@ -215,0 +221 @@
++            bytes_read: scratch.metrics.scratch_bytes_read.clone(),
+@@ -220 +226,10 @@
+-        self.read_record().map_err(|e| io_error(&self.path, e))
++        if self.finished {
++            return Ok(None);
++        }
++        let result = self.read_record().map_err(|e| io_error(&self.path, e));
++        if let Ok(Some(record)) = &result {
++            self.bytes_read.fetch_add((record.order.len() + record.key.len() + record.values.len() + 72) as u64, Ordering::Relaxed);
++        } else if matches!(result, Ok(None)) && self.finished {
++            self.bytes_read.fetch_add(16, Ordering::Relaxed);
++        }
++        result
+--- a/crates/timeseries-table-format/src/table/operations/update_prepare/tests.rs
++++ b/crates/timeseries-table-format/src/table/operations/update_prepare/tests.rs
+@@ -682,0 +683 @@
++    let payload_bytes = parameter("TST_UPDATE_PAYLOAD_BYTES", 0)?;
+@@ -688,3 +689,29 @@
+-            && updates <= target_rows / 4
+-    );
+-    let empty = simple(vec![], vec![])?;
++            && updates
++                <= if concentrated {
++                    target_rows / 4
++                } else {
++                    target_rows
++                }
++    );
++    let batch = |keys: Vec<Option<i64>>,
++                 filled: bool|
++     -> std::result::Result<RecordBatch, ArrowError> {
++        if payload_bytes == 0 {
++            let values = vec![if filled { Some(7) } else { None }; keys.len()];
++            return simple(keys, values);
++        }
++        let bytes = vec![7_u8; payload_bytes];
++        let values =
++            arrow::array::BinaryArray::from(vec![
++                if filled { Some(bytes.as_slice()) } else { None };
++                keys.len()
++            ]);
++        RecordBatch::try_new(
++            Arc::new(Schema::new(vec![
++                Field::new("idx", DataType::Int64, true),
++                Field::new("value", DataType::Binary, true),
++            ])),
++            vec![Arc::new(Int64Array::from(keys)), Arc::new(values)],
++        )
++    };
++    let empty = batch(vec![], false)?;
+@@ -706 +733 @@
+-            writer.write(&simple(
++            writer.write(&batch(
+@@ -710 +737 @@
+-                vec![None; end - start],
++                false,
+@@ -730 +757 @@
+-        simple(
++        batch(
+@@ -734 +761 @@
+-            vec![Some(7); end - start],
++            true,
+@@ -742,2 +769,3 @@
+-            "segment_descriptors": 4, "source_batch_rows": 256, "logical_source_batch_bytes": 4096,
+-            "logical_update_bytes": updates * 16, "target_row_group_rows": 1024,
++            "segment_descriptors": 4, "source_batch_rows": 256, "logical_source_batch_bytes": 256 * (8 + if payload_bytes == 0 { 8 } else { payload_bytes }),
++            "logical_update_bytes": updates * (8 + if payload_bytes == 0 { 8 } else { payload_bytes }), "target_row_group_rows": 1024,
++            "payload_bytes": payload_bytes,
+@@ -758 +785,0 @@
+-    let metrics = prepared.metrics().clone();
+@@ -763,0 +791 @@
++    let metrics = prepared.metrics().clone();
+@@ -779,0 +808,2 @@
++            "scratch_bytes_written": metrics.scratch_bytes_written,
++            "scratch_bytes_read": metrics.scratch_bytes_read.load(Ordering::Relaxed),

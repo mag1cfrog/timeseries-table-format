@@ -20,6 +20,9 @@ pub(crate) const APPEND_DATA_DIR: &str = "data/_managed/append";
 /// Reserved directory for Parquet segments created by entity rewrites.
 pub(crate) const ENTITY_REWRITE_DATA_DIR: &str = "data/_staged/entity-rewrite";
 
+/// Reserved private scratch for keyed update preparation (never live segments).
+pub(crate) const UPDATE_PREPARE_DIR: &str = "data/_staged/update-prepare";
+
 // ====================
 // Transaction log layout
 // ====================

@@ -264,6 +264,7 @@ pub enum VacuumError {
 enum ArtifactKind {
     Parquet,
     Coverage,
+    UpdateScratch,
     Unrecognized,
 }
 
@@ -300,6 +301,19 @@ fn is_managed_parquet_path(path: &str) -> bool {
 }
 
 fn artifact_kind(path: &str) -> ArtifactKind {
+    if let Some((attempt, file)) = path
+        .strip_prefix(storage::layout::UPDATE_PREPARE_DIR)
+        .and_then(|path| path.strip_prefix('/'))
+        .and_then(|path| path.split_once('/'))
+        && is_canonical_uuid(attempt)
+        && file.strip_suffix(".run").is_some_and(|ordinal| {
+            ordinal
+                .parse::<u64>()
+                .is_ok_and(|value| format!("{value:020}") == ordinal)
+        })
+    {
+        return ArtifactKind::UpdateScratch;
+    }
     if is_managed_parquet_path(path) {
         return ArtifactKind::Parquet;
     }
@@ -392,7 +406,7 @@ async fn classify_artifact(
                 VacuumArtifactDisposition::Removable,
                 VacuumArtifactReason::InvalidOrUnreadableParquet,
             ),
-            ArtifactKind::Parquet | ArtifactKind::Coverage => (
+            ArtifactKind::Parquet | ArtifactKind::Coverage | ArtifactKind::UpdateScratch => (
                 VacuumArtifactDisposition::Removable,
                 VacuumArtifactReason::Unreferenced,
             ),
@@ -603,6 +617,41 @@ mod tests {
 
     fn expired_cutoff() -> DateTime<Utc> {
         DateTime::from(SystemTime::UNIX_EPOCH + StdDuration::from_secs(1))
+    }
+
+    #[tokio::test]
+    async fn update_scratch_obeys_retention_and_exact_reserved_path_shape() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let prefix = "data/_staged/update-prepare/00000000-0000-0000-0000-000000000001";
+        let expired = format!("{prefix}/00000000000000000000.run");
+        let recent = format!("{prefix}/00000000000000000001.run");
+        let unknown = format!("{prefix}/1.run");
+        for path in [&expired, &recent, &unknown] {
+            write_new(location.as_ref(), Path::new(path), b"private scratch").await?;
+        }
+        mark_expired(&temp.path().join(&expired))?;
+        mark_expired(&temp.path().join(&unknown))?;
+        let report = table.vacuum(expired_cutoff(), VacuumMode::DryRun).await?;
+        assert_eq!(
+            artifact(&report, &expired).disposition,
+            VacuumArtifactDisposition::Removable
+        );
+        assert_eq!(
+            artifact(&report, &recent).reason,
+            VacuumArtifactReason::WithinRetention
+        );
+        assert_eq!(
+            artifact(&report, &unknown).reason,
+            VacuumArtifactReason::UnrecognizedArtifact
+        );
+        assert!(temp.path().join(&expired).exists());
+        table.vacuum(expired_cutoff(), VacuumMode::Apply).await?;
+        assert!(!temp.path().join(&expired).exists());
+        assert!(temp.path().join(&recent).exists());
+        assert!(temp.path().join(&unknown).exists());
+        Ok(())
     }
 
     fn referenced_segment(
