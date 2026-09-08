@@ -308,7 +308,7 @@ where
     Ok(())
 }
 
-async fn compute_coverage_bitmap_from_stream(
+pub(crate) async fn compute_coverage_bitmap_from_stream(
     mut reader: impl Stream<
         Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
     > + Unpin,

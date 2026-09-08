@@ -32,7 +32,6 @@ mod tests;
 use std::{
     collections::HashSet,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
     path::PathBuf,
     sync::{
         Arc,
@@ -57,6 +56,7 @@ use snafu::Snafu;
 
 use crate::{
     batch_schema::{BatchSchemaAlignment, MissingColumnPolicy},
+    formats::parquet::measured_file::MeasuredParquetFile,
     metadata::{
         index::IndexSpec,
         logical_schema::{LogicalSchema, LogicalTimestampUnit},
@@ -376,7 +376,7 @@ impl SourceSchema {
 }
 
 /// Read the raw value, including timestamp ticks. Never round through coverage.
-fn key_at(batch: &RecordBatch, key_count: usize, row: usize) -> Result<UpdateKey> {
+pub(super) fn key_at(batch: &RecordBatch, key_count: usize, row: usize) -> Result<UpdateKey> {
     use arrow::datatypes::*;
     let mut components = Vec::with_capacity(key_count);
     for (field, array) in batch
@@ -534,50 +534,6 @@ fn cleanup_failure(scratch: &mut Scratch, source: PrepareError) -> PrepareError 
     }
 }
 
-/// Counts bytes requested from the filesystem, including metadata and read-ahead.
-/// This uses the existing local backend; payload columns are never projected.
-struct DiscoveryFile {
-    file: File,
-    bytes: Arc<AtomicU64>,
-}
-struct DiscoveryRead {
-    file: File,
-    bytes: Arc<AtomicU64>,
-}
-
-impl Read for DiscoveryRead {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let bytes = self.file.read(buffer)?;
-        self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        Ok(bytes)
-    }
-}
-impl Length for DiscoveryFile {
-    fn len(&self) -> u64 {
-        self.file.len()
-    }
-}
-impl ChunkReader for DiscoveryFile {
-    type T = BufReader<DiscoveryRead>;
-    fn get_read(&self, start: u64) -> std::result::Result<Self::T, ParquetError> {
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
-        Ok(BufReader::new(DiscoveryRead {
-            file,
-            bytes: self.bytes.clone(),
-        }))
-    }
-    fn get_bytes(
-        &self,
-        start: u64,
-        length: usize,
-    ) -> std::result::Result<bytes::Bytes, ParquetError> {
-        let bytes = self.file.get_bytes(start, length)?;
-        self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        Ok(bytes)
-    }
-}
-
 async fn stage(
     scratch: &mut Scratch,
     root: &std::path::Path,
@@ -679,7 +635,7 @@ async fn stage(
             .map_err(|source| invalid(format!("invalid source path: {source}")))?;
         let path = root.join(&segment.path);
         let bytes_read = Arc::new(AtomicU64::new(0));
-        let file = DiscoveryFile {
+        let file = MeasuredParquetFile {
             file: File::open(&path).map_err(|e| io_error(&path, e))?,
             bytes: bytes_read.clone(),
         };

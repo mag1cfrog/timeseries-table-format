@@ -6,6 +6,7 @@
 pub mod coverage;
 pub mod entity_coverage;
 mod entity_rewrite;
+pub(crate) mod measured_file;
 pub mod rg_parallel;
 pub mod schema;
 pub(crate) mod segment_meta;
