@@ -4,7 +4,7 @@
   "cpu": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
   "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "binary": "E:\\repo\\timeseries-table-format\\target\\debug\\deps\\timeseries_table_format-a5222c4fc29969b9.exe",
-  "git_base": "0d04d7f96f10c02813ad54d527adc136d0d603b5",
+  "git_base": "f1b90dbdbcde6783617095589f7c4a4909df27d6",
   "dirty": true,
   "rss_method": "Windows PeakWorkingSet64 sampled every 20 ms; ready sample includes allocator reuse from fixture generation",
   "measurements": [
@@ -22,17 +22,17 @@
         "update_rows": 4096
       },
       "result": {
-        "elapsed_seconds": 0.679365,
+        "elapsed_seconds": 1.0356115,
         "initial_runs": 171,
-        "key_discovery_bytes_read": 397612,
+        "key_discovery_bytes_read": 397644,
         "largest_record_bytes": 873,
-        "peak_scratch_bytes": 7406252,
+        "peak_scratch_bytes": 8191436,
         "peak_sort_bytes": 65520,
         "projected_column_bytes": 152352,
         "target_rows_read": 16384
       },
-      "peak_rss_bytes": 14340096,
-      "sampled_ready_rss_bytes": 12816384,
+      "peak_rss_bytes": 14270464,
+      "sampled_ready_rss_bytes": 12804096,
       "peak_handles": 85,
       "sampled_ready_handles": 82
     },
@@ -50,17 +50,17 @@
         "update_rows": 4096
       },
       "result": {
-        "elapsed_seconds": 0.7015931,
+        "elapsed_seconds": 1.02792,
         "initial_runs": 171,
-        "key_discovery_bytes_read": 397612,
+        "key_discovery_bytes_read": 397644,
         "largest_record_bytes": 872,
-        "peak_scratch_bytes": 7399034,
+        "peak_scratch_bytes": 8184218,
         "peak_sort_bytes": 65520,
         "projected_column_bytes": 152352,
         "target_rows_read": 16384
       },
-      "peak_rss_bytes": 14368768,
-      "sampled_ready_rss_bytes": 12853248,
+      "peak_rss_bytes": 14295040,
+      "sampled_ready_rss_bytes": 12079104,
       "peak_handles": 85,
       "sampled_ready_handles": 82
     },
@@ -78,17 +78,17 @@
         "update_rows": 16384
       },
       "result": {
-        "elapsed_seconds": 3.0034501,
+        "elapsed_seconds": 4.5565923,
         "initial_runs": 679,
-        "key_discovery_bytes_read": 1664204,
+        "key_discovery_bytes_read": 1664236,
         "largest_record_bytes": 873,
-        "peak_scratch_bytes": 29900105,
+        "peak_scratch_bytes": 33048857,
         "peak_sort_bytes": 65520,
         "projected_column_bytes": 609408,
         "target_rows_read": 65536
       },
       "peak_rss_bytes": 14286848,
-      "sampled_ready_rss_bytes": 12025856,
+      "sampled_ready_rss_bytes": 12742656,
       "peak_handles": 85,
       "sampled_ready_handles": 82
     },
@@ -106,19 +106,19 @@
         "update_rows": 16384
       },
       "result": {
-        "elapsed_seconds": 2.9739885,
+        "elapsed_seconds": 4.6498449,
         "initial_runs": 679,
-        "key_discovery_bytes_read": 1664204,
+        "key_discovery_bytes_read": 1664236,
         "largest_record_bytes": 873,
-        "peak_scratch_bytes": 29875112,
+        "peak_scratch_bytes": 33023864,
         "peak_sort_bytes": 65520,
         "projected_column_bytes": 609408,
         "target_rows_read": 65536
       },
-      "peak_rss_bytes": 14417920,
-      "sampled_ready_rss_bytes": 12849152,
+      "peak_rss_bytes": 14831616,
+      "sampled_ready_rss_bytes": 12808192,
       "peak_handles": 85,
-      "sampled_ready_handles": 82
+      "sampled_ready_handles": 83
     }
   ]
 }

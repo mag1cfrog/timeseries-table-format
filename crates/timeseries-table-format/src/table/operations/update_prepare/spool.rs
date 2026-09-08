@@ -9,6 +9,10 @@ use std::{
 
 use super::{PrepareError, Result};
 
+// No Vec can have this length. A run is complete only after this marker and
+// the record count; raw EOF always means an incomplete private write.
+const END_OF_RUN: u64 = u64::MAX;
+
 /// Counters describe owned sort buffers, not total process RSS or Arrow/Parquet allocations.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PreparationMetrics {
@@ -34,6 +38,7 @@ pub(super) struct Scratch {
     pub(super) directory: PathBuf,
     next_id: u64,
     live_bytes: u64,
+    armed: bool,
     pub(super) metrics: PreparationMetrics,
 }
 
@@ -48,6 +53,7 @@ impl Scratch {
             directory,
             next_id: 0,
             live_bytes: 0,
+            armed: true,
             metrics: PreparationMetrics::default(),
         })
     }
@@ -70,8 +76,14 @@ impl Scratch {
         Ok((id, BufWriter::new(file)))
     }
 
-    fn completed(&mut self, id: u64, mut writer: BufWriter<File>) -> Result<()> {
+    fn completed(&mut self, id: u64, mut writer: BufWriter<File>, records: u64) -> Result<()> {
         let path = self.path(id);
+        writer
+            .write_all(&END_OF_RUN.to_le_bytes())
+            .map_err(|e| io_error(&path, e))?;
+        writer
+            .write_all(&records.to_le_bytes())
+            .map_err(|e| io_error(&path, e))?;
         writer.flush().map_err(|e| io_error(&path, e))?;
         let bytes = writer
             .get_ref()
@@ -99,23 +111,36 @@ impl Scratch {
     /// Keep at most one typed cleanup example, even if a whole disk is inaccessible.
     /// Drop retries remaining files; vacuum can reclaim process-interrupted leftovers.
     pub(super) fn cleanup(&mut self) -> Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
         let mut first = None;
         let mut failures = 0_u64;
         let entries = match fs::read_dir(&self.directory) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.armed = false;
+                return Ok(());
+            }
             Err(e) => return Err(io_error(&self.directory, e)),
         };
         for entry in entries {
             let result = entry.and_then(|entry| fs::remove_file(entry.path()));
             if let Err(e) = result {
+                if e.kind() == io::ErrorKind::NotFound {
+                    continue;
+                }
                 failures += 1;
                 first.get_or_insert(e);
             }
         }
-        if let Err(e) = fs::remove_dir(&self.directory) {
-            failures += 1;
-            first.get_or_insert(e);
+        match fs::remove_dir(&self.directory) {
+            Ok(()) => self.armed = false,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.armed = false,
+            Err(e) => {
+                failures += 1;
+                first.get_or_insert(e);
+            }
         }
         if let Some(source) = first {
             Err(PrepareError::Cleanup {
@@ -154,7 +179,19 @@ impl Record {
             writer.write_all(value)?;
         }
         writer.write_all(&self.segment.to_le_bytes())?;
-        writer.write_all(&self.row.to_le_bytes())
+        writer.write_all(&self.row.to_le_bytes())?;
+        writer.write_all(self.checksum().as_bytes())
+    }
+
+    fn checksum(&self) -> blake3::Hash {
+        let mut hash = blake3::Hasher::new();
+        for value in [&self.order, &self.key, &self.values] {
+            hash.update(&(value.len() as u64).to_le_bytes());
+            hash.update(value);
+        }
+        hash.update(&self.segment.to_le_bytes());
+        hash.update(&self.row.to_le_bytes());
+        hash.finalize()
     }
 }
 
@@ -162,6 +199,8 @@ pub(super) struct RunReader {
     path: PathBuf,
     reader: BufReader<File>,
     max_record: usize,
+    records_read: u64,
+    finished: bool,
 }
 
 impl RunReader {
@@ -172,6 +211,8 @@ impl RunReader {
             path,
             reader,
             max_record: scratch.metrics.largest_record_bytes,
+            records_read: 0,
+            finished: false,
         })
     }
 
@@ -180,11 +221,22 @@ impl RunReader {
     }
 
     fn read_record(&mut self) -> io::Result<Option<Record>> {
-        let mut length = [0; 8];
-        if self.reader.read(&mut length[..1])? == 0 {
+        if self.finished {
             return Ok(None);
         }
-        self.reader.read_exact(&mut length[1..])?;
+        let mut length = [0; 8];
+        self.reader.read_exact(&mut length)?;
+        if u64::from_le_bytes(length) == END_OF_RUN {
+            self.reader.read_exact(&mut length)?;
+            if u64::from_le_bytes(length) != self.records_read {
+                return Err(io::Error::other("scratch run record count mismatch"));
+            }
+            if self.reader.read(&mut [0; 1])? != 0 {
+                return Err(io::Error::other("trailing bytes after scratch run footer"));
+            }
+            self.finished = true;
+            return Ok(None);
+        }
         let mut remaining = self.max_record;
         let mut read_value =
             |length: [u8; 8], reader: &mut BufReader<File>| -> io::Result<Vec<u8>> {
@@ -207,13 +259,23 @@ impl RunReader {
         self.reader.read_exact(&mut length)?;
         let segment = u64::from_le_bytes(length);
         self.reader.read_exact(&mut length)?;
-        Ok(Some(Record {
+        let record = Record {
             order,
             key,
             values,
             segment,
             row: u64::from_le_bytes(length),
-        }))
+        };
+        let mut checksum = [0; 32];
+        self.reader.read_exact(&mut checksum)?;
+        if record.checksum().as_bytes() != &checksum {
+            return Err(io::Error::other("scratch record checksum mismatch"));
+        }
+        self.records_read = self
+            .records_read
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("scratch record counter overflow"))?;
+        Ok(Some(record))
     }
 }
 
@@ -272,7 +334,7 @@ impl Sorter {
                 .write(&mut writer)
                 .map_err(|e| io_error(&scratch.path(id), e))?;
         }
-        scratch.completed(id, writer)?;
+        scratch.completed(id, writer, self.records.len() as u64)?;
         self.records = Vec::new();
         self.bytes = 0;
         self.runs += 1;
@@ -330,7 +392,7 @@ impl Sorter {
                     }
                 }
                 drop((left, right));
-                scratch.completed(output, writer)?;
+                scratch.completed(output, writer, written)?;
                 scratch.remove(left_id)?;
                 if let Some(id) = right_id {
                     scratch.remove(id)?;

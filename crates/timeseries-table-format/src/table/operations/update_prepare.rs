@@ -8,13 +8,14 @@
 //! Sort buffers are byte-budgeted. In addition, processing holds a caller batch,
 //! one aligned/serialized row, at most three merge records, fixed IO buffers,
 //! and a segment descriptor vector. Parquet's synchronous reader streams pages
-//! rather than fetching entire projected row groups. Decoder pages/dictionaries
+//! rather than fetching entire projected row groups. Footer input is checked
+//! against a fixed 64 MiB limit before metadata parsing. Decoder pages/dictionaries
 //! and footer metadata are library allocations, reported separately from the
 //! sort budget; the budget is not a process RSS limit. Projected row groups have
 //! a separate fixed decoded-size guard before any key pages are read, so huge
 //! dictionaries cannot silently turn discovery into an unbounded fallback.
-//! A largest source row may exceed
-//! the budget and is spilled alone. No all-row map or run descriptor list exists.
+//! A largest source row may exceed the budget and is spilled alone. No all-row
+//! map or run descriptor list exists.
 //!
 //! Scratch uses exclusive UUID directories under the reserved staging root.
 //! Explicit completion/error cleanup reports failures; Drop retries best effort.
@@ -45,6 +46,7 @@ use arrow::{
 use parquet::{
     arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder},
     errors::ParquetError,
+    file::metadata::FooterTail,
     file::reader::{ChunkReader, Length},
 };
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,7 @@ use crate::{
         logical_schema::{LogicalSchema, LogicalTimestampUnit},
         schema_compat::SchemaCompatibilityError,
         segments::SegmentMeta,
+        table::TableKind,
     },
     storage::{StorageLocation, TableLocation, ensure_canonical_relative_storage_path},
     transaction_log::TableState,
@@ -69,6 +72,7 @@ const DEFAULT_SORT_BYTES: usize = 8 * 1024 * 1024;
 // total uncompressed input independently of row count, with room above append's
 // ordinary 128 MiB row-group target. Oversized physical layouts fail explicitly.
 const MAX_PROJECTED_ROW_GROUP_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PARQUET_FOOTER_BYTES: usize = 64 * 1024 * 1024;
 type Result<T> = std::result::Result<T, PrepareError>;
 
 /// Complete typed components; nulls survive diagnostics, never successful keys.
@@ -127,6 +131,12 @@ pub(crate) enum PrepareError {
         uncompressed_bytes: u64,
         limit: u64,
     },
+    #[snafu(display("Parquet footer at {path} declares {metadata_bytes} bytes; limit {limit}"))]
+    TargetFooterResource {
+        path: String,
+        metadata_bytes: usize,
+        limit: usize,
+    },
     #[snafu(display("Update IO at {}: {source}", path.display()))]
     Io {
         path: PathBuf,
@@ -183,9 +193,13 @@ pub(crate) struct MatchedUpdate {
     pub(crate) values: RecordBatch,
 }
 
+/// Consumers must drain through `Ok(None)` before treating preparation as fully
+/// consumed: this validates the completion footer and expected row count.
+/// `close` abandons the cursor and cleans scratch without validating unread rows.
 pub(crate) struct PreparedUpdates {
     // Reader must close before Scratch drops (also on Windows).
     reader: Option<RunReader>,
+    remaining_rows: u64,
     scratch: Scratch,
     pub(crate) version: u64,
     pub(crate) segments: Vec<SegmentMeta>,
@@ -221,8 +235,16 @@ impl PreparedUpdates {
             return Ok(None);
         };
         let Some(record) = reader.next()? else {
+            if self.remaining_rows != 0 {
+                return Err(invalid(
+                    "prepared cursor ended before its matched row count",
+                ));
+            }
             return Ok(None);
         };
+        if self.remaining_rows == 0 {
+            return Err(invalid("prepared cursor exceeds its matched row count"));
+        }
         let segment_index =
             usize::try_from(record.segment).map_err(|_| invalid("invalid staged segment index"))?;
         let Some(segment) = self.segments.get(segment_index) else {
@@ -240,10 +262,12 @@ impl PreparedUpdates {
         if values.num_rows() != 1 || values.schema() != self.schema || ipc.next().is_some() {
             return Err(invalid("invalid staged row schema or count"));
         }
+        let key = decode(&record.key)?;
+        self.remaining_rows -= 1;
         Ok(Some(MatchedUpdate {
             segment_index,
             row: record.row,
-            key: decode(&record.key)?,
+            key,
             values,
         }))
     }
@@ -413,17 +437,15 @@ fn validate_value(field: &Field, array: &ArrayRef, row: usize, path: &str) -> Re
 pub(crate) async fn prepare_updates(
     location: &TableLocation,
     state: &TableState,
-    index: &IndexSpec,
     source: impl RecordBatchReader,
     columns: &[String],
 ) -> Result<PreparedUpdates> {
-    prepare_with_budget(location, state, index, source, columns, DEFAULT_SORT_BYTES).await
+    prepare_with_budget(location, state, source, columns, DEFAULT_SORT_BYTES).await
 }
 
 async fn prepare_with_budget(
     location: &TableLocation,
     state: &TableState,
-    index: &IndexSpec,
     source: impl RecordBatchReader,
     columns: &[String],
     budget: usize,
@@ -431,6 +453,9 @@ async fn prepare_with_budget(
     if budget == 0 {
         return Err(invalid("sort budget must be positive"));
     }
+    let TableKind::TimeSeries(index) = &state.table_meta.kind else {
+        return Err(invalid("keyed updates require a time-series snapshot"));
+    };
     let schema = SourceSchema::new(state, index, source.schema(), columns)?;
     let StorageLocation::Local(root) = location.storage();
     let mut scratch = Scratch::create(root)?;
@@ -443,6 +468,7 @@ async fn prepare_with_budget(
             match reader {
                 Ok(reader) => Ok(PreparedUpdates {
                     reader: Some(reader),
+                    remaining_rows: matched_rows,
                     scratch,
                     version: state.version,
                     segments,
@@ -600,6 +626,11 @@ async fn stage(
                 tokio::task::yield_now().await;
             }
         }
+        if inspected != input_rows_seen {
+            return Err(invalid(
+                "staged source count differs from inspected source rows",
+            ));
+        }
     }
     let mut targets = Sorter::new(scratch, budget);
     let key_fields = schema.alignment.output_schema().fields()[..schema.key_count].to_vec();
@@ -617,6 +648,21 @@ async fn stage(
             path: segment.path.clone(),
             source,
         };
+        // Row-group limits run after footer parsing. Bound footer input first:
+        // a file with many tiny row groups must not bypass all resource checks.
+        let tail = file
+            .get_bytes(file.len().saturating_sub(8), 8)
+            .map_err(parquet_error)?;
+        let metadata_bytes = FooterTail::try_from(tail.as_ref())
+            .map_err(parquet_error)?
+            .metadata_length();
+        if metadata_bytes > MAX_PARQUET_FOOTER_BYTES {
+            return Err(PrepareError::TargetFooterResource {
+                path: segment.path.clone(),
+                metadata_bytes,
+                limit: MAX_PARQUET_FOOTER_BYTES,
+            });
+        }
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
         let mut projection = Vec::with_capacity(schema.key_count);
         for field in key_schema.fields() {
@@ -641,7 +687,30 @@ async fn stage(
             let mut uncompressed_bytes = 0_u64;
             for (column, metadata) in group.columns().iter().enumerate() {
                 if mask.leaf_included(column) {
-                    scratch.metrics.projected_column_bytes += metadata.compressed_size() as u64;
+                    // Parquet's byte_range() asserts these invariants. Validate
+                    // persisted values before decoder construction can reach it.
+                    let invalid_range = || {
+                        invalid(format!(
+                            "negative Parquet key-column byte range at {:?}, row group {row_group}, column {column}",
+                            segment.path
+                        ))
+                    };
+                    let compressed_bytes =
+                        u64::try_from(metadata.compressed_size()).map_err(|_| invalid_range())?;
+                    if metadata.data_page_offset() < 0
+                        || metadata
+                            .dictionary_page_offset()
+                            .is_some_and(|offset| offset < 0)
+                    {
+                        return Err(invalid_range());
+                    }
+                    scratch.metrics.projected_column_bytes = scratch
+                        .metrics
+                        .projected_column_bytes
+                        .checked_add(compressed_bytes)
+                        .ok_or(PrepareError::Resource {
+                            reason: "projected compressed byte counter overflow",
+                        })?;
                     uncompressed_bytes = uncompressed_bytes
                         .checked_add(
                             u64::try_from(metadata.uncompressed_size())

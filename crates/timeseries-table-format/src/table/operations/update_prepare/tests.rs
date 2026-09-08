@@ -22,7 +22,6 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 struct Fixture {
     dir: tempfile::TempDir,
     state: TableState,
-    index: IndexSpec,
     location: TableLocation,
 }
 
@@ -115,7 +114,6 @@ impl Fixture {
                 segments,
                 table_coverage: None,
             },
-            index,
             location,
         })
     }
@@ -243,7 +241,6 @@ async fn shuffled_updates_bind_exact_rows_across_segments_and_leave_table_unchan
     let mut prepared = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         source,
         &["value".into()],
         128,
@@ -298,7 +295,6 @@ async fn global_duplicates_unmatched_ambiguity_and_null_keys_are_typed() -> Test
         let result = prepare_with_budget(
             &fixture.location,
             &fixture.state,
-            &fixture.index,
             fixture.source(batches.into_iter().map(Ok).collect()),
             &["value".into()],
             128,
@@ -314,7 +310,6 @@ async fn global_duplicates_unmatched_ambiguity_and_null_keys_are_typed() -> Test
     let unmatched = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         fixture.source(vec![Ok(simple(vec![Some(1), Some(99)], vec![None; 2])?)]),
         &["value".into()],
         128,
@@ -328,7 +323,6 @@ async fn global_duplicates_unmatched_ambiguity_and_null_keys_are_typed() -> Test
     let null = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         fixture.source(vec![Ok(simple(vec![None], vec![None])?)]),
         &["value".into()],
         128,
@@ -349,7 +343,6 @@ async fn global_duplicates_unmatched_ambiguity_and_null_keys_are_typed() -> Test
     let ambiguous = prepare_updates(
         &corrupt.location,
         &corrupt.state,
-        &corrupt.index,
         corrupt.source(vec![Ok(simple(vec![Some(1)], vec![None])?)]),
         &["value".into()],
     )
@@ -363,7 +356,6 @@ async fn global_duplicates_unmatched_ambiguity_and_null_keys_are_typed() -> Test
     prepare_updates(
         &corrupt.location,
         &corrupt.state,
-        &corrupt.index,
         corrupt.source(vec![Ok(simple(vec![Some(2)], vec![None])?)]),
         &["value".into()],
     )
@@ -414,7 +406,6 @@ async fn composite_entities_reordered_columns_and_widening() -> TestResult {
     let mut prepared = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         reader,
         &["second".into(), "first".into()],
         128,
@@ -472,7 +463,6 @@ async fn unsigned_and_timestamp_keys_preserve_raw_values() -> TestResult {
         let mut prepared = prepare_with_budget(
             &fixture.location,
             &fixture.state,
-            &fixture.index,
             fixture.source(vec![Ok(batch.clone())]),
             &["value".into()],
             128,
@@ -492,7 +482,6 @@ async fn unsigned_and_timestamp_keys_preserve_raw_values() -> TestResult {
     let result = prepare_updates(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         fixture.source(vec![Ok(simple(vec![Some(2)], vec![None])?)]),
         &["value".into()],
     )
@@ -510,14 +499,8 @@ async fn advertised_schema_empty_batches_and_reader_failures_are_validated() -> 
     let fixture = Fixture::new(&[simple(vec![Some(1)], vec![None])?], &[])?;
     let before = fixture.snapshot_bytes()?;
     let empty = fixture.source(vec![]);
-    let mut prepared = prepare_updates(
-        &fixture.location,
-        &fixture.state,
-        &fixture.index,
-        empty,
-        &["value".into()],
-    )
-    .await?;
+    let mut prepared =
+        prepare_updates(&fixture.location, &fixture.state, empty, &["value".into()]).await?;
     assert_eq!(prepared.matched_rows, 0);
     assert!(prepared.next()?.is_none());
     for columns in [
@@ -531,7 +514,6 @@ async fn advertised_schema_empty_batches_and_reader_failures_are_validated() -> 
             prepare_updates(
                 &fixture.location,
                 &fixture.state,
-                &fixture.index,
                 fixture.source(vec![]),
                 &columns
             )
@@ -565,14 +547,7 @@ async fn advertised_schema_empty_batches_and_reader_failures_are_validated() -> 
             Arc::new(Schema::new(fields)),
         );
         assert!(matches!(
-            prepare_updates(
-                &fixture.location,
-                &fixture.state,
-                &fixture.index,
-                reader,
-                &["value".into()]
-            )
-            .await,
+            prepare_updates(&fixture.location, &fixture.state, reader, &["value".into()]).await,
             Err(PrepareError::Schema { .. })
         ));
     }
@@ -584,7 +559,6 @@ async fn advertised_schema_empty_batches_and_reader_failures_are_validated() -> 
         prepare_updates(
             &fixture.location,
             &fixture.state,
-            &fixture.index,
             fixture.source(vec![Ok(changed)]),
             &["value".into()]
         )
@@ -598,7 +572,6 @@ async fn advertised_schema_empty_batches_and_reader_failures_are_validated() -> 
     let result = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         fixture.source(vec![Ok(simple(vec![Some(1)], vec![None])?), Err(error)]),
         &["value".into()],
         128,
@@ -624,7 +597,6 @@ async fn drop_cancellation_and_explicit_cleanup_errors_preserve_ownership() -> T
     let mut future = Box::pin(prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         source,
         &columns,
         128,
@@ -640,7 +612,6 @@ async fn drop_cancellation_and_explicit_cleanup_errors_preserve_ownership() -> T
     let prepared = prepare_updates(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         fixture.source(vec![Ok(simple(vec![Some(1)], vec![None])?)]),
         &columns,
     )
@@ -779,7 +750,6 @@ async fn preparation_memory_benchmark() -> TestResult {
     let mut prepared = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         RecordBatchIterator::new(source, schema),
         &["value".into()],
         budget,
@@ -849,7 +819,6 @@ async fn nested_replacements_and_metadata_rules_survive_staging() -> TestResult 
     let mut prepared = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         RecordBatchIterator::new(vec![Ok(source)], source_schema),
         &["value".into()],
         128,
@@ -883,14 +852,7 @@ async fn nested_replacements_and_metadata_rules_survive_staging() -> TestResult 
         bad,
     );
     assert!(matches!(
-        prepare_updates(
-            &fixture.location,
-            &fixture.state,
-            &fixture.index,
-            reader,
-            &["value".into()]
-        )
-        .await,
+        prepare_updates(&fixture.location, &fixture.state, reader, &["value".into()]).await,
         Err(PrepareError::Schema { .. })
     ));
     // Even an existing unselected payload is an invalid extra field.
@@ -898,7 +860,6 @@ async fn nested_replacements_and_metadata_rules_survive_staging() -> TestResult 
         prepare_updates(
             &fixture.location,
             &fixture.state,
-            &fixture.index,
             fixture.source(vec![]),
             &["value".into()]
         )
@@ -931,7 +892,6 @@ async fn discovery_does_not_decode_or_stage_wide_unselected_payloads() -> TestRe
     let prepared = prepare_with_budget(
         &fixture.location,
         &fixture.state,
-        &fixture.index,
         reader,
         &["value".into()],
         128,
@@ -1000,5 +960,208 @@ fn oversized_target_key_layout_is_a_typed_resource_error() -> TestResult {
             ..
         })
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_boundary_truncation_is_not_successful_end_of_updates() -> TestResult {
+    let fixture = Fixture::new(&[simple(vec![Some(1)], vec![None])?], &[])?;
+    let mut prepared = prepare_updates(
+        &fixture.location,
+        &fixture.state,
+        fixture.source(vec![Ok(simple(vec![Some(1)], vec![Some(8)])?)]),
+        &["value".into()],
+    )
+    .await?;
+    let path = fs::read_dir(&prepared.scratch.directory)?
+        .next()
+        .ok_or("missing run")??
+        .path();
+    fs::OpenOptions::new().write(true).open(path)?.set_len(0)?;
+    assert!(
+        prepared.next().is_err(),
+        "lost staged rows must not become successful EOF"
+    );
+    fixture.no_scratch()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_configuration_comes_from_the_selected_snapshot() -> TestResult {
+    let mut fixture = Fixture::new(&[simple(vec![Some(1)], vec![None])?], &[])?;
+    fixture.state.table_meta.kind = TableKind::Generic;
+    let result = prepare_updates(
+        &fixture.location,
+        &fixture.state,
+        fixture.source(vec![]),
+        &["value".into()],
+    )
+    .await;
+    assert!(matches!(result, Err(PrepareError::InvalidInput { .. })));
+    fixture.no_scratch()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_footer_is_rejected_before_metadata_parsing() -> TestResult {
+    use std::io::Write;
+    let fixture = Fixture::new(&[simple(vec![Some(1)], vec![None])?], &[])?;
+    let metadata_bytes = MAX_PARQUET_FOOTER_BYTES + 1;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.dir.path().join("data/source-0.parquet"))?;
+    file.set_len(metadata_bytes as u64 + 8)?;
+    file.seek(SeekFrom::End(-8))?;
+    file.write_all(&(metadata_bytes as u32).to_le_bytes())?;
+    file.write_all(b"PAR1")?;
+    drop(file);
+    let result = prepare_updates(
+        &fixture.location,
+        &fixture.state,
+        fixture.source(vec![Ok(simple(vec![Some(1)], vec![Some(8)])?)]),
+        &["value".into()],
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PrepareError::TargetFooterResource { metadata_bytes: actual, .. }) if actual == metadata_bytes)
+    );
+    fixture.no_scratch()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn negative_parquet_key_byte_ranges_are_rejected_without_panicking() -> TestResult {
+    use futures::FutureExt;
+    use parquet::file::metadata::ParquetMetaDataWriter;
+    let fixture = Fixture::new(&[simple(vec![Some(1)], vec![None])?], &[])?;
+    let path = fixture.dir.path().join("data/source-0.parquet");
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
+    let metadata = builder.metadata().as_ref().clone();
+    drop(builder);
+    let column = metadata.row_group(0).column(0).clone();
+    for invalid_column in [
+        column
+            .clone()
+            .into_builder()
+            .set_total_compressed_size(-1)
+            .build()?,
+        column
+            .clone()
+            .into_builder()
+            .set_data_page_offset(-1)
+            .build()?,
+        column
+            .into_builder()
+            .set_dictionary_page_offset(Some(-1))
+            .build()?,
+    ] {
+        let mut columns = metadata.row_group(0).columns().to_vec();
+        columns[0] = invalid_column;
+        let group = metadata
+            .row_group(0)
+            .clone()
+            .into_builder()
+            .set_column_metadata(columns)
+            .build()?;
+        let invalid_metadata = metadata
+            .clone()
+            .into_builder()
+            .set_row_groups(vec![group])
+            .build();
+        ParquetMetaDataWriter::new(
+            fs::OpenOptions::new().append(true).open(&path)?,
+            &invalid_metadata,
+        )
+        .finish()?;
+        let before = fixture.snapshot_bytes()?;
+        let source = fixture.source(vec![Ok(simple(vec![Some(1)], vec![Some(8)])?)]);
+        let columns = ["value".into()];
+        let result = std::panic::AssertUnwindSafe(prepare_updates(
+            &fixture.location,
+            &fixture.state,
+            source,
+            &columns,
+        ))
+        .catch_unwind()
+        .await;
+        assert!(matches!(result, Ok(Err(PrepareError::InvalidInput { .. }))));
+        assert_eq!(before, fixture.snapshot_bytes()?);
+        fixture.no_scratch()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn successful_cleanup_releases_directory_ownership() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let mut scratch = Scratch::create(dir.path())?;
+    let path = scratch.directory.clone();
+    scratch.cleanup()?;
+    fs::create_dir(&path)?;
+    fs::write(path.join("unowned"), b"must survive a released guard")?;
+    scratch.cleanup()?;
+    drop(scratch);
+    assert!(path.join("unowned").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn scratch_checksum_footer_and_expected_count_detect_lost_or_changed_records() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let mut scratch = Scratch::create(dir.path())?;
+    let mut sorter = Sorter::new(&scratch, 128);
+    sorter.push(
+        &mut scratch,
+        Record {
+            order: vec![1],
+            key: vec![2],
+            values: vec![3],
+            segment: 4,
+            row: 5,
+        },
+    )?;
+    let id = sorter.finish(&mut scratch).await?;
+    let path = scratch.path(id);
+    let original = fs::read(&path)?;
+    for mutation in 0..4 {
+        let mut bytes = original.clone();
+        match mutation {
+            0 => {
+                bytes[26] ^= 1;
+            } // Change a value without changing lengths.
+            1 => {
+                bytes.truncate(bytes.len() - 16);
+            } // Complete record, absent footer.
+            2 => {
+                let last = bytes.len() - 8;
+                bytes[last] ^= 1;
+            } // Wrong footer count.
+            _ => bytes.push(0), // Bytes after an otherwise complete run.
+        }
+        fs::write(&path, bytes)?;
+        let mut reader = RunReader::open(&scratch, id)?;
+        let result = (|| -> Result<()> {
+            while reader.next()?.is_some() {}
+            Ok(())
+        })();
+        assert!(result.is_err(), "accepted scratch mutation {mutation}");
+    }
+    scratch.cleanup()?;
+    let fixture = Fixture::new(&[simple(vec![Some(1)], vec![None])?], &[])?;
+    let mut prepared = prepare_updates(
+        &fixture.location,
+        &fixture.state,
+        fixture.source(vec![Ok(simple(vec![Some(1)], vec![Some(8)])?)]),
+        &["value".into()],
+    )
+    .await?;
+    let run = fs::read_dir(&prepared.scratch.directory)?
+        .next()
+        .ok_or("missing run")??
+        .path();
+    // A valid empty run must still disagree with this cursor's expected count.
+    fs::write(run, [u64::MAX.to_le_bytes(), 0_u64.to_le_bytes()].concat())?;
+    assert!(prepared.next().is_err());
+    fixture.no_scratch()?;
     Ok(())
 }
