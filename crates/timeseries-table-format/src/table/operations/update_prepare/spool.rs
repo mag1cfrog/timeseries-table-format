@@ -2,9 +2,13 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, BufWriter, Read, Write},
+    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     mem::size_of,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use super::{PrepareError, Result};
@@ -23,6 +27,11 @@ pub(crate) struct PreparationMetrics {
     pub(crate) target_rows_read: u64,
     pub(crate) projected_column_bytes: u64,
     pub(crate) key_discovery_bytes_read: u64,
+    pub(crate) scratch_bytes_written: u64,
+    /// Logical scratch bytes consumed, including checksums and completion checks;
+    /// excludes OS cache behavior and BufReader read-ahead.
+    pub(crate) scratch_bytes_read: Arc<AtomicU64>,
+    pub(crate) largest_value_bytes: usize,
 }
 
 pub(super) fn io_error(path: &Path, source: io::Error) -> PrepareError {
@@ -97,6 +106,7 @@ impl Scratch {
                 reason: "scratch byte counter overflow",
             })?;
         self.metrics.peak_scratch_bytes = self.metrics.peak_scratch_bytes.max(self.live_bytes);
+        self.metrics.scratch_bytes_written += bytes;
         Ok(())
     }
 
@@ -160,24 +170,179 @@ impl Drop for Scratch {
     }
 }
 
+/// A reference into the single append-only value file. Sorts never copy values.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ValueLocation {
+    pub(super) offset: u64,
+    pub(super) length: u64,
+}
+
+pub(super) struct ValueWriter {
+    id: u64,
+    writer: BufWriter<File>,
+    bytes: u64,
+    rows: u64,
+    largest_value: usize,
+}
+
+pub(super) struct ValueFile {
+    id: u64,
+    bytes: u64,
+    rows: u64,
+    largest_value: usize,
+}
+
+impl ValueWriter {
+    /// Allocate before creating a Sorter, preserving its contiguous run IDs.
+    pub(super) fn new(scratch: &mut Scratch) -> Result<Self> {
+        let (id, writer) = scratch.writer()?;
+        Ok(Self {
+            id,
+            writer,
+            bytes: 0,
+            rows: 0,
+            largest_value: 0,
+        })
+    }
+
+    pub(super) fn push(&mut self, scratch: &mut Scratch, bytes: &[u8]) -> Result<ValueLocation> {
+        let location = ValueLocation {
+            offset: self.bytes,
+            length: bytes.len() as u64,
+        };
+        self.bytes = self
+            .bytes
+            .checked_add(location.length)
+            .and_then(|n| n.checked_add(32))
+            .ok_or(PrepareError::Resource {
+                reason: "value file size overflow",
+            })?;
+        self.writer
+            .write_all(bytes)
+            .and_then(|()| self.writer.write_all(blake3::hash(bytes).as_bytes()))
+            .map_err(|e| io_error(&scratch.path(self.id), e))?;
+        self.rows += 1;
+        self.largest_value = self.largest_value.max(bytes.len());
+        scratch.metrics.largest_value_bytes = self.largest_value;
+        scratch.live_bytes += location.length + 32;
+        scratch.metrics.peak_scratch_bytes =
+            scratch.metrics.peak_scratch_bytes.max(scratch.live_bytes);
+        Ok(location)
+    }
+
+    pub(super) fn finish(self, scratch: &mut Scratch) -> Result<ValueFile> {
+        scratch.live_bytes -= self.bytes;
+        scratch.completed(self.id, self.writer, self.rows)?;
+        Ok(ValueFile {
+            id: self.id,
+            bytes: self.bytes,
+            rows: self.rows,
+            largest_value: self.largest_value,
+        })
+    }
+}
+
+/// One bounded value allocation; arbitrary source order needs no all-block cache.
+/// Read exactly a value plus its checksum, avoiding wasted read-ahead per seek.
+pub(super) struct ValueReader {
+    reader: File,
+    path: PathBuf,
+    file: ValueFile,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl ValueReader {
+    pub(super) fn open(scratch: &Scratch, file: ValueFile) -> Result<Self> {
+        let path = scratch.path(file.id);
+        let mut reader = Self {
+            reader: File::open(&path).map_err(|e| io_error(&path, e))?,
+            path,
+            file,
+            bytes_read: scratch.metrics.scratch_bytes_read.clone(),
+        };
+        reader.validate_completion()?;
+        Ok(reader)
+    }
+
+    pub(super) fn validate_completion(&mut self) -> Result<()> {
+        let mut check = || -> io::Result<()> {
+            if self.reader.metadata()?.len() != self.file.bytes + 16 {
+                return Err(io::Error::other("value file size mismatch"));
+            }
+            self.reader.seek(SeekFrom::Start(self.file.bytes))?;
+            let mut footer = [0; 16];
+            self.reader.read_exact(&mut footer)?;
+            if footer
+                != [END_OF_RUN.to_le_bytes(), self.file.rows.to_le_bytes()]
+                    .concat()
+                    .as_slice()
+            {
+                return Err(io::Error::other("value file completion mismatch"));
+            }
+            Ok(())
+        };
+        let result = check().map_err(|e| io_error(&self.path, e));
+        if result.is_ok() {
+            self.bytes_read.fetch_add(16, Ordering::Relaxed);
+        }
+        result
+    }
+
+    pub(super) fn read(&mut self, location: ValueLocation) -> Result<Vec<u8>> {
+        let mut read = || -> io::Result<Vec<u8>> {
+            let length = usize::try_from(location.length).map_err(io::Error::other)?;
+            let end = location
+                .offset
+                .checked_add(location.length)
+                .and_then(|n| n.checked_add(32));
+            if length > self.file.largest_value || end.is_none_or(|end| end > self.file.bytes) {
+                return Err(io::Error::other("value reference outside written bounds"));
+            }
+            self.reader.seek(SeekFrom::Start(location.offset))?;
+            let framed_length = length
+                .checked_add(32)
+                .ok_or_else(|| io::Error::other("value size overflow"))?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(framed_length)
+                .map_err(io::Error::other)?;
+            bytes.resize(framed_length, 0);
+            self.reader.read_exact(&mut bytes)?;
+            if blake3::hash(&bytes[..length]).as_bytes() != &bytes[length..] {
+                return Err(io::Error::other("value checksum mismatch"));
+            }
+            bytes.truncate(length);
+            Ok(bytes)
+        };
+        let result = read().map_err(|e| io_error(&self.path, e));
+        if result.is_ok() {
+            self.bytes_read
+                .fetch_add(location.length + 32, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
 pub(super) struct Record {
     pub(super) order: Vec<u8>,
     pub(super) key: Vec<u8>,
-    pub(super) values: Vec<u8>,
+    pub(super) value: ValueLocation,
     pub(super) segment: u64,
     pub(super) row: u64,
 }
 
 impl Record {
     fn allocated_bytes(&self) -> usize {
-        self.order.capacity() + self.key.capacity() + self.values.capacity()
+        self.order.capacity() + self.key.capacity()
     }
 
     fn write(&self, writer: &mut impl Write) -> io::Result<()> {
-        for value in [&self.order, &self.key, &self.values] {
+        for value in [&self.order, &self.key] {
             writer.write_all(&(value.len() as u64).to_le_bytes())?;
             writer.write_all(value)?;
         }
+        writer.write_all(&self.value.offset.to_le_bytes())?;
+        writer.write_all(&self.value.length.to_le_bytes())?;
         writer.write_all(&self.segment.to_le_bytes())?;
         writer.write_all(&self.row.to_le_bytes())?;
         writer.write_all(self.checksum().as_bytes())
@@ -185,10 +350,12 @@ impl Record {
 
     fn checksum(&self) -> blake3::Hash {
         let mut hash = blake3::Hasher::new();
-        for value in [&self.order, &self.key, &self.values] {
+        for value in [&self.order, &self.key] {
             hash.update(&(value.len() as u64).to_le_bytes());
             hash.update(value);
         }
+        hash.update(&self.value.offset.to_le_bytes());
+        hash.update(&self.value.length.to_le_bytes());
         hash.update(&self.segment.to_le_bytes());
         hash.update(&self.row.to_le_bytes());
         hash.finalize()
@@ -196,11 +363,12 @@ impl Record {
 }
 
 pub(super) struct RunReader {
-    path: PathBuf,
+    pub(super) path: PathBuf,
     reader: BufReader<File>,
     max_record: usize,
     records_read: u64,
     finished: bool,
+    bytes_read: Arc<AtomicU64>,
 }
 
 impl RunReader {
@@ -213,11 +381,25 @@ impl RunReader {
             max_record: scratch.metrics.largest_record_bytes,
             records_read: 0,
             finished: false,
+            bytes_read: scratch.metrics.scratch_bytes_read.clone(),
         })
     }
 
     pub(super) fn next(&mut self) -> Result<Option<Record>> {
-        self.read_record().map_err(|e| io_error(&self.path, e))
+        if self.finished {
+            return Ok(None);
+        }
+        let result = self.read_record().map_err(|e| io_error(&self.path, e));
+        if let Ok(Some(record)) = &result {
+            self.bytes_read.fetch_add(
+                (record.order.len() + record.key.len() + 80) as u64,
+                Ordering::Relaxed,
+            );
+        } else if matches!(result, Ok(None)) && self.finished {
+            // Count the footer once; repeated EOF calls do not perform reads.
+            self.bytes_read.fetch_add(16, Ordering::Relaxed);
+        }
+        result
     }
 
     fn read_record(&mut self) -> io::Result<Option<Record>> {
@@ -255,14 +437,19 @@ impl RunReader {
         self.reader.read_exact(&mut length)?;
         let key = read_value(length, &mut self.reader)?;
         self.reader.read_exact(&mut length)?;
-        let values = read_value(length, &mut self.reader)?;
+        let value_offset = u64::from_le_bytes(length);
+        self.reader.read_exact(&mut length)?;
+        let value = ValueLocation {
+            offset: value_offset,
+            length: u64::from_le_bytes(length),
+        };
         self.reader.read_exact(&mut length)?;
         let segment = u64::from_le_bytes(length);
         self.reader.read_exact(&mut length)?;
         let record = Record {
             order,
             key,
-            values,
+            value,
             segment,
             row: u64::from_le_bytes(length),
         };
@@ -307,15 +494,26 @@ impl Sorter {
         // Account for Vec capacity as well as heap payloads. One oversized record
         // may exceed the budget; it is flushed alone, never accumulated with others.
         if !self.records.is_empty()
-            && self.bytes + bytes + (self.records.len() + 1) * size_of::<Record>() > self.budget
+            && self.bytes
+                + bytes
+                + self.records.capacity().max(self.records.len() + 1) * size_of::<Record>()
+                > self.budget
         {
             self.flush(scratch)?;
         }
-        self.records
-            .try_reserve_exact(1)
-            .map_err(|_| PrepareError::Resource {
-                reason: "sort allocation failed",
-            })?;
+        if self.records.len() == self.records.capacity() {
+            // Grow geometrically, but count unused slots against the byte budget.
+            // Reserving exactly one slot per row makes narrow-key runs allocation-heavy.
+            let max_slots = self.budget.saturating_sub(self.bytes + bytes) / size_of::<Record>();
+            let slots = (self.records.capacity().saturating_mul(2).max(16))
+                .min(max_slots)
+                .max(self.records.len() + 1);
+            self.records
+                .try_reserve_exact(slots - self.records.len())
+                .map_err(|_| PrepareError::Resource {
+                    reason: "sort allocation failed",
+                })?;
+        }
         self.bytes += bytes;
         self.records.push(record);
         let allocated = self.bytes + self.records.capacity() * size_of::<Record>();

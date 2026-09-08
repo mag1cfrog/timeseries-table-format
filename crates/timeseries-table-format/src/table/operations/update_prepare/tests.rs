@@ -189,31 +189,37 @@ fn assert_key_error(error: PrepareError, kind: KeyViolation, seen: u64) -> Updat
 #[tokio::test]
 async fn two_way_runs_preserve_every_record() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
-    let dir = tempfile::tempdir()?;
-    let mut scratch = Scratch::create(dir.path())?;
-    let mut sorter = Sorter::new(&scratch, 128);
-    for value in (0_u64..129).rev() {
-        sorter.push(
-            &mut scratch,
-            Record {
-                order: value.to_be_bytes().to_vec(),
-                key: vec![],
-                values: vec![],
-                segment: 0,
-                row: value,
-            },
-        )?;
+    for budget in [128, 4096] {
+        let dir = tempfile::tempdir()?;
+        let mut scratch = Scratch::create(dir.path())?;
+        let mut sorter = Sorter::new(&scratch, budget);
+        for value in (0_u64..129).rev() {
+            sorter.push(
+                &mut scratch,
+                Record {
+                    order: value.to_be_bytes().to_vec(),
+                    key: vec![0; (value % 37) as usize],
+                    value: ValueLocation::default(),
+                    segment: 0,
+                    row: value,
+                },
+            )?;
+        }
+        let run = sorter.finish(&mut scratch).await?;
+        let mut reader = RunReader::open(&scratch, run)?;
+        for value in 0..129 {
+            assert_eq!(reader.next()?.map(|record| record.row), Some(value));
+        }
+        assert!(reader.next()?.is_none());
+        assert!(scratch.metrics.initial_runs > 2);
+        assert!(
+            scratch.metrics.peak_sort_bytes
+                <= budget + scratch.metrics.largest_record_bytes + std::mem::size_of::<Record>()
+        );
+        drop(reader);
+        scratch.cleanup()?;
+        assert!(!scratch.directory.exists());
     }
-    let run = sorter.finish(&mut scratch).await?;
-    let mut reader = RunReader::open(&scratch, run)?;
-    for value in 0..129 {
-        assert_eq!(reader.next()?.map(|record| record.row), Some(value));
-    }
-    assert!(reader.next()?.is_none());
-    assert!(scratch.metrics.initial_runs > 2);
-    drop(reader);
-    scratch.cleanup()?;
-    assert!(!scratch.directory.exists());
     Ok(())
 }
 
@@ -630,7 +636,7 @@ async fn drop_cancellation_and_explicit_cleanup_errors_preserve_ownership() -> T
             Record {
                 order: vec![1],
                 key: vec![],
-                values: vec![],
+                value: ValueLocation::default(),
                 segment: 0,
                 row: 0,
             },
@@ -680,14 +686,41 @@ async fn preparation_memory_benchmark() -> TestResult {
     let target_rows = parameter("TST_UPDATE_TARGET_ROWS", 16_384)?;
     let updates = parameter("TST_UPDATE_ROWS", target_rows / 4)?;
     let budget = parameter("TST_UPDATE_SORT_BYTES", 65_536)?;
+    let payload_bytes = parameter("TST_UPDATE_PAYLOAD_BYTES", 0)?;
     let concentrated = std::env::var("TST_UPDATE_MODE").as_deref() == Ok("concentrated");
     assert!(
         target_rows.is_power_of_two()
             && target_rows >= 4096
             && updates > 0
-            && updates <= target_rows / 4
+            && updates
+                <= if concentrated {
+                    target_rows / 4
+                } else {
+                    target_rows
+                }
     );
-    let empty = simple(vec![], vec![])?;
+    let batch = |keys: Vec<Option<i64>>,
+                 filled: bool|
+     -> std::result::Result<RecordBatch, ArrowError> {
+        if payload_bytes == 0 {
+            let values = vec![if filled { Some(7) } else { None }; keys.len()];
+            return simple(keys, values);
+        }
+        let bytes = vec![7_u8; payload_bytes];
+        let values =
+            arrow::array::BinaryArray::from(vec![
+                if filled { Some(bytes.as_slice()) } else { None };
+                keys.len()
+            ]);
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("idx", DataType::Int64, true),
+                Field::new("value", DataType::Binary, true),
+            ])),
+            vec![Arc::new(Int64Array::from(keys)), Arc::new(values)],
+        )
+    };
+    let empty = batch(vec![], false)?;
     let mut fixture = Fixture::new(&vec![empty; 4], &[])?;
     let rows_per_segment = target_rows / 4;
     for segment in 0..4 {
@@ -703,11 +736,11 @@ async fn preparation_memory_benchmark() -> TestResult {
         )?;
         for start in (0..rows_per_segment).step_by(256) {
             let end = (start + 256).min(rows_per_segment);
-            writer.write(&simple(
+            writer.write(&batch(
                 (start..end)
                     .map(|row| Some((segment * rows_per_segment + row) as i64))
                     .collect(),
-                vec![None; end - start],
+                false,
             )?)?;
         }
         writer.close()?;
@@ -727,11 +760,11 @@ async fn preparation_memory_benchmark() -> TestResult {
         } else {
             target_rows
         };
-        simple(
+        batch(
             (start..end)
                 .map(|row| Some(((row * 12_289) % domain) as i64))
                 .collect(),
-            vec![Some(7); end - start],
+            true,
         )
     });
     println!(
@@ -739,8 +772,9 @@ async fn preparation_memory_benchmark() -> TestResult {
         serde_json::json!({
             "target_rows": target_rows, "update_rows": updates, "sort_budget_bytes": budget,
             "mode": if concentrated { "concentrated" } else { "shuffled" },
-            "segment_descriptors": 4, "source_batch_rows": 256, "logical_source_batch_bytes": 4096,
-            "logical_update_bytes": updates * 16, "target_row_group_rows": 1024,
+            "segment_descriptors": 4, "source_batch_rows": 256, "logical_source_batch_bytes": 256 * (8 + if payload_bytes == 0 { 8 } else { payload_bytes }),
+            "logical_update_bytes": updates * (8 + if payload_bytes == 0 { 8 } else { payload_bytes }), "target_row_group_rows": 1024,
+            "payload_bytes": payload_bytes,
             "baseline_segment_metadata_bytes": serde_json::to_vec(&fixture.state.segments)?.len(),
         })
     );
@@ -755,12 +789,12 @@ async fn preparation_memory_benchmark() -> TestResult {
         budget,
     )
     .await?;
-    let metrics = prepared.metrics().clone();
     let mut consumed = 0;
     while prepared.next()?.is_some() {
         consumed += 1;
     }
     assert_eq!(consumed, updates);
+    let metrics = prepared.metrics().clone();
     assert!(
         metrics.peak_sort_bytes
             <= budget + metrics.largest_record_bytes + std::mem::size_of::<Record>()
@@ -777,6 +811,9 @@ async fn preparation_memory_benchmark() -> TestResult {
             "target_rows_read": metrics.target_rows_read,
             "projected_column_bytes": metrics.projected_column_bytes,
             "key_discovery_bytes_read": metrics.key_discovery_bytes_read,
+            "scratch_bytes_written": metrics.scratch_bytes_written,
+            "scratch_bytes_read": metrics.scratch_bytes_read.load(Ordering::Relaxed),
+            "largest_value_bytes": metrics.largest_value_bytes,
         })
     );
     Ok(())
@@ -995,7 +1032,7 @@ async fn merging_can_be_cancelled_and_corrupt_runs_fail_without_large_allocation
             Record {
                 order: row.to_be_bytes().to_vec(),
                 key: vec![],
-                values: vec![],
+                value: ValueLocation::default(),
                 segment: 0,
                 row,
             },
@@ -1013,7 +1050,7 @@ async fn merging_can_be_cancelled_and_corrupt_runs_fail_without_large_allocation
         Record {
             order: vec![0],
             key: vec![],
-            values: vec![],
+            value: ValueLocation::default(),
             segment: 0,
             row: 0,
         },
@@ -1052,10 +1089,7 @@ async fn record_boundary_truncation_is_not_successful_end_of_updates() -> TestRe
         &["value".into()],
     )
     .await?;
-    let path = fs::read_dir(&prepared.scratch.directory)?
-        .next()
-        .ok_or("missing run")??
-        .path();
+    let path = prepared.reader.as_ref().ok_or("missing run")?.path.clone();
     fs::OpenOptions::new().write(true).open(path)?.set_len(0)?;
     assert!(
         prepared.next().is_err(),
@@ -1185,6 +1219,230 @@ fn successful_cleanup_releases_directory_ownership() -> TestResult {
 }
 
 #[tokio::test]
+async fn compact_value_codec_preserves_scalar_bits_and_canonical_types() -> TestResult {
+    use arrow::array::{
+        BooleanArray, Decimal128Array, FixedSizeBinaryArray, Float32Array, Float64Array,
+    };
+    let f64_bits = [
+        0,
+        1_u64 << 63,
+        f64::INFINITY.to_bits(),
+        f64::NEG_INFINITY.to_bits(),
+        0x7ff8_0000_0000_0042,
+        0xfff8_0000_0000_0011,
+    ];
+    let f32_bits = [
+        0,
+        1_u32 << 31,
+        f32::INFINITY.to_bits(),
+        f32::NEG_INFINITY.to_bits(),
+        0x7fc0_0042,
+        0xffc0_0011,
+    ];
+    let columns: Vec<(&str, ArrayRef)> = vec![
+        ("idx", Arc::new(Int64Array::from(vec![5, 1, 4, 2, 3, 0]))),
+        (
+            "f64",
+            Arc::new(Float64Array::from(f64_bits.map(f64::from_bits).to_vec())),
+        ),
+        (
+            "f32",
+            Arc::new(Float32Array::from(f32_bits.map(f32::from_bits).to_vec())),
+        ),
+        (
+            "bool",
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                Some(true),
+                None,
+                Some(false),
+            ])),
+        ),
+        (
+            "decimal",
+            Arc::new(
+                Decimal128Array::from(vec![
+                    Some(-123456),
+                    None,
+                    Some(0),
+                    Some(1),
+                    Some(999),
+                    Some(-1),
+                ])
+                .with_precision_and_scale(20, 4)?,
+            ),
+        ),
+        (
+            "fixed",
+            Arc::new(FixedSizeBinaryArray::try_from_iter(
+                [b"abc".as_slice(); 6].into_iter(),
+            )?),
+        ),
+        (
+            "text",
+            Arc::new(StringArray::from(vec![
+                Some(""),
+                Some("a\0b"),
+                Some("中文"),
+                None,
+                Some("longer"),
+                Some("x"),
+            ])),
+        ),
+    ];
+    let target = RecordBatch::try_new(
+        Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+                .collect::<Vec<_>>(),
+        )),
+        columns.into_iter().map(|(_, array)| array).collect(),
+    )?;
+    let fixture = Fixture::new(std::slice::from_ref(&target), &[])?;
+    let destinations = target.schema().fields()[1..]
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let mut prepared = prepare_with_budget(
+        &fixture.location,
+        &fixture.state,
+        fixture.source(vec![Ok(target.clone())]),
+        &destinations,
+        128,
+    )
+    .await?;
+    for row in 0..target.num_rows() {
+        let actual = prepared.next()?.ok_or("missing scalar row")?;
+        assert_eq!(actual.row, row as u64);
+        assert_eq!(actual.values.schema(), target.schema());
+        assert_eq!(
+            actual
+                .values
+                .column(1)
+                .as_primitive::<arrow::datatypes::Float64Type>()
+                .value(0)
+                .to_bits(),
+            f64_bits[row]
+        );
+        assert_eq!(
+            actual
+                .values
+                .column(2)
+                .as_primitive::<arrow::datatypes::Float32Type>()
+                .value(0)
+                .to_bits(),
+            f32_bits[row]
+        );
+        for column in 3..target.num_columns() {
+            assert_eq!(
+                actual.values.column(column).to_data(),
+                target.column(column).slice(row, 1).to_data()
+            );
+        }
+    }
+    assert!(prepared.next()?.is_none());
+    fixture.no_scratch()?;
+    Ok(())
+}
+
+#[test]
+fn value_files_reject_corruption_truncation_and_out_of_bounds_references() -> TestResult {
+    for mutation in 0..7 {
+        let dir = tempfile::tempdir()?;
+        let mut scratch = Scratch::create(dir.path())?;
+        let mut writer = ValueWriter::new(&mut scratch)?;
+        let mut location = writer.push(&mut scratch, &[1, 2, 3])?;
+        let file = writer.finish(&mut scratch)?;
+        let path = scratch.path(0);
+        let mut bytes = fs::read(&path)?;
+        match mutation {
+            0 => bytes[0] ^= 1,
+            1 => bytes.truncate(bytes.len() - 16),
+            2 => bytes.clear(),
+            3 => {
+                let last = bytes.len() - 1;
+                bytes[last] ^= 1;
+            }
+            4 => bytes.push(0),
+            5 => location.offset = u64::MAX,
+            _ => location.length = u64::MAX,
+        }
+        fs::write(&path, bytes)?;
+        let result = ValueReader::open(&scratch, file).and_then(|mut reader| reader.read(location));
+        assert!(result.is_err(), "accepted value mutation {mutation}");
+        scratch.cleanup()?;
+        assert!(!scratch.directory.exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_values_require_intact_completion_and_the_matched_key() -> TestResult {
+    for wrong_reference in [false, true] {
+        let fixture = Fixture::new(&[simple(vec![Some(1), Some(2)], vec![None; 2])?], &[])?;
+        let before = fixture.snapshot_bytes()?;
+        let mut prepared = prepare_updates(
+            &fixture.location,
+            &fixture.state,
+            fixture.source(vec![Ok(simple(
+                vec![Some(1), Some(2)],
+                vec![Some(7), Some(8)],
+            )?)]),
+            &["value".into()],
+        )
+        .await?;
+        if wrong_reference {
+            // Recreate a checksummed run with a valid reference to the wrong row.
+            // The value's key must still agree with the resolved target binding.
+            let first = prepared
+                .reader
+                .as_mut()
+                .ok_or("missing reader")?
+                .next()?
+                .ok_or("missing row")?;
+            let second = prepared
+                .reader
+                .as_mut()
+                .ok_or("missing reader")?
+                .next()?
+                .ok_or("missing row")?;
+            let mut sorter = Sorter::new(&prepared.scratch, 128);
+            sorter.push(
+                &mut prepared.scratch,
+                Record {
+                    value: second.value,
+                    ..first
+                },
+            )?;
+            sorter.push(&mut prepared.scratch, second)?;
+            let id = sorter.finish(&mut prepared.scratch).await?;
+            prepared.reader = Some(RunReader::open(&prepared.scratch, id)?);
+            assert!(matches!(
+                prepared.next(),
+                Err(PrepareError::InvalidInput { .. })
+            ));
+        } else {
+            assert!(prepared.next()?.is_some());
+            assert!(prepared.next()?.is_some());
+            // All values were readable, but losing the completion footer is not success.
+            let path = prepared.scratch.path(0);
+            let length = fs::metadata(&path)?.len();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)?
+                .set_len(length - 8)?;
+            assert!(prepared.next().is_err());
+        }
+        fixture.no_scratch()?;
+        assert_eq!(fixture.snapshot_bytes()?, before);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn scratch_checksum_footer_and_expected_count_detect_lost_or_changed_records() -> TestResult {
     let dir = tempfile::tempdir()?;
     let mut scratch = Scratch::create(dir.path())?;
@@ -1194,7 +1452,10 @@ async fn scratch_checksum_footer_and_expected_count_detect_lost_or_changed_recor
         Record {
             order: vec![1],
             key: vec![2],
-            values: vec![3],
+            value: ValueLocation {
+                offset: 3,
+                length: 1,
+            },
             segment: 4,
             row: 5,
         },
@@ -1234,10 +1495,7 @@ async fn scratch_checksum_footer_and_expected_count_detect_lost_or_changed_recor
         &["value".into()],
     )
     .await?;
-    let run = fs::read_dir(&prepared.scratch.directory)?
-        .next()
-        .ok_or("missing run")??
-        .path();
+    let run = prepared.reader.as_ref().ok_or("missing run")?.path.clone();
     // A valid empty run must still disagree with this cursor's expected count.
     fs::write(run, [u64::MAX.to_le_bytes(), 0_u64.to_le_bytes()].concat())?;
     assert!(prepared.next().is_err());

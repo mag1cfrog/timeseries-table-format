@@ -4,6 +4,8 @@
 //! typed encoding, joined, then sorted by segment/physical row. Encoding order
 //! is private and has no relationship to index coverage or chronological order.
 //! Two-way merges bound fan-in even for arbitrarily many runs or a hot key.
+//! Values use Arrow's existing reversible row codec with one snapshot schema.
+//! They are checksummed and written once; sort runs carry only keys and offsets.
 //!
 //! Sort buffers are byte-budgeted. In addition, processing holds a caller batch,
 //! one aligned/serialized row, at most three merge records, fixed IO buffers,
@@ -14,7 +16,8 @@
 //! sort budget; the budget is not a process RSS limit. Projected row groups have
 //! a separate fixed decoded-size guard before any key pages are read, so huge
 //! dictionaries cannot silently turn discovery into an unbounded fallback.
-//! A largest source row may exceed the budget and is spilled alone. No all-row
+//! A largest encoded value is a separate allocation and is written immediately.
+//! An oversized key record is spilled alone. No all-row
 //! map or run descriptor list exists.
 //!
 //! Scratch uses exclusive UUID directories under the reserved staging root.
@@ -29,7 +32,7 @@ mod tests;
 use std::{
     collections::HashSet,
     fs::File,
-    io::{self, BufReader, Cursor, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::PathBuf,
     sync::{
         Arc,
@@ -41,7 +44,7 @@ use arrow::{
     array::{Array, ArrayRef, AsArray, RecordBatch, RecordBatchReader},
     datatypes::{DataType, Field, Schema, SchemaRef},
     error::ArrowError,
-    ipc::{reader::StreamReader, writer::StreamWriter},
+    row::{RowConverter, SortField},
 };
 use parquet::{
     arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder},
@@ -65,7 +68,10 @@ use crate::{
     transaction_log::TableState,
 };
 pub(crate) use spool::PreparationMetrics;
-use spool::{Record, RunReader, Scratch, Sorter, io_error};
+use spool::{
+    Record, RunReader, Scratch, Sorter, ValueFile, ValueLocation, ValueReader, ValueWriter,
+    io_error,
+};
 
 const DEFAULT_SORT_BYTES: usize = 8 * 1024 * 1024;
 // The synchronous decoder can retain dictionaries/pages. Bound their declared
@@ -199,6 +205,8 @@ pub(crate) struct MatchedUpdate {
 pub(crate) struct PreparedUpdates {
     // Reader must close before Scratch drops (also on Windows).
     reader: Option<RunReader>,
+    values: Option<ValueReader>,
+    value_codec: RowConverter,
     remaining_rows: u64,
     scratch: Scratch,
     pub(crate) version: u64,
@@ -218,6 +226,7 @@ impl PreparedUpdates {
         let result = self.read_next();
         if !matches!(result, Ok(Some(_))) {
             self.reader = None;
+            self.values = None;
             return match (result, self.scratch.cleanup()) {
                 (Err(source), Err(cleanup)) => Err(PrepareError::CleanupAfterFailure {
                     source: Box::new(source),
@@ -240,6 +249,9 @@ impl PreparedUpdates {
                     "prepared cursor ended before its matched row count",
                 ));
             }
+            if let Some(values) = &mut self.values {
+                values.validate_completion()?;
+            }
             return Ok(None);
         };
         if self.remaining_rows == 0 {
@@ -253,16 +265,27 @@ impl PreparedUpdates {
         if record.row >= segment.row_count {
             return Err(invalid("staged row outside segment"));
         }
-        let mut ipc =
-            StreamReader::try_new(Cursor::new(record.values), None).map_err(arrow_error)?;
-        let values = ipc
-            .next()
-            .ok_or_else(|| invalid("missing staged row"))?
+        let bytes = self
+            .values
+            .as_mut()
+            .ok_or_else(|| invalid("missing prepared value reader"))?
+            .read(record.value)?;
+        // Only checksum-verified bytes produced by this schema's codec reach the
+        // Arrow row parser; it is not a decoder for arbitrary external input.
+        let parser = self.value_codec.parser();
+        let arrays = self
+            .value_codec
+            .convert_rows([parser.parse(&bytes)])
             .map_err(arrow_error)?;
-        if values.num_rows() != 1 || values.schema() != self.schema || ipc.next().is_some() {
-            return Err(invalid("invalid staged row schema or count"));
+        let values = RecordBatch::try_new(self.schema.clone(), arrays).map_err(arrow_error)?;
+        let key = key_at(
+            &values,
+            self.schema.fields().len() - self.destination_indices.len(),
+            0,
+        )?;
+        if encode(&key)? != record.key {
+            return Err(invalid("prepared value key differs from its matched key"));
         }
-        let key = decode(&record.key)?;
         self.remaining_rows -= 1;
         Ok(Some(MatchedUpdate {
             segment_index,
@@ -275,12 +298,14 @@ impl PreparedUpdates {
     /// Explicit abandonment reports cleanup errors; Drop is a best-effort fallback.
     pub(crate) fn close(mut self) -> Result<()> {
         self.reader = None;
+        self.values = None;
         self.scratch.cleanup()
     }
 }
 
 struct SourceSchema {
     alignment: BatchSchemaAlignment,
+    value_codec: RowConverter,
     key_count: usize,
     destination_indices: Vec<usize>,
 }
@@ -334,6 +359,15 @@ impl SourceSchema {
             source: Box::new(source),
         })?;
         Ok(Self {
+            value_codec: RowConverter::new(
+                alignment
+                    .output_schema()
+                    .fields()
+                    .iter()
+                    .map(|field| SortField::new(field.data_type().clone()))
+                    .collect(),
+            )
+            .map_err(arrow_error)?,
             alignment,
             key_count,
             destination_indices: positions[key_count..].to_vec(),
@@ -463,11 +497,18 @@ async fn prepare_with_budget(
     segments.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     let staged = stage(&mut scratch, root, &segments, &schema, source, budget).await;
     match staged {
-        Ok((id, matched_rows)) => {
-            let reader = RunReader::open(&scratch, id);
+        Ok((id, matched_rows, value_file)) => {
+            let reader = (|| -> Result<_> {
+                Ok((
+                    RunReader::open(&scratch, id)?,
+                    ValueReader::open(&scratch, value_file)?,
+                ))
+            })();
             match reader {
-                Ok(reader) => Ok(PreparedUpdates {
+                Ok((reader, values)) => Ok(PreparedUpdates {
                     reader: Some(reader),
+                    values: Some(values),
+                    value_codec: schema.value_codec,
                     remaining_rows: matched_rows,
                     scratch,
                     version: state.version,
@@ -544,7 +585,8 @@ async fn stage(
     schema: &SourceSchema,
     source: impl RecordBatchReader,
     budget: usize,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, ValueFile)> {
+    let mut values = ValueWriter::new(scratch)?;
     let mut sorter = Sorter::new(scratch, budget);
     let mut input_rows_seen = 0_u64;
     for incoming in source {
@@ -578,21 +620,17 @@ async fn stage(
                 validate_value(field, array, 0, field.name())?;
             }
             let key = encode(&key)?;
-            let mut values = Vec::new();
-            {
-                // ponytail: per-row IPC repeats schema/framing; use batched
-                // value blocks with offsets if measured scratch/CPU cost warrants it.
-                let mut writer =
-                    StreamWriter::try_new(&mut values, &batch.schema()).map_err(arrow_error)?;
-                writer.write(&batch).map_err(arrow_error)?;
-                writer.finish().map_err(arrow_error)?;
-            }
+            let encoded = schema
+                .value_codec
+                .convert_columns(batch.columns())
+                .map_err(arrow_error)?;
+            let value = values.push(scratch, encoded.row(0).as_ref())?;
             sorter.push(
                 scratch,
                 Record {
                     order: key.clone(),
                     key,
-                    values,
+                    value,
                     segment: 0,
                     row: 0,
                 },
@@ -604,8 +642,9 @@ async fn stage(
         tokio::task::yield_now().await;
     }
     let source_id = sorter.finish(scratch).await?;
+    let value_file = values.finish(scratch)?;
     if input_rows_seen == 0 {
-        return Ok((source_id, 0));
+        return Ok((source_id, 0, value_file));
     }
     // Validate global source uniqueness before target discovery; only one prior key.
     {
@@ -754,7 +793,7 @@ async fn stage(
                     Record {
                         order: key.clone(),
                         key,
-                        values: Vec::new(),
+                        value: ValueLocation::default(),
                         segment: segment_index as u64,
                         row,
                     },
@@ -821,7 +860,7 @@ async fn stage(
     drop((source, targets));
     scratch.remove(source_id)?;
     scratch.remove(target_id)?;
-    Ok((matched.finish(scratch).await?, input_rows_seen))
+    Ok((matched.finish(scratch).await?, input_rows_seen, value_file))
 }
 
 fn check_target_budget(

@@ -1,5 +1,7 @@
 # Keyed update preparation: bounded staging
 
+Historical measurement of the per-row IPC implementation at `c27f620`. The bulk-backfill implementation and current performance comparison are documented in [Bulk keyed-update preparation](update-prepare-bulk-2026-09-07.md); the numbers below are retained as baseline evidence.
+
 This native Rust measurement covers validation, exact-key matching, external sorting, and consumption of the prepared cursor. It does not rewrite Parquet payloads or publish a transaction. The raw measurements are in [update-prepare-2026-09-07.json](update-prepare-2026-09-07.json).
 
 ## Environment and workload
