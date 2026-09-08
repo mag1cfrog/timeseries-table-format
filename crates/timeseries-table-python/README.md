@@ -19,10 +19,17 @@ DataFusion SQL. Query results are returned as `pyarrow.Table` objects.
 - Dry-run and apply vacuum modes for expired unreferenced table-managed files
 - DataFusion SQL over managed tables and standalone Parquet data
 - Materialized and streaming Arrow result APIs
+- Explicit nullable-column addition through `table.add_columns(pyarrow.Schema)`
 
 The current release supports local filesystems only. It does not yet support
-object storage, small-file compaction, schema evolution, row updates, merges,
+object storage, small-file compaction, column dropping/renaming, automatic schema merging, row updates, merges,
 or time-travel queries.
+
+`add_columns` adds new nullable top-level fields after the first successful append establishes
+the schema. Historical rows read as null without rewriting data; later appends may omit nullable
+payload fields while retaining all keys and matching the types/nullability of provided fields.
+Replace SQL registrations with `Session.register_tstable` after adding columns. See the
+[guide and runnable example](https://mag1cfrog.github.io/timeseries-table-format/guides/add_nullable_columns/).
 
 ## Install
 

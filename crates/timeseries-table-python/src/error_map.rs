@@ -10,6 +10,7 @@ use crate::exceptions::{
     SchemaMismatchError, StorageError, TimeseriesTableError,
 };
 use timeseries_table_format::{
+    SchemaEvolutionError,
     coverage::{EntityIdentity, EntityValue, SegmentCoverageError, index_interval::IndexInterval},
     metadata::schema_compat::SchemaCompatibilityError,
     storage::StorageError as CoreStorageError,
@@ -186,6 +187,16 @@ pub(crate) fn table_error_to_py(
     let msg = err.to_string();
     let root = &err as &(dyn Error + 'static);
 
+    // An ambiguous commit contains storage causes, but must retain its own
+    // diagnostic rather than being presented as an ordinary storage failure.
+    if find_error_in_source_chain::<CommitError>(root, |error| {
+        matches!(error, CommitError::AmbiguousOutcome { .. })
+    })
+    .is_some()
+    {
+        return TimeseriesTableError::new_err(msg);
+    }
+
     if let Some(
         conflict @ CommitError::Conflict {
             expected, found, ..
@@ -233,7 +244,9 @@ pub(crate) fn table_error_to_py(
         );
     }
 
-    if find_error_in_source_chain::<SchemaCompatibilityError>(root, |_| true).is_some() {
+    if find_error_in_source_chain::<SchemaCompatibilityError>(root, |_| true).is_some()
+        || find_error_in_source_chain::<SchemaEvolutionError>(root, |_| true).is_some()
+    {
         return SchemaMismatchError::new_err(msg);
     }
 
@@ -270,6 +283,62 @@ mod tests {
 
     fn invalid_location_error() -> CoreStorageError {
         StorageLocation::parse("").expect_err("empty storage location must fail")
+    }
+
+    #[test]
+    fn column_addition_errors_preserve_schema_storage_and_ambiguity_categories() {
+        use timeseries_table_format::AddColumnsError;
+
+        init_python();
+        Python::attach(|py| {
+            let schema = TableError::AddColumns {
+                source: AddColumnsError::from(SchemaEvolutionError::MissingSchema),
+            };
+            assert!(
+                table_error_to_py(py, schema, &[])
+                    .get_type(py)
+                    .is(py.get_type::<SchemaMismatchError>())
+            );
+
+            let CoreStorageError::OtherIo { backtrace, .. } = invalid_location_error() else {
+                panic!("expected an invalid location");
+            };
+            let storage = TableError::AddColumns {
+                source: AddColumnsError::from(CommitError::Storage {
+                    source: CoreStorageError::AlreadyExists {
+                        path: "_timeseries_log/0000000003.json".into(),
+                        source: std::io::Error::from(std::io::ErrorKind::AlreadyExists).into(),
+                        backtrace,
+                    },
+                }),
+            };
+            let error = table_error_to_py(py, storage, &[]);
+            assert!(error.get_type(py).is(py.get_type::<StorageError>()));
+            assert_eq!(
+                error
+                    .value(py)
+                    .getattr("path")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "_timeseries_log/0000000003.json"
+            );
+
+            let ambiguous = TableError::AddColumns {
+                source: AddColumnsError::from(CommitError::AmbiguousOutcome {
+                    commit_path: "_timeseries_log/0000000003.json".into(),
+                    operation_error: Box::new(invalid_location_error()),
+                    cleanup_error: Box::new(invalid_location_error()),
+                }),
+            };
+            let message = ambiguous.to_string();
+            let error = table_error_to_py(py, ambiguous, &[]);
+            assert!(error.get_type(py).is(py.get_type::<TimeseriesTableError>()));
+            assert_eq!(
+                error.value(py).str().unwrap().extract::<String>().unwrap(),
+                message
+            );
+        });
     }
 
     #[test]

@@ -47,11 +47,17 @@ messages. See [Index granularity and conflicts](../concepts/index_granularity_an
 for the uniqueness rule.
 
 **`SchemaMismatchError`** - raised when an Arrow source you try to append has a schema that
-conflicts with the table's established schema (set on the first successful append).
+conflicts with the table's established schema (set on the first successful append), or when
+`add_columns(...)` violates the nullable-addition contract.
 
 **`ConflictError`** - raised when a concurrent modification to the table metadata is detected.
 In typical single-process usage this is rare; it can happen if two processes are appending to the
-same table root simultaneously.
+same table root simultaneously or adding columns through a stale handle. The exception carries
+`expected` and `found` versions. Reopen and reconcile before retrying.
+
+**`TimeseriesTableError`** - also preserves protocol incompatibility and ambiguous commit
+diagnostics. An ambiguous outcome must not be treated as guaranteed rollback; reopen and reconcile
+the log before retrying.
 
 **`DataFusionError`** - raised when `Session.sql(...)` or `Session.sql_reader(...)` encounters a
 SQL error (syntax error, type error, unknown column, etc.).
