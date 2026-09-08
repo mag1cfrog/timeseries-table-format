@@ -144,6 +144,7 @@ pub enum PrepareError {
     #[snafu(display("Update schema: {source}"))]
     Schema {
         /// Original schema failure.
+        #[snafu(backtrace)]
         source: Box<SchemaCompatibilityError>,
     },
     /// Arrow validation or conversion failed.
@@ -236,6 +237,7 @@ pub enum PrepareError {
     #[snafu(display("{source}; cleanup also failed: {cleanup}"))]
     CleanupAfterFailure {
         /// Original preparation failure.
+        #[snafu(backtrace)]
         source: Box<PrepareError>,
         /// Cleanup failure.
         cleanup: Box<PrepareError>,

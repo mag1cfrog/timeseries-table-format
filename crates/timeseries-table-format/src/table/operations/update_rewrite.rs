@@ -92,6 +92,7 @@ pub enum RewriteError {
     #[snafu(context(false), display("Prepared updates: {source}"))]
     Preparation {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: PrepareError,
     },
     /// Local source IO failed.
@@ -106,6 +107,7 @@ pub enum RewriteError {
     #[snafu(context(false), display("Rewrite storage: {source}"))]
     Storage {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: StorageError,
     },
     /// Arrow assembly failed.
@@ -124,40 +126,46 @@ pub enum RewriteError {
     #[snafu(context(false), display("Rewrite schema: {source}"))]
     Schema {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: Box<crate::metadata::schema_compat::SchemaCompatibilityError>,
     },
     /// Replacement metadata inspection failed.
     #[snafu(context(false), display("Rewrite inspection: {source}"))]
     Inspection {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::transaction_log::segments::SegmentError,
     },
     /// Replacement coverage verification failed.
     #[snafu(context(false), display("Rewrite coverage: {source}"))]
     Coverage {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::formats::parquet::SegmentCoverageError,
     },
     /// Source sidecar reading failed.
     #[snafu(context(false), display("Rewrite sidecar: {source}"))]
     Sidecar {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::coverage::io::CoverageSidecarError,
     },
     /// Replacement coverage encoding failed.
     #[snafu(context(false), display("Rewrite coverage encoding: {source}"))]
     Codec {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::coverage::serde::CoverageCodecError,
     },
     /// Sidecar path construction failed.
     #[snafu(context(false), display("Rewrite coverage path: {source}"))]
     Layout {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::coverage::layout::CoverageLayoutError,
     },
     /// Explicit replacement cleanup failed; Drop also attempts best effort.
-    #[snafu(display("Replacement cleanup failures: {cleanup_errors:?}"))]
+    #[snafu(display("Replacement cleanup failures: [{}]", cleanup_errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")))]
     Cleanup {
         /// All observed cleanup failures with their paths.
         cleanup_errors: Vec<StorageError>,
@@ -166,6 +174,7 @@ pub enum RewriteError {
     #[snafu(display("{source}; cleanup also failed: {cleanup}"))]
     CleanupAfterFailure {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: Box<RewriteError>,
         /// Cleanup failure.
         cleanup: Box<RewriteError>,
@@ -174,6 +183,7 @@ pub enum RewriteError {
     #[snafu(display("{source}; preparation cleanup also failed: {cleanup}"))]
     PreparationCleanup {
         /// Original typed failure.
+        #[snafu(backtrace)]
         source: Box<RewriteError>,
         /// Cleanup failure.
         cleanup: PrepareError,

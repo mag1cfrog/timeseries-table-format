@@ -121,6 +121,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn update_wrappers_preserve_the_originating_backtrace() {
+        use crate::{UpdatePreparationError, UpdateRewriteError};
+        let schema_failure = || UpdatePreparationError::Schema {
+            source: Box::new(SchemaCompatibilityError::RegisteredSchemaConversion {
+                source: Box::new(LogicalToArrowSchemaError::Int96Unsupported {
+                    column: "value".into(),
+                    backtrace: Backtrace::capture(),
+                }),
+            }),
+        };
+        let storage_failure = || UpdateRewriteError::Storage {
+            source: StorageError::OtherIo {
+                path: "data/replacement.parquet".into(),
+                source: io::Error::other("write failed").into(),
+                backtrace: Backtrace::capture(),
+            },
+        };
+        let errors = [
+            UpdateRowsError::from(schema_failure()),
+            UpdateRowsError::from(UpdatePreparationError::CleanupAfterFailure {
+                source: Box::new(schema_failure()),
+                cleanup: Box::new(UpdatePreparationError::InvalidInput {
+                    reason: "cleanup sentinel".into(),
+                }),
+            }),
+            UpdateRowsError::from(storage_failure()),
+            UpdateRowsError::from(UpdateRewriteError::Preparation {
+                source: schema_failure(),
+            }),
+            UpdateRowsError::CleanupAfterFailure {
+                source: Box::new(UpdateRowsError::from(
+                    UpdateRewriteError::CleanupAfterFailure {
+                        source: Box::new(storage_failure()),
+                        cleanup: Box::new(UpdateRewriteError::Cleanup {
+                            cleanup_errors: vec![],
+                        }),
+                    },
+                )),
+                cleanup: Box::new(UpdateRewriteError::Cleanup {
+                    cleanup_errors: vec![],
+                }),
+            },
+            UpdateRowsError::from(UpdateRewriteError::PreparationCleanup {
+                source: Box::new(storage_failure()),
+                cleanup: schema_failure(),
+            }),
+        ];
+        for error in errors {
+            let error = UpdateRowsSnafu.into_error(error);
+            let mut source = error.source();
+            let mut origin = None;
+            while let Some(cause) = source {
+                if let Some(storage) = cause.downcast_ref::<StorageError>() {
+                    origin = ErrorCompat::backtrace(storage);
+                }
+                if let Some(schema) = cause.downcast_ref::<Box<LogicalToArrowSchemaError>>() {
+                    origin = ErrorCompat::backtrace(schema.as_ref());
+                }
+                source = cause.source();
+            }
+            let origin = origin.expect("original typed source must remain reachable");
+            assert!(std::ptr::eq(
+                ErrorCompat::backtrace(&error).expect("update facade must delegate backtrace"),
+                origin
+            ));
+        }
+    }
+
+    #[test]
+    fn update_cleanup_display_uses_messages_without_debug_backtraces() {
+        let error = crate::UpdateRewriteError::Cleanup {
+            cleanup_errors: vec![StorageError::OtherIo {
+                path: "data/replacement.parquet".into(),
+                source: io::Error::other("cleanup failed").into(),
+                backtrace: Backtrace::capture(),
+            }],
+        };
+        let message = error.to_string();
+        assert!(message.contains("data/replacement.parquet"));
+        assert!(message.contains("cleanup failed"));
+        assert!(!message.contains("backtrace"), "{message}");
+        assert!(!message.contains("OtherIo {"), "{message}");
+    }
+
+    #[test]
     fn append_facade_preserves_arrow_source_and_backtrace() {
         let append_error = AppendError::ArrowInput {
             source: ArrowError::ComputeError("input failed".to_string()),

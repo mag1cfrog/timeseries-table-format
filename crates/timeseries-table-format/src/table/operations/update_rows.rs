@@ -59,13 +59,14 @@ pub enum UpdateRowsError {
     #[snafu(context(false), display("Update preparation failed: {source}"))]
     Preparation {
         /// Complete preparation failure.
+        #[snafu(backtrace)]
         source: PrepareError,
     },
     /// Replacement staging or verification failed.
     #[snafu(context(false), display("Update replacement failed: {source}"))]
     Rewrite {
         /// Complete replacement failure.
-        #[snafu(source(from(RewriteError, Box::new)))]
+        #[snafu(source(from(RewriteError, Box::new)), backtrace)]
         source: Box<RewriteError>,
     },
     /// Version checking or publication failed.
