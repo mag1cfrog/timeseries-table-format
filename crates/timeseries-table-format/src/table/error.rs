@@ -9,7 +9,7 @@ use snafu::prelude::*;
 
 use super::operations::{
     AddColumnsError, AppendError, CoverageQueryError, CreateTableError, OpenTableError,
-    OptimizeError, ScanError, TableStateAccessError, VacuumError,
+    OptimizeError, ScanError, TableStateAccessError, UpdateRowsError, VacuumError,
 };
 
 /// Errors from high-level time-series table operations.
@@ -21,6 +21,13 @@ use super::operations::{
 #[snafu(visibility(pub(crate)))]
 #[non_exhaustive]
 pub enum TableError {
+    /// An atomic keyed row update failed.
+    #[snafu(display("Row update failed: {source}"))]
+    UpdateRows {
+        /// Complete row-update failure.
+        #[snafu(source, backtrace)]
+        source: UpdateRowsError,
+    },
     /// A nullable-column addition failed.
     #[snafu(display("Column addition failed: {source}"))]
     AddColumns {

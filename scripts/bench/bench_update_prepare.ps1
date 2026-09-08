@@ -5,12 +5,12 @@ param(
     [ValidateRange(1, 10)][int]$Repetitions = 1,
     [string]$Label = 'current',
     [string]$WorkloadName,
-    [ValidateSet('prepare', 'rewrite')][string]$Stage = 'prepare'
+    [ValidateSet('prepare', 'rewrite', 'update')][string]$Stage = 'prepare'
 )
 $ErrorActionPreference = 'Stop'
 $binary = (Resolve-Path -LiteralPath $TestBinary).Path
 $testName = 'table::operations::update_prepare::tests::preparation_memory_benchmark'
-if ($Stage -eq 'rewrite') { $testName = 'table::operations::update_rewrite::tests::rewrite_memory_benchmark' }
+if ($Stage -ne 'prepare') { $testName = 'table::operations::update_rewrite::tests::rewrite_memory_benchmark' }
 $measurements = @()
 $workloads = if ($Suite -eq 'bulk') {
     @(
@@ -28,7 +28,7 @@ $workloads = if ($Suite -eq 'bulk') {
         }
     }
 }
-if ($Stage -eq 'rewrite' -and $Suite -eq 'bulk') {
+if ($Stage -ne 'prepare' -and $Suite -eq 'bulk') {
     $workloads = @(
         @{ name = 'narrow-quarter'; targets = 262144; updates = 65536; mode = 'shuffled'; payload = 0; entities = 0; selected_wide = 0 },
         @{ name = 'wide-sparse'; targets = 262144; updates = 4096; mode = 'shuffled'; payload = 4096; entities = 4; selected_wide = 0 },
@@ -46,7 +46,8 @@ foreach ($workload in $workloads) {
     foreach ($repeat in 1..$Repetitions) {
         $env:TST_UPDATE_TARGET_ROWS = "$($workload.targets)"
         $env:TST_UPDATE_ROWS = "$($workload.updates)"
-        $env:TST_UPDATE_SORT_BYTES = if ($Suite -eq 'bulk' -or $Stage -eq 'rewrite') { '8388608' } else { '65536' }
+        $env:TST_UPDATE_SORT_BYTES = if ($Suite -eq 'bulk' -or $Stage -ne 'prepare') { '8388608' } else { '65536' }
+        $env:TST_UPDATE_PUBLISH = if ($Stage -eq 'update') { '1' } else { '0' }
         $env:TST_UPDATE_MODE = $workload.mode
         $env:TST_UPDATE_PAYLOAD_BYTES = "$($workload.payload)"
         $env:TST_UPDATE_ENTITIES = if ($workload.ContainsKey('entities')) { "$($workload.entities)" } else { '0' }

@@ -67,6 +67,7 @@ use crate::{
     storage::{StorageLocation, TableLocation, ensure_canonical_relative_storage_path},
     transaction_log::TableState,
 };
+#[cfg(test)]
 pub(crate) use spool::PreparationMetrics;
 use spool::{
     Record, RunReader, Scratch, Sorter, ValueFile, ValueLocation, ValueReader, ValueWriter,
@@ -83,84 +84,160 @@ type Result<T> = std::result::Result<T, PrepareError>;
 
 /// Complete typed components; nulls survive diagnostics, never successful keys.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) enum KeyValue {
+pub enum KeyValue {
+    /// UTF-8 identity component.
     Utf8(String),
+    /// Signed 32-bit identity component.
     Int32(i32),
+    /// Signed 64-bit identity or ordered-index component.
     Int64(i64),
+    /// Unsigned 64-bit identity or ordered-index component.
     UInt64(u64),
+    /// Exact timestamp, without coverage-bucket rounding.
     Timestamp {
+        /// Raw ticks in the declared unit.
         ticks: i64,
+        /// Timestamp precision.
         unit: LogicalTimestampUnit,
+        /// Canonical time zone, if present.
         timezone: Option<String>,
     },
 }
 
+/// Named entity components in configured order, followed by the raw ordered index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct UpdateKey(pub(crate) Vec<(String, Option<KeyValue>)>);
+pub struct UpdateKey(pub(crate) Vec<(String, Option<KeyValue>)>);
 
+impl UpdateKey {
+    /// Complete diagnostic key; `None` identifies a null component.
+    pub fn components(&self) -> &[(String, Option<KeyValue>)] {
+        &self.0
+    }
+}
+
+/// Why an update key cannot be assigned to exactly one stored row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KeyViolation {
+#[non_exhaustive]
+pub enum KeyViolation {
+    /// An entity or ordered-index component is null.
     NullIdentity,
+    /// Multiple source rows assign the same complete key.
     DuplicateSource,
+    /// No stored row has the complete source key.
     UnmatchedSource,
+    /// Multiple stored rows have the complete source key.
     AmbiguousTarget,
 }
 
+/// Typed input, exact-key matching, and scratch failures from update preparation.
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub(crate) enum PrepareError {
+#[non_exhaustive]
+pub enum PrepareError {
+    /// Invalid column selection, schema, or value.
     #[snafu(display("Invalid update input: {reason}"))]
-    InvalidInput { reason: String },
+    InvalidInput {
+        /// Validation detail.
+        reason: String,
+    },
+    /// Canonical schema conversion or alignment failed.
     #[snafu(display("Update schema: {source}"))]
     Schema {
+        /// Original schema failure.
         source: Box<SchemaCompatibilityError>,
     },
+    /// Arrow validation or conversion failed.
     #[snafu(display("Update batch: {source}"))]
-    Arrow { source: ArrowError },
+    Arrow {
+        /// Original Arrow failure.
+        source: ArrowError,
+    },
+    /// The caller's reader failed, possibly after earlier valid batches.
     #[snafu(display("Update reader: {source}"))]
-    Reader { source: ArrowError },
+    Reader {
+        /// Original reader failure.
+        source: ArrowError,
+    },
+    /// A complete key violated the one-source-row to one-target-row contract.
     #[snafu(display("Update key violation {kind:?} after {input_rows_seen} source rows"))]
     Key {
+        /// Specific key violation.
         kind: KeyViolation,
+        /// Source rows observed before this diagnostic was produced.
         input_rows_seen: u64,
+        /// Violations observed, not an exhaustive count of unread input.
         observed_violations: u64,
+        /// Complete typed example, including any nulls.
         example_key: UpdateKey,
     },
+    /// A staging counter or allocation limit was exceeded.
     #[snafu(display("Update staging resource limit: {reason}"))]
-    Resource { reason: &'static str },
+    Resource {
+        /// Limit that was exceeded.
+        reason: &'static str,
+    },
+    /// Projected target keys exceed the decoder's declared-size limit.
     #[snafu(display(
         "Projected keys in {path}, row group {row_group}, require {uncompressed_bytes} uncompressed bytes; limit {limit}"
     ))]
     TargetResource {
+        /// Source segment path.
         path: String,
+        /// Zero-based Parquet row group.
         row_group: usize,
+        /// Declared uncompressed key-column bytes.
         uncompressed_bytes: u64,
+        /// Maximum accepted bytes.
         limit: u64,
     },
+    /// Target footer exceeds the limit checked before decoding metadata.
     #[snafu(display("Parquet footer at {path} declares {metadata_bytes} bytes; limit {limit}"))]
     TargetFooterResource {
+        /// Source segment path.
         path: String,
+        /// Declared footer bytes.
         metadata_bytes: usize,
+        /// Maximum accepted bytes.
         limit: usize,
     },
+    /// Local input or scratch IO failed.
     #[snafu(display("Update IO at {}: {source}", path.display()))]
     Io {
+        /// Affected local path.
         path: PathBuf,
+        /// Original IO failure.
         source: std::io::Error,
     },
+    /// Target Parquet decoding failed.
     #[snafu(display("Update target {path}: {source}"))]
-    Parquet { path: String, source: ParquetError },
+    Parquet {
+        /// Source segment path.
+        path: String,
+        /// Original Parquet failure.
+        source: ParquetError,
+    },
+    /// Private scratch key encoding failed.
     #[snafu(display("Private update key encoding: {source}"))]
-    Encoding { source: serde_json::Error },
+    Encoding {
+        /// Original encoding failure.
+        source: serde_json::Error,
+    },
+    /// Explicit scratch cleanup failed; Drop also attempts best-effort cleanup.
     #[snafu(display("Update scratch cleanup at {}: {failures} failures; {source}", path.display()))]
     Cleanup {
+        /// First path that failed cleanup.
         path: PathBuf,
+        /// Number of cleanup failures observed.
         failures: u64,
+        /// First cleanup IO failure.
         source: std::io::Error,
     },
+    /// Preparation and its cleanup both failed.
     #[snafu(display("{source}; cleanup also failed: {cleanup}"))]
     CleanupAfterFailure {
+        /// Original preparation failure.
         source: Box<PrepareError>,
+        /// Cleanup failure.
         cleanup: Box<PrepareError>,
     },
 }
@@ -218,6 +295,7 @@ pub(crate) struct PreparedUpdates {
 }
 
 impl PreparedUpdates {
+    #[cfg(test)]
     pub(crate) fn metrics(&self) -> &PreparationMetrics {
         &self.scratch.metrics
     }

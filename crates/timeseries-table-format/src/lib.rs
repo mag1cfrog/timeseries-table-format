@@ -1,6 +1,6 @@
 //! # timeseries-table-format
 //!
-//! Append-only time-series table format with gap/overlap tracking.
+//! Time-series tables with immutable files, atomic keyed updates, and gap/overlap tracking.
 //!
 //! This crate is the canonical library for the table engine and optional integrations.
 //!
@@ -64,8 +64,9 @@ pub use storage::TableLocation;
 pub use table::{
     AddColumnsError, AppendError, AppendReport, CoverageQueryError, CreateTableError,
     OpenTableError, OptimizeError, OptimizeReport, ScanError, TableError, TableStateAccessError,
-    TimeSeriesTable, VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError,
-    VacuumMode, VacuumReport,
+    TimeSeriesTable, UpdateKey, UpdateKeyValue, UpdateKeyViolation, UpdatePreparationError,
+    UpdateRewriteError, UpdateRowsError, UpdateRowsReport, VacuumArtifact,
+    VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
     append::{AppendRequest, IntoRecordBatchReader, ParquetCompression},
 };
 

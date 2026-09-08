@@ -1146,12 +1146,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Weak};
     use tempfile::TempDir;
-    use tracing::{Subscriber, instrument::WithSubscriber, span::Id};
-    use tracing_subscriber::{
-        Layer,
-        layer::{Context, SubscriberExt},
-        registry::LookupSpan,
-    };
+    use tracing::instrument::WithSubscriber;
 
     const ROW_GROUP_STATISTIC_FIELDS: [&str; 9] = [
         "row_group_rows_min",
@@ -1235,26 +1230,7 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Clone, Copy)]
-    struct PanicOnCommitClose;
-
-    impl<S> Layer<S> for PanicOnCommitClose
-    where
-        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
-    {
-        fn on_close(&self, id: Id, ctx: Context<'_, S>) {
-            if ctx
-                .metadata(&id)
-                .is_some_and(|metadata| metadata.name() == "transaction.commit")
-            {
-                panic!("injected transaction commit close panic");
-            }
-        }
-    }
-
-    fn panic_on_commit_close_dispatch() -> tracing::Dispatch {
-        tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnCommitClose))
-    }
+    use crate::table::test_util::panic_on_commit_close_dispatch;
 
     #[derive(Default)]
     struct ReaderObservations {

@@ -11,7 +11,7 @@ time-based segment pruning.
 ## Layers (module layout)
 - `metadata`: pure metadata model + validation (logical schema, table metadata, segment types). No IO.
 - `transaction_log`: append-only metadata log APIs (OCC) + table state materialization.
-- `table`: user-facing `TimeSeriesTable` API (create/open/append/scan).
+- `table`: user-facing `TimeSeriesTable` API (create/open/append/update_rows/scan).
 - `storage`: local backend + table-root IO helpers.
 - `coverage`: coverage math and gap analysis.
 - `formats`: format-specific helpers (currently `formats::parquet`).
@@ -24,7 +24,7 @@ See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
 - **Segment metadata**: min/max timestamps, row counts, file format, coverage sidecars.
 - **Coverage math**: RoaringBitmap overlap checks and gap analysis over index interval IDs.
 - **Storage access**: local filesystem backend and atomic IO helpers.
-- **User API**: create/open/append/scan plus coverage/gap queries.
+- **User API**: create/open/append/update_rows/scan plus coverage/gap queries.
 
 ## On-disk layout (local backend)
 ```
@@ -38,6 +38,7 @@ See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
     table/<ver>-<id>.roar    # table snapshot coverage
   data/_managed/append/...   # append-generated Parquet segments
   data/_staged/entity-rewrite/... # entity-rewrite Parquet segments
+  data/_staged/update-rewrite/... # keyed-update Parquet replacements
 ```
 
 ## Transaction log and OCC
@@ -47,10 +48,11 @@ See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
   1. Read current version `N`.
   2. Build a commit with `expected_version = N`.
   3. Write version `N+1` only if `CURRENT` is still `N`.
-- On conflict, the caller reloads and retries.
+- On conflict, the caller reloads and recomputes snapshot-dependent input before retrying.
 
 Log actions:
 - `AddSegment`: adds a new segment descriptor (and `coverage_path` if enabled).
+- `RemoveSegment`: removes a segment from the new snapshot; historical files are retained.
 - `UpdateTableMeta`: updates table-level metadata (schema adoption, entity pinning).
 - `UpdateTableCoverage`: points to the latest table coverage snapshot.
 
@@ -96,13 +98,76 @@ Log actions:
 3. Stream filtered batches as `TimeSeriesScan`. Input rows need not be chronological, and returned
    batches and rows have no ordering guarantee. Callers must sort when they require ordered results.
 
-## Schema rules (v0.1)
-- No schema evolution: the registered schema remains authoritative and every committed segment
-  matches it exactly. Incoming top-level scalar fields may use the append allowlist for lossless
-  widening before they are written.
-- Time column must exist and have a supported timestamp type.
+## Schema rules
+- The registered schema remains authoritative. `add_columns` adds nullable top-level fields;
+  historical files omit them and read as null under the `schema_add_columns` reader feature.
+  Incoming top-level scalar fields may use the append allowlist for lossless widening.
+- The ordered-index column must exist and have its configured integer or timestamp type.
 - If entity columns are configured, segments may contain multiple identities.
   Coverage overlap is checked independently for each `(identity, index interval)` pair.
+
+## Keyed row updates (Rust)
+
+Use `update_rows(source, columns, expected_version)` to assign externally computed values to
+existing rows. The source is an Arrow `RecordBatchReader`; it can stream batches and need not
+implement `Send`. Its schema contains exactly the entity columns, raw ordered-index column,
+and selected destination columns. Column order is arbitrary, names are exact, and conversion
+uses the existing lossless input rules. Nested destinations are replaced as whole values.
+
+```rust,no_run
+use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+use timeseries_table_format::{TimeSeriesTable, TableError, UpdateRowsReport};
+
+async fn assign_labels(
+    table: &mut TimeSeriesTable,
+    assignments: Vec<RecordBatch>,
+    source_schema: arrow::datatypes::SchemaRef,
+    computed_from_version: u64,
+) -> Result<UpdateRowsReport, TableError> {
+    let reader = RecordBatchIterator::new(assignments.into_iter().map(Ok), source_schema);
+    table.update_rows(reader, vec!["label".into()], computed_from_version).await
+}
+```
+
+Add a new nullable destination with `add_columns` first, then capture `table.state().version`
+and read that snapshot to compute assignments. Supply that same version to `update_rows`.
+Version zero, a handle/version mismatch, or a changed CURRENT is rejected before inspecting
+the reader. Any intervening commit conflicts, including an unrelated append or column addition.
+There is no automatic refresh, rebase, or retry. Recompute against a fresh snapshot after a
+conflict; attaching a fresh version to old computed values is unsafe.
+
+Each complete source key must match exactly one stored row. Null keys, duplicate source keys,
+unmatched keys, ambiguous targets, invalid values, and attempts to assign key columns fail the
+whole operation. Matching uses raw timestamp ticks, not rounded coverage intervals. An empty
+stream still validates its schema and all batches, propagates late reader errors, and rechecks
+CURRENT. It returns a no-op without a data/coverage commit. Nonempty assignments commit even
+when every assigned value equals its old value.
+
+The operation prepares a bounded external key join, streams each affected source file into a
+replacement, verifies keys and coverage, then publishes all removals and additions in one
+transaction. `rows_updated` counts assignments; `segments_rewritten` counts affected files.
+`source_file_bytes` and `replacement_file_bytes` are complete Parquet file sizes, excluding
+scratch and coverage sidecars; they are not IO counters. A sparse update may rewrite a large
+file. Preparation has an 8 MiB sort budget, and the writer targets 8 MiB row groups; caller
+batches, individual large values, Arrow buffers, Parquet decoders, and metadata are additional
+memory. These limits are not a process memory cap. Reproduce the bulk workloads with
+`scripts/bench/bench_update_prepare.ps1 -Stage update`; `-Stage rewrite` retains detailed
+preparation/rewrite IO instrumentation for investigating costs.
+
+Errors are `TableError::UpdateRows` with an `UpdateRowsError` cause. Preparation and rewrite
+variants retain `UpdatePreparationError` and `UpdateRewriteError`, including complete typed
+key examples and cleanup errors. A CURRENT conflict retains `CommitError::Conflict` with
+expected/found versions. A create-only commit race retains its storage error. Definite failures
+clean owned replacements and leave this handle unchanged. `CommitError::AmbiguousOutcome`
+preserves potentially referenced files and leaves the handle unchanged: reopen and reconcile
+before deciding whether another attempt is needed.
+
+Old handles and already planned scans keep their snapshots. Reopened/refreshed handles and
+newly planned DataFusion queries see replacements; existing SQL registrations need no change
+because the schema is unchanged. Coverage, metadata, and required features are unchanged;
+updates introduce no reader/writer feature. Existing nullable-column requirements still apply.
+Vacuum retains historical referenced source files and sidecars. Its cutoff must predate active
+attempts. Updates do not introduce snapshot expiration. The Python adapter is a separate task.
 
 ## Error behavior (high level)
 - Missing coverage snapshot when segments exist yields a clear error.

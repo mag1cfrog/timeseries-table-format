@@ -10,7 +10,8 @@ pub use crate::{
     IntoRecordBatchReader, LogicalDataType, LogicalField, LogicalSchema, OpenTableError,
     OptimizeError, OptimizeReport, ParquetCompression, ParseTimeIndexGranularityError, ScanError,
     SchemaEvolutionError, TableError, TableLocation, TableMeta, TableProtocolError,
-    TableStateAccessError, TimeIndexGranularity, TimeSeriesTable, VacuumArtifact,
-    VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
-    validate_index_range,
+    TableStateAccessError, TimeIndexGranularity, TimeSeriesTable, UpdateKey, UpdateKeyValue,
+    UpdateKeyViolation, UpdatePreparationError, UpdateRewriteError, UpdateRowsError,
+    UpdateRowsReport, VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError,
+    VacuumMode, VacuumReport, validate_index_range,
 };
