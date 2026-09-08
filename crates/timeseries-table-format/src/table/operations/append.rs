@@ -555,7 +555,7 @@ impl TimeSeriesTable {
             Some(table_schema) => {
                 ensure_index_spec_matches_schema(table_schema, &self.index)
                     .map_err(AppendError::from)?;
-                let alignment = BatchSchemaAlignment::for_append(
+                let alignment = BatchSchemaAlignment::for_ingestion(
                     incoming_schema,
                     table_schema,
                     &self.index,

@@ -1,6 +1,6 @@
 //! Per-source alignment into a snapshot's canonical Arrow schema.
 //!
-//! Appends alone may use the established scalar widening allowlist. Historical
+//! Incoming Arrow sources may use the established scalar widening allowlist. Historical
 //! files must have exact physical types. Nullable omissions are feature-gated;
 //! neither path may synthesize ordered-index or entity columns.
 
@@ -73,7 +73,7 @@ impl BatchSchemaAlignment {
     }
 
     /// Validate and map an incoming schema into the registered table schema.
-    pub(crate) fn for_append(
+    pub(crate) fn for_ingestion(
         incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
@@ -330,7 +330,7 @@ mod tests {
             &arrow::record_batch::RecordBatchOptions::new().with_match_field_names(false),
         )
         .unwrap();
-        let alignment = BatchSchemaAlignment::for_append(
+        let alignment = BatchSchemaAlignment::for_ingestion(
             source_schema.clone(),
             &canonical,
             &test_index(),
@@ -403,7 +403,7 @@ mod tests {
                     &test_index(),
                 )
             } else {
-                BatchSchemaAlignment::for_append(
+                BatchSchemaAlignment::for_ingestion(
                     incoming.schema(),
                     &canonical,
                     &test_index(),
@@ -456,7 +456,7 @@ mod tests {
                         &test_index(),
                     )
                 } else {
-                    BatchSchemaAlignment::for_append(
+                    BatchSchemaAlignment::for_ingestion(
                         Arc::new(incoming.clone()),
                         &canonical,
                         &test_index(),
@@ -479,7 +479,7 @@ mod tests {
             incoming.push(replacement);
             let incoming = Schema::new(incoming);
             assert!(
-                BatchSchemaAlignment::for_append(
+                BatchSchemaAlignment::for_ingestion(
                     Arc::new(incoming.clone()),
                     &canonical,
                     &test_index(),
@@ -508,7 +508,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let alignment = BatchSchemaAlignment::for_append(
+        let alignment = BatchSchemaAlignment::for_ingestion(
             incoming.schema(),
             &canonical,
             &test_index(),
@@ -591,7 +591,7 @@ mod tests {
         incoming: &Schema,
         registered: &LogicalSchema,
     ) -> SchemaResult<BatchSchemaAlignment> {
-        BatchSchemaAlignment::for_append(
+        BatchSchemaAlignment::for_ingestion(
             Arc::new(incoming.clone()),
             registered,
             &test_index(),
