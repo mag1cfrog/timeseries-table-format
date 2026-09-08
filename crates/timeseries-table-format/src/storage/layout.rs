@@ -23,6 +23,9 @@ pub(crate) const ENTITY_REWRITE_DATA_DIR: &str = "data/_staged/entity-rewrite";
 /// Reserved private scratch for keyed update preparation (never live segments).
 pub(crate) const UPDATE_PREPARE_DIR: &str = "data/_staged/update-prepare";
 
+/// Immutable replacement segments staged by keyed updates.
+pub(crate) const UPDATE_REWRITE_DATA_DIR: &str = "data/_staged/update-rewrite";
+
 // ====================
 // Transaction log layout
 // ====================

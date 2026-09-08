@@ -4,11 +4,13 @@ param(
     [ValidateSet('smoke', 'bulk')][string]$Suite = 'smoke',
     [ValidateRange(1, 10)][int]$Repetitions = 1,
     [string]$Label = 'current',
-    [string]$WorkloadName
+    [string]$WorkloadName,
+    [ValidateSet('prepare', 'rewrite')][string]$Stage = 'prepare'
 )
 $ErrorActionPreference = 'Stop'
 $binary = (Resolve-Path -LiteralPath $TestBinary).Path
 $testName = 'table::operations::update_prepare::tests::preparation_memory_benchmark'
+if ($Stage -eq 'rewrite') { $testName = 'table::operations::update_rewrite::tests::rewrite_memory_benchmark' }
 $measurements = @()
 $workloads = if ($Suite -eq 'bulk') {
     @(
@@ -26,6 +28,16 @@ $workloads = if ($Suite -eq 'bulk') {
         }
     }
 }
+if ($Stage -eq 'rewrite' -and $Suite -eq 'bulk') {
+    $workloads = @(
+        @{ name = 'narrow-quarter'; targets = 262144; updates = 65536; mode = 'shuffled'; payload = 0; entities = 0; selected_wide = 0 },
+        @{ name = 'wide-sparse'; targets = 262144; updates = 4096; mode = 'shuffled'; payload = 4096; entities = 4; selected_wide = 0 },
+        @{ name = 'wide-concentrated'; targets = 262144; updates = 4096; mode = 'concentrated'; payload = 4096; entities = 4; selected_wide = 0 },
+        @{ name = 'wide-quarter'; targets = 262144; updates = 65536; mode = 'shuffled'; payload = 4096; entities = 4; selected_wide = 1 },
+        @{ name = 'wide-dense'; targets = 262144; updates = 262144; mode = 'shuffled'; payload = 4096; entities = 4; selected_wide = 1 },
+        @{ name = 'wide-single'; targets = 262144; updates = 65536; mode = 'shuffled'; payload = 4096; entities = 1; selected_wide = 1 }
+    )
+}
 if ($WorkloadName) {
     $workloads = @($workloads | Where-Object { $_.name -eq $WorkloadName })
     if ($workloads.Count -eq 0) { throw "Unknown workload for suite ${Suite}: $WorkloadName" }
@@ -34,9 +46,11 @@ foreach ($workload in $workloads) {
     foreach ($repeat in 1..$Repetitions) {
         $env:TST_UPDATE_TARGET_ROWS = "$($workload.targets)"
         $env:TST_UPDATE_ROWS = "$($workload.updates)"
-        $env:TST_UPDATE_SORT_BYTES = if ($Suite -eq 'bulk') { '8388608' } else { '65536' }
+        $env:TST_UPDATE_SORT_BYTES = if ($Suite -eq 'bulk' -or $Stage -eq 'rewrite') { '8388608' } else { '65536' }
         $env:TST_UPDATE_MODE = $workload.mode
         $env:TST_UPDATE_PAYLOAD_BYTES = "$($workload.payload)"
+        $env:TST_UPDATE_ENTITIES = if ($workload.ContainsKey('entities')) { "$($workload.entities)" } else { '0' }
+        $env:TST_UPDATE_SELECTED_WIDE = if ($workload.ContainsKey('selected_wide')) { "$($workload.selected_wide)" } else { '0' }
         $stdout = [System.IO.Path]::GetTempFileName()
         $stderr = [System.IO.Path]::GetTempFileName()
         $process = $null
@@ -73,4 +87,6 @@ foreach ($workload in $workloads) {
 $report = [ordered]@{ os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription; architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); cpu = $env:PROCESSOR_IDENTIFIER; rustc = (rustc --version); binary = $binary; git_base = (git rev-parse HEAD); dirty = [bool](git status --porcelain); rss_method = 'Windows PeakWorkingSet64 sampled every 20 ms; ready sample includes allocator reuse from fixture generation'; measurements = $measurements }
 $report.label = $Label
 $report.suite = $Suite
+$report.stage = $Stage
+$report.binary_sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
 $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Output -Encoding utf8

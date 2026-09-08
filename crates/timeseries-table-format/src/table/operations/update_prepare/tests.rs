@@ -15,7 +15,12 @@ use arrow::{
     datatypes::{Field, TimeUnit},
 };
 use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
-use std::{collections::HashMap, fs, num::NonZeroU64};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{Seek, SeekFrom},
+    num::NonZeroU64,
+};
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 

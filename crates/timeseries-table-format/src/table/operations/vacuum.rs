@@ -284,10 +284,13 @@ fn is_managed_parquet_path(path: &str) -> bool {
         return !id.contains('/') && is_canonical_uuid(id);
     }
 
-    let Some(path) = path
-        .strip_prefix(storage::layout::ENTITY_REWRITE_DATA_DIR)
-        .and_then(|path| path.strip_prefix('/'))
-    else {
+    let Some(path) = [
+        storage::layout::ENTITY_REWRITE_DATA_DIR,
+        storage::layout::UPDATE_REWRITE_DATA_DIR,
+    ]
+    .iter()
+    .find_map(|prefix| path.strip_prefix(prefix))
+    .and_then(|path| path.strip_prefix('/')) else {
         return false;
     };
     let Some((attempt_id, ordinal)) = path.split_once('/') else {
@@ -668,6 +671,46 @@ mod tests {
             file_size: None,
             coverage_path: Some(coverage_path.to_string()),
         })
+    }
+
+    #[tokio::test]
+    async fn vacuum_recognizes_complete_and_interrupted_update_replacements() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), make_basic_table_meta()).await?;
+        let attempt = "00000000-0000-0000-0000-000000000003";
+        let expired = format!(
+            "{}/{attempt}/0000000000.parquet",
+            layout::UPDATE_REWRITE_DATA_DIR
+        );
+        let complete = format!(
+            "{}/{attempt}/0000000001.parquet",
+            layout::UPDATE_REWRITE_DATA_DIR
+        );
+        let recent = format!(
+            "{}/{attempt}/0000000002.parquet",
+            layout::UPDATE_REWRITE_DATA_DIR
+        );
+        write_new(location.as_ref(), Path::new(&expired), b"incomplete").await?;
+        write_new(location.as_ref(), Path::new(&recent), b"active").await?;
+        write_test_parquet(
+            &temp.path().join(&complete),
+            true,
+            false,
+            &[TestRow {
+                ts_millis: 0,
+                symbol: "A",
+                price: 1.0,
+            }],
+        )?;
+        mark_expired(&temp.path().join(&expired))?;
+        mark_expired(&temp.path().join(&complete))?;
+        let report = table.vacuum(expired_cutoff(), VacuumMode::Apply).await?;
+        assert_eq!(report.deleted_files, 2);
+        assert!(!temp.path().join(expired).exists());
+        assert!(!temp.path().join(complete).exists());
+        assert!(temp.path().join(recent).exists());
+        Ok(())
     }
 
     #[tokio::test]

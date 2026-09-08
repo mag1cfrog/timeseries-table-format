@@ -209,7 +209,7 @@ fn ordered_index_array<'a>(
     typed.ok_or_else(|| arrow_index_error(path, index, format!("Arrow {}", array.data_type())))
 }
 
-async fn compute_entity_coverage_from_stream(
+pub(crate) async fn compute_entity_coverage_from_stream(
     mut reader: impl Stream<
         Item = Result<arrow::record_batch::RecordBatch, parquet::errors::ParquetError>,
     > + Unpin,
