@@ -871,6 +871,85 @@ async fn nested_replacements_and_metadata_rules_survive_staging() -> TestResult 
 }
 
 #[tokio::test]
+async fn sliced_list_and_map_replacements_preserve_nulls_empty_values_and_offsets() -> TestResult {
+    use arrow::array::{Int64Builder, ListArray, MapBuilder, MapFieldNames, StringBuilder};
+    use arrow::datatypes::Int64Type;
+
+    let lists: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
+        Some(vec![Some(99)]),
+        Some(vec![Some(1), None, Some(3)]),
+        None,
+        Some(vec![]),
+        Some(vec![Some(98)]),
+    ]));
+    let mut maps = MapBuilder::new(
+        Some(MapFieldNames {
+            entry: "entries".into(),
+            key: "key".into(),
+            value: "value".into(),
+        }),
+        StringBuilder::new(),
+        Int64Builder::new(),
+    );
+    for entries in [
+        Some(vec![("outside-before", Some(99))]),
+        Some(vec![("a", Some(1)), ("b", None)]),
+        None,
+        Some(vec![]),
+        Some(vec![("outside-after", Some(98))]),
+    ] {
+        if let Some(entries) = entries {
+            for (key, value) in entries {
+                maps.keys().append_value(key);
+                maps.values().append_option(value);
+            }
+            maps.append(true)?;
+        } else {
+            maps.append(false)?;
+        }
+    }
+    let maps: ArrayRef = Arc::new(maps.finish());
+    let target = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Int64, true),
+            Field::new("list", lists.data_type().clone(), true),
+            Field::new("map", maps.data_type().clone(), true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![99, 3, 1, 2, 98])),
+            lists,
+            maps,
+        ],
+    )?;
+    let fixture = Fixture::new(std::slice::from_ref(&target), &[])?;
+    let before = fixture.snapshot_bytes()?;
+    // Slicing must exclude surrounding values while preserving nested offsets.
+    // Destination order intentionally differs from both source and table order.
+    let source = target.slice(1, 3).project(&[1, 0, 2])?;
+    let mut prepared = prepare_with_budget(
+        &fixture.location,
+        &fixture.state,
+        RecordBatchIterator::new(vec![Ok(source.clone())], source.schema()),
+        &["map".into(), "list".into()],
+        128,
+    )
+    .await?;
+    assert_eq!(prepared.destination_indices, [2, 1]);
+    assert_eq!(prepared.matched_rows, 3);
+    for row in 1..4 {
+        let update = prepared.next()?.ok_or("missing nested replacement")?;
+        assert_eq!((update.segment_index, update.row), (0, row as u64));
+        let expected = target.slice(row, 1).project(&[0, 2, 1])?;
+        assert_eq!(update.key, key_at(&expected, 1, 0)?);
+        assert_eq!(update.values, expected);
+    }
+    assert!(prepared.next()?.is_none());
+    fixture.no_scratch()?;
+    assert_eq!(fixture.snapshot_bytes()?, before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn discovery_does_not_decode_or_stage_wide_unselected_payloads() -> TestResult {
     let schema = Arc::new(Schema::new(vec![
         Field::new("wide", DataType::Binary, true),
