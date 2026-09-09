@@ -4,6 +4,26 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.8.0
+
+
+### Features
+
+- Expose keyed row updates in Python ([#440](https://github.com/mag1cfrog/timeseries-table-format/pull/440)) ([ecd895c](https://github.com/mag1cfrog/timeseries-table-format/commit/ecd895cdec3c695c19d2cc467e4ae3d87a2a95ce))
+
+- Prepare canonical schema alignment for nullable columns ([#429](https://github.com/mag1cfrog/timeseries-table-format/pull/429)) ([a528c3f](https://github.com/mag1cfrog/timeseries-table-format/commit/a528c3f543f5e876132a962c3f0eb682bb813314))
+
+- Add nullable columns transactionally ([#431](https://github.com/mag1cfrog/timeseries-table-format/pull/431)) ([b4d2840](https://github.com/mag1cfrog/timeseries-table-format/commit/b4d2840b799c114278d1c610afcd45a908e7615e))
+
+- Expose nullable column addition in Python ([#432](https://github.com/mag1cfrog/timeseries-table-format/pull/432)) ([0d04d7f](https://github.com/mag1cfrog/timeseries-table-format/commit/0d04d7f96f10c02813ad54d527adc136d0d603b5))
+
+- Prepare keyed Arrow updates with bounded staging ([#437](https://github.com/mag1cfrog/timeseries-table-format/pull/437)) ([17bd1ea](https://github.com/mag1cfrog/timeseries-table-format/commit/17bd1ea4b4011e3072bbd963d343a381431200f5))
+
+- Stage verified Parquet replacements for keyed updates ([#438](https://github.com/mag1cfrog/timeseries-table-format/pull/438)) ([8164a40](https://github.com/mag1cfrog/timeseries-table-format/commit/8164a40113b07308dddb1fac408a415ad99c0bd2))
+
+- Expose transactional keyed row updates in Rust ([#439](https://github.com/mag1cfrog/timeseries-table-format/pull/439)) ([a5d46e5](https://github.com/mag1cfrog/timeseries-table-format/commit/a5d46e5fd9906e032f839c849cc6c547e89c72dd))
+
+
 ## 0.7.0
 
 
