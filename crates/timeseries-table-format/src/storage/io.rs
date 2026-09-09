@@ -64,7 +64,10 @@ impl FileCleanupGuard {
             return Err(io::Error::other("injected cleanup failure"));
         }
 
-        let result = fs::remove_file(&self.path).await;
+        // Unlink and disarm in one poll. A detached Tokio unlink could finish,
+        // let another writer reuse the path, then cancellation would drop this
+        // still-armed guard and delete the new writer's file.
+        let result = std::fs::remove_file(&self.path);
         self.disarm();
         result
     }
@@ -516,7 +519,10 @@ pub(crate) async fn remove_file(location: &StorageLocation, rel_path: &Path) -> 
                     backtrace: Backtrace::capture(),
                 });
             }
-            match fs::remove_file(&abs).await {
+            // Commit rollback must observe unlink before its cleanup guard can
+            // be cancelled. As with create/rename, keep this local metadata
+            // operation in one poll so a reused path cannot be deleted by Drop.
+            match std::fs::remove_file(&abs) {
                 Ok(()) => Ok(()),
                 Err(source) if source.kind() == io::ErrorKind::NotFound => {
                     Err(StorageError::NotFound {
@@ -759,12 +765,75 @@ pub(crate) async fn list_files(
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use std::sync::mpsc;
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // Hold Tokio's blocking worker so the first cleanup poll cannot race with
+    // its completion. Then let unlink finish without polling its owner again.
+    fn assert_cancelled_cleanup_preserves_reused_path(guard_cleanup: bool) {
+        use std::{
+            future::Future,
+            task::{Context, Poll},
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("commit.json");
+            std::fs::write(&path, "first writer").unwrap();
+            let location = crate::storage::TableLocation::local(temp.path());
+            let mut guard = super::FileCleanupGuard::new_armed(path.clone());
+            let (release, waiting) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || waiting.recv().unwrap());
+            let mut cleanup = Box::pin(async {
+                if guard_cleanup {
+                    guard.cleanup().await
+                } else {
+                    let result =
+                        super::remove_file(location.as_ref(), std::path::Path::new("commit.json"))
+                            .await;
+                    guard.disarm();
+                    result.map_err(std::io::Error::other)
+                }
+            });
+            let first_poll = cleanup
+                .as_mut()
+                .poll(&mut Context::from_waker(futures::task::noop_waker_ref()));
+            if let Poll::Ready(result) = first_poll {
+                result.unwrap();
+            }
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let started = std::time::Instant::now();
+            while path.exists() {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(5),
+                    "cleanup must finish on the blocking worker"
+                );
+                tokio::task::yield_now().await;
+            }
+            std::fs::write(&path, "second writer").unwrap();
+            drop(cleanup);
+            drop(guard);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "second writer");
+        });
+    }
+
+    #[test]
+    fn cancelled_guard_cleanup_preserves_a_reused_commit_path() {
+        assert_cancelled_cleanup_preserves_reused_path(true);
+    }
+
+    #[test]
+    fn cancelled_unlink_preserves_a_reused_commit_path() {
+        assert_cancelled_cleanup_preserves_reused_path(false);
+    }
 
     #[tokio::test]
     async fn write_atomic_creates_file_with_contents() -> TestResult {

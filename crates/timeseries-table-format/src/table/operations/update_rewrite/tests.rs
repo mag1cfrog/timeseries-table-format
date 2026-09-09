@@ -119,6 +119,24 @@ impl Fixture {
         )
         .await?)
     }
+    /// Publish the existing physical fixture through the real log for API probes.
+    async fn publish(&self) -> TestResult<crate::TimeSeriesTable> {
+        use crate::transaction_log::{LogAction, TransactionLogStore};
+        // Remove only the two sentinel files created by Fixture::empty.
+        fs::remove_file(self.dir.path().join("_timeseries_log/CURRENT"))?;
+        fs::remove_file(self.dir.path().join("_timeseries_log/0000000017.json"))?;
+        let log = TransactionLogStore::new(self.location.clone());
+        let mut actions = vec![LogAction::UpdateTableMeta(self.state.table_meta.clone())];
+        actions.extend(
+            self.state
+                .segments
+                .values()
+                .cloned()
+                .map(LogAction::AddSegment),
+        );
+        log.commit_with_expected_version(0, actions).await?;
+        Ok(crate::TimeSeriesTable::open(self.location.clone()).await?)
+    }
     fn originals(&self) -> TestResult<Vec<(String, Vec<u8>)>> {
         let mut paths = vec![
             "_timeseries_log/CURRENT".into(),
@@ -624,7 +642,7 @@ async fn malformed_payload_metadata_fails_before_rewrite_decoding() -> TestResul
 /// Streaming fixtures with distinct incompressible wide values, not a repeated
 /// constant that disappears into one dictionary entry. Run outside Cargo for RSS.
 #[tokio::test]
-#[ignore = "native rewrite benchmark; use bench_update_prepare.ps1 -Stage rewrite"]
+#[ignore = "native rewrite/update benchmark; use bench_update_prepare.ps1 -Stage rewrite or update"]
 async fn rewrite_memory_benchmark() -> TestResult {
     fn parameter(name: &str, default: usize) -> TestResult<usize> {
         Ok(std::env::var(name)
@@ -715,6 +733,11 @@ async fn rewrite_memory_benchmark() -> TestResult {
         });
         fixture.add(empty.schema(), batches).await?;
     }
+    let mut public_table = if std::env::var("TST_UPDATE_PUBLISH").as_deref() == Ok("1") {
+        Some(fixture.publish().await?)
+    } else {
+        None
+    };
     let mut projection = vec![0, if selected_wide { 2 } else { 1 }];
     if entities > 0 {
         projection.push(3);
@@ -739,15 +762,40 @@ async fn rewrite_memory_benchmark() -> TestResult {
             .collect();
         data(keys, width, entities, true)?.project(&projection)
     });
+    let columns = vec![if selected_wide {
+        "wide".into()
+    } else {
+        "value".into()
+    }];
+    if let Some(table) = &mut public_table {
+        let version = table.state().version;
+        let report = table
+            .update_rows(
+                RecordBatchIterator::new(input, source_schema),
+                columns,
+                version,
+            )
+            .await?;
+        let total_seconds = started.elapsed().as_secs_f64();
+        assert_eq!(report.rows_updated, updates as u64);
+        assert_eq!(report.segments_rewritten, if concentrated { 1 } else { 4 });
+        assert_eq!(
+            crate::TimeSeriesTable::open(fixture.location.clone())
+                .await?
+                .state(),
+            table.state()
+        );
+        println!(
+            "UPDATE_BENCH_RESULT {}",
+            serde_json::json!({"total_seconds":total_seconds,"starting_version":report.starting_version,"committed_version":report.committed_version,"rows_updated":report.rows_updated,"segments":report.segments_rewritten,"source_file_bytes":report.source_file_bytes,"replacement_file_bytes":report.replacement_file_bytes})
+        );
+        return Ok(());
+    }
     let prepared = super::super::update_prepare::prepare_updates(
         &fixture.location,
         &fixture.state,
         RecordBatchIterator::new(input, source_schema),
-        &[if selected_wide {
-            "wide".into()
-        } else {
-            "value".into()
-        }],
+        &columns,
     )
     .await?;
     let preparation_seconds = started.elapsed().as_secs_f64();
@@ -767,4 +815,99 @@ async fn rewrite_memory_benchmark() -> TestResult {
     staged.close().await?;
     fixture.no_outputs()?;
     Ok(())
+}
+
+#[tokio::test]
+async fn public_updates_use_exact_timestamp_keys_inside_one_coverage_bucket() -> TestResult {
+    let keys: ArrayRef = Arc::new(
+        arrow::array::TimestampNanosecondArray::from(vec![1_000_000_001, 2_000_000_002])
+            .with_timezone("UTC"),
+    );
+    let nested: ArrayRef = Arc::new(StructArray::from(vec![(
+        Arc::new(Field::new("child", DataType::Int64, true)),
+        Arc::new(Int64Array::from(vec![Some(1), Some(2)])) as ArrayRef,
+    )]));
+    let data = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("idx", keys.data_type().clone(), false),
+            Field::new("nested", nested.data_type().clone(), true),
+        ])),
+        vec![keys, nested],
+    )?;
+    let mut fixture = Fixture::empty(data.schema(), &[])?;
+    fixture.add(data.schema(), [data.clone()]).await?;
+    let mut table = fixture.publish().await?;
+    let before = table.state().clone();
+    let mut columns = data.slice(1, 1).columns().to_vec();
+    columns[1] = arrow::array::new_null_array(data.column(1).data_type(), 1);
+    table
+        .update_rows(
+            RecordBatchIterator::new(
+                [Ok(RecordBatch::try_new(data.schema(), columns)?)],
+                data.schema(),
+            ),
+            vec!["nested".into()],
+            before.version,
+        )
+        .await?;
+    let actual = read_all(
+        &fixture.location,
+        &table.state().segments.values().next().unwrap().path,
+    )?;
+    assert_eq!(actual.column(0), data.column(0));
+    assert_eq!(
+        actual.column(1).slice(0, 1).to_data(),
+        data.column(1).slice(0, 1).to_data()
+    );
+    assert!(actual.column(1).is_null(1));
+    assert_eq!(table.state().table_meta, before.table_meta);
+    assert!(
+        table
+            .state()
+            .table_meta
+            .required_reader_features()
+            .is_empty()
+    );
+    // A third raw timestamp in the same bucket must not match either stored row.
+    let missing = RecordBatch::try_new(
+        data.schema(),
+        vec![
+            Arc::new(
+                arrow::array::TimestampNanosecondArray::from(vec![1_000_000_003])
+                    .with_timezone("UTC"),
+            ),
+            data.column(1).slice(0, 1),
+        ],
+    )?;
+    let version = table.state().version;
+    assert!(matches!(
+        table
+            .update_rows(
+                RecordBatchIterator::new([Ok(missing)], data.schema()),
+                vec!["nested".into()],
+                version
+            )
+            .await,
+        Err(crate::TableError::UpdateRows {
+            source: crate::UpdateRowsError::Preparation {
+                source: PrepareError::Key {
+                    kind: super::super::update_prepare::KeyViolation::UnmatchedSource,
+                    ..
+                }
+            }
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn rewrite_report_counters_reject_overflow_without_wrapping() {
+    let mut count = u64::MAX;
+    assert!(matches!(
+        add_count(&mut count, 1, "source_file_bytes"),
+        Err(RewriteError::CountOverflow {
+            counter: "source_file_bytes"
+        })
+    ));
+    assert_eq!(count, u64::MAX);
 }

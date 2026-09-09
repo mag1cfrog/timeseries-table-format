@@ -59,69 +59,141 @@ use crate::{
 
 type Result<T> = std::result::Result<T, RewriteError>;
 
+/// Typed replacement validation, storage, and cleanup failures during row updates.
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub(crate) enum RewriteError {
+#[non_exhaustive]
+pub enum RewriteError {
+    /// A checked rewrite counter overflowed.
+    #[snafu(display("Update rewrite counter overflow: {counter}"))]
+    CountOverflow {
+        /// Counter that cannot be represented as u64.
+        counter: &'static str,
+    },
+    /// Prepared input or replacement validation failed.
     #[snafu(display("Invalid keyed rewrite: {reason}"))]
-    Invalid { reason: String },
+    Invalid {
+        /// Validation detail.
+        reason: String,
+    },
+    /// A declared decoder allocation exceeds its limit.
     #[snafu(display("Rewrite {allocation} at {path} declares {bytes} bytes; limit {limit}"))]
     Resource {
+        /// Affected path.
         path: String,
+        /// Allocation being limited.
         allocation: &'static str,
+        /// Declared bytes.
         bytes: u64,
+        /// Maximum accepted bytes.
         limit: u64,
     },
+    /// Reading the prepared cursor failed.
     #[snafu(context(false), display("Prepared updates: {source}"))]
-    Preparation { source: PrepareError },
+    Preparation {
+        /// Original typed failure.
+        #[snafu(backtrace)]
+        source: PrepareError,
+    },
+    /// Local source IO failed.
     #[snafu(display("Rewrite IO at {}: {source}", path.display()))]
     Io {
+        /// Affected path.
         path: std::path::PathBuf,
+        /// Original typed failure.
         source: std::io::Error,
     },
+    /// Replacement storage failed.
     #[snafu(context(false), display("Rewrite storage: {source}"))]
-    Storage { source: StorageError },
+    Storage {
+        /// Original typed failure.
+        #[snafu(backtrace)]
+        source: StorageError,
+    },
+    /// Arrow assembly failed.
     #[snafu(context(false), display("Rewrite Arrow: {source}"))]
-    Arrow { source: arrow::error::ArrowError },
+    Arrow {
+        /// Original typed failure.
+        source: arrow::error::ArrowError,
+    },
+    /// Parquet decoding or writing failed.
     #[snafu(context(false), display("Rewrite Parquet: {source}"))]
     Parquet {
+        /// Original typed failure.
         source: parquet::errors::ParquetError,
     },
+    /// Historical schema alignment failed.
     #[snafu(context(false), display("Rewrite schema: {source}"))]
     Schema {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: Box<crate::metadata::schema_compat::SchemaCompatibilityError>,
     },
+    /// Replacement metadata inspection failed.
     #[snafu(context(false), display("Rewrite inspection: {source}"))]
     Inspection {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::transaction_log::segments::SegmentError,
     },
+    /// Replacement coverage verification failed.
     #[snafu(context(false), display("Rewrite coverage: {source}"))]
     Coverage {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::formats::parquet::SegmentCoverageError,
     },
+    /// Source sidecar reading failed.
     #[snafu(context(false), display("Rewrite sidecar: {source}"))]
     Sidecar {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::coverage::io::CoverageSidecarError,
     },
+    /// Replacement coverage encoding failed.
     #[snafu(context(false), display("Rewrite coverage encoding: {source}"))]
     Codec {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::coverage::serde::CoverageCodecError,
     },
+    /// Sidecar path construction failed.
     #[snafu(context(false), display("Rewrite coverage path: {source}"))]
     Layout {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: crate::coverage::layout::CoverageLayoutError,
     },
-    #[snafu(display("Replacement cleanup failures: {cleanup_errors:?}"))]
-    Cleanup { cleanup_errors: Vec<StorageError> },
+    /// Explicit replacement cleanup failed; Drop also attempts best effort.
+    #[snafu(display("Replacement cleanup failures: [{}]", cleanup_errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")))]
+    Cleanup {
+        /// All observed cleanup failures with their paths.
+        cleanup_errors: Vec<StorageError>,
+    },
+    /// Rewriting and replacement cleanup both failed.
     #[snafu(display("{source}; cleanup also failed: {cleanup}"))]
     CleanupAfterFailure {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: Box<RewriteError>,
+        /// Cleanup failure.
         cleanup: Box<RewriteError>,
     },
+    /// Rewriting and preparation cleanup both failed.
     #[snafu(display("{source}; preparation cleanup also failed: {cleanup}"))]
     PreparationCleanup {
+        /// Original typed failure.
+        #[snafu(backtrace)]
         source: Box<RewriteError>,
+        /// Cleanup failure.
         cleanup: PrepareError,
     },
+}
+fn add_count(total: &mut u64, value: u64, counter: &'static str) -> Result<()> {
+    *total = total
+        .checked_add(value)
+        .ok_or(RewriteError::CountOverflow { counter })?;
+    Ok(())
 }
 fn invalid(reason: impl Into<String>) -> RewriteError {
     RewriteError::Invalid {
@@ -467,7 +539,7 @@ async fn rewrite_segment(
             }
             pieces.push(RecordBatch::try_new(schema.clone(), columns)?);
             start = offset + 1;
-            staged.metrics.rows_updated += 1;
+            add_count(&mut staged.metrics.rows_updated, 1, "rows_updated")?;
             *next = prepared.next()?;
         }
         let output = if pieces.is_empty() {
@@ -541,13 +613,28 @@ async fn rewrite_segment(
     }
     meta.coverage_path = Some(sidecar);
     meta.entity_layout = source.entity_layout.clone();
-    staged.metrics.rows_rewritten += row;
-    staged.metrics.source_file_bytes += source_size;
-    staged.metrics.replacement_file_bytes += meta
-        .file_size
-        .ok_or_else(|| invalid("missing replacement size"))?;
-    staged.metrics.source_bytes_read += source_bytes.load(Ordering::Relaxed);
-    staged.metrics.output_key_bytes_read += verification_bytes.load(Ordering::Relaxed);
+    add_count(&mut staged.metrics.rows_rewritten, row, "rows_rewritten")?;
+    add_count(
+        &mut staged.metrics.source_file_bytes,
+        source_size,
+        "source_file_bytes",
+    )?;
+    add_count(
+        &mut staged.metrics.replacement_file_bytes,
+        meta.file_size
+            .ok_or_else(|| invalid("missing replacement size"))?,
+        "replacement_file_bytes",
+    )?;
+    add_count(
+        &mut staged.metrics.source_bytes_read,
+        source_bytes.load(Ordering::Relaxed),
+        "source_bytes_read",
+    )?;
+    add_count(
+        &mut staged.metrics.output_key_bytes_read,
+        verification_bytes.load(Ordering::Relaxed),
+        "output_key_bytes_read",
+    )?;
     staged.replacements.push(SegmentReplacement {
         source: source.clone(),
         replacement: meta,

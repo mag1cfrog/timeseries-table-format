@@ -1,5 +1,10 @@
 # DataFusion integration
 
+Rust `TimeSeriesTable::update_rows` keeps the schema unchanged. Queries planned after a
+successful update refresh the registered provider's snapshot and see replacement values;
+re-registration is unnecessary. Already planned physical scans retain their original files.
+Adding columns changes the schema and still requires re-registration before querying it.
+
 The optional `datafusion` feature lets you query a `timeseries-table-format` table using DataFusion SQL.
 It focuses on time-series workloads and includes **segment-level pruning**:
 when a query has a time predicate, we determine which data segments cannot

@@ -8,11 +8,9 @@ mod open;
 mod optimize;
 mod scan;
 mod state_access;
-// Internal staging is consumed by the following transactional-update slices.
-#[allow(dead_code)]
 pub(crate) mod update_prepare;
-#[allow(dead_code)]
 pub(crate) mod update_rewrite;
+mod update_rows;
 mod vacuum;
 
 pub use add_columns::AddColumnsError;
@@ -23,6 +21,12 @@ pub use open::OpenTableError;
 pub use optimize::{OptimizeError, OptimizeReport};
 pub use scan::ScanError;
 pub use state_access::TableStateAccessError;
+pub use update_prepare::{
+    KeyValue as UpdateKeyValue, KeyViolation as UpdateKeyViolation,
+    PrepareError as UpdatePreparationError, UpdateKey,
+};
+pub use update_rewrite::RewriteError as UpdateRewriteError;
+pub use update_rows::{UpdateRowsError, UpdateRowsReport};
 pub use vacuum::{
     VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode,
     VacuumReport,

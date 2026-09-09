@@ -1,0 +1,127 @@
+{
+  "os": "Microsoft Windows 10.0.26200",
+  "architecture": "X64",
+  "cpu": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "binary": "E:\\repo\\timeseries-table-format\\target\\release\\deps\\timeseries_table_format-9eff3fac916a6d59.exe",
+  "git_base": "8164a40113b07308dddb1fac408a415ad99c0bd2",
+  "dirty": true,
+  "rss_method": "Windows PeakWorkingSet64 sampled every 20 ms; ready sample includes allocator reuse from fixture generation",
+  "measurements": [
+    {
+      "workload": "wide-dense",
+      "repetition": 1,
+      "parameters": {
+        "entities": 4,
+        "logical_source_bytes": 1076363264,
+        "mode": "shuffled",
+        "payload_bytes": 4096,
+        "selected_wide": true,
+        "target_rows": 262144,
+        "updates": 262144
+      },
+      "result": {
+        "metrics": {
+          "output_key_bytes_read": 5054592,
+          "peak_batch_bytes": 1057720,
+          "peak_writer_bytes": 8608170,
+          "replacement_file_bytes": 1076455380,
+          "rows_rewritten": 262144,
+          "rows_updated": 262144,
+          "source_bytes_read": 1095393932,
+          "source_file_bytes": 1080953580
+        },
+        "peak_scratch_bytes": 1264178220,
+        "preparation_key_bytes_read": 8011660,
+        "preparation_seconds": 5.3907003,
+        "rewrite_seconds": 4.6410618,
+        "scratch_bytes_read": 1797779156,
+        "scratch_bytes_written": 1750291136,
+        "segments": 4,
+        "total_seconds": 10.0317647
+      },
+      "peak_rss_bytes": 34390016,
+      "sampled_ready_rss_bytes": 14237696,
+      "peak_handles": 122,
+      "sampled_ready_handles": 107
+    },
+    {
+      "workload": "wide-dense",
+      "repetition": 2,
+      "parameters": {
+        "entities": 4,
+        "logical_source_bytes": 1076363264,
+        "mode": "shuffled",
+        "payload_bytes": 4096,
+        "selected_wide": true,
+        "target_rows": 262144,
+        "updates": 262144
+      },
+      "result": {
+        "metrics": {
+          "output_key_bytes_read": 5054592,
+          "peak_batch_bytes": 1057720,
+          "peak_writer_bytes": 8608170,
+          "replacement_file_bytes": 1076455380,
+          "rows_rewritten": 262144,
+          "rows_updated": 262144,
+          "source_bytes_read": 1095393932,
+          "source_file_bytes": 1080953580
+        },
+        "peak_scratch_bytes": 1264178220,
+        "preparation_key_bytes_read": 8011660,
+        "preparation_seconds": 5.1014538,
+        "rewrite_seconds": 4.6884348,
+        "scratch_bytes_read": 1797779156,
+        "scratch_bytes_written": 1750291136,
+        "segments": 4,
+        "total_seconds": 9.7898908
+      },
+      "peak_rss_bytes": 34086912,
+      "sampled_ready_rss_bytes": 14053376,
+      "peak_handles": 155,
+      "sampled_ready_handles": 140
+    },
+    {
+      "workload": "wide-dense",
+      "repetition": 3,
+      "parameters": {
+        "entities": 4,
+        "logical_source_bytes": 1076363264,
+        "mode": "shuffled",
+        "payload_bytes": 4096,
+        "selected_wide": true,
+        "target_rows": 262144,
+        "updates": 262144
+      },
+      "result": {
+        "metrics": {
+          "output_key_bytes_read": 5054592,
+          "peak_batch_bytes": 1057720,
+          "peak_writer_bytes": 8608170,
+          "replacement_file_bytes": 1076455380,
+          "rows_rewritten": 262144,
+          "rows_updated": 262144,
+          "source_bytes_read": 1095393932,
+          "source_file_bytes": 1080953580
+        },
+        "peak_scratch_bytes": 1264178220,
+        "preparation_key_bytes_read": 8011660,
+        "preparation_seconds": 5.4671795,
+        "rewrite_seconds": 4.6367804,
+        "scratch_bytes_read": 1797779156,
+        "scratch_bytes_written": 1750291136,
+        "segments": 4,
+        "total_seconds": 10.1039623
+      },
+      "peak_rss_bytes": 34701312,
+      "sampled_ready_rss_bytes": 13578240,
+      "peak_handles": 119,
+      "sampled_ready_handles": 113
+    }
+  ],
+  "label": "issue-435-stage-control",
+  "suite": "bulk",
+  "stage": "rewrite",
+  "binary_sha256": "cab355a0008aa15eb28163e9c9f82259e665a8f10573fa67a6fd24788c79792b"
+}

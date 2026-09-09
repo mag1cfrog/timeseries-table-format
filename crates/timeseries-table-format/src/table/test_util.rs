@@ -46,6 +46,26 @@ use tracing_subscriber::{
 
 pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+struct PanicOnCommitClose;
+
+impl<S> Layer<S> for PanicOnCommitClose
+where
+    S: Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        if ctx
+            .metadata(&id)
+            .is_some_and(|metadata| metadata.name() == "transaction.commit")
+        {
+            panic!("injected transaction commit close panic");
+        }
+    }
+}
+
+pub(crate) fn panic_on_commit_close_dispatch() -> tracing::Dispatch {
+    tracing::Dispatch::new(tracing_subscriber::registry().with(PanicOnCommitClose))
+}
+
 pub(crate) async fn append_parquet_fixture(
     table: &mut TimeSeriesTable,
     relative_path: impl AsRef<Path>,

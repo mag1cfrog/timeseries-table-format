@@ -29,7 +29,7 @@
 
 ## Built for time-series data
 
-`timeseries-table-format` turns Arrow data into managed, append-only tables.
+`timeseries-table-format` turns Arrow data into managed tables backed by immutable files.
 It tracks which chronological windows exist for each
 entity, rejects overlapping appends, and exposes the result through DataFusion
 SQL.
@@ -113,9 +113,11 @@ workloads, environment, and full comparison.
 
 ## Current scope
 
-The current release focuses on local, append-only tables and supports explicit nullable-column
-addition without rewriting historical data. It does not yet support object storage, small-file
-compaction, column dropping/renaming, automatic schema merging, row updates, merges, or time-travel queries.
+The engine focuses on local tables and supports explicit nullable-column addition without
+rewriting historical data. The Rust API also supports atomic updates to selected existing
+columns by complete row key; see the [update guide](crates/timeseries-table-format/ENGINE.md#keyed-row-updates-rust).
+It does not yet support object storage, small-file compaction, column dropping/renaming,
+automatic schema merging, row insertion through updates, merges, or time-travel queries.
 
 For design details, read [How I built this](docs/blog/how-i-built-this/how-i-built-this.md)
 or view the [architecture diagram](docs/assets/high-level-architecture.png).
