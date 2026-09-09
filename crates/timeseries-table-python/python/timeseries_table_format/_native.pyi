@@ -593,7 +593,11 @@ class _TestingModule(ModuleType):
     def _test_sql_reader_unsupported_schema(self) -> None: ...
     def _test_sql_reader_midstream_error(self) -> pyarrow.RecordBatchReader: ...
     def _test_append_stream_with_release_counter(
-        self, *, fail_after_first: bool, with_error_details: bool = True
+        self,
+        *,
+        fail_after_first: bool,
+        with_error_details: bool = True,
+        with_payload: bool = False,
     ) -> tuple[object, _AppendStreamReleaseCounter]: ...
     def _test_append_stream_with_schema_import_error(
         self,

@@ -2155,11 +2155,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// Consumes the source once with the GIL released. Empty valid input is a
         /// version-checked no-op; nonempty equal-value input still commits. Affected
         /// immutable files are replaced atomically and retained history protects the
-        /// originals. Newly planned SQL queries see updated values without registration.
+        /// originals. Newly planned SQL queries see updated values without re-registration.
         ///
-        /// Errors include table_root. Invalid schemas use SchemaMismatchError; key
-        /// violations use TimeseriesTableError with reason, observed counts, and
-        /// example_key. Version mismatches use ConflictError with expected/found.
+        /// Errors raised inside the operation include table_root. Invalid schemas
+        /// use SchemaMismatchError. Key violations use TimeseriesTableError with
+        /// reason, observed counts, and example_key. Version mismatches use
+        /// ConflictError with expected/found.
         /// Errors leave this handle unchanged. Reopen and reconcile an ambiguous
         /// commit before retrying; ambiguity does not guarantee rollback.
         #[pyo3(signature = (source, *, columns, expected_version))]
