@@ -102,6 +102,45 @@ raise `ValueError`; writer settings are validated before the source is exported 
 Table failures use the library's existing [exception hierarchy](exceptions.md). Boundary and
 mid-stream source failures do not commit a new version.
 
+## Update row values
+
+```python
+report = table.update_rows(source, columns=["quality"], expected_version=computed_from_version)
+```
+
+Both keyword arguments are required. `columns` accepts a sequence of strings and
+`expected_version` accepts an integer in `1..=18446744073709551615`, excluding bool.
+The source accepts the same Arrow C Stream inputs as append. It contains exactly all entity
+columns, the raw ordered-index column, and the selected payload fields. The core validates
+schema compatibility and exact one-to-one key matches.
+
+Capture the version before reading and computing assignments. Both the handle and published
+table must still match it. The operation never refreshes or retries. It overwrites selected
+values, including explicit nulls in nullable fields; unselected values remain unchanged.
+Nested destinations replace complete top-level values. A valid empty stream is a version-checked
+no-op; equal-value nonempty input still commits. See the
+[workflow guide](../guides/update_rows.md) for provenance, error handling, and resource costs.
+
+`UpdateRowsReport` is read-only. Its seven fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `starting_version` | Snapshot used to compute assignments |
+| `committed_version` | Published version, or starting version for a no-op |
+| `rows_updated` | Addressed rows, including equal-value assignments |
+| `segments_rewritten` | Affected source segments replaced |
+| `source_file_bytes` | Total affected source Parquet file sizes |
+| `replacement_file_bytes` | Total completed replacement Parquet file sizes |
+| `no_op` | True only for a fully validated source with zero rows |
+
+Byte fields exclude scratch, sidecars, and discovery I/O; they are not total I/O measurements.
+All counts are zero for empty input. The successful committed version equals `table.version()`.
+
+::: timeseries_table_format.UpdateRowsReport
+    options:
+      members: true
+      show_source: false
+
 ## Add nullable columns
 
 `TimeSeriesTable.add_columns(columns: pyarrow.Schema) -> int` adds the fields in one commit and

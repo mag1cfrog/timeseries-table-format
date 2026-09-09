@@ -1,7 +1,7 @@
 # timeseries-table-format (Python)
 
-Build local, append-only time-series tables from Parquet files. The Python API
-tracks coverage, rejects overlapping appends, and queries tables with
+Build local time-series tables with immutable Parquet segments. The Python API
+tracks coverage, rejects overlapping appends, updates selected row values, and queries tables with
 DataFusion SQL. Query results are returned as `pyarrow.Table` objects.
 
 - [Documentation](https://mag1cfrog.github.io/timeseries-table-format/)
@@ -20,9 +20,10 @@ DataFusion SQL. Query results are returned as `pyarrow.Table` objects.
 - DataFusion SQL over managed tables and standalone Parquet data
 - Materialized and streaming Arrow result APIs
 - Explicit nullable-column addition through `table.add_columns(pyarrow.Schema)`
+- Atomic keyed value updates through `table.update_rows(source, columns=..., expected_version=...)`
 
 The current release supports local filesystems only. It does not yet support
-object storage, small-file compaction, column dropping/renaming, automatic schema merging, row updates, merges,
+object storage, small-file compaction, column dropping/renaming, automatic schema merging, row insertion/deletion through updates, merges,
 or time-travel queries.
 
 `add_columns` adds new nullable top-level fields after the first successful append establishes
@@ -30,6 +31,14 @@ the schema. Historical rows read as null without rewriting data; later appends m
 payload fields while retaining all keys and matching the types/nullability of provided fields.
 Replace SQL registrations with `Session.register_tstable` after adding columns. See the
 [guide and runnable example](https://mag1cfrog.github.io/timeseries-table-format/guides/add_nullable_columns/).
+
+`update_rows` backfills or overwrites selected existing fields using complete entity and raw
+index keys. Capture the source version before reading and computing assignments; any intervening
+commit conflicts. The operation consumes Arrow batches incrementally and rewrites affected
+segments in one transaction. Explicit null clears a nullable destination, and unselected fields
+remain unchanged. Newly planned SQL queries see value changes without re-registration.
+See the [update guide and runnable example](https://mag1cfrog.github.io/timeseries-table-format/guides/update_rows/)
+for error handling, report semantics, and scratch/rewrite costs.
 
 ## Install
 

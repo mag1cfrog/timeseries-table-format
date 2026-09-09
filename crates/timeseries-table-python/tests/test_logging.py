@@ -447,6 +447,14 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
                     )
                 ).committed_version == 2
             assert table.add_columns(pa.schema([pa.field("quality", pa.float64())])) == 3
+            table.update_rows(
+                pa.table({
+                    "tick": pa.array([0], type=pa.uint64()),
+                    "device_id": ["A"],
+                    "quality": [0.9876543210123],
+                }),
+                columns=["quality"], expected_version=table.version(),
+            )
             assert table.optimize().no_op is False
 
             session = ttf.Session()
@@ -462,6 +470,7 @@ def test_enabled_logging_does_not_deadlock_public_native_operations():
                 reader.close()
 
         messages = "\\n".join(record.getMessage() for record in records)
+        assert "0.9876543210123" not in messages
         for event_name in (
             "table.create",
             "table.append",

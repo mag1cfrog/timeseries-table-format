@@ -3,7 +3,8 @@
 Use `table.add_columns(pyarrow.Schema)` to introduce new payload fields after the first successful
 append establishes the table's schema. The fields must be nullable and top-level. Existing types,
 nullability, names, and keys cannot change. This operation adds fields; it does not compute or
-backfill historical values.
+backfill historical values. Use a subsequent [keyed row update](update_rows.md) to assign
+externally computed values to those columns.
 
 ## Run the example
 

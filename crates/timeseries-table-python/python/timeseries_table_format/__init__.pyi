@@ -1,6 +1,7 @@
 from ._native import (
     __version__,
     AppendReport,
+    UpdateRowsReport,
     ConflictError,
     DataFusionError,
     DuplicateIndexIntervalError,
@@ -30,6 +31,7 @@ def load_notebook_display_config(path: str) -> bool: ...
 __all__ = [
     "__version__",
     "AppendReport",
+    "UpdateRowsReport",
     "TimeseriesTableError",
     "StorageError",
     "ConflictError",
