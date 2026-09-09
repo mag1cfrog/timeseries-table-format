@@ -48,16 +48,48 @@ for the uniqueness rule.
 
 **`SchemaMismatchError`** - raised when an Arrow source you try to append has a schema that
 conflicts with the table's established schema (set on the first successful append), or when
-`add_columns(...)` violates the nullable-addition contract.
+`add_columns(...)` violates the nullable-addition contract. It also covers invalid destination
+selections and source/schema incompatibilities reported by `update_rows(...)`.
 
 **`ConflictError`** - raised when a concurrent modification to the table metadata is detected.
 In typical single-process usage this is rare; it can happen if two processes are appending to the
 same table root simultaneously or adding columns through a stale handle. The exception carries
 `expected` and `found` versions. Reopen and reconcile before retrying.
 
+For `update_rows`, `expected` is the explicit source version. `found` is the selected handle's
+version when that differs, or the observed published version when the handle matches. A create-only
+commit race that has no observed version remains `StorageError` with path context.
+
 **`TimeseriesTableError`** - also preserves protocol incompatibility and ambiguous commit
 diagnostics. An ambiguous outcome must not be treated as guaranteed rollback; reopen and reconcile
 the log before retrying.
+
+## Keyed update diagnostics
+
+Update errors include `table_root`, including representation errors raised inside the operation.
+Invalid Python column/version representations use `TypeError`; out-of-range integer versions use
+`ValueError`. Arrow export/import failures follow append's existing boundary behavior and retain
+available upstream causes. Reader failures during consumption preserve their source diagnostic.
+
+When the core rejects a complete key, the exception is exactly `TimeseriesTableError`. It is
+distinct from append's interval-overlap exceptions and carries these conditional attributes:
+
+| Attribute | Meaning |
+| --- | --- |
+| `reason` | `duplicate_source_key`, `unmatched_source_key`, `ambiguous_target_key`, or `null_identity` |
+| `input_rows_seen` | Source rows observed before rejection |
+| `observed_violations` | Violations observed, not a total for unread input |
+| `example_key` | A complete key dictionary using configured column names |
+
+Key dictionary values are Python strings, integers, or `None`. Timestamp components are
+`pyarrow.TimestampScalar` values in the canonical unit/timezone, preserving nanoseconds.
+Unsigned values retain their full range. A table without entity columns includes only the
+ordered-index entry. These attributes are present when the structured core key diagnostic is
+available; an Arrow reader can reject malformed data before it reaches key validation.
+
+Storage errors retain applicable paths. Cleanup failures preserve their diagnostics alongside
+the primary failure. Ambiguous commits retain the base exception and full diagnostic, even when
+they contain nested storage failures. See [Update values by row key](../guides/update_rows.md).
 
 **`DataFusionError`** - raised when `Session.sql(...)` or `Session.sql_reader(...)` encounters a
 SQL error (syntax error, type error, unknown column, etc.).

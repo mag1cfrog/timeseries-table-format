@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from types import ModuleType
 from typing import Literal, Protocol
@@ -15,7 +16,17 @@ def refresh_logging_cache() -> None:
     """Refresh native logging levels after changing Python logging configuration."""
     ...
 
-class TimeseriesTableError(Exception): ...
+class TimeseriesTableError(Exception):
+    """Base library error.
+
+    Structured update key failures carry reason, input_rows_seen, observed_violations,
+    and example_key. The example uses actual column names and Python str/int/None
+    values, or pyarrow.TimestampScalar for exact timestamps. These attributes are
+    conditional; use getattr when handling arbitrary library errors.
+    """
+
+    ...
+
 class StorageError(TimeseriesTableError): ...
 class ConflictError(TimeseriesTableError): ...
 
@@ -86,6 +97,44 @@ class AppendReport:
     @property
     def max_bytes_per_row_group(self) -> int:
         """Effective maximum estimated encoded bytes per output row group."""
+        ...
+
+class UpdateRowsReport:
+    """Result of assigning selected payload columns by complete row keys."""
+
+    @property
+    def starting_version(self) -> int:
+        """Snapshot used to compute the assignments."""
+        ...
+
+    @property
+    def committed_version(self) -> int:
+        """Published version, or starting_version for empty input."""
+        ...
+
+    @property
+    def rows_updated(self) -> int:
+        """Addressed rows, including equal-value assignments."""
+        ...
+
+    @property
+    def segments_rewritten(self) -> int:
+        """Affected source segments replaced."""
+        ...
+
+    @property
+    def source_file_bytes(self) -> int:
+        """Affected source Parquet file sizes, excluding scratch and sidecars."""
+        ...
+
+    @property
+    def replacement_file_bytes(self) -> int:
+        """Completed replacement Parquet file sizes, not total IO."""
+        ...
+
+    @property
+    def no_op(self) -> bool:
+        """True only for a fully validated source containing zero rows."""
         ...
 
 class OptimizeReport:
@@ -405,6 +454,32 @@ class TimeSeriesTable:
         """
         ...
 
+    def update_rows(
+        self,
+        source: pyarrow.RecordBatch
+        | pyarrow.Table
+        | pyarrow.RecordBatchReader
+        | _ArrowStreamExportable,
+        *,
+        columns: Sequence[str],
+        expected_version: int,
+    ) -> UpdateRowsReport:
+        """Atomically assign existing payload columns using complete entity/index keys.
+
+        Capture expected_version before reading and computing assignments. Any intervening
+        commit conflicts; the operation never refreshes or retries. Source fields contain
+        exactly all configured keys and selected columns, with compatible types/nullability.
+        Explicit null clears a nullable destination; unselected fields remain unchanged.
+        Nested destinations are assigned as whole values. The source is consumed once
+        with the GIL released, using the same Arrow C Stream boundary as append.
+
+        Empty valid input is a version-checked no-op. Nonempty equal-value assignments
+        still commit. Errors leave this handle unchanged. Reopen and reconcile ambiguous
+        outcomes before retrying; they do not guarantee rollback. Newly planned SQL queries
+        see updated values without re-registration. Retained history protects original files.
+        """
+        ...
+
     def add_columns(self, columns: pyarrow.Schema) -> int:
         """Add new nullable top-level fields and return the committed version.
 
@@ -518,7 +593,11 @@ class _TestingModule(ModuleType):
     def _test_sql_reader_unsupported_schema(self) -> None: ...
     def _test_sql_reader_midstream_error(self) -> pyarrow.RecordBatchReader: ...
     def _test_append_stream_with_release_counter(
-        self, *, fail_after_first: bool, with_error_details: bool = True
+        self,
+        *,
+        fail_after_first: bool,
+        with_error_details: bool = True,
+        with_payload: bool = False,
     ) -> tuple[object, _AppendStreamReleaseCounter]: ...
     def _test_append_stream_with_schema_import_error(
         self,

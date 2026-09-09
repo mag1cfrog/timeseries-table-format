@@ -8,6 +8,19 @@ import pyarrow as pa
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 
 
+def test_docs_example_update_rows_runs(tmp_path):
+    mod = runpy.run_path(
+        str(EXAMPLES_DIR / "update_rows.py"), run_name="__doc_example__"
+    )
+    out = mod["run"](table_root=tmp_path / "table")
+    assert out.to_pydict() == {
+        "tick": [0, 0, 1, 1],
+        "device": ["A", "B", "A", "B"],
+        "reading": [1.0, 2.0, 3.0, 4.0],
+        "quality": [0.25, 0.5, 0.75, 1.0],
+    }
+
+
 def test_docs_example_quickstart_runs(tmp_path):
     mod = runpy.run_path(
         str(EXAMPLES_DIR / "quickstart_create_append_query.py"),

@@ -66,6 +66,7 @@ nav:
       - Create your first table: tutorials/create_append_query.md
   - Common tasks:
       - Add nullable columns: guides/add_nullable_columns.md
+      - Update row values: guides/update_rows.md
       - Incremental ingestion: tutorials/real_world_workflow.md
       - Register and join tables: tutorials/register_and_join.md
       - Parameterized queries: tutorials/parameterized_queries.md

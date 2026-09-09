@@ -1,12 +1,12 @@
 ---
 title: timeseries-table-format Python documentation
-description: Build local, append-only time-series tables and query them with DataFusion SQL.
+description: Build local time-series tables, update values by row key, and query them with DataFusion SQL.
 ---
 
 # timeseries-table-format
 
-Build local, append-only time-series tables from Parquet files. The Python API
-tracks coverage, rejects overlapping appends, and queries your tables with
+Build local time-series tables with immutable Parquet segments. The Python API
+tracks coverage, rejects overlapping appends, updates selected row values, and queries your tables with
 DataFusion SQL.
 
 !!! note "Project status"

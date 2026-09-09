@@ -36,7 +36,10 @@ mod _native {
         },
         prelude::*,
         pyclass, pymethods,
-        types::{PyBytes, PyDateTime, PyDict, PyList, PyModule, PyTuple, PyType},
+        types::{
+            PyBool, PyBytes, PyDateTime, PyDict, PyInt, PyList, PyModule, PySequence, PyString,
+            PyTuple, PyType,
+        },
     };
 
     use timeseries_table_format::{
@@ -1478,6 +1481,55 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         }
     }
 
+    /// Result of assigning selected payload columns by complete row keys.
+    #[pyclass(frozen, get_all)]
+    struct UpdateRowsReport {
+        /// Snapshot used to compute the assignments.
+        starting_version: u64,
+        /// Published version, or the starting version for empty input.
+        committed_version: u64,
+        /// Addressed rows, including equal-value assignments.
+        rows_updated: u64,
+        /// Affected source segments replaced.
+        segments_rewritten: u64,
+        /// Affected source Parquet file sizes; excludes scratch and sidecars.
+        source_file_bytes: u64,
+        /// Completed replacement Parquet file sizes, not total IO.
+        replacement_file_bytes: u64,
+        /// True only for a fully validated source containing zero rows.
+        no_op: bool,
+    }
+
+    impl From<timeseries_table_format::UpdateRowsReport> for UpdateRowsReport {
+        fn from(report: timeseries_table_format::UpdateRowsReport) -> Self {
+            Self {
+                starting_version: report.starting_version,
+                committed_version: report.committed_version,
+                rows_updated: report.rows_updated,
+                segments_rewritten: report.segments_rewritten,
+                source_file_bytes: report.source_file_bytes,
+                replacement_file_bytes: report.replacement_file_bytes,
+                no_op: report.no_op,
+            }
+        }
+    }
+
+    #[pymethods]
+    impl UpdateRowsReport {
+        fn __repr__(&self) -> String {
+            format!(
+                "UpdateRowsReport(starting_version={}, committed_version={}, rows_updated={}, segments_rewritten={}, source_file_bytes={}, replacement_file_bytes={}, no_op={})",
+                self.starting_version,
+                self.committed_version,
+                self.rows_updated,
+                self.segments_rewritten,
+                self.source_file_bytes,
+                self.replacement_file_bytes,
+                if self.no_op { "True" } else { "False" },
+            )
+        }
+    }
+
     /// Result of one entity-layout optimization operation.
     #[pyclass(frozen, get_all)]
     struct OptimizeReport {
@@ -2090,6 +2142,96 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             )
         }
 
+        /// Assign selected existing payload columns by complete entity and raw index keys.
+        ///
+        /// Accepts the same Arrow inputs as append. Required keyword arguments are
+        /// `columns` (a sequence of strings) and `expected_version` (an integer in
+        /// 1..=u64::MAX, excluding bool). Capture the version before reading and
+        /// computing values; any intervening commit conflicts without refresh or retry.
+        /// The source must contain exactly all keys and selected fields with compatible
+        /// types and nullability. Explicit null clears a nullable destination; unselected
+        /// fields are untouched. Nested fields are assigned as whole values.
+        ///
+        /// Consumes the source once with the GIL released. Empty valid input is a
+        /// version-checked no-op; nonempty equal-value input still commits. Affected
+        /// immutable files are replaced atomically and retained history protects the
+        /// originals. Newly planned SQL queries see updated values without re-registration.
+        ///
+        /// Errors raised inside the operation include table_root. Invalid schemas
+        /// use SchemaMismatchError. Key violations use TimeseriesTableError with
+        /// reason, observed counts, and example_key. Version mismatches use
+        /// ConflictError with expected/found.
+        /// Errors leave this handle unchanged. Reopen and reconcile an ambiguous
+        /// commit before retrying; ambiguity does not guarantee rollback.
+        #[pyo3(signature = (source, *, columns, expected_version))]
+        fn update_rows(
+            &mut self,
+            py: Python<'_>,
+            source: &Bound<'_, PyAny>,
+            columns: &Bound<'_, PyAny>,
+            expected_version: &Bound<'_, PyAny>,
+        ) -> PyResult<UpdateRowsReport> {
+            use timeseries_table_format::{TableError, UpdateRowsError};
+
+            let table_root = self.table_root.clone();
+            let entity_columns = self.inner.index_spec().entity_columns.clone();
+            let map_error = |py: Python<'_>, error: TableError| {
+                table_error_to_py_with_root(py, &table_root, &entity_columns, error)
+            };
+            let representation = || -> PyResult<_> {
+                if columns.is_instance_of::<PyString>() || columns.is_instance_of::<PyBytes>() {
+                    return Err(PyTypeError::new_err(
+                        "columns must be a sequence of strings",
+                    ));
+                }
+                let sequence = columns
+                    .cast::<PySequence>()
+                    .map_err(|_| PyTypeError::new_err("columns must be a sequence of strings"))?;
+                let columns = sequence.extract::<Vec<String>>()?;
+                if expected_version.is_instance_of::<PyBool>()
+                    || !expected_version.is_instance_of::<PyInt>()
+                {
+                    return Err(PyTypeError::new_err(
+                        "expected_version must be an integer, excluding bool",
+                    ));
+                }
+                let version = expected_version
+                    .extract::<u64>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(
+                            "expected_version must be in 1..=18446744073709551615",
+                        )
+                    })?;
+                Ok((columns, version))
+            };
+            let (columns, version) = representation().map_err(|error| {
+                py_error_with_table_root(py, &table_root, error.to_string(), error)
+            })?;
+            self.inner.ensure_write_compatible().map_err(|source| {
+                map_error(
+                    py,
+                    TableError::UpdateRows {
+                        source: UpdateRowsError::from(source),
+                    },
+                )
+            })?;
+            let reader = record_batch_reader_from_python(source).map_err(|error| {
+                py_error_with_table_root(py, &table_root, error.to_string(), error)
+            })?;
+            let rt = tokio_runner::global_runtime().map_err(|error| {
+                py_error_with_table_root(py, &table_root, error.to_string(), error)
+            })?;
+            tokio_runner::run_blocking_map_err(
+                py,
+                rt.as_ref(),
+                self.inner.update_rows(reader, columns, version),
+                map_error,
+            )
+            .map(UpdateRowsReport::from)
+        }
+
         /// Add new nullable top-level fields and return the committed version.
         ///
         /// `columns` must be a `pyarrow.Schema` containing only new fields, with
@@ -2385,11 +2527,12 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
     /// Test-only helper: return a native stream whose reader drop count is observable.
     #[cfg(feature = "test-utils")]
     #[pyfunction]
-    #[pyo3(signature = (*, fail_after_first, with_error_details=true))]
+    #[pyo3(signature = (*, fail_after_first, with_error_details=true, with_payload=false))]
     fn _test_append_stream_with_release_counter(
         py: Python<'_>,
         fail_after_first: bool,
         with_error_details: bool,
+        with_payload: bool,
     ) -> PyResult<(Py<ArrowCStreamWrapper>, Py<AppendStreamReleaseCounter>)> {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2433,8 +2576,15 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             std::ptr::null()
         }
 
-        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
-        let batch = make_test_i64_batch(&schema, 1, 2)
+        let mut fields = vec![Field::new("x", DataType::Int64, false)];
+        let values = Arc::new(arrow_array::Int64Array::from(vec![1, 2]));
+        let mut arrays: Vec<arrow_array::ArrayRef> = vec![values.clone()];
+        if with_payload {
+            fields.push(Field::new("value", DataType::Int64, false));
+            arrays.push(values);
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let count = Arc::new(AtomicUsize::new(0));
         let mut stream = FFI_ArrowArrayStream::new(Box::new(ReleaseCountingReader {
@@ -2918,6 +3068,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         // Export classes
         m.add_class::<Session>()?;
         m.add_class::<AppendReport>()?;
+        m.add_class::<UpdateRowsReport>()?;
         m.add_class::<OptimizeReport>()?;
         m.add_class::<VacuumArtifact>()?;
         m.add_class::<VacuumReport>()?;

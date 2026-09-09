@@ -2,7 +2,7 @@ use std::error::Error;
 
 use pyo3::{
     Bound, PyErr, PyResult, Python,
-    types::{PyAny, PyAnyMethods, PyDict, PyDictMethods},
+    types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyModule},
 };
 
 use crate::exceptions::{
@@ -10,9 +10,10 @@ use crate::exceptions::{
     SchemaMismatchError, StorageError, TimeseriesTableError,
 };
 use timeseries_table_format::{
-    SchemaEvolutionError,
+    SchemaEvolutionError, UpdateKey, UpdateKeyValue, UpdateKeyViolation, UpdatePreparationError,
+    UpdateRewriteError, UpdateRowsError,
     coverage::{EntityIdentity, EntityValue, SegmentCoverageError, index_interval::IndexInterval},
-    metadata::schema_compat::SchemaCompatibilityError,
+    metadata::{logical_schema::LogicalTimestampUnit, schema_compat::SchemaCompatibilityError},
     storage::StorageError as CoreStorageError,
     table::{AppendError, TableError},
     transaction_log::CommitError,
@@ -38,6 +39,10 @@ pub(crate) fn storage_error_to_py(py: Python<'_>, err: &CoreStorageError) -> PyE
         _ => None,
     };
 
+    new_storage_py_error(py, msg, path_attr)
+}
+
+fn new_storage_py_error(py: Python<'_>, msg: String, path_attr: Option<&str>) -> PyErr {
     let py_err = StorageError::new_err(msg);
     let exc = py_err.value(py);
 
@@ -178,6 +183,37 @@ where
     None
 }
 
+fn update_key_to_python<'py>(py: Python<'py>, key: &UpdateKey) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    for (name, value) in key.components() {
+        match value {
+            None => result.set_item(name, py.None())?,
+            Some(UpdateKeyValue::Utf8(value)) => result.set_item(name, value)?,
+            Some(UpdateKeyValue::Int32(value)) => result.set_item(name, value)?,
+            Some(UpdateKeyValue::Int64(value)) => result.set_item(name, value)?,
+            Some(UpdateKeyValue::UInt64(value)) => result.set_item(name, value)?,
+            Some(UpdateKeyValue::Timestamp {
+                ticks,
+                unit,
+                timezone,
+            }) => {
+                let unit = match unit {
+                    LogicalTimestampUnit::Millis => "ms",
+                    LogicalTimestampUnit::Micros => "us",
+                    LogicalTimestampUnit::Nanos => "ns",
+                };
+                let arrow = PyModule::import(py, "pyarrow")?;
+                let dtype = arrow
+                    .getattr("timestamp")?
+                    .call1((unit, timezone.as_deref()))?;
+                let scalar = arrow.getattr("scalar")?.call1((*ticks, dtype))?;
+                result.set_item(name, scalar)?;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[allow(dead_code)]
 pub(crate) fn table_error_to_py(
     py: Python<'_>,
@@ -195,6 +231,41 @@ pub(crate) fn table_error_to_py(
     .is_some()
     {
         return TimeseriesTableError::new_err(msg);
+    }
+
+    if let Some(UpdateRowsError::SnapshotMismatch { expected, found }) =
+        find_error_in_source_chain::<UpdateRowsError>(root, |error| {
+            matches!(error, UpdateRowsError::SnapshotMismatch { .. })
+        })
+    {
+        return new_conflict_py_error(py, msg, *expected, *found);
+    }
+
+    if let Some(UpdatePreparationError::Key {
+        kind,
+        input_rows_seen,
+        observed_violations,
+        example_key,
+    }) = find_error_in_source_chain::<UpdatePreparationError>(root, |error| {
+        matches!(error, UpdatePreparationError::Key { .. })
+    }) {
+        let reason = match kind {
+            UpdateKeyViolation::DuplicateSource => "duplicate_source_key",
+            UpdateKeyViolation::UnmatchedSource => "unmatched_source_key",
+            UpdateKeyViolation::AmbiguousTarget => "ambiguous_target_key",
+            UpdateKeyViolation::NullIdentity => "null_identity",
+            _ => return TimeseriesTableError::new_err(msg),
+        };
+        let error = TimeseriesTableError::new_err(msg);
+        let attributes = || -> PyResult<()> {
+            let exc = error.value(py);
+            exc.setattr("reason", reason)?;
+            exc.setattr("input_rows_seen", *input_rows_seen)?;
+            exc.setattr("observed_violations", *observed_violations)?;
+            exc.setattr("example_key", update_key_to_python(py, example_key)?)?;
+            Ok(())
+        };
+        return attributes().err().unwrap_or(error);
     }
 
     if let Some(
@@ -246,12 +317,34 @@ pub(crate) fn table_error_to_py(
 
     if find_error_in_source_chain::<SchemaCompatibilityError>(root, |_| true).is_some()
         || find_error_in_source_chain::<SchemaEvolutionError>(root, |_| true).is_some()
+        || find_error_in_source_chain::<UpdatePreparationError>(root, |error| {
+            matches!(error, UpdatePreparationError::InvalidInput { .. })
+        })
+        .is_some()
     {
         return SchemaMismatchError::new_err(msg);
     }
 
     if let Some(storage) = find_error_in_source_chain::<CoreStorageError>(root, |_| true) {
         return storage_error_to_py(py, storage);
+    }
+
+    if let Some(
+        UpdatePreparationError::Io { path, .. } | UpdatePreparationError::Cleanup { path, .. },
+    ) = find_error_in_source_chain::<UpdatePreparationError>(root, |error| {
+        matches!(
+            error,
+            UpdatePreparationError::Io { .. } | UpdatePreparationError::Cleanup { .. }
+        )
+    }) {
+        return new_storage_py_error(py, msg, Some(&path.to_string_lossy()));
+    }
+    if let Some(UpdateRewriteError::Io { path, .. }) =
+        find_error_in_source_chain::<UpdateRewriteError>(root, |error| {
+            matches!(error, UpdateRewriteError::Io { .. })
+        })
+    {
+        return new_storage_py_error(py, msg, Some(&path.to_string_lossy()));
     }
 
     TimeseriesTableError::new_err(msg)
@@ -283,6 +376,131 @@ mod tests {
 
     fn invalid_location_error() -> CoreStorageError {
         StorageLocation::parse("").expect_err("empty storage location must fail")
+    }
+
+    #[test]
+    fn update_publication_errors_keep_their_categories_and_attributes() {
+        init_python();
+        Python::attach(|py| {
+            let map = |source| table_error_to_py(py, TableError::UpdateRows { source }, &[]);
+            let mismatch = map(UpdateRowsError::SnapshotMismatch {
+                expected: u64::MAX,
+                found: 9,
+            });
+            assert!(mismatch.get_type(py).is(py.get_type::<ConflictError>()));
+            assert_eq!(
+                mismatch
+                    .value(py)
+                    .getattr("expected")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                u64::MAX
+            );
+            assert_eq!(
+                mismatch
+                    .value(py)
+                    .getattr("found")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                9
+            );
+
+            let CoreStorageError::OtherIo { backtrace, .. } = invalid_location_error() else {
+                panic!("expected invalid location");
+            };
+            let conflict = map(CommitError::Conflict {
+                expected: 9,
+                found: 10,
+                backtrace,
+            }
+            .into());
+            assert!(conflict.get_type(py).is(py.get_type::<ConflictError>()));
+            assert_eq!(
+                conflict
+                    .value(py)
+                    .getattr("found")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                10
+            );
+
+            let CoreStorageError::OtherIo { backtrace, .. } = invalid_location_error() else {
+                panic!("expected invalid location");
+            };
+            let race = map(CommitError::Storage {
+                source: CoreStorageError::AlreadyExists {
+                    path: "_timeseries_log/0000000010.json".into(),
+                    source: std::io::Error::from(std::io::ErrorKind::AlreadyExists).into(),
+                    backtrace,
+                },
+            }
+            .into());
+            assert!(race.get_type(py).is(py.get_type::<StorageError>()));
+            assert_eq!(
+                race.value(py)
+                    .getattr("path")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "_timeseries_log/0000000010.json"
+            );
+            assert!(!race.value(py).hasattr("found").unwrap());
+
+            let ambiguous = TableError::UpdateRows {
+                source: CommitError::AmbiguousOutcome {
+                    commit_path: "_timeseries_log/0000000010.json".into(),
+                    operation_error: Box::new(invalid_location_error()),
+                    cleanup_error: Box::new(invalid_location_error()),
+                }
+                .into(),
+            };
+            let message = ambiguous.to_string();
+            let error = table_error_to_py(py, ambiguous, &[]);
+            assert!(error.get_type(py).is(py.get_type::<TimeseriesTableError>()));
+            assert_eq!(
+                error.value(py).str().unwrap().extract::<String>().unwrap(),
+                message
+            );
+
+            for source in [
+                UpdateRowsError::from(UpdatePreparationError::Io {
+                    path: "scratch/input".into(),
+                    source: std::io::Error::other("read failed"),
+                }),
+                UpdateRowsError::from(UpdateRewriteError::Io {
+                    path: "data/input.parquet".into(),
+                    source: std::io::Error::other("read failed"),
+                }),
+            ] {
+                let error = map(source);
+                assert!(error.get_type(py).is(py.get_type::<StorageError>()));
+                assert!(error.value(py).hasattr("path").unwrap());
+                assert!(error.to_string().contains("read failed"));
+            }
+            let cleanup = map(UpdateRowsError::CleanupAfterFailure {
+                source: Box::new(
+                    UpdatePreparationError::Reader {
+                        source: datafusion::arrow::error::ArrowError::ComputeError(
+                            "source failed".into(),
+                        ),
+                    }
+                    .into(),
+                ),
+                cleanup: Box::new(UpdateRewriteError::Cleanup {
+                    cleanup_errors: vec![invalid_location_error()],
+                }),
+            });
+            assert!(
+                cleanup
+                    .get_type(py)
+                    .is(py.get_type::<TimeseriesTableError>())
+            );
+            assert!(cleanup.to_string().contains("source failed"));
+            assert!(cleanup.to_string().contains("cleanup also failed"));
+        });
     }
 
     #[test]

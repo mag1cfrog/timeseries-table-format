@@ -114,8 +114,10 @@ workloads, environment, and full comparison.
 ## Current scope
 
 The engine focuses on local tables and supports explicit nullable-column addition without
-rewriting historical data. The Rust API also supports atomic updates to selected existing
-columns by complete row key; see the [update guide](crates/timeseries-table-format/ENGINE.md#keyed-row-updates-rust).
+rewriting historical data. The Rust and Python APIs also support atomic updates to selected
+existing columns by complete row key; see the
+[Python update guide](https://mag1cfrog.github.io/timeseries-table-format/guides/update_rows/) or the
+[Rust update guide](crates/timeseries-table-format/ENGINE.md#keyed-row-updates-rust).
 It does not yet support object storage, small-file compaction, column dropping/renaming,
 automatic schema merging, row insertion through updates, merges, or time-travel queries.
 

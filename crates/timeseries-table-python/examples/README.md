@@ -9,6 +9,12 @@ Creates a temporary table, appends historical rows, adds nullable fields, replac
 registration, and appends values and omissions. Run with
 `python crates/timeseries-table-python/examples/add_nullable_columns.py` from the repository root.
 
+## `update_rows.py`
+
+Adds a nullable destination, captures the version before reading and computing values, then
+updates selected rows and checks the report and reopened SQL results. Run with
+`python crates/timeseries-table-python/examples/update_rows.py` from the repository root.
+
 ## `create_append_sql.py`
 
 Creates a table in a temporary directory, writes a tiny Parquet file with
