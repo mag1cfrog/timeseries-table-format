@@ -267,7 +267,9 @@ async fn rewrites_only_affected_segments_preserving_values_layout_and_order() ->
 
 #[tokio::test]
 async fn historical_nullable_nested_columns_are_filled_and_replaced_whole() -> TestResult {
-    let old = batch(0, 3, 8, 0)?;
+    let mut old = batch(0, 3, 8, 0)?;
+    old.schema_metadata_mut()
+        .insert("schema_version".into(), "example-v1".into());
     let child = Arc::new(Field::new("child", DataType::Int64, false));
     let nested: ArrayRef = Arc::new(StructArray::new(
         vec![child].into(),

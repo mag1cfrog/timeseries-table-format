@@ -444,8 +444,10 @@ async fn prepare_rewrite_source(
         let reader = open_parquet_reader(location.as_ref(), Path::new(&source.path))
             .await
             .map_err(|source| EntityRewriteError::Storage { source })?;
-        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+        // Use the built stream's schema to match the batches aligned during staging.
+        let reader = ParquetRecordBatchStreamBuilder::new(reader)
             .await
+            .and_then(|builder| builder.build())
             .map_err(|error| EntityRewriteError::Parquet {
                 path: source.path.clone(),
                 source: error,
@@ -453,7 +455,7 @@ async fn prepare_rewrite_source(
             })?;
         Some(
             BatchSchemaAlignment::for_historical_segment(
-                builder.schema().clone(),
+                reader.schema().clone(),
                 table_schema,
                 index,
             )
@@ -918,9 +920,18 @@ mod tests {
     #[tokio::test]
     async fn evolved_rewrite_materializes_canonical_schema_and_preserves_rows_and_coverage()
     -> TestResult {
-        let fixture = rewrite_fixture().await?;
-        let original_bytes = std::fs::read(fixture.temp.path().join(&fixture.source.path))?;
-        let original = read_batch(&fixture.temp.path().join(&fixture.source.path))?;
+        let mut fixture = rewrite_fixture().await?;
+        let source_path = fixture.temp.path().join(&fixture.source.path);
+        let mut original = read_batch(&source_path)?;
+        original
+            .schema_metadata_mut()
+            .insert("schema_version".into(), "example-v1".into());
+        let mut writer =
+            ArrowWriter::try_new(File::create(&source_path)?, original.schema(), None)?;
+        writer.write(&original)?;
+        writer.close()?;
+        let original_bytes = std::fs::read(&source_path)?;
+        fixture.source.file_size = Some(original_bytes.len() as u64);
         let mut fields = fixture
             .table_schema
             .to_arrow_schema_ref()?

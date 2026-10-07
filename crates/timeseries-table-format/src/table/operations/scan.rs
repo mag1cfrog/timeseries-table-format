@@ -302,16 +302,21 @@ where
     let expected = start.kind_name();
     let index_column = index.column.as_str();
 
-    let builder = ParquetRecordBatchStreamBuilder::new(reader)
+    let reader = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .context(ParquetSnafu {
             path: &path,
             operation: "reading metadata",
+        })?
+        .with_batch_size(SCAN_BATCH_SIZE)
+        .build()
+        .context(ParquetSnafu {
+            path: &path,
+            operation: "building the batch stream",
         })?;
 
-    // Locate the index column and compute native bounds before moving the
-    // builder into the directly-polled record-batch stream.
-    let schema = builder.schema();
+    // Parquet omits schema metadata from batches; use the built stream's schema.
+    let schema = reader.schema();
     let alignment = canonical_schema
         .map(|table_schema| {
             BatchSchemaAlignment::for_historical_segment(Arc::clone(schema), table_schema, index)
@@ -353,13 +358,6 @@ where
         }
     };
 
-    let reader = builder
-        .with_batch_size(SCAN_BATCH_SIZE)
-        .build()
-        .context(ParquetSnafu {
-            path: &path,
-            operation: "building the batch stream",
-        })?;
     let index_column = index_column.to_string();
 
     let stream = reader

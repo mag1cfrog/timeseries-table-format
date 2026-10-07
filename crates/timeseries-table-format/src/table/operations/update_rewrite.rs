@@ -5,7 +5,11 @@
 #[cfg(test)]
 mod tests;
 
-use arrow::{array::RecordBatch, compute::concat_batches, datatypes::SchemaRef};
+use arrow::{
+    array::{RecordBatch, RecordBatchReader},
+    compute::concat_batches,
+    datatypes::SchemaRef,
+};
 use parquet::{
     arrow::{
         ArrowWriter, ProjectionMask,
@@ -473,17 +477,19 @@ async fn rewrite_segment(
     index: &IndexSpec,
 ) -> Result<()> {
     let source_bytes = Arc::new(AtomicU64::new(0));
-    let builder = reader_builder(&staged.location, &source.path, source_bytes.clone())?;
+    let mut reader = reader_builder(&staged.location, &source.path, source_bytes.clone())?
+        .with_batch_size(READ_ROWS)
+        .build()?;
     let logical = state
         .table_meta
         .logical_schema()
         .ok_or_else(|| invalid("missing canonical schema"))?;
-    let alignment =
-        BatchSchemaAlignment::for_historical_segment(builder.schema().clone(), logical, index)
-            .map_err(Box::new)?;
+    // Parquet omits schema metadata from decoded batches; the built reader agrees.
+    let alignment = BatchSchemaAlignment::for_historical_segment(reader.schema(), logical, index)
+        .map_err(Box::new)?;
     if MissingColumnPolicy::from_table_requirements(&state.table_meta)
         == MissingColumnPolicy::Reject
-        && builder.schema().fields().len() != schema.fields().len()
+        && reader.schema().fields().len() != schema.fields().len()
     {
         return Err(invalid("historical missing columns require table feature"));
     }
@@ -494,7 +500,6 @@ async fn rewrite_segment(
     {
         return Err(invalid("source file size changed"));
     }
-    let mut reader = builder.with_batch_size(READ_ROWS).build()?;
     let sink = staged.create_owned_sink(path).await?;
     let properties = WriterProperties::builder()
         .set_max_row_group_row_count(Some(64 * 1024))
