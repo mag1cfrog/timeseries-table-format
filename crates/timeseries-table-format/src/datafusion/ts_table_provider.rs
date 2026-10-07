@@ -5,7 +5,7 @@ mod timestamp_pruning;
 
 use crate::storage::file_size;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -40,7 +40,7 @@ use datafusion::logical_expr::{Expr, Operator};
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
 use crate::metadata::index::{IndexKind, IndexSpec};
-use crate::metadata::schema_compat::ensure_file_schema_metadata_matches;
+use crate::metadata::schema_compat::ensure_file_metadata_matches;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -76,7 +76,7 @@ struct Cache {
 #[derive(Debug)]
 struct MetadataCheckingReaderFactory {
     inner: DefaultParquetFileReaderFactory,
-    metadata: Arc<BTreeMap<String, String>>,
+    schema: SchemaRef,
 }
 
 impl ParquetFileReaderFactory for MetadataCheckingReaderFactory {
@@ -93,7 +93,7 @@ impl ParquetFileReaderFactory for MetadataCheckingReaderFactory {
             .create_reader(partition_index, file, metadata_size_hint, metrics)?;
         Ok(Box::new(MetadataCheckingReader {
             inner,
-            metadata: Arc::clone(&self.metadata),
+            schema: Arc::clone(&self.schema),
             path,
         }))
     }
@@ -101,7 +101,7 @@ impl ParquetFileReaderFactory for MetadataCheckingReaderFactory {
 
 struct MetadataCheckingReader {
     inner: Box<dyn AsyncFileReader + Send>,
-    metadata: Arc<BTreeMap<String, String>>,
+    schema: SchemaRef,
     path: String,
 }
 
@@ -125,7 +125,7 @@ impl AsyncFileReader for MetadataCheckingReader {
             let metadata = self.inner.get_metadata(options).await?;
             let file = metadata.file_metadata();
             let schema = parquet_to_arrow_schema(file.schema_descr(), file.key_value_metadata())?;
-            ensure_file_schema_metadata_matches(&self.metadata, schema.metadata())
+            ensure_file_metadata_matches(&self.schema, &schema)
                 .map_err(|error| ParquetError::General(format!("{}: {error}", self.path)))?;
             Ok(metadata)
         }
@@ -422,12 +422,18 @@ impl TableProvider for TsTableProvider {
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
         let mut parquet_source = ParquetSource::new(Arc::clone(&self.schema))
             .with_predicate(Arc::clone(&exact_predicate));
-        if !self.schema.metadata().is_empty() {
+        if !self.schema.metadata().is_empty()
+            || self
+                .schema
+                .flattened_fields()
+                .iter()
+                .any(|field| !field.metadata().is_empty())
+        {
             let store = state.runtime_env().object_store(&self.object_store_url)?;
             parquet_source = parquet_source.with_parquet_file_reader_factory(Arc::new(
                 MetadataCheckingReaderFactory {
                     inner: DefaultParquetFileReaderFactory::new(store),
-                    metadata: Arc::new(self.schema.metadata().clone().into_iter().collect()),
+                    schema: Arc::clone(&self.schema),
                 },
             ));
         }

@@ -4,19 +4,16 @@
 //! Every appended segment must have a [`LogicalSchema`] that matches the table's
 //! canonical schema exactly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, Schema};
 use snafu::prelude::*;
 
 use crate::{
     coverage::{EntityIdentity, EntityValue},
     metadata::{
         index::{IndexKind, IndexSpec},
-        logical_schema::{
-            ArrowToLogicalSchemaError, LogicalDataType, LogicalField, LogicalSchema,
-            LogicalToArrowSchemaError,
-        },
+        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalToArrowSchemaError},
         table::TableMeta,
     },
 };
@@ -25,11 +22,11 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum SchemaCompatibilityError {
-    /// A historical source has a type the table's logical model cannot represent.
-    #[snafu(display("Cannot validate source schema: {source}"))]
-    SourceSchemaConversion {
-        /// Original Arrow-to-logical conversion failure.
-        source: Box<ArrowToLogicalSchemaError>,
+    /// A segment's logical schema cannot be converted for annotation validation.
+    #[snafu(display("Cannot validate segment schema annotations: {source}"))]
+    SegmentSchemaConversion {
+        /// Original logical-to-Arrow conversion failure.
+        source: Box<LogicalToArrowSchemaError>,
     },
     /// A committed file disagrees with the table's persisted schema annotations.
     #[snafu(display("Parquet schema metadata does not match the table schema"))]
@@ -39,6 +36,18 @@ pub enum SchemaCompatibilityError {
     IncomingSchemaMetadataMismatch {
         /// Conflicting or unregistered annotation key.
         key: String,
+    },
+    /// A field annotation conflicts with its persisted definition.
+    #[snafu(display("Incoming field metadata conflicts with the table at {column:?}"))]
+    IncomingFieldMetadataMismatch {
+        /// Field path containing conflicting or unregistered annotations.
+        column: String,
+    },
+    /// A committed field lost or changed its persisted annotations.
+    #[snafu(display("Parquet field metadata does not match the table at {column:?}"))]
+    FileFieldMetadataMismatch {
+        /// Field path containing missing, extra, or conflicting annotations.
+        column: String,
     },
     /// The table does not yet have a canonical logical schema.
     ///
@@ -175,9 +184,9 @@ pub enum SchemaCompatibilityError {
         /// The name of the column with mismatched type.
         column: String,
         /// The type in the table schema.
-        table_type: LogicalDataType,
+        table_type: Box<LogicalDataType>,
         /// The type in the segment schema.
-        segment_type: LogicalDataType,
+        segment_type: Box<LogicalDataType>,
     },
 
     /// Specialized version of TypeMismatch for the ordered index column.
@@ -189,9 +198,9 @@ pub enum SchemaCompatibilityError {
         /// The name of the ordered index column.
         column: String,
         /// The type in the table schema.
-        table_type: LogicalDataType,
+        table_type: Box<LogicalDataType>,
         /// The type in the segment schema.
-        segment_type: LogicalDataType,
+        segment_type: Box<LogicalDataType>,
     },
 
     /// The registered index kind disagrees with the logical schema.
@@ -211,7 +220,7 @@ pub enum SchemaCompatibilityError {
 /// Check committed file annotations before decoding discards schema metadata.
 /// Legacy tables without persisted annotations keep their existing behavior.
 pub(crate) fn ensure_file_schema_metadata_matches(
-    registered: &BTreeMap<String, String>,
+    registered: &HashMap<String, String>,
     file: &HashMap<String, String>,
 ) -> SchemaResult<()> {
     if !registered.is_empty()
@@ -223,6 +232,80 @@ pub(crate) fn ensure_file_schema_metadata_matches(
         return Err(SchemaCompatibilityError::FileSchemaMetadataMismatch);
     }
     Ok(())
+}
+
+/// Check stored annotations on columns present in a historical file. Column
+/// presence and physical types are checked separately by schema alignment.
+pub(crate) fn ensure_file_metadata_matches(registered: &Schema, file: &Schema) -> SchemaResult<()> {
+    ensure_file_schema_metadata_matches(registered.metadata(), file.metadata())?;
+    let fields: HashMap<_, _> = registered
+        .fields()
+        .iter()
+        .map(|field| (field.name(), field))
+        .collect();
+    for source in file.fields() {
+        if let Some(table) = fields.get(source.name())
+            && let Some(column) = field_metadata_mismatch(table, source, false)
+        {
+            return Err(SchemaCompatibilityError::FileFieldMetadataMismatch { column });
+        }
+    }
+    Ok(())
+}
+
+/// Empty annotation maps retain legacy behavior. Once a field has annotations,
+/// input can omit them, but cannot replace them or introduce additional keys.
+pub(crate) fn field_metadata_mismatch(
+    table: &Field,
+    source: &Field,
+    allow_missing: bool,
+) -> Option<String> {
+    let expected = table.metadata();
+    let actual = source.metadata();
+    if !expected.is_empty()
+        && ((!allow_missing && expected.len() != actual.len())
+            || actual
+                .iter()
+                .any(|(key, value)| expected.get(key) != Some(value)))
+    {
+        return Some(table.name().clone());
+    }
+    let child = match (table.data_type(), source.data_type()) {
+        (DataType::Struct(expected), DataType::Struct(actual)) => expected
+            .iter()
+            .zip(actual)
+            .find_map(|(table, source)| field_metadata_mismatch(table, source, allow_missing)),
+        (DataType::List(table), DataType::List(source))
+        | (DataType::Map(table, _), DataType::Map(source, _)) => {
+            field_metadata_mismatch(table, source, allow_missing)
+        }
+        _ => None,
+    };
+    child.map(|child| format!("{}.{child}", table.name()))
+}
+
+/// Arrow's equals_datatype also ignores nested names. Alignment only permits
+/// annotations to differ; names, order, nullability, and physical types stay exact.
+pub(crate) fn data_types_match_ignoring_metadata(table: &DataType, source: &DataType) -> bool {
+    let field_matches = |table: &Field, source: &Field| {
+        table.name() == source.name()
+            && table.is_nullable() == source.is_nullable()
+            && data_types_match_ignoring_metadata(table.data_type(), source.data_type())
+    };
+    match (table, source) {
+        (DataType::Struct(table), DataType::Struct(source)) => {
+            table.len() == source.len()
+                && table
+                    .iter()
+                    .zip(source)
+                    .all(|(table, source)| field_matches(table, source))
+        }
+        (DataType::List(table), DataType::List(source)) => field_matches(table, source),
+        (DataType::Map(table, table_sorted), DataType::Map(source, source_sorted)) => {
+            table_sorted == source_sorted && field_matches(table, source)
+        }
+        _ => table == source,
+    }
 }
 
 /// A convenience type alias for results of schema compatibility operations.
@@ -380,20 +463,21 @@ pub fn ensure_schema_fields_match_by_name(
                     column: (*name).to_string(),
                 })?;
 
-        if table_field.data_type != seg_field.data_type
-            || table_field.nullable != seg_field.nullable
-        {
+        let same_type = table_field
+            .data_type
+            .eq_ignoring_metadata(&seg_field.data_type);
+        if !same_type || table_field.nullable != seg_field.nullable {
             let err = if *name == index_col_name {
                 SchemaCompatibilityError::IndexColumnTypeMismatch {
                     column: (*name).to_string(),
-                    table_type: table_field.data_type.clone(),
-                    segment_type: seg_field.data_type.clone(),
+                    table_type: Box::new(table_field.data_type.clone()),
+                    segment_type: Box::new(seg_field.data_type.clone()),
                 }
             } else {
                 SchemaCompatibilityError::TypeMismatch {
                     column: (*name).to_string(),
-                    table_type: table_field.data_type.clone(),
-                    segment_type: seg_field.data_type.clone(),
+                    table_type: Box::new(table_field.data_type.clone()),
+                    segment_type: Box::new(seg_field.data_type.clone()),
                 }
             };
             return Err(err);
@@ -406,6 +490,20 @@ pub fn ensure_schema_fields_match_by_name(
                 column: (*name).to_string(),
             });
         }
+    }
+
+    if table_schema.has_metadata() {
+        let table = table_schema.to_arrow_schema().map_err(|source| {
+            SchemaCompatibilityError::RegisteredSchemaConversion {
+                source: Box::new(source),
+            }
+        })?;
+        let segment = segment_schema.to_arrow_schema().map_err(|source| {
+            SchemaCompatibilityError::SegmentSchemaConversion {
+                source: Box::new(source),
+            }
+        })?;
+        ensure_file_metadata_matches(&table, &segment)?;
     }
 
     Ok(())
@@ -423,10 +521,10 @@ mod tests {
 
     #[test]
     fn committed_metadata_requires_exact_annotations_except_for_legacy_tables() {
-        let registered = BTreeMap::from([("unit".into(), "ms".into())]);
+        let registered = HashMap::from([("unit".into(), "ms".into())]);
         let matching = HashMap::from([("unit".into(), "ms".into())]);
         assert!(ensure_file_schema_metadata_matches(&registered, &matching).is_ok());
-        assert!(ensure_file_schema_metadata_matches(&BTreeMap::new(), &matching).is_ok());
+        assert!(ensure_file_schema_metadata_matches(&HashMap::new(), &matching).is_ok());
         for invalid in [
             HashMap::new(),
             HashMap::from([("unit".into(), "us".into())]),
@@ -444,6 +542,7 @@ mod tests {
 
     fn schema(data_type: LogicalDataType) -> LogicalSchema {
         LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "idx".to_string(),
             data_type,
             nullable: false,
@@ -461,6 +560,7 @@ mod tests {
 
     fn schema_with_entities(entity_types: Vec<LogicalDataType>) -> LogicalSchema {
         let mut fields = vec![LogicalField {
+            metadata: Default::default(),
             name: "idx".to_string(),
             data_type: LogicalDataType::Int64,
             nullable: false,
@@ -470,6 +570,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(position, data_type)| LogicalField {
+                    metadata: Default::default(),
                     name: format!("entity_{position}"),
                     data_type,
                     nullable: false,
@@ -528,6 +629,7 @@ mod tests {
             index_granularity: NonZeroU64::new(1).unwrap(),
         });
         let missing = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "other".to_string(),
             data_type: LogicalDataType::UInt64,
             nullable: false,

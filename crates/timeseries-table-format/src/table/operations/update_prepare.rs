@@ -711,13 +711,6 @@ async fn stage(
     let mut targets = Sorter::new(scratch, budget);
     let key_fields = schema.alignment.output_schema().fields()[..schema.key_count].to_vec();
     let key_schema = Arc::new(Schema::new(key_fields));
-    let registered_metadata = schema
-        .alignment
-        .output_schema()
-        .metadata()
-        .clone()
-        .into_iter()
-        .collect();
     for (segment_index, segment) in segments.iter().enumerate() {
         ensure_canonical_relative_storage_path(&segment.path)
             .map_err(|source| invalid(format!("invalid source path: {source}")))?;
@@ -747,9 +740,9 @@ async fn stage(
             });
         }
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
-        crate::metadata::schema_compat::ensure_file_schema_metadata_matches(
-            &registered_metadata,
-            builder.schema().metadata(),
+        crate::metadata::schema_compat::ensure_file_metadata_matches(
+            schema.alignment.output_schema(),
+            builder.schema(),
         )
         .map_err(|source| PrepareError::Schema {
             source: Box::new(source),

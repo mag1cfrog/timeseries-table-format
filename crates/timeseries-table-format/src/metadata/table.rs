@@ -277,6 +277,7 @@ mod tests {
     #[test]
     fn table_meta_arrow_schema_ref_propagates_convert_error() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "legacy_ts".to_string(),
             data_type: LogicalDataType::Int96,
             nullable: false,

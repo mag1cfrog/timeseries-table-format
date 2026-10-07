@@ -53,12 +53,47 @@ pub struct LogicalField {
     pub data_type: LogicalDataType,
     /// Whether the column allows null values.
     pub nullable: bool,
+    /// Opaque field annotations, including annotations on nested fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl LogicalField {
+    fn eq_ignoring_metadata(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.nullable == other.nullable
+            && self.data_type.eq_ignoring_metadata(&other.data_type)
+    }
+
+    fn has_metadata(&self) -> bool {
+        if !self.metadata.is_empty() {
+            return true;
+        }
+        match &self.data_type {
+            LogicalDataType::Struct { fields } => fields.iter().any(Self::has_metadata),
+            LogicalDataType::List { elements } => elements.has_metadata(),
+            LogicalDataType::Map {
+                key,
+                value,
+                entries_metadata,
+                null_value_metadata,
+                ..
+            } => {
+                !entries_metadata.is_empty()
+                    || !null_value_metadata.is_empty()
+                    || key.has_metadata()
+                    || value.as_deref().is_some_and(Self::has_metadata)
+            }
+            _ => false,
+        }
+    }
+
     fn to_arrow_field_ref(&self, path: &str) -> Result<FieldRef, LogicalToArrowSchemaError> {
         let dt = self.data_type.to_arrow_datatype(path)?;
-        Ok(Arc::new(Field::new(self.name.clone(), dt, self.nullable)))
+        Ok(Arc::new(
+            Field::new(self.name.clone(), dt, self.nullable)
+                .with_metadata(self.metadata.clone().into_iter().collect()),
+        ))
     }
 }
 
@@ -144,6 +179,13 @@ pub enum LogicalDataType {
         value: Option<Box<LogicalField>>,
         /// Whether entries are sorted by key.
         keys_sorted: bool,
+        /// Annotations on Arrow's non-nullable entries struct.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        entries_metadata: BTreeMap<String, String>,
+        /// Annotations on the nullable Null value field of a keys-only map.
+        /// Must be empty when `value` is present.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        null_value_metadata: BTreeMap<String, String>,
     },
 
     /// Catch-all logical data type referenced by name.
@@ -151,6 +193,45 @@ pub enum LogicalDataType {
 }
 
 impl LogicalDataType {
+    /// Compare logical definitions without losing names through Arrow conversion.
+    pub(crate) fn eq_ignoring_metadata(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Struct { fields: left }, Self::Struct { fields: right }) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| left.eq_ignoring_metadata(right))
+            }
+            (Self::List { elements: left }, Self::List { elements: right }) => {
+                left.eq_ignoring_metadata(right)
+            }
+            (
+                Self::Map {
+                    key: left_key,
+                    value: left_value,
+                    keys_sorted: left_sorted,
+                    ..
+                },
+                Self::Map {
+                    key: right_key,
+                    value: right_value,
+                    keys_sorted: right_sorted,
+                    ..
+                },
+            ) => {
+                left_sorted == right_sorted
+                    && left_key.eq_ignoring_metadata(right_key)
+                    && match (left_value, right_value) {
+                        (Some(left), Some(right)) => left.eq_ignoring_metadata(right),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            }
+            _ => self == other,
+        }
+    }
+
     fn to_arrow_datatype(&self, column: &str) -> Result<DataType, LogicalToArrowSchemaError> {
         Ok(match self {
             LogicalDataType::Bool => DataType::Boolean,
@@ -247,9 +328,14 @@ impl LogicalDataType {
                 key,
                 value,
                 keys_sorted,
+                entries_metadata,
+                null_value_metadata,
             } => {
                 if key.nullable {
                     return MapKeyMustBeNonNullSnafu { column }.fail();
+                }
+                if value.is_some() && !null_value_metadata.is_empty() {
+                    return MapNullValueMetadataSnafu { column }.fail();
                 }
 
                 // Canonical Arrow Map field names are "entries", "key", "value"
@@ -258,16 +344,29 @@ impl LogicalDataType {
 
                 let key_dt = key.data_type.to_arrow_datatype(&key_path)?;
 
-                let (val_dt, val_nullable) = match value.as_deref() {
-                    Some(v) => (v.data_type.to_arrow_datatype(&val_path)?, v.nullable),
-                    None => (DataType::Null, true),
+                let (val_dt, val_nullable, val_metadata) = match value.as_deref() {
+                    Some(v) => (
+                        v.data_type.to_arrow_datatype(&val_path)?,
+                        v.nullable,
+                        &v.metadata,
+                    ),
+                    None => (DataType::Null, true, null_value_metadata),
                 };
 
-                let key_field: FieldRef = Arc::new(Field::new("key", key_dt, false));
-                let val_field: FieldRef = Arc::new(Field::new("value", val_dt, val_nullable));
+                let key_field: FieldRef = Arc::new(
+                    Field::new("key", key_dt, false)
+                        .with_metadata(key.metadata.clone().into_iter().collect()),
+                );
+                let val_field: FieldRef = Arc::new(
+                    Field::new("value", val_dt, val_nullable)
+                        .with_metadata(val_metadata.clone().into_iter().collect()),
+                );
 
                 let entries_dt = DataType::Struct(Fields::from(vec![key_field, val_field]));
-                let entries_field: FieldRef = Arc::new(Field::new("entries", entries_dt, false));
+                let entries_field: FieldRef = Arc::new(
+                    Field::new("entries", entries_dt, false)
+                        .with_metadata(entries_metadata.clone().into_iter().collect()),
+                );
 
                 DataType::Map(entries_field, *keys_sorted)
             }
@@ -321,6 +420,7 @@ impl fmt::Display for LogicalDataType {
                 key,
                 value,
                 keys_sorted,
+                ..
             } => match value.as_deref() {
                 Some(v) => write!(f, "Map<{}, {}, keys_sorted={}>", key, v, keys_sorted),
                 None => write!(
@@ -348,9 +448,7 @@ pub struct LogicalSchema {
 impl LogicalSchema {
     /// Convert an Arrow schema into this table's exact logical schema model.
     ///
-    /// Preserves schema metadata, field names, order, supported types, and nullability.
-    /// Field metadata is not retained; callers that must reject field metadata loss
-    /// should validate it before conversion.
+    /// Preserves schema and field metadata, names, order, supported types, and nullability.
     pub fn try_from_arrow_schema(schema: &Schema) -> Result<Self, ArrowToLogicalSchemaError> {
         let fields = schema
             .fields()
@@ -434,6 +532,15 @@ pub enum LogicalSchemaValidationError {
         column_path: String,
     },
 
+    /// Only keys-only maps may annotate the implicit Null value field.
+    #[snafu(display(
+        "Map with a value field cannot have null_value_metadata: column={column_path}"
+    ))]
+    UnexpectedNullValueMetadata {
+        /// Column path for the map with redundant value annotations.
+        column_path: String,
+    },
+
     /// Struct fields must be non-empty.
     #[snafu(display("Struct must have at least one field: column={column_path}"))]
     EmptyStruct {
@@ -506,6 +613,11 @@ impl LogicalSchema {
         &self.metadata
     }
 
+    /// Whether any schema or field annotations need preservation.
+    pub(crate) fn has_metadata(&self) -> bool {
+        !self.metadata.is_empty() || self.columns.iter().any(LogicalField::has_metadata)
+    }
+
     /// Set schema annotations on this schema value. This does not alter a committed table.
     pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
         self.metadata = metadata;
@@ -569,7 +681,17 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaV
             validate_field(elements, &child_path)
         }
 
-        LogicalDataType::Map { key, value, .. } => {
+        LogicalDataType::Map {
+            key,
+            value,
+            null_value_metadata,
+            ..
+        } => {
+            if value.is_some() && !null_value_metadata.is_empty() {
+                return Err(LogicalSchemaValidationError::UnexpectedNullValueMetadata {
+                    column_path: path.to_string(),
+                });
+            }
             if key.nullable {
                 return Err(LogicalSchemaValidationError::InvalidMapKeyNullability {
                     column_path: path.to_string(),
@@ -591,6 +713,12 @@ fn validate_dtype(dt: &LogicalDataType, path: &str) -> Result<(), LogicalSchemaV
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum LogicalToArrowSchemaError {
+    /// A map with a value cannot also annotate an implicit Null value.
+    #[snafu(display("Map with a value field cannot have null_value_metadata: column={column}"))]
+    MapNullValueMetadata {
+        /// Column path containing redundant value annotations.
+        column: String,
+    },
     /// FixedBinary fields must declare a positive byte width.
     #[snafu(display(
         "invalid FixedBinary byte_width for column '{column}': {byte_width} (must be > 0)"
@@ -679,6 +807,7 @@ fn logical_field_from_arrow(
     path: &str,
 ) -> Result<LogicalField, ArrowToLogicalSchemaError> {
     Ok(LogicalField {
+        metadata: field.metadata().clone().into_iter().collect(),
         name: field.name().clone(),
         data_type: logical_data_type_from_arrow(field.data_type(), path)?,
         nullable: field.is_nullable(),
@@ -770,6 +899,12 @@ fn logical_data_type_from_arrow(
                 )?))
             };
             LogicalDataType::Map {
+                entries_metadata: entries.metadata().clone().into_iter().collect(),
+                null_value_metadata: if value.is_none() {
+                    fields[1].metadata().clone().into_iter().collect()
+                } else {
+                    BTreeMap::new()
+                },
                 key: Box::new(key),
                 value,
                 keys_sorted: *keys_sorted,
@@ -787,46 +922,55 @@ mod tests {
     fn sample_logical_schema_all_supported() -> LogicalSchema {
         LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "flag".to_string(),
                 data_type: LogicalDataType::Bool,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "i32".to_string(),
                 data_type: LogicalDataType::Int32,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "i64".to_string(),
                 data_type: LogicalDataType::Int64,
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "f32".to_string(),
                 data_type: LogicalDataType::Float32,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "f64".to_string(),
                 data_type: LogicalDataType::Float64,
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "text".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "bytes".to_string(),
                 data_type: LogicalDataType::Binary,
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "fixed".to_string(),
                 data_type: LogicalDataType::FixedBinary { byte_width: 16 },
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Micros,
@@ -842,6 +986,7 @@ mod tests {
     fn arrow_schema_conversion_preserves_supported_logical_types() {
         let expected = LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Nanos,
@@ -850,6 +995,7 @@ mod tests {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "decimal".to_string(),
                 data_type: LogicalDataType::Decimal {
                     precision: 40,
@@ -858,12 +1004,15 @@ mod tests {
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "items".to_string(),
                 data_type: LogicalDataType::List {
                     elements: Box::new(LogicalField {
+                        metadata: Default::default(),
                         name: "item".to_string(),
                         data_type: LogicalDataType::Struct {
                             fields: vec![LogicalField {
+                                metadata: Default::default(),
                                 name: "value".to_string(),
                                 data_type: LogicalDataType::UInt64,
                                 nullable: false,
@@ -875,14 +1024,19 @@ mod tests {
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "attrs".to_string(),
                 data_type: LogicalDataType::Map {
+                    entries_metadata: Default::default(),
+                    null_value_metadata: Default::default(),
                     key: Box::new(LogicalField {
+                        metadata: Default::default(),
                         name: "key".to_string(),
                         data_type: LogicalDataType::Utf8,
                         nullable: false,
                     }),
                     value: Some(Box::new(LogicalField {
+                        metadata: Default::default(),
                         name: "value".to_string(),
                         data_type: LogicalDataType::Binary,
                         nullable: true,
@@ -898,10 +1052,10 @@ mod tests {
             .fields()
             .iter()
             .map(|field| {
-                field
-                    .as_ref()
-                    .clone()
-                    .with_metadata(HashMap::from([("ignored".to_string(), "yes".to_string())]))
+                field.as_ref().clone().with_metadata(HashMap::from([(
+                    "field-metadata".to_string(),
+                    "retained".to_string(),
+                )]))
             })
             .collect::<Vec<_>>();
         let arrow = Schema::new_with_metadata(
@@ -909,13 +1063,9 @@ mod tests {
             HashMap::from([("schema-metadata".to_string(), "retained".to_string())]),
         );
 
-        assert_eq!(
-            LogicalSchema::try_from_arrow_schema(&arrow).expect("logical schema"),
-            expected.with_metadata(BTreeMap::from([(
-                "schema-metadata".into(),
-                "retained".into()
-            )]))
-        );
+        let logical = LogicalSchema::try_from_arrow_schema(&arrow).expect("logical schema");
+        assert_eq!(logical.to_arrow_schema().unwrap(), arrow);
+        assert!(logical.has_metadata());
     }
 
     #[test]
@@ -955,6 +1105,85 @@ mod tests {
             value["metadata"] = invalid;
             assert!(serde_json::from_value::<LogicalSchema>(value).is_err());
         }
+    }
+
+    #[test]
+    fn nested_field_metadata_round_trips_without_changing_legacy_json() {
+        fn annotated(name: &str, data_type: DataType, nullable: bool) -> Field {
+            Field::new(name, data_type, nullable).with_metadata(HashMap::from([
+                ("path".into(), name.into()),
+                ("opaque".into(), "\u{6e29}\u{5ea6}\0\n".into()),
+            ]))
+        }
+        for value_type in [DataType::Null, DataType::Int64] {
+            let entries = annotated(
+                "entries",
+                DataType::Struct(
+                    vec![
+                        annotated("key", DataType::Utf8, false),
+                        annotated("value", value_type, true),
+                    ]
+                    .into(),
+                ),
+                false,
+            );
+            let list = annotated("item", DataType::Map(Arc::new(entries), true), true);
+            let child = annotated("child", DataType::List(Arc::new(list)), false);
+            let schema = Schema::new(vec![annotated(
+                "detail",
+                DataType::Struct(vec![child].into()),
+                true,
+            )]);
+            let logical = LogicalSchema::try_from_arrow_schema(&schema).unwrap();
+            assert!(logical.has_metadata());
+            let json = serde_json::to_string(&logical).unwrap();
+            let restored: LogicalSchema = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.to_arrow_schema().unwrap(), schema);
+            assert_eq!(serde_json::to_string(&restored).unwrap(), json);
+
+            let mut invalid = serde_json::to_value(&logical).unwrap();
+            invalid["columns"][0]["metadata"] = serde_json::json!({"invalid": 1});
+            assert!(serde_json::from_value::<LogicalSchema>(invalid).is_err());
+        }
+        let legacy = r#"{"columns":[{"name":"detail","data_type":{"Map":{"key":{"name":"key","data_type":"Utf8","nullable":false},"value":null,"keys_sorted":false}},"nullable":true}]}"#;
+        let logical: LogicalSchema = serde_json::from_str(legacy).unwrap();
+        assert!(!logical.has_metadata());
+        assert_eq!(serde_json::to_string(&logical).unwrap(), legacy);
+        let mut annotated = logical.clone();
+        let LogicalDataType::Map { key, .. } = &mut annotated.columns[0].data_type else {
+            unreachable!()
+        };
+        key.metadata.insert("unit".into(), "ms".into());
+        assert!(annotated.has_metadata());
+        assert!(
+            logical.columns[0]
+                .data_type
+                .eq_ignoring_metadata(&annotated.columns[0].data_type)
+        );
+        let LogicalDataType::Map { key, .. } = &mut annotated.columns[0].data_type else {
+            unreachable!()
+        };
+        key.name = "renamed".into();
+        assert!(
+            !logical.columns[0]
+                .data_type
+                .eq_ignoring_metadata(&annotated.columns[0].data_type)
+        );
+        let mut conflicting = serde_json::to_value(&logical).unwrap();
+        conflicting["columns"][0]["data_type"]["Map"]["value"] = serde_json::json!({
+            "name": "value", "data_type": "Int64", "nullable": true
+        });
+        conflicting["columns"][0]["data_type"]["Map"]["null_value_metadata"] =
+            serde_json::json!({"unit": "ms"});
+        let conflicting: LogicalSchema = serde_json::from_value(conflicting).unwrap();
+        assert!(matches!(
+            LogicalSchema::new(conflicting.columns().to_vec()),
+            Err(LogicalSchemaValidationError::UnexpectedNullValueMetadata { .. })
+        ));
+        assert!(matches!(
+            conflicting.to_arrow_schema(),
+            Err(LogicalToArrowSchemaError::MapNullValueMetadata { .. })
+        ));
     }
 
     #[test]
@@ -1018,6 +1247,7 @@ mod tests {
     fn logical_schema_rejects_fixed_binary_invalid_width() {
         for width in [0, -1] {
             let err = LogicalSchema::new(vec![LogicalField {
+                metadata: Default::default(),
                 name: "bad_fixed".to_string(),
                 data_type: LogicalDataType::FixedBinary { byte_width: width },
                 nullable: false,
@@ -1040,6 +1270,7 @@ mod tests {
     #[test]
     fn logical_schema_rejects_int96() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "legacy_ts".to_string(),
             data_type: LogicalDataType::Int96,
             nullable: false,
@@ -1060,14 +1291,19 @@ mod tests {
     #[test]
     fn logical_schema_map_entries_field_is_non_nullable() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "attrs".to_string(),
             data_type: LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Utf8,
                     nullable: false,
                 }),
                 value: Some(Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: LogicalDataType::Int64,
                     nullable: true,
@@ -1092,9 +1328,13 @@ mod tests {
     #[test]
     fn logical_schema_map_value_none_maps_to_null_field() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "attrs".to_string(),
             data_type: LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Utf8,
                     nullable: false,
@@ -1130,9 +1370,11 @@ mod tests {
     #[test]
     fn logical_schema_rejects_empty_struct_field_name() {
         let err = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "root".to_string(),
             data_type: LogicalDataType::Struct {
                 fields: vec![LogicalField {
+                    metadata: Default::default(),
                     name: "".to_string(),
                     data_type: LogicalDataType::Int32,
                     nullable: false,
@@ -1155,6 +1397,7 @@ mod tests {
     #[test]
     fn logical_schema_rejects_other_type() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "opaque".to_string(),
             data_type: LogicalDataType::Other("parquet::Map".to_string()),
             nullable: true,
@@ -1175,6 +1418,7 @@ mod tests {
     #[test]
     fn logical_schema_timestamp_without_timezone() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -1196,6 +1440,7 @@ mod tests {
     #[test]
     fn logical_schema_decimal_conversion_bounds() {
         let valid_128 = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "dec128".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 38,
@@ -1217,6 +1462,7 @@ mod tests {
         );
 
         let valid_256 = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "dec256".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 76,
@@ -1238,6 +1484,7 @@ mod tests {
         );
 
         let invalid = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "dec_too_large".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 77,
@@ -1267,6 +1514,7 @@ mod tests {
 
         for (name, precision, scale, details_substr) in cases {
             let logical = LogicalSchema::new(vec![LogicalField {
+                metadata: Default::default(),
                 name: name.to_string(),
                 data_type: LogicalDataType::Decimal { precision, scale },
                 nullable: false,
@@ -1294,6 +1542,7 @@ mod tests {
     #[test]
     fn logical_schema_fixed_binary_json_roundtrip() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "fixed".to_string(),
             data_type: LogicalDataType::FixedBinary { byte_width: 8 },
             nullable: false,
@@ -1308,6 +1557,7 @@ mod tests {
     #[test]
     fn logical_schema_decimal_json_roundtrip() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "amount".to_string(),
             data_type: LogicalDataType::Decimal {
                 precision: 18,
@@ -1325,6 +1575,7 @@ mod tests {
     #[test]
     fn logical_schema_uint64_roundtrips_json_and_maps_exactly_to_arrow() {
         let schema = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "offset".to_string(),
             data_type: LogicalDataType::UInt64,
             nullable: false,

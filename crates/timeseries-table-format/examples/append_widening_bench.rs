@@ -291,16 +291,19 @@ fn incoming_schema() -> SchemaRef {
 fn registered_logical_schema() -> Result<LogicalSchema, LogicalSchemaValidationError> {
     LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: INDEX_COLUMN.to_string(),
             data_type: LogicalDataType::UInt64,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: SEQUENCE_COLUMN.to_string(),
             data_type: LogicalDataType::UInt64,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: PAYLOAD_COLUMN.to_string(),
             data_type: LogicalDataType::Binary,
             nullable: false,

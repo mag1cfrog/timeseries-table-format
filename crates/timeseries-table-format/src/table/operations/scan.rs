@@ -38,9 +38,7 @@ use crate::batch_schema::{BatchSchemaAlignment, MissingColumnPolicy};
 use crate::metadata::{
     index::{IndexSpec, IndexValue, IndexValueError, validate_index_range},
     logical_schema::LogicalSchema,
-    schema_compat::{
-        SchemaCompatibilityError, ensure_file_schema_metadata_matches, require_table_schema,
-    },
+    schema_compat::{SchemaCompatibilityError, ensure_file_metadata_matches, require_table_schema},
     segments::SegmentMeta,
 };
 use crate::storage::{self, TableLocation};
@@ -311,8 +309,18 @@ where
             operation: "reading metadata",
         })?;
     if let Some((table_schema, _)) = canonical_schema {
-        ensure_file_schema_metadata_matches(table_schema.metadata(), builder.schema().metadata())
-            .map_err(|source| ScanError::Schema {
+        ensure_file_metadata_matches(
+            &table_schema
+                .to_arrow_schema()
+                .map_err(|source| ScanError::Schema {
+                    path: Some(path.clone()),
+                    source: Box::new(SchemaCompatibilityError::RegisteredSchemaConversion {
+                        source: Box::new(source),
+                    }),
+                })?,
+            builder.schema(),
+        )
+        .map_err(|source| ScanError::Schema {
             path: Some(path.clone()),
             source: Box::new(source),
         })?;
@@ -329,20 +337,12 @@ where
     let schema = reader.schema();
     let alignment = canonical_schema
         .map(|(table_schema, policy)| {
-            let alignment = if policy == MissingColumnPolicy::Reject {
-                BatchSchemaAlignment::for_metadata_restoration(
-                    Arc::clone(schema),
-                    table_schema,
-                    index,
-                )
-            } else {
-                BatchSchemaAlignment::for_historical_segment(
-                    Arc::clone(schema),
-                    table_schema,
-                    index,
-                    policy,
-                )
-            };
+            let alignment = BatchSchemaAlignment::for_historical_segment(
+                Arc::clone(schema),
+                table_schema,
+                index,
+                policy,
+            );
             alignment.map(Arc::new).map_err(|source| ScanError::Schema {
                 path: Some(path.clone()),
                 source: Box::new(source),
@@ -537,7 +537,7 @@ impl TimeSeriesTable {
                     .state
                     .table_meta
                     .logical_schema()
-                    .is_some_and(|schema| !schema.metadata().is_empty())
+                    .is_some_and(|schema| schema.has_metadata())
             {
                 Some((
                     require_table_schema(&self.state.table_meta)

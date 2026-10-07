@@ -482,11 +482,8 @@ async fn rewrite_segment(
         .table_meta
         .logical_schema()
         .ok_or_else(|| invalid("missing canonical schema"))?;
-    crate::metadata::schema_compat::ensure_file_schema_metadata_matches(
-        logical.metadata(),
-        builder.schema().metadata(),
-    )
-    .map_err(Box::new)?;
+    crate::metadata::schema_compat::ensure_file_metadata_matches(schema, builder.schema())
+        .map_err(Box::new)?;
     let mut reader = builder.with_batch_size(READ_ROWS).build()?;
     // Parquet omits schema metadata from decoded batches; the built reader agrees.
     let alignment = BatchSchemaAlignment::for_historical_segment(

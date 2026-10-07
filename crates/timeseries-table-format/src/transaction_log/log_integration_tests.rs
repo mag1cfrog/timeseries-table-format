@@ -48,6 +48,7 @@ fn sample_time_index_spec() -> IndexSpec {
 fn sample_table_meta() -> TableMeta {
     let schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Micros,
@@ -56,11 +57,13 @@ fn sample_table_meta() -> TableMeta {
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: true,

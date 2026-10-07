@@ -24,6 +24,7 @@ use tempfile::TempDir;
 
 fn field(name: &str, data_type: LogicalDataType) -> LogicalField {
     LogicalField {
+        metadata: Default::default(),
         name: name.into(),
         data_type,
         nullable: true,
@@ -422,6 +423,8 @@ async fn invalid_requests_publish_nothing_and_preserve_the_handle() -> TestResul
         vec![field(
             "x",
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(field("key", LogicalDataType::Utf8)),
                 value: None,
                 keys_sorted: false,
@@ -430,6 +433,8 @@ async fn invalid_requests_publish_nothing_and_preserve_the_handle() -> TestResul
         vec![field(
             "x",
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
                     nullable: false,
                     ..field("renamed", LogicalDataType::Utf8)
@@ -623,6 +628,29 @@ async fn schemaless_tables_require_initial_adoption_and_names_are_exact() -> Tes
 #[tokio::test]
 async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestResult {
     use crate::metadata::logical_schema::LogicalTimestampUnit;
+    fn annotate(field: &mut LogicalField) {
+        field.metadata.insert("path".into(), field.name.clone());
+        match &mut field.data_type {
+            LogicalDataType::Struct { fields } => fields.iter_mut().for_each(annotate),
+            LogicalDataType::List { elements } => annotate(elements),
+            LogicalDataType::Map {
+                key,
+                value,
+                entries_metadata,
+                null_value_metadata,
+                ..
+            } => {
+                entries_metadata.insert("role".into(), "entries".into());
+                annotate(key);
+                if let Some(value) = value {
+                    annotate(value);
+                } else {
+                    null_value_metadata.insert("role".into(), "null-value".into());
+                }
+            }
+            _ => {}
+        }
+    }
     let temp = TempDir::new()?;
     let mut table =
         TimeSeriesTable::create(TableLocation::local(temp.path()), table_meta()).await?;
@@ -667,6 +695,8 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             elements: Box::new(field("item", LogicalDataType::Int64)),
         },
         LogicalDataType::Map {
+            entries_metadata: Default::default(),
+            null_value_metadata: Default::default(),
             key: Box::new(LogicalField {
                 nullable: false,
                 ..field("key", LogicalDataType::Utf8)
@@ -675,6 +705,8 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             keys_sorted: true,
         },
         LogicalDataType::Map {
+            entries_metadata: Default::default(),
+            null_value_metadata: Default::default(),
             key: Box::new(LogicalField {
                 nullable: false,
                 ..field("key", LogicalDataType::Utf8)
@@ -688,10 +720,28 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             types
                 .into_iter()
                 .enumerate()
-                .map(|(i, dt)| field(&format!("c{i}"), dt))
+                .map(|(i, dt)| {
+                    let mut field = field(&format!("c{i}"), dt);
+                    annotate(&mut field);
+                    field
+                })
                 .collect(),
         )
         .await?;
+    assert!(
+        table
+            .state()
+            .table_meta
+            .required_reader_features()
+            .contains("schema_metadata")
+    );
+    assert!(
+        table
+            .state()
+            .table_meta
+            .required_writer_features()
+            .contains("schema_metadata")
+    );
     table.append(batch(1, None)).await?;
     for optimize in [false, true] {
         if optimize {
@@ -708,6 +758,8 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             );
         }
     }
+    let reopened = TimeSeriesTable::open(table.location().clone()).await?;
+    assert_eq!(reopened.state().table_meta, table.state().table_meta);
     Ok(())
 }
 
@@ -983,6 +1035,7 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
         "rename",
         "retype",
         "nullability",
+        "field_metadata",
         "remove_schema",
         "key",
         "required",
@@ -1010,6 +1063,9 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
             "rename" => fields[2].name = "renamed".into(),
             "retype" => fields[2].data_type = LogicalDataType::Int64,
             "nullability" => fields[2].nullable = false,
+            "field_metadata" => {
+                fields[2].metadata.insert("unit".into(), "ms".into());
+            }
             "key" => {
                 let crate::metadata::table::TableKind::TimeSeries(index) = &mut next.kind else {
                     unreachable!()
@@ -1033,6 +1089,9 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
                 serde_json::json!({"columns": fields}),
             )?)
         };
+        if change == "field_metadata" {
+            next.require_schema_metadata_feature();
+        }
         TransactionLogStore::new(location.clone())
             .commit_with_expected_version(
                 1,

@@ -94,6 +94,7 @@ fn make_table_meta() -> crate::metadata::table::TableMeta {
 
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -102,11 +103,13 @@ fn make_table_meta() -> crate::metadata::table::TableMeta {
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: false,

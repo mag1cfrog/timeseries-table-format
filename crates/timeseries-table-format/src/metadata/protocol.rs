@@ -135,7 +135,7 @@ impl TableMeta {
         if self
             .logical_schema
             .as_ref()
-            .is_some_and(|schema| !schema.metadata().is_empty())
+            .is_some_and(|schema| schema.has_metadata())
         {
             self.required_reader_features
                 .insert(SCHEMA_METADATA_FEATURE.into());
@@ -174,7 +174,7 @@ impl TableMeta {
         if self
             .logical_schema
             .as_ref()
-            .is_some_and(|schema| !schema.metadata().is_empty())
+            .is_some_and(|schema| schema.has_metadata())
             && (!self
                 .required_reader_features
                 .contains(SCHEMA_METADATA_FEATURE)
@@ -366,6 +366,7 @@ mod tests {
     fn schema_metadata_requires_capable_readers_and_writers() {
         use crate::metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
         let schema = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "ts".into(),
             data_type: LogicalDataType::Int64,
             nullable: false,
@@ -375,40 +376,44 @@ mod tests {
             "unit".into(),
             "ns".into(),
         )]));
-        let meta = TableMeta::new_time_series_with_schema(
-            IndexSpec {
-                column: "ts".into(),
-                entity_columns: vec![],
-                kind: IndexKind::Int64 {
-                    index_granularity: std::num::NonZeroU64::MIN,
+        let mut field_only = schema.clone().columns().to_vec();
+        field_only[0].metadata = schema.metadata().clone();
+        for schema in [schema, LogicalSchema::new(field_only).unwrap()] {
+            let meta = TableMeta::new_time_series_with_schema(
+                IndexSpec {
+                    column: "ts".into(),
+                    entity_columns: vec![],
+                    kind: IndexKind::Int64 {
+                        index_granularity: std::num::NonZeroU64::MIN,
+                    },
                 },
-            },
-            schema,
-        );
-        assert!(meta.ensure_write_compatible().is_ok());
-        assert_eq!(
-            meta.ensure_read_compatible_with(&[]),
-            Err(TableProtocolError::UnsupportedReaderFeatures {
-                features: vec![SCHEMA_METADATA_FEATURE.into()],
-            })
-        );
-        assert_eq!(
-            meta.ensure_write_compatible_with(&[SCHEMA_METADATA_FEATURE], &[]),
-            Err(TableProtocolError::UnsupportedWriterFeatures {
-                features: vec![SCHEMA_METADATA_FEATURE.into()],
-            })
-        );
-        for reader in [false, true] {
-            let mut invalid = meta.clone();
-            if reader {
-                invalid.required_reader_features.clear();
-            } else {
-                invalid.required_writer_features.clear();
-            }
-            assert_eq!(
-                invalid.ensure_read_compatible(),
-                Err(TableProtocolError::MissingSchemaMetadataFeatures)
+                schema,
             );
+            assert!(meta.ensure_write_compatible().is_ok());
+            assert_eq!(
+                meta.ensure_read_compatible_with(&[]),
+                Err(TableProtocolError::UnsupportedReaderFeatures {
+                    features: vec![SCHEMA_METADATA_FEATURE.into()],
+                })
+            );
+            assert_eq!(
+                meta.ensure_write_compatible_with(&[SCHEMA_METADATA_FEATURE], &[]),
+                Err(TableProtocolError::UnsupportedWriterFeatures {
+                    features: vec![SCHEMA_METADATA_FEATURE.into()],
+                })
+            );
+            for reader in [false, true] {
+                let mut invalid = meta.clone();
+                if reader {
+                    invalid.required_reader_features.clear();
+                } else {
+                    invalid.required_writer_features.clear();
+                }
+                assert_eq!(
+                    invalid.ensure_read_compatible(),
+                    Err(TableProtocolError::MissingSchemaMetadataFeatures)
+                );
+            }
         }
     }
 
