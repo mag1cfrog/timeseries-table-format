@@ -40,7 +40,7 @@ use datafusion::logical_expr::{Expr, Operator};
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
 use crate::metadata::index::{IndexKind, IndexSpec};
-use crate::metadata::schema_compat::ensure_file_metadata_matches;
+use crate::metadata::schema_compat::validate_file_metadata;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -71,15 +71,14 @@ struct Cache {
     state: Option<TableState>,
 }
 
-/// Validate annotations on the footer DataFusion already fetches, preserving lazy
-/// file opening, predicate pushdown, byte-range batching, and execution metrics.
+/// Creates Parquet readers that validate stored metadata against the table schema.
 #[derive(Debug)]
-struct MetadataCheckingReaderFactory {
+struct TableReaderFactory {
     inner: DefaultParquetFileReaderFactory,
-    schema: SchemaRef,
+    table_schema: SchemaRef,
 }
 
-impl ParquetFileReaderFactory for MetadataCheckingReaderFactory {
+impl ParquetFileReaderFactory for TableReaderFactory {
     fn create_reader(
         &self,
         partition_index: usize,
@@ -91,21 +90,21 @@ impl ParquetFileReaderFactory for MetadataCheckingReaderFactory {
         let inner = self
             .inner
             .create_reader(partition_index, file, metadata_size_hint, metrics)?;
-        Ok(Box::new(MetadataCheckingReader {
+        Ok(Box::new(TableReader {
             inner,
-            schema: Arc::clone(&self.schema),
+            table_schema: Arc::clone(&self.table_schema),
             path,
         }))
     }
 }
 
-struct MetadataCheckingReader {
+struct TableReader {
     inner: Box<dyn AsyncFileReader + Send>,
-    schema: SchemaRef,
+    table_schema: SchemaRef,
     path: String,
 }
 
-impl AsyncFileReader for MetadataCheckingReader {
+impl AsyncFileReader for TableReader {
     fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
         self.inner.get_bytes(range)
     }
@@ -123,9 +122,10 @@ impl AsyncFileReader for MetadataCheckingReader {
     ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
         async move {
             let metadata = self.inner.get_metadata(options).await?;
-            let file = metadata.file_metadata();
-            let schema = parquet_to_arrow_schema(file.schema_descr(), file.key_value_metadata())?;
-            ensure_file_metadata_matches(&self.schema, &schema)
+            let footer = metadata.file_metadata();
+            let file_schema =
+                parquet_to_arrow_schema(footer.schema_descr(), footer.key_value_metadata())?;
+            validate_file_metadata(&self.table_schema, &file_schema)
                 .map_err(|error| ParquetError::General(format!("{}: {error}", self.path)))?;
             Ok(metadata)
         }
@@ -430,12 +430,11 @@ impl TableProvider for TsTableProvider {
                 .any(|field| !field.metadata().is_empty())
         {
             let store = state.runtime_env().object_store(&self.object_store_url)?;
-            parquet_source = parquet_source.with_parquet_file_reader_factory(Arc::new(
-                MetadataCheckingReaderFactory {
+            parquet_source =
+                parquet_source.with_parquet_file_reader_factory(Arc::new(TableReaderFactory {
                     inner: DefaultParquetFileReaderFactory::new(store),
-                    schema: Arc::clone(&self.schema),
-                },
-            ));
+                    table_schema: Arc::clone(&self.schema),
+                }));
         }
 
         let mut builder =

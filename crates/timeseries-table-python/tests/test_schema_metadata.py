@@ -12,7 +12,7 @@ METADATA = {"unit": "ms", "description": "\u6e29\u5ea6", "opaque": '{"version":1
 ARROW_METADATA = {key.encode(): value.encode() for key, value in METADATA.items()}
 
 
-def create(root):
+def create_table(root):
     return ttf.TimeSeriesTable.create(
         table_root=str(root),
         index_column="idx",
@@ -22,20 +22,20 @@ def create(root):
     )
 
 
-def batch(idx, metadata=None):
+def make_batch(idx, metadata=None):
     return pa.record_batch(
         {"idx": [idx, idx], "entity": ["A", "B"], "value": [10, 20]}
     ).replace_schema_metadata(metadata)
 
 
-def files(root):
+def snapshot_files(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
 @pytest.mark.parametrize("evolve", [False, True])
 def test_schema_metadata_survives_the_table_lifecycle(tmp_path, evolve):
-    table = create(tmp_path)
-    table.append(batch(0, METADATA))
+    table = create_table(tmp_path)
+    table.append(make_batch(0, METADATA))
     commit = json.loads((tmp_path / "_timeseries_log/0000000002.json").read_text())
     meta = next(
         a["UpdateTableMeta"] for a in commit["actions"] if "UpdateTableMeta" in a
@@ -45,8 +45,8 @@ def test_schema_metadata_survives_the_table_lifecycle(tmp_path, evolve):
     assert meta["required_writer_features"] == ["schema_metadata"]
 
     # Missing or partial annotations inherit the canonical values.
-    table.append(batch(1))
-    table.append(batch(2, {"unit": "ms"}))
+    table.append(make_batch(1))
+    table.append(make_batch(2, {"unit": "ms"}))
     column = "score" if evolve else "value"
     if evolve:
         table.add_columns(pa.schema([pa.field(column, pa.int64())]))
@@ -75,11 +75,11 @@ def test_schema_metadata_survives_the_table_lifecycle(tmp_path, evolve):
 def test_conflicting_or_extra_metadata_is_rejected_before_consumption(
     tmp_path, operation, metadata
 ):
-    table = create(tmp_path)
-    table.append(batch(0, METADATA))
+    table = create_table(tmp_path)
+    table.append(make_batch(0, METADATA))
     version = table.version()
-    before = files(tmp_path)
-    source = batch(1 if operation == "append" else 0, metadata)
+    before = snapshot_files(tmp_path)
+    source = make_batch(1 if operation == "append" else 0, metadata)
     consumed = []
 
     def batches():
@@ -94,31 +94,31 @@ def test_conflicting_or_extra_metadata_is_rejected_before_consumption(
             table.update_rows(reader, columns=["value"], expected_version=version)
     assert not consumed
     assert table.version() == version
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
 
     assert ttf.TimeSeriesTable.open(str(tmp_path)).version() == version
 
 
 @pytest.mark.parametrize("metadata", [{b"bad": b"\xff"}, {b"\xff": b"bad"}])
 def test_non_utf8_metadata_is_rejected_before_first_append(tmp_path, metadata):
-    table = create(tmp_path)
-    before = files(tmp_path)
+    table = create_table(tmp_path)
+    before = snapshot_files(tmp_path)
     with pytest.raises(ValueError, match="[Uu][Tt][Ff]-?8"):
-        table.append(batch(0, metadata))
+        table.append(make_batch(0, metadata))
     assert table.version() == 1
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
 
 
 def test_legacy_schema_does_not_adopt_later_annotations(tmp_path):
-    table = create(tmp_path)
-    table.append(batch(0))
-    table.append(batch(1, METADATA))
+    table = create_table(tmp_path)
+    table.append(make_batch(0))
+    table.append(make_batch(1, METADATA))
     query = ttf.Session()
     query.register_tstable("t", str(tmp_path))
     assert query.sql("SELECT * FROM t").schema.metadata in (None, {})
 
 
-def change_file_unit(path):
+def corrupt_file_metadata(path):
     # Change only the embedded annotation, leaving data and recorded size intact.
     data = path.read_bytes()
     encoded = pq.ParquetFile(path).metadata.metadata[b"ARROW:schema"]
@@ -136,12 +136,12 @@ def change_file_unit(path):
 def test_file_metadata_conflicts_are_rejected_without_publication(
     tmp_path, operation, evolve
 ):
-    table = create(tmp_path)
-    report = table.append(batch(0, {"unit": "ms"}))
+    table = create_table(tmp_path)
+    report = table.append(make_batch(0, {"unit": "ms"}))
     if evolve:
         table.add_columns(pa.schema([pa.field("score", pa.int64())]))
-    change_file_unit(tmp_path / report.segment_path)
-    before = files(tmp_path)
+    corrupt_file_metadata(tmp_path / report.segment_path)
+    before = snapshot_files(tmp_path)
     version = table.version()
     error_type = (
         pa.ArrowInvalid if operation == "sql_reader" else ttf.TimeseriesTableError
@@ -156,18 +156,18 @@ def test_file_metadata_conflicts_are_rejected_without_publication(
                 with query.sql_reader("SELECT * FROM t") as reader:
                     reader.read_all()
         elif operation == "update":
-            table.update_rows(batch(0), columns=["value"], expected_version=version)
+            table.update_rows(make_batch(0), columns=["value"], expected_version=version)
         else:
             table.optimize()
     assert table.version() == version
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
 
 
 def test_sql_checks_only_files_selected_by_segment_pruning(tmp_path):
-    table = create(tmp_path)
-    table.append(batch(0, {"unit": "ms"}))
-    unused = table.append(batch(1))
-    change_file_unit(tmp_path / unused.segment_path)
+    table = create_table(tmp_path)
+    table.append(make_batch(0, {"unit": "ms"}))
+    unused = table.append(make_batch(1))
+    corrupt_file_metadata(tmp_path / unused.segment_path)
     query = ttf.Session()
     query.register_tstable("t", str(tmp_path))
     assert query.sql("SELECT value FROM t WHERE idx = 0").num_rows == 2
@@ -178,7 +178,7 @@ def test_sql_checks_only_files_selected_by_segment_pruning(tmp_path):
 
 
 @pytest.mark.parametrize("kind", ["struct", "list", "map"])
-def test_top_level_metadata_does_not_break_nested_optimize(tmp_path, kind):
+def test_optimize_preserves_schema_and_nested_metadata(tmp_path, kind):
     child = pa.field("value", pa.int64(), metadata={"unit": "ms"})
     data_type, values = {
         "struct": (pa.struct([child]), [{"value": 1}, {"value": 2}]),
@@ -197,7 +197,7 @@ def test_top_level_metadata_does_not_break_nested_optimize(tmp_path, kind):
         [pa.array([0, 0]), pa.array(["A", "B"]), pa.array(values, type=data_type)],
         schema=schema,
     )
-    table = create(tmp_path)
+    table = create_table(tmp_path)
     table.append(source)
     table.optimize()
     table = ttf.TimeSeriesTable.open(str(tmp_path))
@@ -239,8 +239,8 @@ def detail_values(kind):
 def test_added_field_metadata_survives_backfill_and_rewrites(
     tmp_path, kind, schema_metadata
 ):
-    table = create(tmp_path)
-    initial = batch(0, schema_metadata)
+    table = create_table(tmp_path)
+    initial = make_batch(0, schema_metadata)
     table.append(initial)
     field = detail_field(kind, METADATA)
     detail = detail_values(kind)[0]
@@ -261,7 +261,7 @@ def test_added_field_metadata_survives_backfill_and_rewrites(
     assert historical["detail"].to_pylist() == [None, None]
 
     # Omitting either the field or its annotations inherits the registered schema.
-    table.append(batch(1))
+    table.append(make_batch(1))
     bare = detail_field(kind, None)
     table.append(
         pa.Table.from_pylist(
@@ -301,24 +301,24 @@ def test_added_field_metadata_survives_backfill_and_rewrites(
 @pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
 @pytest.mark.parametrize("metadata", [{b"bad": b"\xff"}, {b"\xff": b"bad"}])
 def test_non_utf8_added_field_metadata_is_rejected_atomically(tmp_path, kind, metadata):
-    table = create(tmp_path)
-    table.append(batch(0))
+    table = create_table(tmp_path)
+    table.append(make_batch(0))
     field = detail_field(kind, metadata)
     if kind != "scalar":
         field = field.remove_metadata()
-    before = files(tmp_path)
+    before = snapshot_files(tmp_path)
     with pytest.raises(ValueError, match="[Uu][Tt][Ff]-?8") as error:
         table.add_columns(pa.schema([pa.field("valid", pa.int64()), field]))
     assert type(error.value) is ValueError
     assert getattr(error.value, "table_root") == str(tmp_path)
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
     assert table.version() == ttf.TimeSeriesTable.open(str(tmp_path)).version() == 2
 
 
 @pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
 @pytest.mark.parametrize("metadata", [{b"bad": b"\xff"}, {b"\xff": b"bad"}])
 def test_non_utf8_field_metadata_is_rejected_before_publication(tmp_path, kind, metadata):
-    table = create(tmp_path)
+    table = create_table(tmp_path)
     schema = pa.schema([
         pa.field("idx", pa.int64()), pa.field("entity", pa.string()),
         detail_field(kind, metadata),
@@ -326,16 +326,16 @@ def test_non_utf8_field_metadata_is_rejected_before_publication(tmp_path, kind, 
     source = pa.Table.from_pylist(
         [{"idx": 0, "entity": "A", "detail": detail_values(kind)[0]}], schema=schema
     )
-    before = files(tmp_path)
+    before = snapshot_files(tmp_path)
     with pytest.raises(ValueError, match="[Uu][Tt][Ff]-?8"):
         table.append(source)
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
     assert table.version() == 1
 
 
 @pytest.mark.parametrize("kind", ["struct", "list", "map"])
 def test_legacy_nested_annotations_do_not_block_updates(tmp_path, kind):
-    table = create(tmp_path)
+    table = create_table(tmp_path)
     source = pa.Table.from_pylist(
         [{"idx": 0, "entity": "A", "value": 10, "detail": detail_values(kind)[0]}],
         schema=pa.schema([
@@ -348,18 +348,18 @@ def test_legacy_nested_annotations_do_not_block_updates(tmp_path, kind):
     path = tmp_path / "_timeseries_log/0000000002.json"
     commit = json.loads(path.read_text())
 
-    def without_annotations(value):
+    def without_metadata(value):
         if isinstance(value, dict):
             return {
-                key: without_annotations(child) for key, child in value.items()
+                key: without_metadata(child) for key, child in value.items()
                 if key not in {"metadata", "entries_metadata", "null_value_metadata"}
             }
         if isinstance(value, list):
-            return [without_annotations(child) for child in value]
+            return [without_metadata(child) for child in value]
         return value
 
     meta = next(a["UpdateTableMeta"] for a in commit["actions"] if "UpdateTableMeta" in a)
-    meta["logical_schema"] = without_annotations(meta["logical_schema"])
+    meta["logical_schema"] = without_metadata(meta["logical_schema"])
     meta["required_reader_features"] = []
     meta["required_writer_features"] = []
     path.write_text(json.dumps(commit))
@@ -379,7 +379,7 @@ def test_legacy_nested_annotations_do_not_block_updates(tmp_path, kind):
 @pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
 @pytest.mark.parametrize("evolve", [False, True])
 def test_field_metadata_is_persisted_and_inherited(tmp_path, kind, evolve):
-    table = create(tmp_path)
+    table = create_table(tmp_path)
     field = detail_field(kind, {"unit": "ms", "description": "sample"})
     schema = pa.schema(
         [
@@ -419,7 +419,7 @@ def test_field_metadata_is_persisted_and_inherited(tmp_path, kind, evolve):
         schema = schema.append(pa.field("score", pa.int64()))
     # This is the #447 reproduction: update an unrelated scalar column.
     table.update_rows(
-        batch(0), columns=["value"], expected_version=table.version()
+        make_batch(0), columns=["value"], expected_version=table.version()
     )
     replacement = pa.Table.from_pylist(
         [{"idx": 1, "entity": "B", "detail": detail_values(kind)[0]}],
@@ -447,7 +447,7 @@ def test_field_metadata_is_persisted_and_inherited(tmp_path, kind, evolve):
 @pytest.mark.parametrize("operation", ["append", "update"])
 @pytest.mark.parametrize("metadata", [{"unit": "us"}, {"extra": "value"}])
 def test_field_metadata_conflicts_are_atomic(tmp_path, kind, operation, metadata):
-    table = create(tmp_path)
+    table = create_table(tmp_path)
     source = pa.Table.from_pylist(
         [{"idx": 0, "entity": "A", "detail": detail_values(kind)[0]}],
         schema=pa.schema([
@@ -456,7 +456,7 @@ def test_field_metadata_conflicts_are_atomic(tmp_path, kind, operation, metadata
         ]),
     )
     table.append(source)
-    before = files(tmp_path)
+    before = snapshot_files(tmp_path)
     version = table.version()
     changed_field = detail_field(kind, metadata)
     if kind != "scalar":
@@ -477,13 +477,13 @@ def test_field_metadata_conflicts_are_atomic(tmp_path, kind, operation, metadata
             table.update_rows(reader, columns=["detail"], expected_version=version)
     assert not consumed
     assert table.version() == version
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
 
 
 @pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
 @pytest.mark.parametrize("operation", ["sql", "update", "optimize"])
 def test_committed_field_metadata_conflicts_are_rejected(tmp_path, kind, operation):
-    table = create(tmp_path)
+    table = create_table(tmp_path)
     field = detail_field(kind, {"unit": "ms"})
     source = pa.Table.from_pylist(
         [
@@ -503,7 +503,7 @@ def test_committed_field_metadata_conflicts_are_rejected(tmp_path, kind, operati
     changed = base64.b64encode(decoded.replace(b"ms", b"us"))
     assert len(changed) == len(encoded) and data.count(encoded) == 1
     path.write_bytes(data.replace(encoded, changed))
-    before = files(tmp_path)
+    before = snapshot_files(tmp_path)
     version = table.version()
     with pytest.raises(ttf.TimeseriesTableError, match="Parquet field metadata does not match"):
         if operation == "sql":
@@ -514,6 +514,6 @@ def test_committed_field_metadata_conflicts_are_rejected(tmp_path, kind, operati
             table.update_rows(source, columns=["detail"], expected_version=version)
         else:
             table.optimize()
-    assert files(tmp_path) == before
+    assert snapshot_files(tmp_path) == before
     assert table.version() == version
     assert ttf.TimeSeriesTable.open(str(tmp_path)).version() == version

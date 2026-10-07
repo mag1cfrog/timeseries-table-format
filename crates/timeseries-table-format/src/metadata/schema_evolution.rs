@@ -157,7 +157,7 @@ impl TableMeta {
             Some(LogicalSchema::new(fields)?.with_metadata(schema.metadata().clone()));
         next.required_reader_features
             .insert(SCHEMA_ADD_COLUMNS_FEATURE.to_string());
-        next.require_schema_metadata_feature();
+        next.enable_metadata_feature();
         self.ensure_valid_schema_transition_to(&next)?;
         Ok(next)
     }

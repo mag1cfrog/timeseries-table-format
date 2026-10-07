@@ -38,8 +38,8 @@ use crate::{
         index::{IndexSpec, IndexSpecError},
         logical_schema::LogicalSchema,
         schema_compat::{
-            SchemaCompatibilityError, ensure_file_metadata_matches,
-            ensure_index_spec_matches_schema, ensure_schema_fields_match_by_name,
+            SchemaCompatibilityError, ensure_index_spec_matches_schema,
+            ensure_schema_fields_match_by_name, validate_file_metadata,
         },
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
     },
@@ -297,12 +297,12 @@ async fn stage_identity_data(
                 backtrace: Backtrace::capture(),
             })?;
     if let Some(alignment) = alignment {
-        ensure_file_metadata_matches(alignment.output_schema(), metadata.schema()).map_err(
-            |source| EntityRewriteError::SegmentSchemaValidation {
+        validate_file_metadata(alignment.output_schema(), metadata.schema()).map_err(|source| {
+            EntityRewriteError::SegmentSchemaValidation {
                 path: source_path.to_string(),
                 source: Box::new(source),
-            },
-        )?;
+            }
+        })?;
     }
     let schema = alignment.map_or_else(
         || metadata.schema().clone(),
@@ -461,7 +461,7 @@ async fn prepare_rewrite_source(
                 source: error,
                 backtrace: Backtrace::capture(),
             })?;
-        ensure_file_metadata_matches(
+        validate_file_metadata(
             &table_schema.to_arrow_schema().map_err(|source| {
                 EntityRewriteError::TableSchemaValidation {
                     source: Box::new(SchemaCompatibilityError::RegisteredSchemaConversion {

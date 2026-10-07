@@ -740,7 +740,7 @@ async fn stage(
             });
         }
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
-        crate::metadata::schema_compat::ensure_file_metadata_matches(
+        crate::metadata::schema_compat::validate_file_metadata(
             schema.alignment.output_schema(),
             builder.schema(),
         )

@@ -38,7 +38,7 @@ use crate::batch_schema::{BatchSchemaAlignment, MissingColumnPolicy};
 use crate::metadata::{
     index::{IndexSpec, IndexValue, IndexValueError, validate_index_range},
     logical_schema::LogicalSchema,
-    schema_compat::{SchemaCompatibilityError, ensure_file_metadata_matches, require_table_schema},
+    schema_compat::{SchemaCompatibilityError, require_table_schema, validate_file_metadata},
     segments::SegmentMeta,
 };
 use crate::storage::{self, TableLocation};
@@ -309,7 +309,7 @@ where
             operation: "reading metadata",
         })?;
     if let Some((table_schema, _)) = canonical_schema {
-        ensure_file_metadata_matches(
+        validate_file_metadata(
             &table_schema
                 .to_arrow_schema()
                 .map_err(|source| ScanError::Schema {

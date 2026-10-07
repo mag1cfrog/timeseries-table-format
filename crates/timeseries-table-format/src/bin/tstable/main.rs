@@ -313,7 +313,7 @@ async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<Tim
         })
 }
 
-fn open_parquet_batch_reader(parquet: &Path) -> CliResult<impl RecordBatchReader> {
+fn open_parquet_reader(parquet: &Path) -> CliResult<impl RecordBatchReader> {
     let path = parquet.display().to_string();
     let file = File::open(parquet)
         .map_err(ParquetError::from)
@@ -351,7 +351,7 @@ async fn append_parquet_file(
             table: table_root.display().to_string(),
             parquet: parquet.display().to_string(),
         })?;
-    let reader = open_parquet_batch_reader(parquet)?;
+    let reader = open_parquet_reader(parquet)?;
     table
         .append(reader)
         .await

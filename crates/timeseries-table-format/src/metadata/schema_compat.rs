@@ -1,8 +1,4 @@
-//! Schema compatibility helpers (pure metadata).
-//!
-//! v0.1 rule: **no schema evolution**.
-//! Every appended segment must have a [`LogicalSchema`] that matches the table's
-//! canonical schema exactly.
+//! Schema compatibility checks for table columns, keys, and metadata.
 
 use std::collections::HashMap;
 
@@ -217,33 +213,22 @@ pub enum SchemaCompatibilityError {
     },
 }
 
-/// Check committed file annotations before decoding discards schema metadata.
-/// Legacy tables without persisted annotations keep their existing behavior.
-pub(crate) fn ensure_file_schema_metadata_matches(
-    registered: &HashMap<String, String>,
-    file: &HashMap<String, String>,
+/// Check stored schema and field metadata before decoding can discard it.
+/// Empty table metadata maps retain legacy behavior. Column presence and physical
+/// types are checked separately by schema alignment.
+pub(crate) fn validate_file_metadata(
+    table_schema: &Schema,
+    file_schema: &Schema,
 ) -> SchemaResult<()> {
-    if !registered.is_empty()
-        && (registered.len() != file.len()
-            || registered
-                .iter()
-                .any(|(key, value)| file.get(key) != Some(value)))
-    {
+    if !table_schema.metadata().is_empty() && table_schema.metadata() != file_schema.metadata() {
         return Err(SchemaCompatibilityError::FileSchemaMetadataMismatch);
     }
-    Ok(())
-}
-
-/// Check stored annotations on columns present in a historical file. Column
-/// presence and physical types are checked separately by schema alignment.
-pub(crate) fn ensure_file_metadata_matches(registered: &Schema, file: &Schema) -> SchemaResult<()> {
-    ensure_file_schema_metadata_matches(registered.metadata(), file.metadata())?;
-    let fields: HashMap<_, _> = registered
+    let fields: HashMap<_, _> = table_schema
         .fields()
         .iter()
         .map(|field| (field.name(), field))
         .collect();
-    for source in file.fields() {
+    for source in file_schema.fields() {
         if let Some(table) = fields.get(source.name())
             && let Some(column) = field_metadata_mismatch(table, source, false)
         {
@@ -253,17 +238,18 @@ pub(crate) fn ensure_file_metadata_matches(registered: &Schema, file: &Schema) -
     Ok(())
 }
 
-/// Empty annotation maps retain legacy behavior. Once a field has annotations,
-/// input can omit them, but cannot replace them or introduce additional keys.
+/// Return the first field path with incompatible metadata. Input batches may
+/// omit keys to inherit; stored files must match exactly. Empty table metadata
+/// maps retain legacy behavior.
 pub(crate) fn field_metadata_mismatch(
     table: &Field,
     source: &Field,
-    allow_missing: bool,
+    allow_missing_keys: bool,
 ) -> Option<String> {
     let expected = table.metadata();
     let actual = source.metadata();
     if !expected.is_empty()
-        && ((!allow_missing && expected.len() != actual.len())
+        && ((!allow_missing_keys && expected.len() != actual.len())
             || actual
                 .iter()
                 .any(|(key, value)| expected.get(key) != Some(value)))
@@ -274,10 +260,10 @@ pub(crate) fn field_metadata_mismatch(
         (DataType::Struct(expected), DataType::Struct(actual)) => expected
             .iter()
             .zip(actual)
-            .find_map(|(table, source)| field_metadata_mismatch(table, source, allow_missing)),
+            .find_map(|(table, source)| field_metadata_mismatch(table, source, allow_missing_keys)),
         (DataType::List(table), DataType::List(source))
         | (DataType::Map(table, _), DataType::Map(source, _)) => {
-            field_metadata_mismatch(table, source, allow_missing)
+            field_metadata_mismatch(table, source, allow_missing_keys)
         }
         _ => None,
     };
@@ -286,11 +272,11 @@ pub(crate) fn field_metadata_mismatch(
 
 /// Arrow's equals_datatype also ignores nested names. Alignment only permits
 /// annotations to differ; names, order, nullability, and physical types stay exact.
-pub(crate) fn data_types_match_ignoring_metadata(table: &DataType, source: &DataType) -> bool {
+pub(crate) fn same_type_ignoring_metadata(table: &DataType, source: &DataType) -> bool {
     let field_matches = |table: &Field, source: &Field| {
         table.name() == source.name()
             && table.is_nullable() == source.is_nullable()
-            && data_types_match_ignoring_metadata(table.data_type(), source.data_type())
+            && same_type_ignoring_metadata(table.data_type(), source.data_type())
     };
     match (table, source) {
         (DataType::Struct(table), DataType::Struct(source)) => {
@@ -503,7 +489,7 @@ pub fn ensure_schema_fields_match_by_name(
                 source: Box::new(source),
             }
         })?;
-        ensure_file_metadata_matches(&table, &segment)?;
+        validate_file_metadata(&table, &segment)?;
     }
 
     Ok(())
@@ -520,11 +506,11 @@ mod tests {
     };
 
     #[test]
-    fn committed_metadata_requires_exact_annotations_except_for_legacy_tables() {
-        let registered = HashMap::from([("unit".into(), "ms".into())]);
-        let matching = HashMap::from([("unit".into(), "ms".into())]);
-        assert!(ensure_file_schema_metadata_matches(&registered, &matching).is_ok());
-        assert!(ensure_file_schema_metadata_matches(&HashMap::new(), &matching).is_ok());
+    fn file_metadata_must_match_registered_keys_and_values() {
+        let registered =
+            Schema::empty().with_metadata(HashMap::from([("unit".into(), "ms".into())]));
+        assert!(validate_file_metadata(&registered, &registered).is_ok());
+        assert!(validate_file_metadata(&Schema::empty(), &registered).is_ok());
         for invalid in [
             HashMap::new(),
             HashMap::from([("unit".into(), "us".into())]),
@@ -534,7 +520,7 @@ mod tests {
             ]),
         ] {
             assert!(matches!(
-                ensure_file_schema_metadata_matches(&registered, &invalid),
+                validate_file_metadata(&registered, &Schema::empty().with_metadata(invalid)),
                 Err(SchemaCompatibilityError::FileSchemaMetadataMismatch)
             ));
         }

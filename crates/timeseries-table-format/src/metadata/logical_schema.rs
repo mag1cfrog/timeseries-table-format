@@ -1109,27 +1109,27 @@ mod tests {
 
     #[test]
     fn nested_field_metadata_round_trips_without_changing_legacy_json() {
-        fn annotated(name: &str, data_type: DataType, nullable: bool) -> Field {
+        fn field_with_metadata(name: &str, data_type: DataType, nullable: bool) -> Field {
             Field::new(name, data_type, nullable).with_metadata(HashMap::from([
                 ("path".into(), name.into()),
                 ("opaque".into(), "\u{6e29}\u{5ea6}\0\n".into()),
             ]))
         }
         for value_type in [DataType::Null, DataType::Int64] {
-            let entries = annotated(
+            let entries = field_with_metadata(
                 "entries",
                 DataType::Struct(
                     vec![
-                        annotated("key", DataType::Utf8, false),
-                        annotated("value", value_type, true),
+                        field_with_metadata("key", DataType::Utf8, false),
+                        field_with_metadata("value", value_type, true),
                     ]
                     .into(),
                 ),
                 false,
             );
-            let list = annotated("item", DataType::Map(Arc::new(entries), true), true);
-            let child = annotated("child", DataType::List(Arc::new(list)), false);
-            let schema = Schema::new(vec![annotated(
+            let list = field_with_metadata("item", DataType::Map(Arc::new(entries), true), true);
+            let child = field_with_metadata("child", DataType::List(Arc::new(list)), false);
+            let schema = Schema::new(vec![field_with_metadata(
                 "detail",
                 DataType::Struct(vec![child].into()),
                 true,

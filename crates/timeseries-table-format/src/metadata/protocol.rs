@@ -131,7 +131,8 @@ pub enum TableProtocolError {
 }
 
 impl TableMeta {
-    pub(crate) fn require_schema_metadata_feature(&mut self) {
+    /// Add schema_metadata reader and writer requirements for annotated schemas.
+    pub(crate) fn enable_metadata_feature(&mut self) {
         if self
             .logical_schema
             .as_ref()
@@ -363,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_metadata_requires_capable_readers_and_writers() {
+    fn schema_metadata_requires_reader_and_writer_features() {
         use crate::metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
         let schema = LogicalSchema::new(vec![LogicalField {
             metadata: Default::default(),

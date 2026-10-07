@@ -615,7 +615,7 @@ impl TimeSeriesTable {
             None if expected_version == 1 => {
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
-                updated_meta.require_schema_metadata_feature();
+                updated_meta.enable_metadata_feature();
                 Some(updated_meta)
             }
             None => {

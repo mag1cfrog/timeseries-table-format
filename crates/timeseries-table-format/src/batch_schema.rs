@@ -18,8 +18,8 @@ use crate::metadata::{
     logical_schema::LogicalSchema,
     protocol::SCHEMA_ADD_COLUMNS_FEATURE,
     schema_compat::{
-        SchemaCompatibilityError, SchemaResult, data_types_match_ignoring_metadata,
-        field_metadata_mismatch,
+        SchemaCompatibilityError, SchemaResult, field_metadata_mismatch,
+        same_type_ignoring_metadata,
     },
     table::TableMeta,
 };
@@ -161,7 +161,7 @@ impl BatchSchemaAlignment {
 
             let column = if table_field.data_type() == incoming_field.data_type() {
                 ColumnAlignment::Reuse(incoming_index)
-            } else if data_types_match_ignoring_metadata(
+            } else if same_type_ignoring_metadata(
                 table_field.data_type(),
                 incoming_field.data_type(),
             ) || (allow_widening

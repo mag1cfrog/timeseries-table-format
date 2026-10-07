@@ -151,7 +151,7 @@ impl TableMeta {
     pub fn new_time_series_with_schema(index: IndexSpec, logical_schema: LogicalSchema) -> Self {
         let mut meta = Self::new_time_series(index);
         meta.logical_schema = Some(logical_schema);
-        meta.require_schema_metadata_feature();
+        meta.enable_metadata_feature();
         meta
     }
 

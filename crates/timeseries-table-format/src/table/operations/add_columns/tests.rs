@@ -281,7 +281,7 @@ async fn created_schema_metadata_survives_append_optimize_and_reopen() -> TestRe
 }
 
 #[tokio::test]
-async fn schema_metadata_scan_checks_the_footer_and_preserves_nested_annotations() -> TestResult {
+async fn scan_preserves_metadata_and_rejects_footer_conflicts() -> TestResult {
     use arrow::array::StructArray;
     use parquet::arrow::ArrowWriter;
     use std::collections::HashMap;
@@ -628,11 +628,11 @@ async fn schemaless_tables_require_initial_adoption_and_names_are_exact() -> Tes
 #[tokio::test]
 async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestResult {
     use crate::metadata::logical_schema::LogicalTimestampUnit;
-    fn annotate(field: &mut LogicalField) {
+    fn add_field_metadata(field: &mut LogicalField) {
         field.metadata.insert("path".into(), field.name.clone());
         match &mut field.data_type {
-            LogicalDataType::Struct { fields } => fields.iter_mut().for_each(annotate),
-            LogicalDataType::List { elements } => annotate(elements),
+            LogicalDataType::Struct { fields } => fields.iter_mut().for_each(add_field_metadata),
+            LogicalDataType::List { elements } => add_field_metadata(elements),
             LogicalDataType::Map {
                 key,
                 value,
@@ -641,9 +641,9 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
                 ..
             } => {
                 entries_metadata.insert("role".into(), "entries".into());
-                annotate(key);
+                add_field_metadata(key);
                 if let Some(value) = value {
-                    annotate(value);
+                    add_field_metadata(value);
                 } else {
                     null_value_metadata.insert("role".into(), "null-value".into());
                 }
@@ -722,7 +722,7 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
                 .enumerate()
                 .map(|(i, dt)| {
                     let mut field = field(&format!("c{i}"), dt);
-                    annotate(&mut field);
+                    add_field_metadata(&mut field);
                     field
                 })
                 .collect(),
@@ -1090,7 +1090,7 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
             )?)
         };
         if change == "field_metadata" {
-            next.require_schema_metadata_feature();
+            next.enable_metadata_feature();
         }
         TransactionLogStore::new(location.clone())
             .commit_with_expected_version(
@@ -1125,7 +1125,7 @@ fn established_schema_metadata_cannot_be_changed_or_removed() -> TestResult {
             .clone()
             .with_metadata(BTreeMap::from([("unit".into(), "ms".into())])),
     );
-    original.require_schema_metadata_feature();
+    original.enable_metadata_feature();
     for metadata in [
         BTreeMap::new(),
         BTreeMap::from([("unit".into(), "s".into())]),
