@@ -56,6 +56,14 @@ After an explicit `add_columns` operation, append may omit nullable payload fiel
 pre-existing nullable fields. Missing keys and non-nullable fields remain errors. Baseline tables
 retain their strict missing-field behavior until the first addition.
 
+The first successful append preserves schema and field metadata, including supported nested
+annotations, in the canonical schema. Later appends inherit missing metadata keys. At each schema
+or field location with registered annotations, supplied keys must match the registered values;
+extra keys are rejected. Locations with no registered annotations retain legacy behavior and do
+not adopt later metadata. Keys and values must be valid UTF-8. See
+[Schema and field metadata](../concepts/table_protocol.md#schema-and-field-metadata) for storage
+and compatibility rules.
+
 For a materialized source, pass a table or record batch directly. This example assumes the target
 table expects the shown schema:
 
@@ -114,6 +122,10 @@ The source accepts the same Arrow C Stream inputs as append. It contains exactly
 columns, the raw ordered-index column, and the selected payload fields. The core validates
 schema compatibility and exact one-to-one key matches.
 
+Schema-level metadata on a partial update describes the table schema and follows the same
+inheritance and conflict rules as append. Field metadata is checked for the keys and selected
+payload fields. Updates preserve the table's registered metadata.
+
 Capture the version before reading and computing assignments. Both the handle and published
 table must still match it. The operation never refreshes or retries. It overwrites selected
 values, including explicit nulls in nullable fields; unselected values remain unchanged.
@@ -149,10 +161,13 @@ a canonical schema, normally established by its first successful append. Field o
 case-sensitive names, types, and nullability are preserved. Dots are literal name characters;
 use SQL quoting when needed.
 
-Schema/field metadata, including nested metadata, raises `ValueError`. A non-schema argument raises
-`TypeError`. Core validation failures use `SchemaMismatchError`, including empty schemas,
-duplicates, existing/key names, unsupported types, and non-nullable additions. Existing fields and
-key definitions cannot change. Addition fills no historical values and rewrites no data or coverage.
+Field metadata is preserved at every supported nesting level. Schema-level metadata on the
+argument raises `ValueError`, even if it matches the table: `add_columns` leaves existing schema
+annotations unchanged. Metadata containing invalid UTF-8 also raises `ValueError` before
+publication. A non-schema argument raises `TypeError`. Core validation failures use
+`SchemaMismatchError`, including empty schemas, duplicates, existing/key names, unsupported types,
+and non-nullable additions. Existing fields and key definitions cannot change. Addition fills no
+historical values and rewrites no data or coverage.
 
 The operation uses the handle's selected version without refreshing or retrying. A stale handle
 raises `ConflictError` with `expected` and `found`. A create-only commit race retains `StorageError`

@@ -235,6 +235,87 @@ def detail_values(kind):
 
 
 @pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
+@pytest.mark.parametrize("schema_metadata", [None, METADATA])
+def test_added_field_metadata_survives_backfill_and_rewrites(
+    tmp_path, kind, schema_metadata
+):
+    table = create(tmp_path)
+    initial = batch(0, schema_metadata)
+    table.append(initial)
+    field = detail_field(kind, METADATA)
+    detail = detail_values(kind)[0]
+    assert table.add_columns(pa.schema([field])) == 3
+    meta = json.loads((tmp_path / "_timeseries_log/0000000003.json").read_text())[
+        "actions"
+    ][0]["UpdateTableMeta"]
+    assert meta["logical_schema"]["columns"][-1]["metadata"] == METADATA
+    assert meta["required_reader_features"] == ["schema_add_columns", "schema_metadata"]
+    assert meta["required_writer_features"] == ["schema_metadata"]
+
+    table = ttf.TimeSeriesTable.open(str(tmp_path))
+    query = ttf.Session()
+    query.register_tstable("t", str(tmp_path))
+    expected_schema = initial.schema.append(field)
+    historical = query.sql("SELECT * FROM t ORDER BY idx, entity")
+    assert historical.schema.equals(expected_schema, check_metadata=True)
+    assert historical["detail"].to_pylist() == [None, None]
+
+    # Omitting either the field or its annotations inherits the registered schema.
+    table.append(batch(1))
+    bare = detail_field(kind, None)
+    table.append(
+        pa.Table.from_pylist(
+            [
+                {"idx": 2, "entity": "A", "value": 10, "detail": detail},
+                {"idx": 2, "entity": "B", "value": 20, "detail": None},
+            ],
+            schema=initial.schema.remove_metadata().append(bare),
+        )
+    )
+    table.update_rows(
+        pa.Table.from_pylist(
+            [{"idx": 0, "entity": "A", "detail": detail}],
+            schema=pa.schema(
+                [initial.schema.field("idx"), initial.schema.field("entity"), bare]
+            ),
+        ),
+        columns=["detail"],
+        expected_version=table.version(),
+    )
+    table.optimize()
+    table = ttf.TimeSeriesTable.open(str(tmp_path))
+    query.register_tstable("t", str(tmp_path))
+    with query.sql_reader("SELECT * FROM t ORDER BY idx, entity") as reader:
+        result = reader.read_all()
+    assert result.schema.equals(expected_schema, check_metadata=True)
+    assert result["detail"].to_pylist() == [detail, None, None, None, detail, None]
+    assert result["value"].to_pylist() == [10, 20] * 3
+    for path in tmp_path.rglob("*.parquet"):
+        encoded = pq.ParquetFile(path).metadata.metadata[b"ARROW:schema"]
+        stored = pa.ipc.read_schema(pa.BufferReader(base64.b64decode(encoded)))
+        # Original files from before the addition remain untouched.
+        if "detail" in stored.names:
+            assert stored.equals(expected_schema, check_metadata=True)
+
+
+@pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
+@pytest.mark.parametrize("metadata", [{b"bad": b"\xff"}, {b"\xff": b"bad"}])
+def test_non_utf8_added_field_metadata_is_rejected_atomically(tmp_path, kind, metadata):
+    table = create(tmp_path)
+    table.append(batch(0))
+    field = detail_field(kind, metadata)
+    if kind != "scalar":
+        field = field.remove_metadata()
+    before = files(tmp_path)
+    with pytest.raises(ValueError, match="[Uu][Tt][Ff]-?8") as error:
+        table.add_columns(pa.schema([pa.field("valid", pa.int64()), field]))
+    assert type(error.value) is ValueError
+    assert getattr(error.value, "table_root") == str(tmp_path)
+    assert files(tmp_path) == before
+    assert table.version() == ttf.TimeSeriesTable.open(str(tmp_path)).version() == 2
+
+
+@pytest.mark.parametrize("kind", ["scalar", "struct", "list", "map"])
 @pytest.mark.parametrize("metadata", [{b"bad": b"\xff"}, {b"\xff": b"bad"}])
 def test_non_utf8_field_metadata_is_rejected_before_publication(tmp_path, kind, metadata):
     table = create(tmp_path)

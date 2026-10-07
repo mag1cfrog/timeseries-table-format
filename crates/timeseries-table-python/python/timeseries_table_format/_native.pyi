@@ -483,9 +483,10 @@ class TimeSeriesTable:
     def add_columns(self, columns: pyarrow.Schema) -> int:
         """Add new nullable top-level fields and return the committed version.
 
-        `columns` describes only the new fields. Names, order, types, and nullable
-        annotations are preserved; schema/field metadata, including nested metadata,
-        is rejected. The table must already have a canonical schema, normally
+        `columns` describes only the new fields and must not contain schema-level
+        metadata. Names, order, types, nullability, and field metadata (including
+        supported nested fields) are preserved. Metadata keys and values must be
+        valid UTF-8. The table must already have a canonical schema, normally
         established by its first successful append.
 
         Historical rows read as null without rewriting data or coverage. Later appends
@@ -502,7 +503,8 @@ class TimeSeriesTable:
         TypeError
             If `columns` is not a `pyarrow.Schema`.
         ValueError
-            If Arrow metadata is present or the schema cannot be imported.
+            If schema-level metadata is present or the schema cannot be imported,
+            including metadata containing invalid UTF-8.
         SchemaMismatchError
             If fields violate the core nullable-addition contract.
         ConflictError
