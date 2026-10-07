@@ -882,21 +882,21 @@ async fn nested_replacements_and_metadata_rules_survive_staging() -> TestResult 
         9
     );
     prepared.close()?;
-    // Nested metadata is part of the Arrow type and must not be stripped.
+    // Legacy fields without persisted annotations ignore nested metadata too.
     let nested_type =
         DataType::Struct(vec![Arc::new(child.as_ref().clone().with_metadata(metadata))].into());
-    let bad = Arc::new(Schema::new(vec![
+    let annotated = Arc::new(Schema::new(vec![
         schema.field(0).clone(),
         Field::new("value", nested_type, true),
     ]));
     let reader = RecordBatchIterator::new(
         Vec::<std::result::Result<RecordBatch, ArrowError>>::new(),
-        bad,
+        annotated,
     );
-    assert!(matches!(
-        prepare_updates(&fixture.location, &fixture.state, reader, &["value".into()]).await,
-        Err(PrepareError::Schema { .. })
-    ));
+    let mut prepared =
+        prepare_updates(&fixture.location, &fixture.state, reader, &["value".into()]).await?;
+    assert!(prepared.next()?.is_none());
+    prepared.close()?;
     // Even an existing unselected payload is an invalid extra field.
     assert!(matches!(
         prepare_updates(

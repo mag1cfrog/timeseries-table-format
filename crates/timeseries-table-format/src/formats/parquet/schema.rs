@@ -368,6 +368,7 @@ fn parse_parquet_list(
 
     Ok(LogicalDataType::List {
         elements: Box::new(LogicalField {
+            metadata: Default::default(),
             name: "element".to_string(),
             data_type: elem_dt,
             nullable: elem_nullable,
@@ -446,6 +447,7 @@ fn parse_parquet_map(
         let val_nullable = matches!(val_t.get_basic_info().repetition(), Repetition::OPTIONAL);
         let val_dt = parquet_type_to_logical_datatype(val_t, &format!("{column_path}.value"))?;
         Some(Box::new(LogicalField {
+            metadata: Default::default(),
             name: "value".to_string(),
             nullable: val_nullable,
             data_type: val_dt,
@@ -455,7 +457,10 @@ fn parse_parquet_map(
     };
 
     Ok(LogicalDataType::Map {
+        entries_metadata: Default::default(),
+        null_value_metadata: Default::default(),
         key: Box::new(LogicalField {
+            metadata: Default::default(),
             name: "key".to_string(),
             data_type: key_dt,
             nullable: false,
@@ -481,6 +486,7 @@ fn parquet_type_to_logical_field(
             LogicalType::List => {
                 let dt = parse_parquet_list(t, &path)?;
                 return Ok(LogicalField {
+                    metadata: Default::default(),
                     name,
                     data_type: dt,
                     nullable,
@@ -489,6 +495,7 @@ fn parquet_type_to_logical_field(
             LogicalType::Map => {
                 let dt = parse_parquet_map(t, &path)?;
                 return Ok(LogicalField {
+                    metadata: Default::default(),
                     name,
                     data_type: dt,
                     nullable,
@@ -504,9 +511,11 @@ fn parquet_type_to_logical_field(
     if matches!(rep, Repetition::REPEATED) {
         let elem_dt = parquet_type_to_logical_datatype(t, &format!("{path}.element"))?;
         return Ok(LogicalField {
+            metadata: Default::default(),
             name,
             data_type: LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: elem_dt,
                     nullable: false,
@@ -525,6 +534,7 @@ fn parquet_type_to_logical_field(
             .collect::<Result<Vec<_>, _>>()?;
 
         return Ok(LogicalField {
+            metadata: Default::default(),
             name,
             data_type: LogicalDataType::Struct { fields: children },
             nullable,
@@ -534,6 +544,7 @@ fn parquet_type_to_logical_field(
     // 4) Primitive leaf
     let dt = parquet_primitive_to_logical_datatype(t, &path)?;
     Ok(LogicalField {
+        metadata: Default::default(),
         name,
         data_type: dt,
         nullable,
@@ -1573,6 +1584,7 @@ mod tests {
             cols[0].data_type,
             LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: LogicalDataType::Int32,
                     nullable: false,
@@ -1618,12 +1630,16 @@ mod tests {
         assert_eq!(
             cols[0].data_type,
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Binary,
                     nullable: false,
                 }),
                 value: Some(Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: LogicalDataType::Int64,
                     nullable: true,
@@ -1668,6 +1684,7 @@ mod tests {
             cols[0].data_type,
             LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: LogicalDataType::Int64,
                     nullable: true,
@@ -1707,6 +1724,7 @@ mod tests {
             cols[0].data_type,
             LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: LogicalDataType::Int32,
                     nullable: false,
@@ -1761,9 +1779,11 @@ mod tests {
             cols[0].data_type,
             LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: LogicalDataType::List {
                         elements: Box::new(LogicalField {
+                            metadata: Default::default(),
                             name: "element".to_string(),
                             data_type: LogicalDataType::Int32,
                             nullable: false,
@@ -1823,14 +1843,19 @@ mod tests {
             cols[0].data_type,
             LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: LogicalDataType::Map {
+                        entries_metadata: Default::default(),
+                        null_value_metadata: Default::default(),
                         key: Box::new(LogicalField {
+                            metadata: Default::default(),
                             name: "key".to_string(),
                             data_type: LogicalDataType::Binary,
                             nullable: false,
                         }),
                         value: Some(Box::new(LogicalField {
+                            metadata: Default::default(),
                             name: "value".to_string(),
                             data_type: LogicalDataType::Int64,
                             nullable: true,
@@ -1889,15 +1914,20 @@ mod tests {
         assert_eq!(
             cols[0].data_type,
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Binary,
                     nullable: false,
                 }),
                 value: Some(Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: LogicalDataType::List {
                         elements: Box::new(LogicalField {
+                            metadata: Default::default(),
                             name: "element".to_string(),
                             data_type: LogicalDataType::Int32,
                             nullable: false,
@@ -1969,9 +1999,11 @@ mod tests {
             LogicalDataType::Struct {
                 fields: vec![
                     LogicalField {
+                        metadata: Default::default(),
                         name: "nums".to_string(),
                         data_type: LogicalDataType::List {
                             elements: Box::new(LogicalField {
+                                metadata: Default::default(),
                                 name: "element".to_string(),
                                 data_type: LogicalDataType::Int32,
                                 nullable: false,
@@ -1980,14 +2012,19 @@ mod tests {
                         nullable: true,
                     },
                     LogicalField {
+                        metadata: Default::default(),
                         name: "attrs".to_string(),
                         data_type: LogicalDataType::Map {
+                            entries_metadata: Default::default(),
+                            null_value_metadata: Default::default(),
                             key: Box::new(LogicalField {
+                                metadata: Default::default(),
                                 name: "key".to_string(),
                                 data_type: LogicalDataType::Binary,
                                 nullable: false,
                             }),
                             value: Some(Box::new(LogicalField {
+                                metadata: Default::default(),
                                 name: "value".to_string(),
                                 data_type: LogicalDataType::UInt64,
                                 nullable: true,
@@ -2052,20 +2089,28 @@ mod tests {
         assert_eq!(
             cols[0].data_type,
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Binary,
                     nullable: false,
                 }),
                 value: Some(Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: LogicalDataType::Map {
+                        entries_metadata: Default::default(),
+                        null_value_metadata: Default::default(),
                         key: Box::new(LogicalField {
+                            metadata: Default::default(),
                             name: "key".to_string(),
                             data_type: LogicalDataType::Binary,
                             nullable: false,
                         }),
                         value: Some(Box::new(LogicalField {
+                            metadata: Default::default(),
                             name: "value".to_string(),
                             data_type: LogicalDataType::Int32,
                             nullable: true,
@@ -2130,12 +2175,15 @@ mod tests {
             cols[0].data_type,
             LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "element".to_string(),
                     data_type: LogicalDataType::Struct {
                         fields: vec![LogicalField {
+                            metadata: Default::default(),
                             name: "nums".to_string(),
                             data_type: LogicalDataType::List {
                                 elements: Box::new(LogicalField {
+                                    metadata: Default::default(),
                                     name: "element".to_string(),
                                     data_type: LogicalDataType::Int32,
                                     nullable: false,
@@ -2288,12 +2336,16 @@ mod tests {
         assert_eq!(
             cols[0].data_type,
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Binary,
                     nullable: false,
                 }),
                 value: Some(Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: LogicalDataType::Int32,
                     nullable: true,
@@ -2337,7 +2389,10 @@ mod tests {
         assert_eq!(
             cols[0].data_type,
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Binary,
                     nullable: false,

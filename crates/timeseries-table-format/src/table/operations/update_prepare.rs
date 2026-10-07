@@ -427,8 +427,9 @@ impl SourceSchema {
             positions.push(position);
             fields.push(logical.columns()[position].clone());
         }
-        let projection =
-            LogicalSchema::new(fields).map_err(|source| invalid(source.to_string()))?;
+        let projection = LogicalSchema::new(fields)
+            .map_err(|source| invalid(source.to_string()))?
+            .with_metadata(logical.metadata().clone());
         let alignment = BatchSchemaAlignment::for_ingestion(
             incoming,
             &projection,
@@ -739,6 +740,13 @@ async fn stage(
             });
         }
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
+        crate::metadata::schema_compat::validate_file_metadata(
+            schema.alignment.output_schema(),
+            builder.schema(),
+        )
+        .map_err(|source| PrepareError::Schema {
+            source: Box::new(source),
+        })?;
         let mut projection = Vec::with_capacity(schema.key_count);
         for field in key_schema.fields() {
             let position = builder

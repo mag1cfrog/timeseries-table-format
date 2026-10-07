@@ -130,6 +130,7 @@ async fn atomic_updates_preserve_snapshots_coverage_and_compose_with_mutations()
     let (dir, mut table) = populated().await?;
     table
         .add_columns(vec![LogicalField {
+            metadata: Default::default(),
             name: "score".into(),
             data_type: LogicalDataType::Int64,
             nullable: true,
@@ -638,6 +639,7 @@ async fn every_intervening_mutation_conflicts_and_cleans_the_update_attempt() ->
             _ => {
                 concurrent
                     .add_columns(vec![LogicalField {
+                        metadata: Default::default(),
                         name: "new".into(),
                         data_type: LogicalDataType::Int64,
                         nullable: true,

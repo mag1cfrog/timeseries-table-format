@@ -1240,6 +1240,7 @@ mod tests {
 
         let logical_schema = LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -1248,31 +1249,37 @@ mod tests {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "symbol".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "price".to_string(),
                 data_type: LogicalDataType::Float64,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "volume".to_string(),
                 data_type: LogicalDataType::Int64,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "is_trade".to_string(),
                 data_type: LogicalDataType::Bool,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "venue".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: true,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "payload".to_string(),
                 data_type: LogicalDataType::Binary,
                 nullable: false,

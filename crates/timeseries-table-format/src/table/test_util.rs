@@ -293,6 +293,7 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
 
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit,
@@ -301,11 +302,13 @@ pub(crate) fn make_table_meta_with_unit(unit: LogicalTimestampUnit) -> TableMeta
             nullable: true,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: false,
@@ -335,6 +338,7 @@ pub(crate) fn make_int32_entity_table_meta() -> TableMeta {
         },
         LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -343,11 +347,13 @@ pub(crate) fn make_int32_entity_table_meta() -> TableMeta {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "device_id".to_string(),
                 data_type: LogicalDataType::Int32,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "price".to_string(),
                 data_type: LogicalDataType::Float64,
                 nullable: false,
@@ -693,6 +699,7 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
 
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -701,11 +708,13 @@ pub(crate) fn make_basic_table_meta() -> TableMeta {
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: false,

@@ -24,6 +24,7 @@ use tempfile::TempDir;
 
 fn field(name: &str, data_type: LogicalDataType) -> LogicalField {
     LogicalField {
+        metadata: Default::default(),
         name: name.into(),
         data_type,
         nullable: true,
@@ -123,17 +124,27 @@ async fn addition_is_one_metadata_commit_and_composes_with_append_scan_and_optim
     assert_eq!(table.state().segments, before.segments);
     assert_eq!(table.state().table_coverage, before.table_coverage);
     let mut expected = before.table_meta.clone();
-    expected.logical_schema = Some(LogicalSchema::new(
-        before
-            .table_meta
-            .logical_schema()
-            .unwrap()
-            .columns()
-            .iter()
-            .cloned()
-            .chain([score, quality])
-            .collect(),
-    )?);
+    expected.logical_schema = Some(
+        LogicalSchema::new(
+            before
+                .table_meta
+                .logical_schema()
+                .unwrap()
+                .columns()
+                .iter()
+                .cloned()
+                .chain([score, quality])
+                .collect(),
+        )?
+        .with_metadata(
+            before
+                .table_meta
+                .logical_schema()
+                .unwrap()
+                .metadata()
+                .clone(),
+        ),
+    );
     expected
         .required_reader_features
         .insert("schema_add_columns".into());
@@ -158,6 +169,13 @@ async fn addition_is_one_metadata_commit_and_composes_with_append_scan_and_optim
         2
     );
     assert!(old_batches.iter().all(|b| b.num_columns() == 3));
+    assert!(old_batches.iter().all(|b| {
+        b.schema()
+            .metadata()
+            .get("schema_version")
+            .map(String::as_str)
+            == Some("example-v1")
+    }));
     table.append(batch(1, Some(vec![Some(7), None]))).await?;
     table.append(batch(2, None)).await?;
     let rows: Vec<_> = table.scan_range(0_i64, 3_i64).await?.try_collect().await?;
@@ -171,6 +189,11 @@ async fn addition_is_one_metadata_commit_and_composes_with_append_scan_and_optim
     assert_eq!(
         optimized.iter().map(RecordBatch::num_rows).sum::<usize>(),
         6
+    );
+    assert!(
+        optimized
+            .iter()
+            .all(|b| b.schema() == table.state().table_meta.arrow_schema_ref().unwrap())
     );
     assert_eq!(
         optimized
@@ -190,14 +213,154 @@ async fn addition_is_one_metadata_commit_and_composes_with_append_scan_and_optim
         .add_columns(vec![field("later", LogicalDataType::Bool)])
         .await?;
     assert_eq!(table.state().version, second);
-    assert_eq!(table.state().table_meta.required_reader_features().len(), 1);
+    assert_eq!(table.state().table_meta.required_reader_features().len(), 2);
     assert!(
         table
             .state()
             .table_meta
             .required_writer_features()
-            .is_empty()
+            .contains("schema_metadata")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn created_schema_metadata_survives_append_optimize_and_reopen() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let original = table_meta();
+    let metadata = BTreeMap::from([("unit".into(), "ms".into())]);
+    let crate::metadata::table::TableKind::TimeSeries(index) = original.kind() else {
+        unreachable!()
+    };
+    let meta = TableMeta::new_time_series_with_schema(
+        index.clone(),
+        original
+            .logical_schema()
+            .unwrap()
+            .clone()
+            .with_metadata(metadata.clone()),
+    );
+    let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+    let expected = table.state().table_meta.arrow_schema_ref()?;
+    table.append(batch(0, None)).await?;
+    table.optimize().await?;
+    let table = TimeSeriesTable::open(location.clone()).await?;
+    assert_eq!(
+        table
+            .state()
+            .table_meta
+            .logical_schema()
+            .unwrap()
+            .metadata(),
+        &metadata
+    );
+    let batches: Vec<_> = table.scan_range(0_i64, 1_i64).await?.try_collect().await?;
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+    assert!(batches.iter().all(|b| b.schema() == expected));
+    for segment in table.state().segments.values() {
+        let schema = crate::formats::parquet::logical_schema_from_parquet(
+            &location,
+            Path::new(&segment.path),
+        )
+        .await?;
+        assert_eq!(schema.metadata(), &metadata);
+    }
+    crate::metadata::protocol::TEST_READER_FEATURES
+        .scope(&[], async {
+            assert!(
+                TimeSeriesTable::open(location)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported table reader features")
+            );
+        })
+        .await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn scan_preserves_metadata_and_rejects_footer_conflicts() -> TestResult {
+    use arrow::array::StructArray;
+    use parquet::arrow::ArrowWriter;
+    use std::collections::HashMap;
+
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut meta = table_meta();
+    meta.logical_schema = None;
+    let mut table = TimeSeriesTable::create(location, meta).await?;
+    let base = batch(0, None);
+    let child = Arc::new(
+        Field::new("reading", DataType::Float64, true)
+            .with_metadata(HashMap::from([("unit".into(), "ms".into())])),
+    );
+    let values: ArrayRef = Arc::new(StructArray::from(vec![(child, base.column(2).clone())]));
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            base.schema().field(0).clone(),
+            base.schema().field(1).clone(),
+            Field::new("value", values.data_type().clone(), true)
+                .with_metadata(HashMap::from([("origin".into(), "sensor".into())])),
+        ],
+        HashMap::from([("unit".into(), "ms".into())]),
+    ));
+    let source = RecordBatch::try_new(
+        schema.clone(),
+        vec![base.column(0).clone(), base.column(1).clone(), values],
+    )?;
+    let report = table.append(source.clone()).await?;
+    let rows: Vec<_> = table.scan_range(0_i64, 1_i64).await?.try_collect().await?;
+    assert_eq!(rows, vec![source.clone()]);
+
+    let path = temp.path().join(report.segment_path);
+    let original = std::fs::read(&path)?;
+    let mut conflict = source.clone();
+    conflict
+        .schema_metadata_mut()
+        .insert("unit".into(), "us".into());
+    let mut writer = ArrowWriter::try_new(std::fs::File::create(&path)?, conflict.schema(), None)?;
+    writer.write(&conflict)?;
+    writer.close()?;
+    let error = table
+        .scan_range(0_i64, 1_i64)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Parquet schema metadata does not match")
+    );
+    // Matching annotations must not hide a real payload type change.
+    let mut wrong_type = base;
+    wrong_type
+        .schema_metadata_mut()
+        .insert("unit".into(), "ms".into());
+    let mut writer =
+        ArrowWriter::try_new(std::fs::File::create(&path)?, wrong_type.schema(), None)?;
+    writer.write(&wrong_type)?;
+    writer.close()?;
+    let error = table
+        .scan_range(0_i64, 1_i64)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("value"));
+    std::fs::write(path, original)?;
+
+    table.optimize().await?;
+    let reopened = TimeSeriesTable::open(table.location().clone()).await?;
+    let rows: Vec<_> = reopened
+        .scan_range(0_i64, 1_i64)
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+    assert!(rows.iter().all(|batch| batch.schema() == schema));
     Ok(())
 }
 
@@ -260,6 +423,8 @@ async fn invalid_requests_publish_nothing_and_preserve_the_handle() -> TestResul
         vec![field(
             "x",
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(field("key", LogicalDataType::Utf8)),
                 value: None,
                 keys_sorted: false,
@@ -268,6 +433,8 @@ async fn invalid_requests_publish_nothing_and_preserve_the_handle() -> TestResul
         vec![field(
             "x",
             LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
                     nullable: false,
                     ..field("renamed", LogicalDataType::Utf8)
@@ -461,6 +628,29 @@ async fn schemaless_tables_require_initial_adoption_and_names_are_exact() -> Tes
 #[tokio::test]
 async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestResult {
     use crate::metadata::logical_schema::LogicalTimestampUnit;
+    fn add_field_metadata(field: &mut LogicalField) {
+        field.metadata.insert("path".into(), field.name.clone());
+        match &mut field.data_type {
+            LogicalDataType::Struct { fields } => fields.iter_mut().for_each(add_field_metadata),
+            LogicalDataType::List { elements } => add_field_metadata(elements),
+            LogicalDataType::Map {
+                key,
+                value,
+                entries_metadata,
+                null_value_metadata,
+                ..
+            } => {
+                entries_metadata.insert("role".into(), "entries".into());
+                add_field_metadata(key);
+                if let Some(value) = value {
+                    add_field_metadata(value);
+                } else {
+                    null_value_metadata.insert("role".into(), "null-value".into());
+                }
+            }
+            _ => {}
+        }
+    }
     let temp = TempDir::new()?;
     let mut table =
         TimeSeriesTable::create(TableLocation::local(temp.path()), table_meta()).await?;
@@ -505,6 +695,8 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             elements: Box::new(field("item", LogicalDataType::Int64)),
         },
         LogicalDataType::Map {
+            entries_metadata: Default::default(),
+            null_value_metadata: Default::default(),
             key: Box::new(LogicalField {
                 nullable: false,
                 ..field("key", LogicalDataType::Utf8)
@@ -513,6 +705,8 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             keys_sorted: true,
         },
         LogicalDataType::Map {
+            entries_metadata: Default::default(),
+            null_value_metadata: Default::default(),
             key: Box::new(LogicalField {
                 nullable: false,
                 ..field("key", LogicalDataType::Utf8)
@@ -526,10 +720,28 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             types
                 .into_iter()
                 .enumerate()
-                .map(|(i, dt)| field(&format!("c{i}"), dt))
+                .map(|(i, dt)| {
+                    let mut field = field(&format!("c{i}"), dt);
+                    add_field_metadata(&mut field);
+                    field
+                })
                 .collect(),
         )
         .await?;
+    assert!(
+        table
+            .state()
+            .table_meta
+            .required_reader_features()
+            .contains("schema_metadata")
+    );
+    assert!(
+        table
+            .state()
+            .table_meta
+            .required_writer_features()
+            .contains("schema_metadata")
+    );
     table.append(batch(1, None)).await?;
     for optimize in [false, true] {
         if optimize {
@@ -546,6 +758,8 @@ async fn valid_types_round_trip_through_real_append_scan_and_optimize() -> TestR
             );
         }
     }
+    let reopened = TimeSeriesTable::open(table.location().clone()).await?;
+    assert_eq!(reopened.state().table_meta, table.state().table_meta);
     Ok(())
 }
 
@@ -821,6 +1035,7 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
         "rename",
         "retype",
         "nullability",
+        "field_metadata",
         "remove_schema",
         "key",
         "required",
@@ -848,6 +1063,9 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
             "rename" => fields[2].name = "renamed".into(),
             "retype" => fields[2].data_type = LogicalDataType::Int64,
             "nullability" => fields[2].nullable = false,
+            "field_metadata" => {
+                fields[2].metadata.insert("unit".into(), "ms".into());
+            }
             "key" => {
                 let crate::metadata::table::TableKind::TimeSeries(index) = &mut next.kind else {
                     unreachable!()
@@ -871,6 +1089,9 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
                 serde_json::json!({"columns": fields}),
             )?)
         };
+        if change == "field_metadata" {
+            next.enable_metadata_feature();
+        }
         TransactionLogStore::new(location.clone())
             .commit_with_expected_version(
                 1,
@@ -892,6 +1113,36 @@ async fn replay_rejects_undeclared_and_non_additive_transitions() -> TestResult 
             "accepted invalid intermediate transition: {change}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn established_schema_metadata_cannot_be_changed_or_removed() -> TestResult {
+    let mut original = table_meta();
+    let schema = original.logical_schema().unwrap().clone();
+    original.logical_schema = Some(
+        schema
+            .clone()
+            .with_metadata(BTreeMap::from([("unit".into(), "ms".into())])),
+    );
+    original.enable_metadata_feature();
+    for metadata in [
+        BTreeMap::new(),
+        BTreeMap::from([("unit".into(), "s".into())]),
+    ] {
+        let mut next = original.clone();
+        next.logical_schema = Some(schema.clone().with_metadata(metadata));
+        assert!(matches!(
+            original.ensure_valid_schema_transition_to(&next),
+            Err(SchemaEvolutionError::ExistingSchemaMetadataChanged)
+        ));
+    }
+    let mut legacy = original.clone();
+    legacy.logical_schema = Some(schema);
+    assert!(matches!(
+        legacy.ensure_valid_schema_transition_to(&original),
+        Err(SchemaEvolutionError::ExistingSchemaMetadataChanged)
+    ));
     Ok(())
 }
 

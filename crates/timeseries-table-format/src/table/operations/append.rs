@@ -615,6 +615,7 @@ impl TimeSeriesTable {
             None if expected_version == 1 => {
                 let mut updated_meta = self.state.table_meta.clone();
                 updated_meta.logical_schema = Some(segment_schema.clone());
+                updated_meta.enable_metadata_feature();
                 Some(updated_meta)
             }
             None => {
@@ -1173,6 +1174,7 @@ mod tests {
         let mut meta = make_basic_table_meta();
         let mut fields = meta.logical_schema.as_ref().unwrap().columns().to_vec();
         fields.push(LogicalField {
+            metadata: Default::default(),
             name: "label".into(),
             data_type: LogicalDataType::Bool,
             nullable: true,
@@ -1393,6 +1395,7 @@ mod tests {
         TableMeta::new_time_series_with_schema(
             timestamp_only_index(),
             LogicalSchema::new(vec![LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -1445,21 +1448,25 @@ mod tests {
             },
             LogicalSchema::new(vec![
                 LogicalField {
+                    metadata: Default::default(),
                     name: "seq".to_string(),
                     data_type: LogicalDataType::UInt64,
                     nullable: false,
                 },
                 LogicalField {
+                    metadata: Default::default(),
                     name: "device_id".to_string(),
                     data_type: LogicalDataType::Int32,
                     nullable: false,
                 },
                 LogicalField {
+                    metadata: Default::default(),
                     name: "reading".to_string(),
                     data_type: LogicalDataType::Float64,
                     nullable: true,
                 },
                 LogicalField {
+                    metadata: Default::default(),
                     name: "label".to_string(),
                     data_type: LogicalDataType::Utf8,
                     nullable: false,
@@ -1510,6 +1517,7 @@ mod tests {
             },
             LogicalSchema::new(vec![
                 LogicalField {
+                    metadata: Default::default(),
                     name: "ts".to_string(),
                     data_type: LogicalDataType::Timestamp {
                         unit: LogicalTimestampUnit::Millis,
@@ -1518,6 +1526,7 @@ mod tests {
                     nullable: false,
                 },
                 LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: value_type,
                     nullable,
@@ -1832,6 +1841,7 @@ mod tests {
                 },
             },
             LogicalSchema::new(vec![LogicalField {
+                metadata: Default::default(),
                 name: "seq".to_string(),
                 data_type: LogicalDataType::UInt64,
                 nullable: false,
@@ -4511,6 +4521,7 @@ mod tests {
         };
         let schema = LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -4519,16 +4530,19 @@ mod tests {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "symbol".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "venue".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "price".to_string(),
                 data_type: LogicalDataType::Float64,
                 nullable: false,

@@ -32,6 +32,7 @@ fn make_basic_table_meta() -> TableMeta {
         index,
         LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -40,6 +41,7 @@ fn make_basic_table_meta() -> TableMeta {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "symbol".to_string(),
                 data_type: LogicalDataType::Utf8,
                 nullable: false,

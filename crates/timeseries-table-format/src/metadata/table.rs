@@ -147,15 +147,12 @@ impl TableMeta {
     }
 
     /// Variant that lets you explicitly pass a logical schema up front.
+    /// Schema annotations enable the metadata-preservation reader and writer feature.
     pub fn new_time_series_with_schema(index: IndexSpec, logical_schema: LogicalSchema) -> Self {
-        TableMeta {
-            kind: TableKind::TimeSeries(index),
-            logical_schema: Some(logical_schema),
-            created_at: Utc::now(),
-            protocol_version: TABLE_PROTOCOL_VERSION,
-            required_reader_features: BTreeSet::new(),
-            required_writer_features: BTreeSet::new(),
-        }
+        let mut meta = Self::new_time_series(index);
+        meta.logical_schema = Some(logical_schema);
+        meta.enable_metadata_feature();
+        meta
     }
 
     /// Convert the table's logical schema to a shared Arrow [`SchemaRef`].
@@ -280,6 +277,7 @@ mod tests {
     #[test]
     fn table_meta_arrow_schema_ref_propagates_convert_error() {
         let logical = LogicalSchema::new(vec![LogicalField {
+            metadata: Default::default(),
             name: "legacy_ts".to_string(),
             data_type: LogicalDataType::Int96,
             nullable: false,

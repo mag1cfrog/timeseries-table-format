@@ -380,6 +380,7 @@ mod tests {
             logical_schema: Some(
                 LogicalSchema::new(vec![
                     LogicalField {
+                        metadata: Default::default(),
                         name: "ts".to_string(),
                         data_type: LogicalDataType::Timestamp {
                             unit: LogicalTimestampUnit::Micros,
@@ -388,6 +389,7 @@ mod tests {
                         nullable: false,
                     },
                     LogicalField {
+                        metadata: Default::default(),
                         name: "symbol".to_string(),
                         data_type: LogicalDataType::Utf8,
                         nullable: false,
@@ -442,6 +444,7 @@ mod tests {
     fn logical_schema_rejects_duplicate_columns() {
         let dup = LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Micros,
@@ -450,6 +453,7 @@ mod tests {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Micros,
