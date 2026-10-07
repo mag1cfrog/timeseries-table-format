@@ -484,6 +484,58 @@ def test_unsigned_keys_are_not_truncated(tmp_path):
     assert getattr(error.value, "example_key") == {"tick": 2**64 - 1}
 
 
+@pytest.mark.parametrize("metadata", [None, {b"schema_version": b"example-v1"}])
+@pytest.mark.parametrize("evolve", [False, True])
+def test_updates_from_metadata_bearing_parquet(tmp_path, metadata, evolve):
+    schema = pa.schema(
+        [
+            pa.field("entity", pa.int64(), nullable=False),
+            pa.field("tick", pa.uint64()),
+            pa.field("value", pa.float32()),
+        ],
+        metadata=metadata,
+    )
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(tmp_path),
+        index_column="tick",
+        index_type="uint64",
+        index_granularity=1,
+        entity_columns=["entity"],
+    )
+    table.append(
+        pa.Table.from_pylist(
+            [
+                {"entity": 7, "tick": 1, "value": 10.0},
+                {"entity": 7, "tick": 2, "value": 20.0},
+            ],
+            schema=schema,
+        )
+    )
+    assert pq.read_schema(next(tmp_path.rglob("*.parquet"))).metadata == metadata
+    column = "score" if evolve else "value"
+    if evolve:
+        table.add_columns(pa.schema([pa.field(column, pa.float32())]))
+    source = pa.Table.from_pylist(
+        [{"entity": 7, "tick": 1, column: 99.0}],
+        schema=pa.schema(
+            [
+                schema.field("entity"),
+                schema.field("tick"),
+                pa.field(column, pa.float32()),
+            ]
+        ),
+    )
+    version = table.version()
+    report = table.update_rows(source, columns=[column], expected_version=version)
+    assert report.rows_updated == 1
+    assert report.committed_version == table.version() == version + 1
+    assert ttf.TimeSeriesTable.open(str(tmp_path)).version() == version + 1
+    result = session(tmp_path).sql("SELECT * FROM t ORDER BY tick").to_pydict()
+    expected = {"entity": [7, 7], "tick": [1, 2], "value": [10.0, 20.0]}
+    expected[column] = [99.0, None if evolve else 20.0]
+    assert result == expected
+
+
 def test_lossless_scalar_widening_and_arrow_metadata_follow_append(tmp_path):
     table = create(tmp_path)
     fields = [SCHEMA.field(k) for k in KEYS] + [

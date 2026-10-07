@@ -101,8 +101,14 @@ async fn addition_is_one_metadata_commit_and_composes_with_append_scan_and_optim
 {
     let temp = TempDir::new()?;
     let location = TableLocation::local(temp.path());
-    let mut table = TimeSeriesTable::create(location.clone(), table_meta()).await?;
-    table.append(batch(0, None)).await?;
+    let mut meta = table_meta();
+    meta.logical_schema = None;
+    let mut table = TimeSeriesTable::create(location.clone(), meta).await?;
+    let mut initial = batch(0, None);
+    initial
+        .schema_metadata_mut()
+        .insert("schema_version".into(), "example-v1".into());
+    table.append(initial).await?;
     let old_handle = table.clone();
     let old_scan = table.scan_range(0_i64, 10_i64).await?;
     let before = table.state().clone();
