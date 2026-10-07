@@ -1355,6 +1355,7 @@ mod tests {
             .columns()
             .to_vec();
         fields.push(LogicalField {
+            metadata: Default::default(),
             name: "venue".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,

@@ -24,7 +24,9 @@ def run(*, table_root: Path) -> pa.Table:
     version = table.add_columns(
         pa.schema(
             [
-                pa.field("quality", pa.float64(), nullable=True),
+                pa.field(
+                    "quality", pa.float64(), nullable=True, metadata={"unit": "ratio"}
+                ),
                 pa.field("reviewed", pa.bool_(), nullable=True),
             ]
         )
@@ -50,7 +52,9 @@ def run(*, table_root: Path) -> pa.Table:
     )
     # Evolved tables fill omitted nullable payloads with null. All keys are required.
     table.append(pa.table({"tick": [2, 2], "device": ["A", "B"]}))
-    return session.sql("SELECT * FROM readings ORDER BY tick, device")
+    result = session.sql("SELECT * FROM readings ORDER BY tick, device")
+    assert result.schema.field("quality").metadata == {b"unit": b"ratio"}
+    return result
 
 
 if __name__ == "__main__":

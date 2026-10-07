@@ -187,6 +187,7 @@ fn make_table_meta_with_timezone(
 ) -> Result<TableMeta, Box<dyn std::error::Error>> {
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -195,11 +196,13 @@ fn make_table_meta_with_timezone(
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "price".to_string(),
             data_type: LogicalDataType::Float64,
             nullable: price_nullable,
@@ -215,6 +218,7 @@ fn make_table_meta_with_timezone(
 fn make_nested_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
     let logical_schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -223,20 +227,24 @@ fn make_nested_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "symbol".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "attrs".to_string(),
             data_type: LogicalDataType::Struct {
                 fields: vec![
                     LogicalField {
+                        metadata: Default::default(),
                         name: "a".to_string(),
                         data_type: LogicalDataType::Int64,
                         nullable: false,
                     },
                     LogicalField {
+                        metadata: Default::default(),
                         name: "b".to_string(),
                         data_type: LogicalDataType::Utf8,
                         nullable: true,
@@ -246,9 +254,11 @@ fn make_nested_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
             nullable: true,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "tags".to_string(),
             data_type: LogicalDataType::List {
                 elements: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "item".to_string(),
                     data_type: LogicalDataType::Utf8,
                     nullable: true,
@@ -257,14 +267,19 @@ fn make_nested_table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
             nullable: true,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "metrics".to_string(),
             data_type: LogicalDataType::Map {
+                entries_metadata: Default::default(),
+                null_value_metadata: Default::default(),
                 key: Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "key".to_string(),
                     data_type: LogicalDataType::Utf8,
                     nullable: false,
                 }),
                 value: Some(Box::new(LogicalField {
+                    metadata: Default::default(),
                     name: "value".to_string(),
                     data_type: LogicalDataType::Float64,
                     nullable: true,
@@ -513,11 +528,13 @@ fn make_numeric_batch(
 fn make_numeric_table_meta(kind: IndexKind, data_type: LogicalDataType) -> TestResult<TableMeta> {
     let schema = LogicalSchema::new(vec![
         LogicalField {
+            metadata: Default::default(),
             name: "idx".to_string(),
             data_type,
             nullable: false,
         },
         LogicalField {
+            metadata: Default::default(),
             name: "tag".to_string(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
@@ -735,6 +752,7 @@ fn int32_entity_table_meta() -> TestResult<TableMeta> {
         },
         LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -743,11 +761,13 @@ fn int32_entity_table_meta() -> TestResult<TableMeta> {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "device_id".to_string(),
                 data_type: LogicalDataType::Int32,
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "price".to_string(),
                 data_type: LogicalDataType::Float64,
                 nullable: false,

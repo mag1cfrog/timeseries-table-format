@@ -425,21 +425,6 @@ mod _native {
                 "columns must not contain schema metadata",
             ));
         }
-        for field in schema.flattened_fields() {
-            let mut metadata_field = field;
-            // Arrow's flattened_fields omits the run-ends field.
-            if field.metadata().is_empty()
-                && let DataType::RunEndEncoded(run_ends, _) = field.data_type()
-            {
-                metadata_field = run_ends;
-            }
-            if !metadata_field.metadata().is_empty() {
-                return Err(PyValueError::new_err(format!(
-                    "columns must not contain field metadata: {:?}",
-                    metadata_field.name()
-                )));
-            }
-        }
         Ok(schema)
     }
 
@@ -2259,8 +2244,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// Add new nullable top-level fields and return the committed version.
         ///
         /// `columns` must be a `pyarrow.Schema` containing only new fields, with
-        /// no schema or field metadata (including nested fields). Names, order,
-        /// types, and nullability are preserved. The table must already have a
+        /// no schema-level metadata. Names, order, types, nullability, and field
+        /// metadata (including supported nested fields) are preserved. Metadata
+        /// keys and values must be valid UTF-8. The table must already have a
         /// canonical schema, normally established by its first successful append.
         ///
         /// Historical rows read as null; no data or coverage files are rewritten.
@@ -2279,7 +2265,8 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// TypeError
         ///     If `columns` is not a `pyarrow.Schema`.
         /// ValueError
-        ///     If Arrow metadata is present or the schema cannot be imported.
+        ///     If schema-level metadata is present or the schema cannot be
+        ///     imported, including metadata containing invalid UTF-8.
         /// SchemaMismatchError
         ///     If the fields violate the core nullable-addition contract.
         /// ConflictError

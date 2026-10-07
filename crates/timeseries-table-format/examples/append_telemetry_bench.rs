@@ -35,6 +35,7 @@ fn table_meta() -> Result<TableMeta, Box<dyn std::error::Error>> {
         },
     };
     let schema = LogicalSchema::new(vec![LogicalField {
+        metadata: Default::default(),
         name: "ts".to_string(),
         data_type: LogicalDataType::Timestamp {
             unit: LogicalTimestampUnit::Millis,

@@ -327,6 +327,7 @@ mod tests {
 
     fn schema_for_entities(entity_columns: &[String]) -> LogicalSchema {
         let mut fields = vec![LogicalField {
+            metadata: Default::default(),
             name: "ts".to_string(),
             data_type: LogicalDataType::Timestamp {
                 unit: LogicalTimestampUnit::Millis,
@@ -335,6 +336,7 @@ mod tests {
             nullable: false,
         }];
         fields.extend(entity_columns.iter().map(|column| LogicalField {
+            metadata: Default::default(),
             name: column.clone(),
             data_type: LogicalDataType::Utf8,
             nullable: false,
@@ -845,6 +847,7 @@ mod tests {
     async fn rebuild_table_state_validates_persisted_entity_component_types() -> TestResult {
         let typed_schema = LogicalSchema::new(vec![
             LogicalField {
+                metadata: Default::default(),
                 name: "ts".to_string(),
                 data_type: LogicalDataType::Timestamp {
                     unit: LogicalTimestampUnit::Millis,
@@ -853,6 +856,7 @@ mod tests {
                 nullable: false,
             },
             LogicalField {
+                metadata: Default::default(),
                 name: "symbol".to_string(),
                 data_type: LogicalDataType::Int32,
                 nullable: false,

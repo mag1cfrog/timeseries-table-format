@@ -26,7 +26,8 @@ Every `UpdateTableMeta` replacement contains this compatibility header:
 ```
 
 All three fields are required. Feature lists cannot be null, and an empty list means that only
-baseline protocol-7 behavior is required. New tables start with both lists empty.
+baseline protocol-7 behavior is required. New tables without schema or field metadata start with
+both lists empty. Creating a table with an annotated schema declares `schema_metadata` in both lists.
 
 ## Read and write checks
 
@@ -65,6 +66,7 @@ let version = table.add_columns(vec![LogicalField {
     name: "score".to_string(),
     data_type: LogicalDataType::Float64,
     nullable: true,
+    metadata: Default::default(),
 }]).await?;
 ```
 
@@ -81,7 +83,7 @@ any commit file is created or `CURRENT` changes.
 This includes complete supported structs, lists, and maps as new nullable top-level fields;
 it excludes legacy `Int96`, placeholder `Other` types, invalid parameters, and definitions whose
 names or types would change during conversion. Existing fields keep their order, names, types,
-and nullability. Index and entity-key definitions cannot change. Replay rejects undeclared
+nullability, and metadata. Index and entity-key definitions cannot change. Replay rejects undeclared
 additions, removed schemas, and non-additive changes, including invalid intermediate metadata
 replacements in a commit.
 
@@ -110,6 +112,44 @@ Existing Rust handles, native scans, and already built physical plans retain the
 This feature does not permit dropping, renaming, reordering, or retyping columns, nested-field
 edits, defaults, automatic schema merging, or backfilling values. Its meaning will not be expanded
 to cover those operations.
+
+## Schema and field metadata
+
+The canonical schema stores Arrow schema-level metadata and metadata on every supported field,
+including Struct children, List elements, and Map entries, keys, and values. The table records
+these annotations when a schema is supplied at creation, adopted by the first successful append,
+or extended with annotated fields through `add_columns`. Metadata keys and values are UTF-8
+strings. Values are opaque: an annotation does not add support for a new data type or enable
+Arrow extension-type computation.
+
+Persisted annotations require `schema_metadata` in both the reader and writer feature lists.
+The declaration and schema change are atomic, without changing protocol version 7. Older clients
+that do not support the feature reject the table, so they cannot silently discard its metadata.
+Schemas serialized before this feature remain valid; absent metadata maps are read as empty.
+
+The transaction log's schema is authoritative. Append and update inputs may omit some or all
+metadata keys and inherit the registered values. At each schema or field location with a
+nonempty canonical metadata map, supplied keys must already exist and have equal values. A
+conflicting value or an additional key rejects the write before publication. Partial updates
+apply this rule to schema-level metadata and to their supplied key and payload fields.
+`add_columns` accepts metadata on new fields; its Python schema argument must have no
+schema-level metadata. Existing annotations cannot be changed through these operations.
+
+An empty canonical metadata map retains legacy behavior at that location. Later input annotations
+are not adopted or compared for equality there. Historical files may contain such unregistered
+annotations, but those do not become table-wide definitions and are not guaranteed to survive
+rewrites. Metadata on a newly added field is independent of empty maps on existing fields.
+
+Registered metadata survives transaction-log replay, reopening, native reads, and rewritten
+Parquet files. SQL table schemas expose it; computed SQL expressions follow DataFusion's own
+schema rules. Historical rows missing an added field read as null with that field's registered
+metadata. When reading stored fields with registered annotations, the reader checks the full
+Parquet footer for missing, extra, or changed metadata.
+
+The decoded batch still has to match the built Parquet reader's declared schema. That schema
+can omit annotations present in the footer. After validating the input, alignment restores the
+canonical metadata on the output. Field names, nested order, types, nullability, and scalar
+widening rules remain unchanged.
 
 ## Adding a feature
 

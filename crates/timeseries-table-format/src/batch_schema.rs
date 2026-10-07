@@ -17,7 +17,10 @@ use crate::metadata::{
     index::IndexSpec,
     logical_schema::LogicalSchema,
     protocol::SCHEMA_ADD_COLUMNS_FEATURE,
-    schema_compat::{SchemaCompatibilityError, SchemaResult},
+    schema_compat::{
+        SchemaCompatibilityError, SchemaResult, field_metadata_mismatch,
+        same_type_ignoring_metadata,
+    },
     table::TableMeta,
 };
 
@@ -56,7 +59,7 @@ pub(crate) struct BatchSchemaAlignment {
 /// cannot introduce a new cast merely by supplying a different array type.
 enum ColumnAlignment {
     Reuse(usize),
-    Widen(usize),
+    Cast(usize),
     Null,
 }
 
@@ -79,23 +82,31 @@ impl BatchSchemaAlignment {
         index: &IndexSpec,
         policy: MissingColumnPolicy,
     ) -> SchemaResult<Self> {
+        // Metadata-free legacy schemas keep their existing ingestion behavior.
+        // Annotated tables own these values; input may omit but never override them.
+        if !registered_schema.metadata().is_empty() {
+            for (key, value) in incoming_schema.metadata() {
+                if registered_schema.metadata().get(key) != Some(value) {
+                    return Err(SchemaCompatibilityError::IncomingSchemaMetadataMismatch {
+                        key: key.clone(),
+                    });
+                }
+            }
+        }
         Self::build(incoming_schema, registered_schema, index, policy, true)
     }
 
-    /// Historical data is reordered and null-filled, never cast. Called only
-    /// for snapshots that select the nullable-column policy.
+    /// Restore the canonical schema on historical data without widening types.
+    /// Missing nullable columns still require the snapshot's evolution feature.
+    /// Use the built reader's schema, which can omit annotations. The caller must
+    /// check persisted metadata against the full footer before reading batches.
     pub(crate) fn for_historical_segment(
         incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
+        policy: MissingColumnPolicy,
     ) -> SchemaResult<Self> {
-        Self::build(
-            incoming_schema,
-            registered_schema,
-            index,
-            MissingColumnPolicy::FillNullableWithNull,
-            false,
-        )
+        Self::build(incoming_schema, registered_schema, index, policy, false)
     }
 
     fn build(
@@ -103,7 +114,7 @@ impl BatchSchemaAlignment {
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
         policy: MissingColumnPolicy,
-        allow_widening: bool,
+        is_ingestion: bool,
     ) -> SchemaResult<Self> {
         let output_schema = registered_schema.to_arrow_schema_ref().map_err(|source| {
             SchemaCompatibilityError::RegisteredSchemaConversion {
@@ -150,10 +161,13 @@ impl BatchSchemaAlignment {
 
             let column = if table_field.data_type() == incoming_field.data_type() {
                 ColumnAlignment::Reuse(incoming_index)
-            } else if allow_widening
-                && is_allowlisted_widening(incoming_field.data_type(), table_field.data_type())
+            } else if same_type_ignoring_metadata(
+                table_field.data_type(),
+                incoming_field.data_type(),
+            ) || (is_ingestion
+                && is_allowlisted_widening(incoming_field.data_type(), table_field.data_type()))
             {
-                ColumnAlignment::Widen(incoming_index)
+                ColumnAlignment::Cast(incoming_index)
             } else {
                 return Err(SchemaCompatibilityError::IncomingTypeMismatch {
                     column: table_field.name().clone(),
@@ -161,6 +175,12 @@ impl BatchSchemaAlignment {
                     incoming_type: incoming_field.data_type().clone(),
                 });
             };
+            // Historical metadata is checked against the full footer by the caller.
+            if is_ingestion
+                && let Some(column) = field_metadata_mismatch(table_field, incoming_field, true)
+            {
+                return Err(SchemaCompatibilityError::IncomingFieldMetadataMismatch { column });
+            }
             columns.push(column);
         }
 
@@ -198,6 +218,20 @@ impl BatchSchemaAlignment {
                 "record batch schema does not match its declared source schema".to_string(),
             ));
         }
+        // Arrow can construct batches with relaxed nested-field matching. Validate
+        // the actual arrays before a metadata cast could hide a name/type mismatch.
+        for (array, field) in incoming_batch
+            .columns()
+            .iter()
+            .zip(self.input_schema.fields())
+        {
+            if array.data_type() != field.data_type() {
+                return Err(ArrowError::SchemaError(format!(
+                    "array type does not match its declared source field {:?}",
+                    field.name()
+                )));
+            }
+        }
         let columns = self
             .columns
             .iter()
@@ -208,7 +242,7 @@ impl BatchSchemaAlignment {
                     incoming_batch.num_rows(),
                 )),
                 ColumnAlignment::Reuse(index) => Ok(Arc::clone(incoming_batch.column(*index))),
-                ColumnAlignment::Widen(index) => {
+                ColumnAlignment::Cast(index) => {
                     cast(incoming_batch.column(*index), output_field.data_type())
                 }
             })
@@ -257,6 +291,7 @@ mod tests {
             source_schema.clone(),
             &canonical,
             &test_index(),
+            MissingColumnPolicy::FillNullableWithNull,
         )
         .unwrap();
         let original = RecordBatch::try_new(
@@ -317,7 +352,18 @@ mod tests {
             DataType::Struct(fields),
             true,
         )]));
-        let canonical = LogicalSchema::try_from_arrow_schema(&source_schema).unwrap();
+        let target = Schema::new(vec![Field::new(
+            "value",
+            DataType::Struct(
+                vec![
+                    Field::new("registered", DataType::Int64, false)
+                        .with_metadata(HashMap::from([("unit".into(), "ms".into())])),
+                ]
+                .into(),
+            ),
+            true,
+        )]);
+        let canonical = LogicalSchema::try_from_arrow_schema(&target).unwrap();
         let array = StructArray::from(vec![(
             Arc::new(Field::new("different", DataType::Int64, false)),
             Arc::new(Int64Array::from(vec![1])) as ArrayRef,
@@ -338,6 +384,126 @@ mod tests {
         )
         .unwrap();
         assert!(alignment.align_batch(&batch).is_err());
+        assert!(alignment.align_batch(&batch.slice(0, 0)).is_err());
+    }
+
+    #[test]
+    fn metadata_only_casts_preserve_sliced_values_and_nulls() {
+        use arrow::array::{Int64Builder, ListArray, MapBuilder, MapFieldNames, StringBuilder};
+        use arrow::datatypes::Int64Type;
+
+        let list: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
+            Some(vec![Some(99)]),
+            Some(vec![Some(1), None]),
+            None,
+            Some(vec![]),
+        ]));
+        let mut map = MapBuilder::new(
+            Some(MapFieldNames {
+                entry: "entries".into(),
+                key: "key".into(),
+                value: "value".into(),
+            }),
+            StringBuilder::new(),
+            Int64Builder::new(),
+        );
+        for value in [Some(99), Some(1), None] {
+            map.keys().append_value("key");
+            map.values().append_option(value);
+            map.append(true).unwrap();
+        }
+        map.append(false).unwrap();
+        map.append(true).unwrap();
+        let map: ArrayRef = Arc::new(map.finish());
+        for input in [list, map] {
+            let input = input.slice(1, input.len() - 1);
+            let field = Field::new("value", input.data_type().clone(), true);
+            let source = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![field.clone()])),
+                vec![input.clone()],
+            )
+            .unwrap();
+            let metadata = HashMap::from([("unit".into(), "ms".into())]);
+            let target_type = match field.data_type() {
+                DataType::List(child) => {
+                    DataType::List(Arc::new(child.as_ref().clone().with_metadata(metadata)))
+                }
+                DataType::Map(entries, sorted) => DataType::Map(
+                    Arc::new(entries.as_ref().clone().with_metadata(metadata)),
+                    *sorted,
+                ),
+                _ => unreachable!(),
+            };
+            let target = Schema::new(vec![field.with_data_type(target_type)]);
+            let canonical = LogicalSchema::try_from_arrow_schema(&target).unwrap();
+            for historical in [false, true] {
+                let alignment = if historical {
+                    BatchSchemaAlignment::for_historical_segment(
+                        source.schema(),
+                        &canonical,
+                        &test_index(),
+                        MissingColumnPolicy::Reject,
+                    )
+                } else {
+                    BatchSchemaAlignment::for_ingestion(
+                        source.schema(),
+                        &canonical,
+                        &test_index(),
+                        MissingColumnPolicy::Reject,
+                    )
+                }
+                .unwrap();
+                for source in [&source, &source.slice(0, 0)] {
+                    let aligned = alignment.align_batch(source).unwrap();
+                    assert_eq!(aligned.schema().as_ref(), &target);
+                    let restored = cast(aligned.column(0), input.data_type()).unwrap();
+                    assert_eq!(restored.as_ref(), source.column(0).as_ref());
+                    assert_eq!(aligned.column(0).nulls(), source.column(0).nulls());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_alignment_still_rejects_nested_shape_changes() {
+        let first = Field::new("a", DataType::Int32, true);
+        let second = Field::new("b", DataType::Int64, true);
+        let canonical = LogicalSchema::try_from_arrow_schema(&Schema::new(vec![Field::new(
+            "value",
+            DataType::Struct(
+                vec![
+                    first
+                        .clone()
+                        .with_metadata(HashMap::from([("unit".into(), "ms".into())])),
+                    second.clone(),
+                ]
+                .into(),
+            ),
+            true,
+        )]))
+        .unwrap();
+        for children in [
+            vec![first.clone().with_name("renamed"), second.clone()],
+            vec![second.clone(), first.clone()],
+            vec![first.clone()],
+            vec![first.clone().with_nullable(false), second.clone()],
+            vec![first.with_data_type(DataType::Int64), second],
+        ] {
+            let incoming = Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Struct(children.into()),
+                true,
+            )]));
+            assert!(matches!(
+                BatchSchemaAlignment::for_ingestion(
+                    incoming,
+                    &canonical,
+                    &test_index(),
+                    MissingColumnPolicy::Reject
+                ),
+                Err(SchemaCompatibilityError::IncomingTypeMismatch { .. })
+            ));
+        }
     }
 
     #[test]
@@ -401,6 +567,7 @@ mod tests {
                     incoming.schema(),
                     &canonical,
                     &test_index(),
+                    MissingColumnPolicy::FillNullableWithNull,
                 )
             } else {
                 BatchSchemaAlignment::for_ingestion(
@@ -426,6 +593,15 @@ mod tests {
         }
         assert!(matches!(
             strict_alignment(&incoming.schema(), &canonical),
+            Err(SchemaCompatibilityError::MissingIncomingColumn { .. })
+        ));
+        assert!(matches!(
+            BatchSchemaAlignment::for_historical_segment(
+                incoming.schema(),
+                &canonical,
+                &test_index(),
+                MissingColumnPolicy::Reject
+            ),
             Err(SchemaCompatibilityError::MissingIncomingColumn { .. })
         ));
     }
@@ -454,6 +630,7 @@ mod tests {
                         Arc::new(incoming.clone()),
                         &canonical,
                         &test_index(),
+                        MissingColumnPolicy::FillNullableWithNull,
                     )
                 } else {
                     BatchSchemaAlignment::for_ingestion(
@@ -491,7 +668,8 @@ mod tests {
                 BatchSchemaAlignment::for_historical_segment(
                     Arc::new(incoming.clone()),
                     &canonical,
-                    &test_index()
+                    &test_index(),
+                    MissingColumnPolicy::FillNullableWithNull,
                 )
                 .is_err()
             );
@@ -529,7 +707,8 @@ mod tests {
             BatchSchemaAlignment::for_historical_segment(
                 incoming.schema(),
                 &canonical,
-                &test_index()
+                &test_index(),
+                MissingColumnPolicy::FillNullableWithNull,
             ),
             Err(SchemaCompatibilityError::IncomingTypeMismatch { .. })
         ));
@@ -571,6 +750,7 @@ mod tests {
             incoming.schema(),
             &canonical,
             &test_index(),
+            MissingColumnPolicy::FillNullableWithNull,
         )
         .unwrap()
         .align_batch(&incoming)
@@ -608,6 +788,7 @@ mod tests {
 
     fn field(name: &str, data_type: LogicalDataType, nullable: bool) -> LogicalField {
         LogicalField {
+            metadata: Default::default(),
             name: name.to_string(),
             data_type,
             nullable,

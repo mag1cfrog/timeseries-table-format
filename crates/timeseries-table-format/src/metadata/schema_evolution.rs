@@ -42,6 +42,9 @@ pub enum SchemaEvolutionError {
     /// Existing fields must remain identical and in their original order.
     #[snafu(display("Schema evolution must preserve all existing fields and their order"))]
     ExistingFieldsChanged,
+    /// Row writes and column additions cannot replace established schema annotations.
+    #[snafu(display("Schema evolution must preserve existing schema metadata"))]
+    ExistingSchemaMetadataChanged,
     /// Table kind and all ordered-index/entity-key definitions are immutable.
     #[snafu(display("Schema evolution must preserve the table kind and key definitions"))]
     TableKindOrKeysChanged,
@@ -119,7 +122,8 @@ fn validate_schema_addition(
     // Replay may supply a deserialized schema that bypassed LogicalSchema::new.
     // Activating historical alignment requires the entire canonical schema to
     // be representable, including fields that predate this addition.
-    let logical = LogicalSchema::new(schema.columns().to_vec())?;
+    let logical =
+        LogicalSchema::new(schema.columns().to_vec())?.with_metadata(schema.metadata().clone());
     let arrow = logical.to_arrow_schema()?;
     let parquet = ArrowSchemaConverter::new().convert(&arrow)?;
     let metadata = vec![KeyValue::new(
@@ -149,9 +153,11 @@ impl TableMeta {
         let mut fields = schema.columns().to_vec();
         fields.extend(columns);
         let mut next = self.clone();
-        next.logical_schema = Some(LogicalSchema::new(fields)?);
+        next.logical_schema =
+            Some(LogicalSchema::new(fields)?.with_metadata(schema.metadata().clone()));
         next.required_reader_features
             .insert(SCHEMA_ADD_COLUMNS_FEATURE.to_string());
+        next.enable_metadata_feature();
         self.ensure_valid_schema_transition_to(&next)?;
         Ok(next)
     }
@@ -177,6 +183,9 @@ impl TableMeta {
             .logical_schema
             .as_ref()
             .ok_or(SchemaEvolutionError::ExistingFieldsChanged)?;
+        if proposed.metadata() != previous.metadata() {
+            return Err(SchemaEvolutionError::ExistingSchemaMetadataChanged);
+        }
         if !proposed.columns().starts_with(previous.columns()) {
             return Err(SchemaEvolutionError::ExistingFieldsChanged);
         }

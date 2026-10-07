@@ -6,17 +6,30 @@ mod timestamp_pruning;
 use crate::storage::file_size;
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, SchemaRef};
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::{FutureExt, future::BoxFuture};
+use parquet::{
+    arrow::{
+        arrow_reader::ArrowReaderOptions, async_reader::AsyncFileReader, parquet_to_arrow_schema,
+    },
+    errors::{ParquetError, Result as ParquetResult},
+    file::metadata::ParquetMetaData,
+};
 
 use datafusion::catalog::Session;
 use datafusion::catalog::TableProvider;
 use datafusion::common::DFSchema;
 
 use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::physical_plan::parquet::{
+    DefaultParquetFileReaderFactory, ParquetFileReaderFactory,
+};
 use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
@@ -27,6 +40,7 @@ use datafusion::logical_expr::{Expr, Operator};
 use datafusion::logical_expr::TableProviderFilterPushDown;
 
 use crate::metadata::index::{IndexKind, IndexSpec};
+use crate::metadata::schema_compat::validate_file_metadata;
 use crate::table::TimeSeriesTable;
 use crate::transaction_log::SegmentMeta;
 use crate::transaction_log::TableState;
@@ -34,6 +48,7 @@ use datafusion::logical_expr::utils::{conjunction, expr_to_columns};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::lit;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::scalar::ScalarValue;
 use tokio::sync::RwLock;
 
@@ -54,6 +69,68 @@ pub struct TsTableProvider {
 struct Cache {
     version: Option<u64>,
     state: Option<TableState>,
+}
+
+/// Creates Parquet readers that validate stored metadata against the table schema.
+#[derive(Debug)]
+struct TableReaderFactory {
+    inner: DefaultParquetFileReaderFactory,
+    table_schema: SchemaRef,
+}
+
+impl ParquetFileReaderFactory for TableReaderFactory {
+    fn create_reader(
+        &self,
+        partition_index: usize,
+        file: PartitionedFile,
+        metadata_size_hint: Option<usize>,
+        metrics: &ExecutionPlanMetricsSet,
+    ) -> DFResult<Box<dyn AsyncFileReader + Send>> {
+        let path = file.object_meta.location.to_string();
+        let inner = self
+            .inner
+            .create_reader(partition_index, file, metadata_size_hint, metrics)?;
+        Ok(Box::new(TableReader {
+            inner,
+            table_schema: Arc::clone(&self.table_schema),
+            path,
+        }))
+    }
+}
+
+struct TableReader {
+    inner: Box<dyn AsyncFileReader + Send>,
+    table_schema: SchemaRef,
+    path: String,
+}
+
+impl AsyncFileReader for TableReader {
+    fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
+        self.inner.get_bytes(range)
+    }
+
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<Range<u64>>,
+    ) -> BoxFuture<'_, ParquetResult<Vec<Bytes>>> {
+        self.inner.get_byte_ranges(ranges)
+    }
+
+    fn get_metadata<'a>(
+        &'a mut self,
+        options: Option<&'a ArrowReaderOptions>,
+    ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
+        async move {
+            let metadata = self.inner.get_metadata(options).await?;
+            let footer = metadata.file_metadata();
+            let file_schema =
+                parquet_to_arrow_schema(footer.schema_descr(), footer.key_value_metadata())?;
+            validate_file_metadata(&self.table_schema, &file_schema)
+                .map_err(|error| ParquetError::General(format!("{}: {error}", self.path)))?;
+            Ok(metadata)
+        }
+        .boxed()
+    }
 }
 
 /// Wrap a generic error for DataFusion APIs.
@@ -343,14 +420,27 @@ impl TableProvider for TsTableProvider {
         };
 
         // Build Parquet scan plan (DataSourceExec + ParquetSource)
-        let parquet_source = Arc::new(
-            ParquetSource::new(Arc::clone(&self.schema))
-                .with_predicate(Arc::clone(&exact_predicate)),
-        );
+        let mut parquet_source = ParquetSource::new(Arc::clone(&self.schema))
+            .with_predicate(Arc::clone(&exact_predicate));
+        if !self.schema.metadata().is_empty()
+            || self
+                .schema
+                .flattened_fields()
+                .iter()
+                .any(|field| !field.metadata().is_empty())
+        {
+            let store = state.runtime_env().object_store(&self.object_store_url)?;
+            parquet_source =
+                parquet_source.with_parquet_file_reader_factory(Arc::new(TableReaderFactory {
+                    inner: DefaultParquetFileReaderFactory::new(store),
+                    table_schema: Arc::clone(&self.schema),
+                }));
+        }
 
-        let mut builder = FileScanConfigBuilder::new(self.object_store_url.clone(), parquet_source)
-            .with_projection_indices(projection.cloned())?
-            .with_limit(limit);
+        let mut builder =
+            FileScanConfigBuilder::new(self.object_store_url.clone(), Arc::new(parquet_source))
+                .with_projection_indices(projection.cloned())?
+                .with_limit(limit);
 
         let selected =
             self.prune_segments_by_metadata(segments, &metadata_filters, &pruning_predicate)?;

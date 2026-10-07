@@ -607,6 +607,7 @@ mod tests {
         for _ in 0..32 {
             nested = LogicalDataType::Struct {
                 fields: vec![LogicalField {
+                    metadata: Default::default(),
                     name: "child".into(),
                     data_type: nested,
                     nullable: true,
@@ -615,6 +616,7 @@ mod tests {
         }
         let mut fields = meta.logical_schema().unwrap().columns().to_vec();
         fields.push(LogicalField {
+            metadata: Default::default(),
             name: "nested".into(),
             data_type: nested,
             nullable: true,

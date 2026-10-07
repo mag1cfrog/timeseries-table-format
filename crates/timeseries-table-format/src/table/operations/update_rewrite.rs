@@ -477,22 +477,22 @@ async fn rewrite_segment(
     index: &IndexSpec,
 ) -> Result<()> {
     let source_bytes = Arc::new(AtomicU64::new(0));
-    let mut reader = reader_builder(&staged.location, &source.path, source_bytes.clone())?
-        .with_batch_size(READ_ROWS)
-        .build()?;
+    let builder = reader_builder(&staged.location, &source.path, source_bytes.clone())?;
     let logical = state
         .table_meta
         .logical_schema()
         .ok_or_else(|| invalid("missing canonical schema"))?;
-    // Parquet omits schema metadata from decoded batches; the built reader agrees.
-    let alignment = BatchSchemaAlignment::for_historical_segment(reader.schema(), logical, index)
+    crate::metadata::schema_compat::validate_file_metadata(schema, builder.schema())
         .map_err(Box::new)?;
-    if MissingColumnPolicy::from_table_requirements(&state.table_meta)
-        == MissingColumnPolicy::Reject
-        && reader.schema().fields().len() != schema.fields().len()
-    {
-        return Err(invalid("historical missing columns require table feature"));
-    }
+    let mut reader = builder.with_batch_size(READ_ROWS).build()?;
+    // Parquet omits schema metadata from decoded batches; the built reader agrees.
+    let alignment = BatchSchemaAlignment::for_historical_segment(
+        reader.schema(),
+        logical,
+        index,
+        MissingColumnPolicy::from_table_requirements(&state.table_meta),
+    )
+    .map_err(Box::new)?;
     let source_size = storage::file_size(staged.location.as_ref(), Path::new(&source.path)).await?;
     if source
         .file_size

@@ -157,62 +157,16 @@ def test_wrong_type_is_not_coerced(tmp_path, columns):
     "columns",
     [
         pa.schema([pa.field("new", pa.int64())], metadata={"source": "x"}),
-        pa.schema([pa.field("new", pa.int64(), metadata={"source": "x"})]),
-        pa.schema(
-            [
-                pa.field(
-                    "new",
-                    pa.struct([pa.field("child", pa.int64(), metadata={"x": "y"})]),
-                )
-            ]
-        ),
-        pa.schema(
-            [
-                pa.field(
-                    "new", pa.list_(pa.field("item", pa.int64(), metadata={"x": "y"}))
-                )
-            ]
-        ),
-        pa.schema(
-            [
-                pa.field(
-                    "new",
-                    pa.map_(
-                        pa.field(
-                            "key", pa.string(), nullable=False, metadata={"x": "y"}
-                        ),
-                        pa.int64(),
-                    ),
-                )
-            ]
-        ),
-        pa.schema(
-            [
-                pa.field(
-                    "new",
-                    pa.map_(
-                        pa.string(), pa.field("value", pa.int64(), metadata={"x": "y"})
-                    ),
-                )
-            ]
-        ),
-        pa.schema(
-            [
-                pa.field(
-                    "new",
-                    pa.dictionary(
-                        pa.int32(),
-                        pa.struct([pa.field("child", pa.int64(), metadata={"x": "y"})]),
-                    ),
-                )
-            ]
-        ),
         pa.schema([pa.field("new", pa.int64())], metadata={b"binary": b"\xff"}),
     ],
 )
-def test_metadata_is_rejected_without_publication(tmp_path, columns):
+@pytest.mark.parametrize("schema_metadata", [None, {"source": "x"}])
+def test_schema_metadata_is_rejected_without_publication(
+    tmp_path, columns, schema_metadata
+):
     root = tmp_path / "table"
-    table = _create(root)
+    table = _create(root, append=False)
+    table.append(_batch(0).replace_schema_metadata(schema_metadata))
     before = _files(root)
     with pytest.raises(ValueError) as error:
         table.add_columns(columns)
@@ -261,6 +215,22 @@ def test_unimportable_arrow_parameters_are_atomic_value_errors(tmp_path, data_ty
         (pa.schema([pa.field("new", pa.int64(), nullable=False)]), "new"),
         (pa.schema([pa.field("new", pa.date32())]), "new"),
         (pa.schema([pa.field("new", pa.dictionary(pa.int32(), pa.string()))]), "new"),
+        (
+            pa.schema(
+                [
+                    pa.field(
+                        "new",
+                        pa.dictionary(
+                            pa.int32(),
+                            pa.struct(
+                                [pa.field("child", pa.int64(), metadata={"x": "y"})]
+                            ),
+                        ),
+                    ),
+                ]
+            ),
+            "new",
+        ),
         (pa.schema([pa.field("new", pa.struct([]))]), "new"),
         (
             pa.schema([pa.field("valid", pa.int64()), pa.field("bad", pa.uint8())]),
