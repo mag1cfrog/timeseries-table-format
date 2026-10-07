@@ -4,6 +4,24 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.8.1
+
+
+### Bug Fixes
+
+- Align Parquet batches with built reader schemas ([#448](https://github.com/mag1cfrog/timeseries-table-format/pull/448)) ([4d856ec](https://github.com/mag1cfrog/timeseries-table-format/commit/4d856ec6e622db90f5ed5c745c6c45432124084f))
+
+
+### Documentation
+
+- Characterize wide SQL reader memory ([#444](https://github.com/mag1cfrog/timeseries-table-format/pull/444)) ([23c9b38](https://github.com/mag1cfrog/timeseries-table-format/commit/23c9b38008fdb02fc0993df8be957827517801a5))
+
+
+### Perf
+
+- Enable shared Parquet filter pushdown defaults ([#446](https://github.com/mag1cfrog/timeseries-table-format/pull/446)) ([3e0c415](https://github.com/mag1cfrog/timeseries-table-format/commit/3e0c415065bde2aa3d1de9b1c0cdddfd0928cecc))
+
+
 ## 0.8.0
 
 
