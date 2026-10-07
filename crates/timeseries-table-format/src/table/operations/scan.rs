@@ -308,23 +308,7 @@ where
             path: &path,
             operation: "reading metadata",
         })?;
-    if let Some((table_schema, _)) = canonical_schema {
-        validate_file_metadata(
-            &table_schema
-                .to_arrow_schema()
-                .map_err(|source| ScanError::Schema {
-                    path: Some(path.clone()),
-                    source: Box::new(SchemaCompatibilityError::RegisteredSchemaConversion {
-                        source: Box::new(source),
-                    }),
-                })?,
-            builder.schema(),
-        )
-        .map_err(|source| ScanError::Schema {
-            path: Some(path.clone()),
-            source: Box::new(source),
-        })?;
-    }
+    let file_schema = Arc::clone(builder.schema());
     let reader = builder
         .with_batch_size(SCAN_BATCH_SIZE)
         .build()
@@ -342,13 +326,15 @@ where
                 table_schema,
                 index,
                 policy,
-            );
-            alignment.map(Arc::new).map_err(|source| ScanError::Schema {
-                path: Some(path.clone()),
-                source: Box::new(source),
-            })
+            )?;
+            validate_file_metadata(alignment.output_schema(), &file_schema)?;
+            Ok(Arc::new(alignment))
         })
-        .transpose()?;
+        .transpose()
+        .map_err(|source| ScanError::Schema {
+            path: Some(path.clone()),
+            source: Box::new(source),
+        })?;
     let index_idx = schema
         .index_of(index_column)
         .ok()

@@ -98,8 +98,8 @@ impl BatchSchemaAlignment {
 
     /// Restore the canonical schema on historical data without widening types.
     /// Missing nullable columns still require the snapshot's evolution feature.
-    /// The caller checks persisted annotations against the full footer before
-    /// supplying the built reader's schema, which can omit annotations.
+    /// Use the built reader's schema, which can omit annotations. The caller must
+    /// check persisted metadata against the full footer before reading batches.
     pub(crate) fn for_historical_segment(
         incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
@@ -114,7 +114,7 @@ impl BatchSchemaAlignment {
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
         policy: MissingColumnPolicy,
-        allow_widening: bool,
+        is_ingestion: bool,
     ) -> SchemaResult<Self> {
         let output_schema = registered_schema.to_arrow_schema_ref().map_err(|source| {
             SchemaCompatibilityError::RegisteredSchemaConversion {
@@ -164,7 +164,7 @@ impl BatchSchemaAlignment {
             } else if same_type_ignoring_metadata(
                 table_field.data_type(),
                 incoming_field.data_type(),
-            ) || (allow_widening
+            ) || (is_ingestion
                 && is_allowlisted_widening(incoming_field.data_type(), table_field.data_type()))
             {
                 ColumnAlignment::Cast(incoming_index)
@@ -175,7 +175,10 @@ impl BatchSchemaAlignment {
                     incoming_type: incoming_field.data_type().clone(),
                 });
             };
-            if let Some(column) = field_metadata_mismatch(table_field, incoming_field, true) {
+            // Historical metadata is checked against the full footer by the caller.
+            if is_ingestion
+                && let Some(column) = field_metadata_mismatch(table_field, incoming_field, true)
+            {
                 return Err(SchemaCompatibilityError::IncomingFieldMetadataMismatch { column });
             }
             columns.push(column);

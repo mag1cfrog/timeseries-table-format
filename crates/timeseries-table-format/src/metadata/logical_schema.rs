@@ -1108,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_field_metadata_round_trips_without_changing_legacy_json() {
+    fn nested_field_metadata_round_trips_through_json_and_arrow() {
         fn field_with_metadata(name: &str, data_type: DataType, nullable: bool) -> Field {
             Field::new(name, data_type, nullable).with_metadata(HashMap::from([
                 ("path".into(), name.into()),
@@ -1140,15 +1140,32 @@ mod tests {
             let restored: LogicalSchema = serde_json::from_str(&json).unwrap();
             assert_eq!(restored.to_arrow_schema().unwrap(), schema);
             assert_eq!(serde_json::to_string(&restored).unwrap(), json);
-
-            let mut invalid = serde_json::to_value(&logical).unwrap();
-            invalid["columns"][0]["metadata"] = serde_json::json!({"invalid": 1});
-            assert!(serde_json::from_value::<LogicalSchema>(invalid).is_err());
         }
-        let legacy = r#"{"columns":[{"name":"detail","data_type":{"Map":{"key":{"name":"key","data_type":"Utf8","nullable":false},"value":null,"keys_sorted":false}},"nullable":true}]}"#;
-        let logical: LogicalSchema = serde_json::from_str(legacy).unwrap();
+    }
+
+    #[test]
+    fn field_metadata_rejects_non_string_values() {
+        let mut invalid = serde_json::to_value(sample_logical_schema_all_supported()).unwrap();
+        invalid["columns"][0]["metadata"] = serde_json::json!({"invalid": 1});
+        assert!(serde_json::from_value::<LogicalSchema>(invalid).is_err());
+    }
+
+    const KEYS_ONLY_MAP_JSON: &str = concat!(
+        r#"{"columns":[{"name":"detail","data_type":{"Map":{"key":{"name":"key","#,
+        r#""data_type":"Utf8","nullable":false},"value":null,"keys_sorted":false}},"#,
+        r#""nullable":true}]}"#,
+    );
+
+    #[test]
+    fn keys_only_map_preserves_legacy_json() {
+        let logical: LogicalSchema = serde_json::from_str(KEYS_ONLY_MAP_JSON).unwrap();
         assert!(!logical.has_metadata());
-        assert_eq!(serde_json::to_string(&logical).unwrap(), legacy);
+        assert_eq!(serde_json::to_string(&logical).unwrap(), KEYS_ONLY_MAP_JSON);
+    }
+
+    #[test]
+    fn map_comparison_ignores_metadata_but_checks_names() {
+        let logical: LogicalSchema = serde_json::from_str(KEYS_ONLY_MAP_JSON).unwrap();
         let mut annotated = logical.clone();
         let LogicalDataType::Map { key, .. } = &mut annotated.columns[0].data_type else {
             unreachable!()
@@ -1169,7 +1186,11 @@ mod tests {
                 .data_type
                 .eq_ignoring_metadata(&annotated.columns[0].data_type)
         );
-        let mut conflicting = serde_json::to_value(&logical).unwrap();
+    }
+
+    #[test]
+    fn map_with_value_rejects_null_value_metadata() {
+        let mut conflicting: serde_json::Value = serde_json::from_str(KEYS_ONLY_MAP_JSON).unwrap();
         conflicting["columns"][0]["data_type"]["Map"]["value"] = serde_json::json!({
             "name": "value", "data_type": "Int64", "nullable": true
         });

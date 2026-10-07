@@ -461,21 +461,8 @@ async fn prepare_rewrite_source(
                 source: error,
                 backtrace: Backtrace::capture(),
             })?;
-        validate_file_metadata(
-            &table_schema.to_arrow_schema().map_err(|source| {
-                EntityRewriteError::TableSchemaValidation {
-                    source: Box::new(SchemaCompatibilityError::RegisteredSchemaConversion {
-                        source: Box::new(source),
-                    }),
-                }
-            })?,
-            builder.schema(),
-        )
-        .map_err(|error| EntityRewriteError::SegmentSchemaValidation {
-            path: source.path.clone(),
-            source: Box::new(error),
-        })?;
-        // The reader's schema describes decoded batches; the footer was checked above.
+        let file_schema = builder.schema().clone();
+        // The reader's schema describes decoded batches; retain the full footer too.
         let reader = builder
             .build()
             .map_err(|error| EntityRewriteError::Parquet {
@@ -488,13 +475,18 @@ async fn prepare_rewrite_source(
             table_schema,
             index,
             policy,
-        );
-        Some(
-            alignment.map_err(|error| EntityRewriteError::SegmentSchemaValidation {
+        )
+        .map_err(|error| EntityRewriteError::SegmentSchemaValidation {
+            path: source.path.clone(),
+            source: Box::new(error),
+        })?;
+        validate_file_metadata(alignment.output_schema(), &file_schema).map_err(|error| {
+            EntityRewriteError::SegmentSchemaValidation {
                 path: source.path.clone(),
                 source: Box::new(error),
-            })?,
-        )
+            }
+        })?;
+        Some(alignment)
     } else {
         let source_schema = logical_schema_from_parquet(location, Path::new(&source.path))
             .await
