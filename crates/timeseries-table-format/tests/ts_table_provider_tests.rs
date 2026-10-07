@@ -32,7 +32,7 @@ use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder}
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 use timeseries_table_format::coverage::EntityValue;
-use timeseries_table_format::datafusion::TsTableProvider;
+use timeseries_table_format::datafusion::{TsTableProvider, default_session_config};
 use timeseries_table_format::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
@@ -1278,7 +1278,7 @@ async fn append_public_sources_round_trip_exact_rows() -> TestResult {
     assert_eq!(reopened.state().version, 8);
     assert_eq!(reopened.state().segments.len(), 7);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, reopened)?;
     let batches =
         collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts, symbol").await?;
@@ -1354,7 +1354,7 @@ async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestRe
         (4_000, "B", 21.0),
     ])?;
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::new(table.clone()))?;
     let batches = collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts").await?;
     let actual = arrow_select::concat::concat_batches(&first_batch(&batches)?.schema(), &batches)?;
@@ -1368,7 +1368,7 @@ async fn reordered_parquet_columns_survive_append_query_and_optimize() -> TestRe
         canonical_schema.as_ref()
     );
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::new(table.clone()))?;
     let batches = collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts").await?;
     let actual = arrow_select::concat::concat_batches(&first_batch(&batches)?.schema(), &batches)?;
@@ -1552,7 +1552,7 @@ async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
             .map(|segment| &segment.entity_layout),
         Some(SegmentEntityLayout::NotApplicable)
     ));
-    let signed_ctx = SessionContext::new();
+    let signed_ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&signed_ctx, signed)?;
     let (_, signed_batches) = run_numeric_query(&signed_ctx, None).await?;
     assert_eq!(collect_i64_values(&signed_batches)?, vec![-3, 0, 4]);
@@ -1581,7 +1581,7 @@ async fn append_round_trips_signed_and_unsigned_indexes() -> TestResult {
         )?)
         .await?;
     let unsigned = Arc::new(TimeSeriesTable::open(unsigned_location).await?);
-    let unsigned_ctx = SessionContext::new();
+    let unsigned_ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&unsigned_ctx, unsigned)?;
     let (_, unsigned_batches) = run_numeric_query(&unsigned_ctx, None).await?;
     assert_eq!(
@@ -1618,7 +1618,7 @@ async fn append_round_trips_composite_entity_identity_order() -> TestResult {
         [EntityValue::from("A"), EntityValue::from("X")]
     );
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, reopened)?;
     let batches =
         collect_batches(&ctx, "SELECT ts, symbol, venue, price FROM t ORDER BY ts").await?;
@@ -1690,7 +1690,7 @@ async fn append_randomized_partitions_preserve_exact_rows() -> TestResult {
             "seed {case_seed:#x}"
         );
 
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(default_session_config());
         let _provider = register_provider(&ctx, reopened)?;
         let result =
             collect_batches(&ctx, "SELECT ts, symbol, price FROM t ORDER BY ts, symbol").await?;
@@ -1708,7 +1708,7 @@ async fn count_star_returns_all_rows() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
@@ -1723,7 +1723,7 @@ async fn select_ts_limit_returns_five_rows() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT ts FROM t LIMIT 5").await?;
@@ -1739,7 +1739,7 @@ async fn projection_sanity_ts_price() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT ts, price FROM t").await?;
@@ -1757,7 +1757,7 @@ async fn projection_with_limit_respects_row_count() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT ts, price FROM t LIMIT 3").await?;
@@ -1776,7 +1776,7 @@ async fn projection_order_is_preserved() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT price, ts FROM t").await?;
@@ -1794,7 +1794,7 @@ async fn order_by_limit_returns_descending_rows() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts DESC LIMIT 3").await?;
@@ -1817,8 +1817,8 @@ async fn empty_table_returns_zero_rows() -> TestResult {
     let table = create_table(&tmp, false).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
-    let _provider = register_provider(&ctx, Arc::clone(&table))?;
+    let ctx = SessionContext::new_with_config(default_session_config());
+    let provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let count_batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
     let count = scalar_u64(&count_batches)?;
@@ -1826,6 +1826,16 @@ async fn empty_table_returns_zero_rows() -> TestResult {
 
     let limit_batches = collect_batches(&ctx, "SELECT ts FROM t LIMIT 1").await?;
     assert_eq!(total_rows(&limit_batches), 0);
+    let sorted = ctx
+        .sql("SELECT price, ts FROM t ORDER BY ts LIMIT 1")
+        .await?
+        .create_physical_plan()
+        .await?;
+    assert_eq!(
+        sorted.schema(),
+        Arc::new(provider.schema().project(&[2, 0])?)
+    );
+    assert_eq!(total_rows(&collect(sorted, ctx.task_ctx()).await?), 0);
     Ok(())
 }
 
@@ -1847,7 +1857,7 @@ async fn missing_file_size_falls_back_to_stat() -> TestResult {
     remove_committed_file_size(tmp.path(), 2).await?;
 
     let table = Arc::new(TimeSeriesTable::open(location).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
@@ -1868,7 +1878,7 @@ async fn cache_refreshes_after_new_segments() -> TestResult {
     append_parquet_fixture(&mut writer, tmp.path(), "data/seg-a.parquet").await?;
 
     let provider_table = Arc::new(TimeSeriesTable::open(location.clone()).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&provider_table))?;
 
     let initial_batches = collect_batches(&ctx, "SELECT COUNT(*) FROM t").await?;
@@ -1891,7 +1901,7 @@ async fn provider_schema_matches_table_meta() -> TestResult {
     let table = create_table(&tmp, false).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let expected = table.state().table_meta.arrow_schema_ref()?;
@@ -1907,7 +1917,7 @@ async fn provider_schema_supports_nested_types() -> TestResult {
     let table = TimeSeriesTable::create(location, meta).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let schema = provider.schema();
@@ -1973,12 +1983,58 @@ async fn pushdown_marks_all_filters_inexact() -> TestResult {
 }
 
 #[tokio::test]
+async fn shared_sql_defaults_filter_during_decode_and_allow_opt_out() -> TestResult {
+    let tmp = TempDir::new()?;
+    let rows = (0..32)
+        .map(|i| TestRow {
+            ts_millis: minutes_to_millis(i),
+            symbol: "A",
+            price: Some(i as f64),
+        })
+        .collect::<Vec<_>>();
+    let props = WriterProperties::builder()
+        .set_statistics_enabled(EnabledStatistics::None)
+        .build();
+    let table =
+        create_single_segment_table_with_props(&tmp, "data/pushdown.parquet", &rows, props).await?;
+    let ctx = SessionContext::new_with_config(default_session_config());
+    register_provider(&ctx, Arc::new(table))?;
+
+    for enabled in [true, false] {
+        if !enabled {
+            ctx.sql("SET datafusion.execution.parquet.pushdown_filters = false")
+                .await?
+                .collect()
+                .await?;
+        }
+        let plan = ctx
+            .sql("SELECT ts FROM t WHERE price = 16.0")
+            .await?
+            .create_physical_plan()
+            .await?;
+        let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await?;
+        assert_eq!(collect_i64_values(&batches)?, vec![minutes_to_millis(16)]);
+        let metrics = find_data_source_exec(plan.as_ref())
+            .ok_or("expected DataSourceExec")?
+            .metrics()
+            .ok_or("expected scan metrics")?;
+        let pruned = metrics
+            .sum_by_name("pushdown_rows_pruned")
+            .ok_or("expected pushdown_rows_pruned")?
+            .as_usize();
+        assert_eq!(pruned, if enabled { 31 } else { 0 });
+        assert_eq!(metrics.output_rows(), Some(if enabled { 1 } else { 32 }));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn scan_attaches_parquet_predicate_for_non_time_filters() -> TestResult {
     let tmp = TempDir::new()?;
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let df = ctx.sql("SELECT count(*) FROM t WHERE symbol = 'A'").await?;
@@ -2050,7 +2106,7 @@ async fn explain_prunes_segments_on_time_filter() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(
@@ -2074,7 +2130,7 @@ async fn explain_retains_matching_single_entity_segments() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches =
@@ -2092,7 +2148,7 @@ async fn explain_retains_matching_single_entity_segments() -> TestResult {
 async fn entity_equality_prunes_conflicting_single_entity_segments() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_entity_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
 
     let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A'").await?;
@@ -2124,7 +2180,7 @@ async fn entity_equality_prunes_conflicting_single_entity_segments() -> TestResu
 async fn numeric_entity_equality_prunes_conflicting_single_entity_segments() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_int32_entity_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
 
     let (files, batches) = run_timestamp_query(&ctx, "device_id = -1").await?;
@@ -2145,7 +2201,7 @@ async fn numeric_entity_equality_prunes_conflicting_single_entity_segments() -> 
 async fn entity_pruning_composes_safely_with_other_predicates() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_entity_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
 
     let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A' AND price < 35.0").await?;
@@ -2180,7 +2236,7 @@ async fn entity_pruning_precedes_missing_file_access() -> TestResult {
     tokio::fs::remove_file(tmp.path().join("data/entity-b.parquet")).await?;
 
     let table = Arc::new(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let (files, batches) = run_timestamp_query(&ctx, "symbol = 'A'").await?;
 
@@ -2193,7 +2249,7 @@ async fn entity_pruning_precedes_missing_file_access() -> TestResult {
 async fn entity_metadata_preserves_unfiltered_and_grouped_results() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_entity_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
 
     let batches = collect_batches(&ctx, "SELECT ts FROM t ORDER BY ts").await?;
@@ -2226,7 +2282,7 @@ async fn time_filter_returns_correct_rows() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(
@@ -2246,7 +2302,7 @@ async fn date_trunc_filter_returns_correct_rows() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(
@@ -2266,7 +2322,7 @@ async fn date_bin_filter_returns_correct_rows() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(
@@ -2317,7 +2373,7 @@ async fn date_trunc_filter_returns_correct_rows_olson_tz() -> TestResult {
     )?;
 
     let table = MemTable::try_new(schema, vec![vec![batch]])?;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     ctx.register_table("t", Arc::new(table))?;
 
     let batches = collect_batches(
@@ -2337,7 +2393,7 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
     let table = create_two_segment_table(&tmp).await?;
     let table = Arc::new(table);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::clone(&table))?;
 
     let batches = collect_batches(&ctx, "SELECT MIN(ts), MAX(ts) FROM t").await?;
@@ -2353,7 +2409,7 @@ async fn multi_segment_min_max_reflects_all_data() -> TestResult {
 async fn timestamp_direct_predicates_select_expected_files_and_rows() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_utc_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let cases = [
         (
@@ -2455,7 +2511,7 @@ async fn timestamp_direct_predicates_select_expected_files_and_rows() -> TestRes
 async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_rows() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_utc_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let cases = [
         (
@@ -2536,7 +2592,7 @@ async fn timestamp_arithmetic_and_fixed_transforms_select_expected_files_and_row
 async fn overridden_builtin_name_does_not_enable_timestamp_pruning() -> TestResult {
     let tmp = TempDir::new()?;
     let table = Arc::new(create_utc_pruning_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let udf = create_udf(
         "to_unixtime",
@@ -2598,7 +2654,7 @@ async fn timestamp_calendar_date_transforms_select_expected_files_and_rows() -> 
         ],
     )
     .await?;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::new(table))?;
     let expected_values = vec![
         ts_millis("2024-01-08T00:00:00Z"),
@@ -2674,7 +2730,7 @@ async fn timestamp_iana_dst_transforms_select_expected_files_and_rows() -> TestR
         ],
     )
     .await?;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, Arc::new(table))?;
     let cases = [
         (
@@ -2750,7 +2806,7 @@ async fn int64_queries_prune_planned_files_and_return_exact_rows() -> TestResult
     ];
     let tmp = TempDir::new()?;
     let table = Arc::new(create_int64_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let cases = vec![
         (
@@ -2881,7 +2937,7 @@ async fn uint64_queries_prune_planned_files_without_signed_narrowing() -> TestRe
     ];
     let tmp = TempDir::new()?;
     let table = Arc::new(create_uint64_table(&tmp).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let signed_max = i64::MAX as u64;
     let signed_max_sql = "CAST('9223372036854775807' AS BIGINT UNSIGNED)";
@@ -2997,7 +3053,7 @@ async fn numeric_pruning_precedes_missing_file_size_lookup() -> TestResult {
     tokio::fs::remove_file(tmp.path().join("data/int-a.parquet")).await?;
 
     let table = Arc::new(TimeSeriesTable::open(TableLocation::local(tmp.path())).await?);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     let _provider = register_provider(&ctx, table)?;
     let (plan, batches) = run_numeric_query(&ctx, Some("idx >= 20")).await?;
 

@@ -27,7 +27,7 @@ cargo add tokio --features macros,rt-multi-thread
 ```rust
 use std::sync::Arc;
 use timeseries_table_format::{
-    datafusion::{engine::prelude::SessionContext, TsTableProvider},
+    datafusion::{default_session_config, engine::prelude::SessionContext, TsTableProvider},
     storage::TableLocation,
     table::TimeSeriesTable,
 };
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = TsTableProvider::try_new(Arc::new(table))?;
 
     // 3. Register it in a DataFusion SessionContext
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     ctx.register_table("my_table", Arc::new(provider))?;
 
     // 4. Run a query with time filters + projection
@@ -67,6 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+`default_session_config()` enables Parquet row filter pushdown and is also used by
+the Python bindings and CLI. This lets scans skip decoding payloads for rows that
+do not match the predicate. For queries through `TsTableProvider`, disable it with
+`SET datafusion.execution.parquet.pushdown_filters = false` in the same session.
+Sessions created with `SessionContext::new()` keep DataFusion's own defaults.
 
 ### How Pruning Works
 

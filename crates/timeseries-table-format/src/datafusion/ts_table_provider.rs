@@ -17,8 +17,7 @@ use datafusion::catalog::TableProvider;
 use datafusion::common::DFSchema;
 
 use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::physical_plan::FileScanConfigBuilder;
-use datafusion::datasource::physical_plan::ParquetSource;
+use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::object_store::ObjectStoreUrl;
@@ -360,6 +359,10 @@ impl TableProvider for TsTableProvider {
             "pruned_segments",
             total_candidate_segments.saturating_sub(selected.len()),
         );
+        if selected.is_empty() {
+            // An empty scan still needs one partition for downstream sort/aggregate plans.
+            builder = builder.with_file_group(FileGroup::new(vec![]));
+        }
         for seg in selected {
             let file_size = self.segment_file_size(seg).await?;
             let location = self

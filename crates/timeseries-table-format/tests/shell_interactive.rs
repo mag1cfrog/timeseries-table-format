@@ -20,7 +20,10 @@ use timeseries_table_format::{
 use tokio::io::AsyncWriteExt;
 
 mod test_common {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/common.rs"
+    ));
 }
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

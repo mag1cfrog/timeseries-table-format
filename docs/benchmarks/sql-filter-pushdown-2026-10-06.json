@@ -1,0 +1,379 @@
+{
+  "env": {
+    "python": "3.12.12 (main, Feb  3 2026, 22:51:04) [Clang 21.1.4 ]",
+    "platform": "Linux-6.19.14-200.fc43.x86_64-x86_64-with-glibc2.42",
+    "cpus": 16,
+    "ttf_version": "0.8.0",
+    "pyarrow_version": "25.0.0"
+  },
+  "params": {
+    "runs": 3,
+    "warmups": 1
+  },
+  "dataset": {
+    "rows": 32768,
+    "rows_per_segment": 8192,
+    "segments": 4,
+    "row_groups": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "payload_columns": 8,
+    "payload_bytes_per_column": 2048,
+    "decoded_payload_bytes": 536870912,
+    "parquet_bytes": 11271319
+  },
+  "results": [
+    {
+      "case": "selective",
+      "pushdown_filters": false,
+      "samples": [
+        {
+          "total_s": 0.1079898034222424,
+          "row_count": 1,
+          "result_arrow_bytes": 16500,
+          "rows_per_second": 9.260133533996528,
+          "process_peak_before_query_bytes": 94400512,
+          "peak_rss_bytes": 735326208,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "FilterExec: record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, metrics=[output_rows=1, elapsed_compute=21.33ms, output_bytes=144.1 KB, output_batches=1, selectivity=0% (1/32.77 K)]\n  DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1 AND record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1, required_guarantees=[record_id in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=29.71\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=237.74\u00b5s, metadata_load_time=5.11ms, page_index_eval_time=100.98\u00b5s, row_pushdown_eval_time=57ns, statistics_eval_time=906.23\u00b5s, time_elapsed_opening=9.75ms, time_elapsed_processing=368.49ms, time_elapsed_scanning_total=390.29ms, time_elapsed_scanning_until_data=354.16ms, output_rows_skew=80%, scan_efficiency_ratio=400.46% (11.26 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        },
+        {
+          "total_s": 0.11072497395798564,
+          "row_count": 1,
+          "result_arrow_bytes": 16500,
+          "rows_per_second": 9.031386183747923,
+          "process_peak_before_query_bytes": 94339072,
+          "peak_rss_bytes": 733814784,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "FilterExec: record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, metrics=[output_rows=1, elapsed_compute=18.28ms, output_bytes=144.1 KB, output_batches=1, selectivity=0% (1/32.77 K)]\n  DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1 AND record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1, required_guarantees=[record_id in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=48.25\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=254.38\u00b5s, metadata_load_time=4.50ms, page_index_eval_time=98.87\u00b5s, row_pushdown_eval_time=57ns, statistics_eval_time=763.63\u00b5s, time_elapsed_opening=10.16ms, time_elapsed_processing=361.28ms, time_elapsed_scanning_total=379.06ms, time_elapsed_scanning_until_data=344.96ms, output_rows_skew=80%, scan_efficiency_ratio=399.03% (11.26 M/2.82 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        },
+        {
+          "total_s": 0.1117175780236721,
+          "row_count": 1,
+          "result_arrow_bytes": 16500,
+          "rows_per_second": 8.9511428522744,
+          "process_peak_before_query_bytes": 94392320,
+          "peak_rss_bytes": 732508160,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "FilterExec: record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, metrics=[output_rows=1, elapsed_compute=20.77ms, output_bytes=144.1 KB, output_batches=1, selectivity=0% (1/32.77 K)]\n  DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1 AND record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1, required_guarantees=[record_id in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=25.38\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=220.10\u00b5s, metadata_load_time=5.10ms, page_index_eval_time=77.10\u00b5s, row_pushdown_eval_time=57ns, statistics_eval_time=718.49\u00b5s, time_elapsed_opening=9.02ms, time_elapsed_processing=382.31ms, time_elapsed_scanning_total=402.83ms, time_elapsed_scanning_until_data=368.37ms, output_rows_skew=80%, scan_efficiency_ratio=399.03% (11.26 M/2.82 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        }
+      ]
+    },
+    {
+      "case": "selective",
+      "pushdown_filters": true,
+      "samples": [
+        {
+          "total_s": 0.012617249973118305,
+          "row_count": 1,
+          "result_arrow_bytes": 16500,
+          "rows_per_second": 79.25657351091174,
+          "process_peak_before_query_bytes": 94089216,
+          "peak_rss_bytes": 138158080,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1 AND record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1, required_guarantees=[record_id in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=1, elapsed_compute=5.60\u00b5s, output_bytes=400.1 KB, output_batches=1, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=1.58 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=1, pushdown_rows_pruned=32.77 K, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=8.19 K, predicate_cache_records=2, bloom_filter_eval_time=210.76\u00b5s, metadata_load_time=4.09ms, page_index_eval_time=85.30\u00b5s, row_pushdown_eval_time=73.60\u00b5s, statistics_eval_time=629.10\u00b5s, time_elapsed_opening=8.08ms, time_elapsed_processing=18.33ms, time_elapsed_scanning_total=13.84ms, time_elapsed_scanning_until_data=12.89ms, output_rows_skew=100%, scan_efficiency_ratio=56.06% (1.58 M/2.82 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        },
+        {
+          "total_s": 0.01285261707380414,
+          "row_count": 1,
+          "result_arrow_bytes": 16500,
+          "rows_per_second": 77.80516561394903,
+          "process_peak_before_query_bytes": 94343168,
+          "peak_rss_bytes": 137940992,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1 AND record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1, required_guarantees=[record_id in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=1, elapsed_compute=5.00\u00b5s, output_bytes=400.1 KB, output_batches=1, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=1.58 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=1, pushdown_rows_pruned=32.77 K, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=8.19 K, predicate_cache_records=2, bloom_filter_eval_time=240.96\u00b5s, metadata_load_time=4.72ms, page_index_eval_time=97.00\u00b5s, row_pushdown_eval_time=66.97\u00b5s, statistics_eval_time=636.06\u00b5s, time_elapsed_opening=8.84ms, time_elapsed_processing=18.60ms, time_elapsed_scanning_total=13.33ms, time_elapsed_scanning_until_data=12.41ms, output_rows_skew=100%, scan_efficiency_ratio=56.12% (1.58 M/2.82 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        },
+        {
+          "total_s": 0.012307524681091309,
+          "row_count": 1,
+          "result_arrow_bytes": 16500,
+          "rows_per_second": 81.25110661255485,
+          "process_peak_before_query_bytes": 94408704,
+          "peak_rss_bytes": 137998336,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 = baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1 AND record_id_null_count@2 != row_count@3 AND record_id_min@0 <= baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca <= record_id_max@1, required_guarantees=[record_id in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=1, elapsed_compute=5.32\u00b5s, output_bytes=400.1 KB, output_batches=1, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=1.58 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=1, pushdown_rows_pruned=32.77 K, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=8.19 K, predicate_cache_records=2, bloom_filter_eval_time=187.18\u00b5s, metadata_load_time=8.71ms, page_index_eval_time=81.91\u00b5s, row_pushdown_eval_time=60.70\u00b5s, statistics_eval_time=710.30\u00b5s, time_elapsed_opening=12.63ms, time_elapsed_processing=22.30ms, time_elapsed_scanning_total=13.00ms, time_elapsed_scanning_until_data=12.17ms, output_rows_skew=100%, scan_efficiency_ratio=56.26% (1.58 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        }
+      ]
+    },
+    {
+      "case": "nonselective",
+      "pushdown_filters": false,
+      "samples": [
+        {
+          "total_s": 0.13004584796726704,
+          "row_count": 32767,
+          "result_arrow_bytes": 540655500,
+          "rows_per_second": 251964.98398201502,
+          "process_peak_before_query_bytes": 95510528,
+          "peak_rss_bytes": 826716160,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "FilterExec: record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, metrics=[output_rows=32.77 K, elapsed_compute=18.18ms, output_bytes=516.0 MB, output_batches=4, selectivity=100% (32.77 K/32.77 K)]\n  DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1) AND record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1), required_guarantees=[record_id not in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=24.76\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=259.36\u00b5s, metadata_load_time=5.54ms, page_index_eval_time=88.77\u00b5s, row_pushdown_eval_time=57ns, statistics_eval_time=725.32\u00b5s, time_elapsed_opening=10.03ms, time_elapsed_processing=381.80ms, time_elapsed_scanning_total=401.80ms, time_elapsed_scanning_until_data=369.46ms, output_rows_skew=80%, scan_efficiency_ratio=400.46% (11.26 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        },
+        {
+          "total_s": 0.12839704472571611,
+          "row_count": 32767,
+          "result_arrow_bytes": 540655500,
+          "rows_per_second": 255200.57778586264,
+          "process_peak_before_query_bytes": 95588352,
+          "peak_rss_bytes": 832409600,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "FilterExec: record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, metrics=[output_rows=32.77 K, elapsed_compute=15.59ms, output_bytes=516.0 MB, output_batches=4, selectivity=100% (32.77 K/32.77 K)]\n  DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1) AND record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1), required_guarantees=[record_id not in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=25.29\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=252.41\u00b5s, metadata_load_time=5.40ms, page_index_eval_time=74.14\u00b5s, row_pushdown_eval_time=57ns, statistics_eval_time=816.21\u00b5s, time_elapsed_opening=9.57ms, time_elapsed_processing=386.37ms, time_elapsed_scanning_total=401.03ms, time_elapsed_scanning_until_data=368.93ms, output_rows_skew=80%, scan_efficiency_ratio=399.03% (11.26 M/2.82 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        },
+        {
+          "total_s": 0.13170341728255153,
+          "row_count": 32767,
+          "result_arrow_bytes": 540655500,
+          "rows_per_second": 248793.84814824446,
+          "process_peak_before_query_bytes": 95428608,
+          "peak_rss_bytes": 832372736,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "FilterExec: record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, metrics=[output_rows=32.77 K, elapsed_compute=18.84ms, output_bytes=516.0 MB, output_batches=4, selectivity=100% (32.77 K/32.77 K)]\n  DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1) AND record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1), required_guarantees=[record_id not in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=31.16\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=212.32\u00b5s, metadata_load_time=4.99ms, page_index_eval_time=82.56\u00b5s, row_pushdown_eval_time=57ns, statistics_eval_time=885.62\u00b5s, time_elapsed_opening=9.37ms, time_elapsed_processing=394.05ms, time_elapsed_scanning_total=412.60ms, time_elapsed_scanning_until_data=382.34ms, output_rows_skew=80%, scan_efficiency_ratio=400.46% (11.26 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        }
+      ]
+    },
+    {
+      "case": "nonselective",
+      "pushdown_filters": true,
+      "samples": [
+        {
+          "total_s": 0.08303178614005446,
+          "row_count": 32767,
+          "result_arrow_bytes": 540655500,
+          "rows_per_second": 394632.0020712312,
+          "process_peak_before_query_bytes": 95690752,
+          "peak_rss_bytes": 741691392,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1) AND record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1), required_guarantees=[record_id not in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=27.83\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=32.77 K, pushdown_rows_pruned=1, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=32.77 K, predicate_cache_records=65.53 K, bloom_filter_eval_time=289.25\u00b5s, metadata_load_time=4.14ms, page_index_eval_time=110.39\u00b5s, row_pushdown_eval_time=115.59\u00b5s, statistics_eval_time=775.85\u00b5s, time_elapsed_opening=8.45ms, time_elapsed_processing=402.85ms, time_elapsed_scanning_total=404.31ms, time_elapsed_scanning_until_data=373.28ms, output_rows_skew=80%, scan_efficiency_ratio=399.03% (11.26 M/2.82 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        },
+        {
+          "total_s": 0.07920513674616814,
+          "row_count": 32767,
+          "result_arrow_bytes": 540655500,
+          "rows_per_second": 413697.91589413845,
+          "process_peak_before_query_bytes": 95633408,
+          "peak_rss_bytes": 743350272,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1) AND record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1), required_guarantees=[record_id not in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=25.44\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=32.77 K, pushdown_rows_pruned=1, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=32.77 K, predicate_cache_records=65.53 K, bloom_filter_eval_time=143.65\u00b5s, metadata_load_time=2.99ms, page_index_eval_time=111.28\u00b5s, row_pushdown_eval_time=132.10\u00b5s, statistics_eval_time=644.81\u00b5s, time_elapsed_opening=6.25ms, time_elapsed_processing=414.85ms, time_elapsed_scanning_total=418.46ms, time_elapsed_scanning_until_data=404.80ms, output_rows_skew=80%, scan_efficiency_ratio=400.46% (11.26 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        },
+        {
+          "total_s": 0.08697040332481265,
+          "row_count": 32767,
+          "result_arrow_bytes": 540655500,
+          "rows_per_second": 376760.35464183684,
+          "process_peak_before_query_bytes": 95694848,
+          "peak_rss_bytes": 716918784,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca AND record_id@2 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca, pruning_predicate=record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1) AND record_id_null_count@2 != row_count@3 AND (record_id_min@0 != baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca OR baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca != record_id_max@1), required_guarantees=[record_id not in (baa21ee8c93f1d626d0286c968bc0bcc684d0db0f15ee3d3c04a6745e4b1beca)], metrics=[output_rows=32.77 K, elapsed_compute=24.54\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=4 total \u2192 4 matched, page_index_rows_pruned=32.77 K total \u2192 32.77 K matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.26 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, page_index_load_skipped=15, predicate_evaluation_errors=0, pushdown_rows_matched=32.77 K, pushdown_rows_pruned=1, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=32.77 K, predicate_cache_records=65.53 K, bloom_filter_eval_time=265.37\u00b5s, metadata_load_time=6.07ms, page_index_eval_time=95.94\u00b5s, row_pushdown_eval_time=129.30\u00b5s, statistics_eval_time=799.24\u00b5s, time_elapsed_opening=10.89ms, time_elapsed_processing=412.97ms, time_elapsed_scanning_total=410.63ms, time_elapsed_scanning_until_data=391.99ms, output_rows_skew=80%, scan_efficiency_ratio=400.46% (11.26 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        }
+      ]
+    },
+    {
+      "case": "unfiltered",
+      "pushdown_filters": false,
+      "samples": [
+        {
+          "total_s": 0.08339924830943346,
+          "row_count": 32768,
+          "result_arrow_bytes": 540672000,
+          "rows_per_second": 392905.21994181507,
+          "process_peak_before_query_bytes": 95625216,
+          "peak_rss_bytes": 723406848,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=true, metrics=[output_rows=32.77 K, elapsed_compute=20.22\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=0 total \u2192 0 matched, page_index_rows_pruned=0 total \u2192 0 matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.18 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=1.89\u00b5s, metadata_load_time=3.96ms, page_index_eval_time=38ns, row_pushdown_eval_time=38ns, statistics_eval_time=38ns, time_elapsed_opening=5.30ms, time_elapsed_processing=368.88ms, time_elapsed_scanning_total=373.73ms, time_elapsed_scanning_until_data=373.47ms, output_rows_skew=80%, scan_efficiency_ratio=397.64% (11.18 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        },
+        {
+          "total_s": 0.08091533416882157,
+          "row_count": 32768,
+          "result_arrow_bytes": 540672000,
+          "rows_per_second": 404966.50402052246,
+          "process_peak_before_query_bytes": 95641600,
+          "peak_rss_bytes": 733196288,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=true, metrics=[output_rows=32.77 K, elapsed_compute=22.33\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=0 total \u2192 0 matched, page_index_rows_pruned=0 total \u2192 0 matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.18 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=2.30\u00b5s, metadata_load_time=4.20ms, page_index_eval_time=38ns, row_pushdown_eval_time=38ns, statistics_eval_time=38ns, time_elapsed_opening=5.78ms, time_elapsed_processing=365.48ms, time_elapsed_scanning_total=368.15ms, time_elapsed_scanning_until_data=367.92ms, output_rows_skew=80%, scan_efficiency_ratio=397.64% (11.18 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        },
+        {
+          "total_s": 0.08053099038079381,
+          "row_count": 32768,
+          "result_arrow_bytes": 540672000,
+          "rows_per_second": 406899.2551197406,
+          "process_peak_before_query_bytes": 95428608,
+          "peak_rss_bytes": 734560256,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=true, metrics=[output_rows=32.77 K, elapsed_compute=19.73\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=0 total \u2192 0 matched, page_index_rows_pruned=0 total \u2192 0 matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.18 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=1.56\u00b5s, metadata_load_time=5.38ms, page_index_eval_time=38ns, row_pushdown_eval_time=38ns, statistics_eval_time=38ns, time_elapsed_opening=6.65ms, time_elapsed_processing=360.77ms, time_elapsed_scanning_total=365.51ms, time_elapsed_scanning_until_data=365.25ms, output_rows_skew=80%, scan_efficiency_ratio=397.64% (11.18 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "false"
+        }
+      ]
+    },
+    {
+      "case": "unfiltered",
+      "pushdown_filters": true,
+      "samples": [
+        {
+          "total_s": 0.08348632091656327,
+          "row_count": 32768,
+          "result_arrow_bytes": 540672000,
+          "rows_per_second": 392495.4368602317,
+          "process_peak_before_query_bytes": 95453184,
+          "peak_rss_bytes": 728502272,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=true, metrics=[output_rows=32.77 K, elapsed_compute=21.05\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=0 total \u2192 0 matched, page_index_rows_pruned=0 total \u2192 0 matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.18 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=2.08\u00b5s, metadata_load_time=4.13ms, page_index_eval_time=38ns, row_pushdown_eval_time=38ns, statistics_eval_time=38ns, time_elapsed_opening=5.53ms, time_elapsed_processing=365.93ms, time_elapsed_scanning_total=369.69ms, time_elapsed_scanning_until_data=365.28ms, output_rows_skew=80%, scan_efficiency_ratio=397.64% (11.18 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        },
+        {
+          "total_s": 0.07967851590365171,
+          "row_count": 32768,
+          "result_arrow_bytes": 540672000,
+          "rows_per_second": 411252.63979092543,
+          "process_peak_before_query_bytes": 95666176,
+          "peak_rss_bytes": 740937728,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=true, metrics=[output_rows=32.77 K, elapsed_compute=16.02\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=0 total \u2192 0 matched, page_index_rows_pruned=0 total \u2192 0 matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.18 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=2.06\u00b5s, metadata_load_time=4.98ms, page_index_eval_time=38ns, row_pushdown_eval_time=38ns, statistics_eval_time=38ns, time_elapsed_opening=6.57ms, time_elapsed_processing=360.77ms, time_elapsed_scanning_total=363.09ms, time_elapsed_scanning_until_data=362.89ms, output_rows_skew=80%, scan_efficiency_ratio=397.64% (11.18 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        },
+        {
+          "total_s": 0.07926916517317295,
+          "row_count": 32768,
+          "result_arrow_bytes": 540672000,
+          "rows_per_second": 413376.3731258478,
+          "process_peak_before_query_bytes": 95674368,
+          "peak_rss_bytes": 739037184,
+          "explain_analyze": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "DataSourceExec: file_groups={16 groups: [[tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:0..704458], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:704458..1408916], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:1408916..2113374], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2113374..2817832], [tmp/tmpr4nlt4lg/wide_table/data/_managed/append/9b88ed2a-bfb0-40c1-b881-b49ef45b84f6.parquet:2817832..2821147, tmp/tmpr4nlt4lg/wide_table/data/_managed/append/ab146ee4-94c9-4717-a369-b8ee9cdbd7e2.parquet:0..701143], ...]}, projection=[entity, tick, record_id, payload_0, payload_1, payload_2, payload_3, payload_4, payload_5, payload_6, payload_7], file_type=parquet, predicate=true, metrics=[output_rows=32.77 K, elapsed_compute=19.31\u00b5s, output_bytes=516.1 MB, output_batches=4, files_ranges_pruned_statistics=19 total \u2192 19 matched, row_groups_pruned_statistics=4 total \u2192 4 matched, row_groups_pruned_bloom_filter=4 total \u2192 4 matched, page_index_pages_pruned=0 total \u2192 0 matched, page_index_rows_pruned=0 total \u2192 0 matched, limit_pruned_row_groups=0 total \u2192 0 matched, batches_split=0, bytes_scanned=11.18 M, file_open_errors=0, file_scan_errors=0, files_opened=19, files_processed=19, num_predicate_creation_errors=0, predicate_evaluation_errors=0, pushdown_rows_matched=0, pushdown_rows_pruned=0, row_groups_pruned_dynamic_filter=0, predicate_cache_inner_records=0, predicate_cache_records=0, bloom_filter_eval_time=2.17\u00b5s, metadata_load_time=4.51ms, page_index_eval_time=38ns, row_pushdown_eval_time=38ns, statistics_eval_time=38ns, time_elapsed_opening=6.74ms, time_elapsed_processing=368.40ms, time_elapsed_scanning_total=370.50ms, time_elapsed_scanning_until_data=365.97ms, output_rows_skew=80%, scan_efficiency_ratio=397.64% (11.18 M/2.81 M)]\n"
+            }
+          ],
+          "effective_batch_size": "8192",
+          "effective_target_partitions": "16",
+          "effective_parquet.pushdown_filters": "true"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Fixture preparation and every read run in separate processes; filesystem caches are not cleared.",
+    "Each query selects all columns. Selective matches one hashed record_id; nonselective excludes that record_id; unfiltered has no predicate.",
+    "Timing and process peak memory are recorded before validating every returned key and payload or running EXPLAIN ANALYZE.",
+    "EXPLAIN ANALYZE executes the query a second time in the worker; its metrics are separate from the timed sample.",
+    "Peak RSS includes interpreter and runtime allocations (Windows: peak working set); the compressible fixture and local results are not portable performance thresholds."
+  ]
+}

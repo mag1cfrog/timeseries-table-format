@@ -11,11 +11,11 @@ use arrow::{
     error::ArrowError,
     util::display::{ArrayFormatter, FormatOptions},
 };
-use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::prelude::SessionContext;
 use futures_util::StreamExt;
 use snafu::ResultExt;
-use timeseries_table_format::datafusion::TsTableProvider;
 use timeseries_table_format::datafusion::pretty::pretty_format_batches_compact_floats;
+use timeseries_table_format::datafusion::{TsTableProvider, default_session_config};
 use timeseries_table_format::{
     storage::{OutputLocation, OutputSink, TableLocation, open_output_sink},
     table::TimeSeriesTable,
@@ -239,8 +239,7 @@ impl DataFusionEngine {
         let table = Arc::new(table);
         let provider = TsTableProvider::try_new(table).context(DataFusionSnafu)?;
 
-        let cfg = SessionConfig::new();
-        let ctx = SessionContext::new_with_config(cfg);
+        let ctx = SessionContext::new_with_config(default_session_config());
 
         ctx.register_table(self.table_name.as_str(), Arc::new(provider))
             .context(DataFusionSnafu)?;
@@ -258,8 +257,7 @@ impl DataFusionEngine {
         let table = Arc::new(table.clone());
         let provider = TsTableProvider::try_new(table).context(DataFusionSnafu)?;
 
-        let cfg = SessionConfig::new();
-        let ctx = SessionContext::new_with_config(cfg);
+        let ctx = SessionContext::new_with_config(default_session_config());
 
         ctx.register_table(self.table_name.as_str(), Arc::new(provider))
             .context(DataFusionSnafu)?;
@@ -435,7 +433,10 @@ mod tests {
     use crate::query::{OutputFormat, QueryOpts, default_table_name, print_query_result};
 
     mod test_common {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/common.rs"
+        ));
     }
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

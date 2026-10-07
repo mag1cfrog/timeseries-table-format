@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use datafusion::prelude::*;
 use timeseries_table_format::datafusion::{
-    TsTableProvider, pretty::pretty_format_batches_compact_floats,
+    TsTableProvider, default_session_config, pretty::pretty_format_batches_compact_floats,
 };
 use timeseries_table_format::{storage::TableLocation, table::TimeSeriesTable};
 
@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let table = TimeSeriesTable::open(TableLocation::local(&table_root)).await?;
     let provider = TsTableProvider::try_new(Arc::new(table))?;
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(default_session_config());
     ctx.register_table("nvda_1h", Arc::new(provider))?;
 
     let sql = r#"

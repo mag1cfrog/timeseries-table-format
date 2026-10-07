@@ -4,6 +4,7 @@ use assert_cmd::Command;
 use predicates::str::contains;
 use tempfile::TempDir;
 
+#[path = "support/common.rs"]
 mod common;
 
 use common::{table_root, write_parquet_rows};
