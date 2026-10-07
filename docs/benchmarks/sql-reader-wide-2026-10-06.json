@@ -1,0 +1,517 @@
+{
+  "env": {
+    "python": "3.12.12 (main, Feb  3 2026, 22:51:04) [Clang 21.1.4 ]",
+    "platform": "Linux-6.19.14-200.fc43.x86_64-x86_64-with-glibc2.42",
+    "cpus": 16,
+    "ttf_version": "0.8.0",
+    "pyarrow_version": "25.0.0"
+  },
+  "params": {
+    "runs": 3,
+    "warmups": 1
+  },
+  "dataset": {
+    "rows": 32768,
+    "rows_per_segment": 8192,
+    "segments": 4,
+    "row_groups": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "payload_columns": 8,
+    "payload_bytes_per_column": 2048,
+    "decoded_payload_bytes": 536870912,
+    "parquet_bytes": 11271319
+  },
+  "wide_streaming_results": [
+    {
+      "name": "default",
+      "mode": "sql_reader_process_as_you_go",
+      "settings": [],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 85417984,
+          "time_to_first_batch_s": 0.07992158411070704,
+          "total_s": 0.10906760720536113,
+          "post_first_batch_s": 0.029146023094654083,
+          "row_count": 32768,
+          "batch_count": 4,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 300437.5069703493,
+          "close_s": 2.2050924599170685e-05,
+          "peak_rss_bytes": 731648000,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 686608384
+        },
+        {
+          "process_peak_before_query_bytes": 85360640,
+          "time_to_first_batch_s": 0.08087628800421953,
+          "total_s": 0.11186043405905366,
+          "post_first_batch_s": 0.030984146054834127,
+          "row_count": 32768,
+          "batch_count": 4,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 292936.463868011,
+          "close_s": 2.2721942514181137e-05,
+          "peak_rss_bytes": 714698752,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 715034624
+        },
+        {
+          "process_peak_before_query_bytes": 85176320,
+          "time_to_first_batch_s": 0.07923635095357895,
+          "total_s": 0.10774469934403896,
+          "post_first_batch_s": 0.028508348390460014,
+          "row_count": 32768,
+          "batch_count": 4,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 304126.3301071424,
+          "close_s": 1.9667204469442368e-05,
+          "peak_rss_bytes": 741797888,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 678170624
+        }
+      ]
+    },
+    {
+      "name": "default",
+      "mode": "sql_reader_close_early",
+      "settings": [],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 85147648,
+          "time_to_first_batch_s": 0.07848003599792719,
+          "total_s": 0.09515195619314909,
+          "post_first_batch_s": 0.0166719201952219,
+          "row_count": 8192,
+          "batch_count": 1,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 135168000,
+          "rows_per_second": 86093.86845784912,
+          "close_s": 0.009370026178658009,
+          "peak_rss_bytes": 737370112,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 702312448
+        },
+        {
+          "process_peak_before_query_bytes": 85385216,
+          "time_to_first_batch_s": 0.07661182479932904,
+          "total_s": 0.09437440056353807,
+          "post_first_batch_s": 0.017762575764209032,
+          "row_count": 8192,
+          "batch_count": 1,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 135168000,
+          "rows_per_second": 86803.20034970385,
+          "close_s": 0.009864946361631155,
+          "peak_rss_bytes": 725590016,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 708317184
+        },
+        {
+          "process_peak_before_query_bytes": 85438464,
+          "time_to_first_batch_s": 0.07585784513503313,
+          "total_s": 0.09720435924828053,
+          "post_first_batch_s": 0.021346514113247395,
+          "row_count": 8192,
+          "batch_count": 1,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 135168000,
+          "rows_per_second": 84276.05575873297,
+          "close_s": 0.01329477597028017,
+          "peak_rss_bytes": 725311488,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 721412096
+        }
+      ]
+    },
+    {
+      "name": "small_batches",
+      "mode": "sql_reader_process_as_you_go",
+      "settings": [
+        "SET datafusion.execution.batch_size = 1024"
+      ],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 96051200,
+          "time_to_first_batch_s": 0.06487298896536231,
+          "total_s": 0.12300502695143223,
+          "post_first_batch_s": 0.05813203798606992,
+          "row_count": 32768,
+          "batch_count": 32,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 266395.6166030372,
+          "close_s": 1.7181970179080963e-05,
+          "peak_rss_bytes": 537817088,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 535281664
+        },
+        {
+          "process_peak_before_query_bytes": 96288768,
+          "time_to_first_batch_s": 0.07366014178842306,
+          "total_s": 0.12913926178589463,
+          "post_first_batch_s": 0.05547911999747157,
+          "row_count": 32768,
+          "batch_count": 32,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 253741.5774787952,
+          "close_s": 1.737242564558983e-05,
+          "peak_rss_bytes": 554663936,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 548282368
+        },
+        {
+          "process_peak_before_query_bytes": 96010240,
+          "time_to_first_batch_s": 0.06740333000198007,
+          "total_s": 0.1267749099060893,
+          "post_first_batch_s": 0.05937157990410924,
+          "row_count": 32768,
+          "batch_count": 32,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 258473.85751860097,
+          "close_s": 1.7041806131601334e-05,
+          "peak_rss_bytes": 553840640,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 541376512
+        }
+      ]
+    },
+    {
+      "name": "small_batches",
+      "mode": "sql_reader_close_early",
+      "settings": [
+        "SET datafusion.execution.batch_size = 1024"
+      ],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 96002048,
+          "time_to_first_batch_s": 0.06971001531928778,
+          "total_s": 0.07531144004315138,
+          "post_first_batch_s": 0.005601424723863602,
+          "row_count": 1024,
+          "batch_count": 1,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 16896000,
+          "rows_per_second": 13596.871861874852,
+          "close_s": 0.002873317338526249,
+          "peak_rss_bytes": 538673152,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 520335360
+        },
+        {
+          "process_peak_before_query_bytes": 95981568,
+          "time_to_first_batch_s": 0.0686833169311285,
+          "total_s": 0.07507947878912091,
+          "post_first_batch_s": 0.006396161857992411,
+          "row_count": 1024,
+          "batch_count": 1,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 16896000,
+          "rows_per_second": 13638.879977791996,
+          "close_s": 0.0032564890570938587,
+          "peak_rss_bytes": 534302720,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 522866688
+        },
+        {
+          "process_peak_before_query_bytes": 96071680,
+          "time_to_first_batch_s": 0.06877123098820448,
+          "total_s": 0.07252326095476747,
+          "post_first_batch_s": 0.0037520299665629864,
+          "row_count": 1024,
+          "batch_count": 1,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 16896000,
+          "rows_per_second": 14119.607785406473,
+          "close_s": 0.0010377583093941212,
+          "peak_rss_bytes": 538013696,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 16,
+          "isolated_peak_rss_bytes": 515874816
+        }
+      ]
+    },
+    {
+      "name": "single_partition",
+      "mode": "sql_reader_process_as_you_go",
+      "settings": [
+        "SET datafusion.execution.target_partitions = 1"
+      ],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 96010240,
+          "time_to_first_batch_s": 0.07690084213390946,
+          "total_s": 0.3037498821504414,
+          "post_first_batch_s": 0.22684904001653194,
+          "row_count": 32768,
+          "batch_count": 4,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 107878.23115523267,
+          "close_s": 1.6780570149421692e-05,
+          "peak_rss_bytes": 288464896,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 288145408
+        },
+        {
+          "process_peak_before_query_bytes": 96260096,
+          "time_to_first_batch_s": 0.06400007707998157,
+          "total_s": 0.2807275652885437,
+          "post_first_batch_s": 0.21672748820856214,
+          "row_count": 32768,
+          "batch_count": 4,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 116725.2669552406,
+          "close_s": 1.6610603779554367e-05,
+          "peak_rss_bytes": 288714752,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 282578944
+        },
+        {
+          "process_peak_before_query_bytes": 96030720,
+          "time_to_first_batch_s": 0.06160198291763663,
+          "total_s": 0.2829654919914901,
+          "post_first_batch_s": 0.2213635090738535,
+          "row_count": 32768,
+          "batch_count": 4,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 115802.10636067759,
+          "close_s": 1.5488825738430023e-05,
+          "peak_rss_bytes": 288751616,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 287813632
+        }
+      ]
+    },
+    {
+      "name": "single_partition",
+      "mode": "sql_reader_close_early",
+      "settings": [
+        "SET datafusion.execution.target_partitions = 1"
+      ],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 95916032,
+          "time_to_first_batch_s": 0.06518669333308935,
+          "total_s": 0.0734167410992086,
+          "post_first_batch_s": 0.008230047766119242,
+          "row_count": 8192,
+          "batch_count": 1,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 135168000,
+          "rows_per_second": 111582.1797228794,
+          "close_s": 9.797979146242142e-06,
+          "peak_rss_bytes": 269340672,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 260268032
+        },
+        {
+          "process_peak_before_query_bytes": 96161792,
+          "time_to_first_batch_s": 0.0654621641151607,
+          "total_s": 0.07450491189956665,
+          "post_first_batch_s": 0.009042747784405947,
+          "row_count": 8192,
+          "batch_count": 1,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 135168000,
+          "rows_per_second": 109952.48220738649,
+          "close_s": 1.788325607776642e-05,
+          "peak_rss_bytes": 269459456,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 257540096
+        },
+        {
+          "process_peak_before_query_bytes": 95739904,
+          "time_to_first_batch_s": 0.06950801890343428,
+          "total_s": 0.07737858779728413,
+          "post_first_batch_s": 0.00787056889384985,
+          "row_count": 8192,
+          "batch_count": 1,
+          "first_batch_rows": 8192,
+          "maximum_batch_arrow_bytes": 135168000,
+          "total_arrow_bytes": 135168000,
+          "rows_per_second": 105869.0812691147,
+          "close_s": 1.696217805147171e-05,
+          "peak_rss_bytes": 269090816,
+          "effective_batch_size": 8192,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 260231168
+        }
+      ]
+    },
+    {
+      "name": "small_batches_single_partition",
+      "mode": "sql_reader_process_as_you_go",
+      "settings": [
+        "SET datafusion.execution.batch_size = 1024",
+        "SET datafusion.execution.target_partitions = 1"
+      ],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 95522816,
+          "time_to_first_batch_s": 0.018397334963083267,
+          "total_s": 0.206209609284997,
+          "post_first_batch_s": 0.18781227432191372,
+          "row_count": 32768,
+          "batch_count": 32,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 158906.27072917923,
+          "close_s": 1.6561243683099747e-05,
+          "peak_rss_bytes": 173150208,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 173318144
+        },
+        {
+          "process_peak_before_query_bytes": 96006144,
+          "time_to_first_batch_s": 0.01838186662644148,
+          "total_s": 0.24339152872562408,
+          "post_first_batch_s": 0.2250096620991826,
+          "row_count": 32768,
+          "batch_count": 32,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 134630.81550771414,
+          "close_s": 1.7463229596614838e-05,
+          "peak_rss_bytes": 170700800,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 171069440
+        },
+        {
+          "process_peak_before_query_bytes": 96030720,
+          "time_to_first_batch_s": 0.01866748696193099,
+          "total_s": 0.23507922794669867,
+          "post_first_batch_s": 0.21641174098476768,
+          "row_count": 32768,
+          "batch_count": 32,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 540672000,
+          "rows_per_second": 139391.3034605922,
+          "close_s": 1.5649013221263885e-05,
+          "peak_rss_bytes": 170491904,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 169934848
+        }
+      ]
+    },
+    {
+      "name": "small_batches_single_partition",
+      "mode": "sql_reader_close_early",
+      "settings": [
+        "SET datafusion.execution.batch_size = 1024",
+        "SET datafusion.execution.target_partitions = 1"
+      ],
+      "samples": [
+        {
+          "process_peak_before_query_bytes": 96047104,
+          "time_to_first_batch_s": 0.017331646289676428,
+          "total_s": 0.01983639784157276,
+          "post_first_batch_s": 0.0025047515518963337,
+          "row_count": 1024,
+          "batch_count": 1,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 16896000,
+          "rows_per_second": 51622.27578708466,
+          "close_s": 1.2854114174842834e-05,
+          "peak_rss_bytes": 158588928,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 150601728
+        },
+        {
+          "process_peak_before_query_bytes": 95830016,
+          "time_to_first_batch_s": 0.01733735715970397,
+          "total_s": 0.01965952990576625,
+          "post_first_batch_s": 0.0023221727460622787,
+          "row_count": 1024,
+          "batch_count": 1,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 16896000,
+          "rows_per_second": 52086.698151396544,
+          "close_s": 1.0388903319835663e-05,
+          "peak_rss_bytes": 157417472,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 151969792
+        },
+        {
+          "process_peak_before_query_bytes": 96149504,
+          "time_to_first_batch_s": 0.01835013786330819,
+          "total_s": 0.03940871683880687,
+          "post_first_batch_s": 0.021058578975498676,
+          "row_count": 1024,
+          "batch_count": 1,
+          "first_batch_rows": 1024,
+          "maximum_batch_arrow_bytes": 16896000,
+          "total_arrow_bytes": 16896000,
+          "rows_per_second": 25984.099005010954,
+          "close_s": 0.0009755026549100876,
+          "peak_rss_bytes": 191082496,
+          "effective_batch_size": 1024,
+          "effective_target_partitions": 1,
+          "isolated_peak_rss_bytes": 180908032
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Preparation and each read sample run in separate child processes so fixture allocations do not inflate reader peak memory; filesystem caches are not cleared.",
+    "Binary values are intentionally compressible to separate Parquet size from decoded Arrow memory.",
+    "peak_rss_bytes is the process lifetime peak (Windows: peak working set), including interpreter and runtime allocations.",
+    "effective_batch_size and effective_target_partitions are read from DataFusion after measuring the scan, rather than inferred from logical CPU count.",
+    "isolated_peak_rss_bytes samples Linux VmRSS every 10 ms, includes post-scan diagnostics, and may miss short peaks; it is null elsewhere.",
+    "Early close consumes and discards one batch, checks that close is terminal and repeatable, and reuses the session for SELECT 1; workers time out after 60 seconds.",
+    "Closing a reader does not promise immediate memory return to the operating system."
+  ]
+}

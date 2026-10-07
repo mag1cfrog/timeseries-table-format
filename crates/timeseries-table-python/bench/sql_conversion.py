@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import errno
 import gc
+import hashlib
 import importlib
 import json
 import os
@@ -16,6 +17,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
@@ -124,9 +126,7 @@ def _timed(fn):
 
 
 def _summarize_seconds(xs: list[float]) -> dict[str, object]:
-    xs_sorted = sorted(xs)
-    mid = xs_sorted[len(xs_sorted) // 2]
-    return {"min_s": xs_sorted[0], "median_s": mid, "runs_s": xs}
+    return {"min_s": min(xs), "median_s": median(xs), "runs_s": xs}
 
 
 @contextmanager
@@ -145,14 +145,9 @@ def _temp_env_var(key: str, value: str | None):
             os.environ[key] = old
 
 
-def _median(xs: list[float]) -> float:
-    xs_sorted = sorted(xs)
-    return xs_sorted[len(xs_sorted) // 2]
-
-
 def _fmt_seconds(s: float) -> str:
     if s < 1e-3:
-        return f"{s * 1e6:.0f}µs"
+        return f"{s * 1e6:.0f}us"
     if s < 1.0:
         return f"{s * 1e3:.1f}ms"
     return f"{s:.3f}s"
@@ -182,8 +177,8 @@ def _print_summary(out: dict[str, object]) -> None:
 
         # Rust-side export breakdown (best-effort).
         try:
-            ipc_encode_ms = _median([float(x) for x in r["rust_ms"]["ipc_encode_ms"]])
-            c_export_ms = _median(
+            ipc_encode_ms = median([float(x) for x in r["rust_ms"]["ipc_encode_ms"]])
+            c_export_ms = median(
                 [float(x) for x in r["rust_ms_c_stream"]["c_stream_export_ms"]]
             )
             print(
@@ -209,9 +204,11 @@ def _print_summary(out: dict[str, object]) -> None:
         row_counts = [int(x) for x in r["sql_reader_iter"]["row_count"]]
         batch_counts = [int(x) for x in r["sql_reader_iter"]["batch_count"]]
         if row_counts and batch_counts:
-            median_rows = sorted(row_counts)[len(row_counts) // 2]
-            median_batches = sorted(batch_counts)[len(batch_counts) // 2]
-            throughput = median_rows / iter_total_s if iter_total_s > 0 else float("nan")
+            median_rows = median(row_counts)
+            median_batches = median(batch_counts)
+            throughput = (
+                median_rows / iter_total_s if iter_total_s > 0 else float("nan")
+            )
             print(
                 f"  median rows={median_rows} batches={median_batches} throughput={throughput:,.0f} rows/s",
                 file=sys.stderr,
@@ -263,8 +260,8 @@ def _print_summary(out: dict[str, object]) -> None:
             stream_vals = [int(x) for x in process_stream_iso_rss if x is not None]
             table_vals = [int(x) for x in process_table_iso_rss if x is not None]
             if stream_vals and table_vals:
-                stream_med = sorted(stream_vals)[len(stream_vals) // 2]
-                table_med = sorted(table_vals)[len(table_vals) // 2]
+                stream_med = median(stream_vals)
+                table_med = median(table_vals)
                 reduction_pct = (
                     (table_med - stream_med) / table_med * 100.0 if table_med else 0.0
                 )
@@ -279,6 +276,42 @@ def _print_summary(out: dict[str, object]) -> None:
 
 
 def _try_peak_rss_bytes() -> int | None:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (name, ctypes.c_size_t)
+                for name in (
+                    "PeakWorkingSetSize",
+                    "WorkingSetSize",
+                    "QuotaPeakPagedPoolUsage",
+                    "QuotaPagedPoolUsage",
+                    "QuotaPeakNonPagedPoolUsage",
+                    "QuotaNonPagedPoolUsage",
+                    "PagefileUsage",
+                    "PeakPagefileUsage",
+                )
+            ]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        if psapi.GetProcessMemoryInfo(
+            kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        ):
+            return int(counters.PeakWorkingSetSize)
+        return None
+
     if resource is None:
         return None
 
@@ -303,7 +336,7 @@ def _fmt_optional_bytes(xs: object) -> str:
     if not vals:
         return "n/a"
 
-    b = sorted(vals)[len(vals) // 2]
+    b = median(vals)
     mib = b / (1024**2)
     if mib < 1024:
         return f"{mib:.1f} MiB"
@@ -330,7 +363,9 @@ def _read_proc_rss_bytes(pid: int) -> int | None:
     return None
 
 
-def _bench_sql_reader_iter(sess: ttf.Session, sql: str) -> dict[str, int | float | None]:
+def _bench_sql_reader_iter(
+    sess: ttf.Session, sql: str
+) -> dict[str, int | float | None]:
     t0 = _now()
     reader = sess.sql_reader(sql)
     first_batch_rows = 0
@@ -367,7 +402,9 @@ def _bench_sql_reader_iter(sess: ttf.Session, sql: str) -> dict[str, int | float
     }
 
 
-def _bench_sql_reader_read_all(sess: ttf.Session, sql: str) -> dict[str, int | float | None]:
+def _bench_sql_reader_read_all(
+    sess: ttf.Session, sql: str
+) -> dict[str, int | float | None]:
     t0 = _now()
     reader = sess.sql_reader(sql)
     try:
@@ -384,7 +421,9 @@ def _bench_sql_reader_read_all(sess: ttf.Session, sql: str) -> dict[str, int | f
     }
 
 
-def _bench_session_sql_table(sess: ttf.Session, sql: str) -> dict[str, int | float | None]:
+def _bench_session_sql_table(
+    sess: ttf.Session, sql: str
+) -> dict[str, int | float | None]:
     t0 = _now()
     table = sess.sql(sql)
     t1 = _now()
@@ -398,7 +437,7 @@ def _bench_session_sql_table(sess: ttf.Session, sql: str) -> dict[str, int | flo
 
 
 def _bench_sql_reader_process_as_you_go(
-    sess: ttf.Session, sql: str
+    sess: ttf.Session, sql: str, *, close_after_first: bool = False
 ) -> dict[str, int | float | None]:
     t0 = _now()
     reader = sess.sql_reader(sql)
@@ -406,6 +445,8 @@ def _bench_sql_reader_process_as_you_go(
     batch_count = 0
     first_batch_rows = 0
     first_batch_s: float | None = None
+    maximum_batch_arrow_bytes = 0
+    total_arrow_bytes = 0
 
     try:
         for batch in reader:
@@ -414,13 +455,29 @@ def _bench_sql_reader_process_as_you_go(
                 first_batch_rows = batch.num_rows
             row_count += batch.num_rows
             batch_count += 1
+            maximum_batch_arrow_bytes = max(maximum_batch_arrow_bytes, batch.nbytes)
+            total_arrow_bytes += batch.nbytes
+            del batch
+            if close_after_first:
+                break
     finally:
+        close_started = _now()
         reader.close()
+        close_s = _now() - close_started
 
     t1 = _now()
 
     if first_batch_s is None:
         first_batch_s = t1 - t0
+
+    if close_after_first:
+        reader.close()
+        try:
+            next(reader)
+        except pa.ArrowInvalid as exc:
+            assert "closed" in str(exc)
+        else:
+            raise AssertionError("reader must reject reads after close")
 
     return {
         "time_to_first_batch_s": first_batch_s,
@@ -429,6 +486,10 @@ def _bench_sql_reader_process_as_you_go(
         "row_count": row_count,
         "batch_count": batch_count,
         "first_batch_rows": first_batch_rows,
+        "maximum_batch_arrow_bytes": maximum_batch_arrow_bytes,
+        "total_arrow_bytes": total_arrow_bytes,
+        "rows_per_second": row_count / (t1 - t0),
+        "close_s": close_s,
         "peak_rss_bytes": _try_peak_rss_bytes(),
     }
 
@@ -473,6 +534,8 @@ def _run_isolated_worker(
     mode: str,
     table_root: Path,
     sql: str,
+    settings: tuple[str, ...] = (),
+    timeout_s: float | None = None,
 ) -> dict[str, int | float | None]:
     cmd = [
         sys.executable,
@@ -484,6 +547,8 @@ def _run_isolated_worker(
         "--worker-query",
         sql,
     ]
+    for setting in settings:
+        cmd.extend(["--worker-setting", setting])
 
     proc = subprocess.Popen(
         cmd,
@@ -494,6 +559,7 @@ def _run_isolated_worker(
     )
 
     sampled_peak_rss: int | None = None
+    started = _now()
     while True:
         rss = _read_proc_rss_bytes(proc.pid)
         if rss is not None:
@@ -502,6 +568,13 @@ def _run_isolated_worker(
 
         if proc.poll() is not None:
             break
+
+        if timeout_s is not None and _now() - started > timeout_s:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            raise TimeoutError(
+                f"Benchmark worker {mode} exceeded {timeout_s}s.\n{stdout}\n{stderr}"
+            )
 
         time.sleep(0.01)
 
@@ -520,19 +593,160 @@ def _run_isolated_worker(
     return metrics
 
 
-def _run_worker_mode(mode: str, table_root: str, sql: str) -> int:
+def _run_worker_mode(mode: str, table_root: str, sql: str, settings: list[str]) -> int:
     sess = ttf.Session()
+    for setting in settings:
+        sess.sql(setting)
     sess.register_tstable("prices", table_root)
+    before = _try_peak_rss_bytes()
 
     if mode == "sql_reader_process_as_you_go":
         out = _bench_sql_reader_process_as_you_go(sess, sql)
+    elif mode == "sql_reader_close_early":
+        out = _bench_sql_reader_process_as_you_go(sess, sql, close_after_first=True)
+        assert sess.sql("SELECT 1 AS ok")["ok"].to_pylist() == [1]
     elif mode == "session_sql_process_after_materialize":
         out = _bench_session_sql_process_after_materialize(sess, sql)
     else:
         raise SystemExit(f"unsupported --worker-mode: {mode}")
 
-    print(json.dumps(out))
+    # Read settings after measuring the scan so diagnostics do not inflate its peak.
+    sess.sql("SET datafusion.catalog.information_schema = true")
+    for name in ("batch_size", "target_partitions"):
+        value = sess.sql(f"SHOW datafusion.execution.{name}")["value"][0].as_py()
+        out[f"effective_{name}"] = int(value)
+
+    print(json.dumps({"process_peak_before_query_bytes": before, **out}))
     return 0
+
+
+def _prepare_wide_table(root: Path, rows: int) -> dict[str, object]:
+    table = ttf.TimeSeriesTable.create(
+        table_root=str(root),
+        index_column="tick",
+        index_type="uint64",
+        index_granularity=1,
+        entity_columns=["entity"],
+    )
+    for entity in range(4):
+        digests = [
+            hashlib.sha256(str(entity * rows + i).encode()).digest()
+            for i in range(rows)
+        ]
+        blobs = pa.array([digest * 64 for digest in digests], type=pa.binary())
+        columns = {
+            "entity": pa.array([entity] * rows, pa.int64()),
+            "tick": pa.array(range(rows), pa.uint64()),
+            "record_id": pa.array([digest.hex() for digest in digests]),
+            **{f"payload_{i}": blobs for i in range(8)},
+        }
+        table.append(pa.table(columns), max_rows_per_row_group=rows)
+    files = sorted((root / "data").rglob("*.parquet"))
+    row_groups = [pq.ParquetFile(file).metadata.num_row_groups for file in files]
+    assert len(files) == 4 and row_groups == [1] * 4
+    return {
+        "rows": rows * 4,
+        "rows_per_segment": rows,
+        "segments": len(files),
+        "row_groups": row_groups,
+        "payload_columns": 8,
+        "payload_bytes_per_column": 2048,
+        "decoded_payload_bytes": rows * 4 * 8 * 2048,
+        "parquet_bytes": sum(file.stat().st_size for file in files),
+    }
+
+
+def _bench_wide_streaming(args: argparse.Namespace) -> dict[str, object]:
+    rows = args.wide_rows_per_segment
+    settings = (
+        "SET datafusion.execution.batch_size = 1024",
+        "SET datafusion.execution.target_partitions = 1",
+    )
+    configurations = [
+        ("default", ()),
+        ("small_batches", settings[:1]),
+        ("single_partition", settings[1:]),
+        ("small_batches_single_partition", settings),
+    ]
+    tmpdir = args.tmpdir.strip() or None
+    if tmpdir:
+        Path(tmpdir).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=tmpdir) as directory:
+        root = Path(directory) / "wide_table"
+        prepared = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--worker-mode",
+                "prepare_wide",
+                "--worker-table-root",
+                str(root),
+                "--wide-rows-per-segment",
+                str(rows),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+        dataset = json.loads(prepared.stdout)
+        results = []
+        for name, config in configurations:
+            for mode in ("sql_reader_process_as_you_go", "sql_reader_close_early"):
+                samples = []
+                for run in range(args.warmups + args.runs):
+                    sample = _run_isolated_worker(
+                        mode, root, "SELECT * FROM prices", config, timeout_s=60
+                    )
+                    if mode == "sql_reader_close_early":
+                        assert sample["batch_count"] == 1
+                        assert 0 < sample["row_count"] < rows * 4
+                    else:
+                        assert sample["row_count"] == rows * 4
+                        assert sample["total_arrow_bytes"] == rows * 4 * 16500
+                    if run >= args.warmups:
+                        samples.append(sample)
+                results.append(
+                    {"name": name, "mode": mode, "settings": config, "samples": samples}
+                )
+                if args.summary:
+                    print(
+                        f"{name} {mode}: "
+                        f"first={_fmt_seconds(median([s['time_to_first_batch_s'] for s in samples]))} "
+                        f"total={_fmt_seconds(median([s['total_s'] for s in samples]))} "
+                        f"peak={_fmt_optional_bytes([s['peak_rss_bytes'] for s in samples])} "
+                        f"largest_batch={_fmt_optional_bytes([s['maximum_batch_arrow_bytes'] for s in samples])}",
+                        file=sys.stderr,
+                    )
+        return {
+            "env": {
+                "python": sys.version.replace("\n", " "),
+                "platform": platform.platform(),
+                "cpus": os.cpu_count(),
+                "ttf_version": ttf.__version__,
+                "pyarrow_version": pa.__version__,
+            },
+            "params": {"runs": args.runs, "warmups": args.warmups},
+            "dataset": dataset,
+            "wide_streaming_results": results,
+            "notes": [
+                "Preparation and each read sample run in separate child processes so fixture allocations do not inflate reader peak memory; filesystem caches are not cleared.",
+                "Binary values are intentionally compressible to separate Parquet size from decoded Arrow memory.",
+                "peak_rss_bytes is the process lifetime peak (Windows: peak working set), including interpreter and runtime allocations.",
+                "effective_batch_size and effective_target_partitions are read from DataFusion after measuring the scan, rather than inferred from logical CPU count.",
+                "isolated_peak_rss_bytes samples Linux VmRSS every 10 ms, includes post-scan diagnostics, and may miss short peaks; it is null elsewhere.",
+                "Early close consumes and discards one batch, checks that close is terminal and repeatable, and reuses the session for SELECT 1; workers time out after 60 seconds.",
+                "Closing a reader does not promise immediate memory return to the operating system.",
+            ],
+        }
+
+
+def _write_results(out: dict[str, object], args: argparse.Namespace) -> None:
+    payload = json.dumps(out, indent=2)
+    if args.json:
+        Path(args.json).write_text(payload, encoding="utf-8")
+    if not args.json or args.print_json:
+        print(payload)
 
 
 def main(argv: list[str]) -> int:
@@ -551,6 +765,17 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--warmups", type=int, default=1)
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--medium-ipc-mb", type=int, default=64)
+    ap.add_argument(
+        "--wide-streaming",
+        action="store_true",
+        help="Run the isolated wide-binary scan/early-close matrix instead of conversion benchmarks (no test-utils needed).",
+    )
+    ap.add_argument(
+        "--wide-rows-per-segment",
+        type=int,
+        default=8192,
+        help="Rows in each of four wide-streaming segments; lower this for a smoke run.",
+    )
     ap.add_argument(
         "--include-streaming",
         action="store_true",
@@ -580,14 +805,34 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--worker-mode", default="", help=argparse.SUPPRESS)
     ap.add_argument("--worker-table-root", default="", help=argparse.SUPPRESS)
     ap.add_argument("--worker-query", default="", help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--worker-setting", action="append", default=[], help=argparse.SUPPRESS
+    )
     args = ap.parse_args(argv)
+
+    if args.wide_rows_per_segment <= 0:
+        raise SystemExit("--wide-rows-per-segment must be > 0")
 
     if args.worker_mode:
         if not args.worker_table_root:
             raise SystemExit("--worker-table-root is required with --worker-mode")
+        if args.worker_mode == "prepare_wide":
+            print(
+                json.dumps(
+                    _prepare_wide_table(
+                        Path(args.worker_table_root), args.wide_rows_per_segment
+                    )
+                )
+            )
+            return 0
         if not args.worker_query:
             raise SystemExit("--worker-query is required with --worker-mode")
-        return _run_worker_mode(args.worker_mode, args.worker_table_root, args.worker_query)
+        return _run_worker_mode(
+            args.worker_mode,
+            args.worker_table_root,
+            args.worker_query,
+            args.worker_setting,
+        )
 
     if args.target_ipc_gb <= 0:
         raise SystemExit("--target-ipc-gb must be > 0")
@@ -599,6 +844,9 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--chunk-rows must be > 0")
     if args.warmups < 0 or args.runs <= 0:
         raise SystemExit("--warmups must be >= 0 and --runs must be > 0")
+    if args.wide_streaming:
+        _write_results(_bench_wide_streaming(args), args)
+        return 0
 
     testing = _require_testing_module()
 
@@ -756,7 +1004,11 @@ def main(argv: list[str]) -> int:
                             sess, sql, ipc_compression=args.ipc_compression
                         )
                     )
-                    _t, table = _timed(lambda: pa_ipc.open_stream(ipc_bytes).read_all())
+                    _t, table = _timed(
+                        lambda ipc_bytes=ipc_bytes: pa_ipc.open_stream(
+                            ipc_bytes
+                        ).read_all()
+                    )
                     del table
                     del ipc_bytes
                     gc.collect()
@@ -764,7 +1016,7 @@ def main(argv: list[str]) -> int:
                     _t, (obj, _m) = _timed(
                         lambda: testing._bench_sql_c_stream(sess, sql)
                     )
-                    _t, table = _timed(lambda: _decode_c_stream(obj))
+                    _t, table = _timed(lambda obj=obj: _decode_c_stream(obj))
                     del table
                     del obj
                     gc.collect()
@@ -819,7 +1071,9 @@ def main(argv: list[str]) -> int:
                     bench_sql_ipc_times.append(t_bench)
 
                     t_decode, table = _timed(
-                        lambda: pa_ipc.open_stream(ipc_bytes).read_all()
+                        lambda ipc_bytes=ipc_bytes: pa_ipc.open_stream(
+                            ipc_bytes
+                        ).read_all()
                     )
                     decode_only_times.append(t_decode)
 
@@ -843,7 +1097,7 @@ def main(argv: list[str]) -> int:
                     )
                     bench_sql_c_stream_times.append(t_bench)
 
-                    t_decode, table = _timed(lambda: _decode_c_stream(obj))
+                    t_decode, table = _timed(lambda obj=obj: _decode_c_stream(obj))
                     c_stream_decode_only_times.append(t_decode)
 
                     c_stream_arrow_mem_bytes.append(int(m["arrow_mem_bytes"]))
@@ -1105,9 +1359,7 @@ def main(argv: list[str]) -> int:
                                 "peak_rss_bytes": sql_reader_read_all_peak_rss_bytes,
                             },
                             "session_sql_table": {
-                                "total_s": _summarize_seconds(
-                                    session_sql_table_times
-                                ),
+                                "total_s": _summarize_seconds(session_sql_table_times),
                                 "row_count": session_sql_table_row_counts,
                                 "batch_count": session_sql_table_batch_counts,
                                 "peak_rss_bytes": session_sql_table_peak_rss_bytes,
@@ -1116,9 +1368,7 @@ def main(argv: list[str]) -> int:
                                 "time_to_first_batch_s": _summarize_seconds(
                                     sql_reader_process_first_batch_times
                                 ),
-                                "total_s": _summarize_seconds(
-                                    sql_reader_process_times
-                                ),
+                                "total_s": _summarize_seconds(sql_reader_process_times),
                                 "post_first_batch_s": _summarize_seconds(
                                     sql_reader_process_post_first_batch_times
                                 ),
@@ -1150,15 +1400,9 @@ def main(argv: list[str]) -> int:
                         }
                     )
 
-            payload = json.dumps(out, indent=2, sort_keys=False)
             if args.summary:
                 _print_summary(out)
-            if args.json:
-                Path(args.json).write_text(payload, encoding="utf-8")
-                if args.print_json:
-                    print(payload)
-            else:
-                print(payload)
+            _write_results(out, args)
             return 0
     finally:
         if not args.no_gc_disable and gc_was_enabled:

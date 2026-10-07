@@ -274,6 +274,14 @@ Sample local results on a generated dataset of about 10.5M rows:
 In this local run, `sql_reader(...)` made the first batch available much earlier and reduced peak
 RSS for process-as-you-go workloads.
 
+For wide binary rows, run the same script with `--wide-streaming` to compare
+default settings, smaller batches, one partition, and both settings together.
+This mode measures full scans and early close in fresh processes. See the
+[wide-row methodology and results](../../docs-site/docs/performance.md#wide-binary-rows)
+and [raw measurements](sql-reader-wide-2026-10-06.json). Streaming limits
+Python materialization but does not impose a decoded byte or process memory
+ceiling.
+
 ---
 
 ## Chart Generation
