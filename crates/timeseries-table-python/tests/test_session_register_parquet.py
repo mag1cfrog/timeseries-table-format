@@ -52,19 +52,20 @@ def test_register_parquet_empty_name_rejected(tmp_path):
         sess.register_parquet("", str(p))
 
 
-def test_register_parquet_missing_path_raises_with_path_context(tmp_path):
-    # Use an invalid extension to force DataFusion to reject registration at register time
-    # (missing files can be accepted by DataFusion and only fail at query time).
-    missing = tmp_path / "missing.txt"
+@pytest.mark.parametrize("exists", [False, True])
+def test_register_parquet_invalid_extension_raises_with_path_context(tmp_path, exists):
+    path = tmp_path / "data.txt"
+    if exists:
+        _write_dim_parquet(str(path))
 
     sess = ttf.Session()
     with pytest.raises(ttf.DataFusionError) as excinfo:
-        sess.register_parquet("dim", str(missing))
+        sess.register_parquet("dim", str(path))
 
     e = excinfo.value
-    assert str(missing) in str(e)
+    assert str(path) in str(e)
     assert getattr(e, "name", None) == "dim"
-    assert getattr(e, "path", None) == str(missing)
+    assert getattr(e, "path", None) == str(path)
 
 
 def test_register_parquet_concurrent_replace_does_not_crash(tmp_path):
@@ -101,12 +102,14 @@ def test_register_parquet_failed_replace_restores_previous_registration(tmp_path
     sess.register_parquet("dim", str(p))
     assert testing._test_session_table_exists(sess, "dim") is True
 
-    missing = tmp_path / "bad.txt"
+    invalid = tmp_path / "bad.parquet"
+    invalid.write_bytes(b"not a parquet file")
     with pytest.raises(ttf.DataFusionError):
-        sess.register_parquet("dim", str(missing))
+        sess.register_parquet("dim", str(invalid))
 
     # Should rollback to the previous provider.
     assert testing._test_session_table_exists(sess, "dim") is True
+    assert sess.sql("SELECT count(*) AS n FROM dim")["n"].to_pylist() == [2]
 
 
 def test_register_parquet_missing_path_does_not_register_when_none_existed(tmp_path):

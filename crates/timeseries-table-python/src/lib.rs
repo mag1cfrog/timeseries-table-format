@@ -22,6 +22,8 @@ mod _native {
     use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::error::ArrowError;
     use datafusion::common::ScalarValue;
+    use datafusion::datasource::file_format::options::ReadOptions;
+    use datafusion::datasource::listing::ListingTableUrl;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::execution::SendableRecordBatchStream;
     use datafusion::prelude::{ParquetReadOptions, SessionContext};
@@ -936,16 +938,39 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
                         RegisterParquetError::Runtime("Session catalog semaphore closed")
                     })?;
 
+                    let read_options = ParquetReadOptions::default();
+                    let table_path =
+                        ListingTableUrl::parse(&path).map_err(RegisterParquetError::DataFusion)?;
+                    if !table_path.is_collection()
+                        && !table_path.as_str().ends_with(read_options.file_extension)
+                    {
+                        return Err(RegisterParquetError::DataFusion(DFError::Execution(
+                            format!(
+                                "File path '{}' does not match the expected extension '{}'",
+                                table_path.as_str(),
+                                read_options.file_extension
+                            ),
+                        )));
+                    }
+
                     // Swap with rollback.
                     let old = ctx
                         .deregister_table(name.as_str())
                         .map_err(RegisterParquetError::DataFusion)?;
 
+                    let mut table_options = ctx.copied_table_options();
+                    // Keep pushdown controlled by the session so SET false can disable it.
+                    table_options.parquet.global.pushdown_filters = false;
+                    let listing_options =
+                        read_options.to_listing_options(&ctx.copied_config(), table_options);
+
                     match ctx
-                        .register_parquet(
+                        .register_listing_table(
                             name.as_str(),
                             path.as_str(),
-                            ParquetReadOptions::default(),
+                            listing_options,
+                            None,
+                            None,
                         )
                         .await
                     {

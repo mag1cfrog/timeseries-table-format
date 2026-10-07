@@ -11,7 +11,7 @@ pub use ts_table_provider::TsTableProvider;
 /// SQL session defaults shared by Rust applications, the CLI, and Python bindings.
 ///
 /// Parquet predicates are evaluated during decoding to avoid materializing
-/// nonmatching rows. Disable this with
+/// nonmatching rows. For queries through [`TsTableProvider`], disable this with
 /// `SET datafusion.execution.parquet.pushdown_filters = false` when needed.
 /// Caller-created DataFusion configurations retain their own defaults.
 pub fn default_session_config() -> engine::prelude::SessionConfig {

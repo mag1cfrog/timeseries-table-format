@@ -60,12 +60,26 @@ def test_filter_pushdown_preserves_query_results(tmp_path, registration, streami
         (["tick"], "try_cast(record_id AS BIGINT) = 4", [4]),
         (["payload_0"], "record_id = 'missing'", []),
         (["tick"], "record_id IS NOT NULL ORDER BY tick LIMIT 2", [0, 1]),
+        (["tick"], "tick > 100 ORDER BY tick", []),
+        (["tick"], "tick > 100 ORDER BY tick LIMIT 2", []),
+        (["payload_7", "tick"], "entity = 99 ORDER BY tick", []),
     ]
-    for pushdown in (None, "false", "true"):
+    for pushdown in (None, "false", "true", "false"):
         if pushdown is not None:
             session.sql(
                 "SET datafusion.execution.parquet.pushdown_filters = " + pushdown
             )
+        # Both row groups survive statistics pruning for this predicate.
+        plan = session.sql("EXPLAIN ANALYZE SELECT * FROM prices WHERE record_id = 'b'")
+        scan = next(
+            line
+            for row in plan.to_pylist()
+            for line in row["plan"].splitlines()
+            if "DataSourceExec:" in line
+        )
+        enabled = pushdown != "false"
+        assert f"metrics=[output_rows={1 if enabled else 6}," in scan
+        assert f"pushdown_rows_pruned={5 if enabled else 0}," in scan
         for columns, predicate, indices in cases:
             query = f"SELECT {', '.join(columns)} FROM prices WHERE {predicate}"
             if streaming:
