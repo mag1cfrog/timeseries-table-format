@@ -24,7 +24,7 @@ mod _native {
     use datafusion::common::ScalarValue;
     use datafusion::error::DataFusionError as DFError;
     use datafusion::execution::SendableRecordBatchStream;
-    use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+    use datafusion::prelude::{ParquetReadOptions, SessionContext};
 
     use pyo3::PyAny;
     use pyo3::types::{PyCapsule, PyCapsuleMethods};
@@ -44,7 +44,7 @@ mod _native {
 
     use timeseries_table_format::{
         AppendReport as CoreAppendReport, AppendRequest, ParquetCompression,
-        datafusion::TsTableProvider,
+        datafusion::{TsTableProvider, default_session_config},
         table::{
             OptimizeReport as CoreOptimizeReport, VacuumArtifact as CoreVacuumArtifact,
             VacuumArtifactReason as CoreVacuumArtifactReason, VacuumError as CoreVacuumError,
@@ -772,8 +772,7 @@ This project requires pyarrow>=23.0.0, so please upgrade your pyarrow installati
         fn new() -> PyResult<Self> {
             let rt = tokio_runner::global_runtime()?;
 
-            let cfg = SessionConfig::new();
-            let ctx = SessionContext::new_with_config(cfg);
+            let ctx = SessionContext::new_with_config(default_session_config());
 
             Ok(Self {
                 rt,

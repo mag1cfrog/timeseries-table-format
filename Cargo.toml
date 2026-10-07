@@ -16,6 +16,7 @@ missing_docs = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+mod_module_files = "deny"
 
 [workspace.dependencies]
 timeseries-table-format = { path = "crates/timeseries-table-format", version = "0.8.0", default-features = false }

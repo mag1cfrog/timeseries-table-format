@@ -32,7 +32,7 @@ use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder}
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 use timeseries_table_format::coverage::EntityValue;
-use timeseries_table_format::datafusion::TsTableProvider;
+use timeseries_table_format::datafusion::{TsTableProvider, default_session_config};
 use timeseries_table_format::metadata::logical_schema::{
     LogicalDataType, LogicalField, LogicalSchema, LogicalTimestampUnit,
 };
@@ -1969,6 +1969,52 @@ async fn pushdown_marks_all_filters_inexact() -> TestResult {
         r.iter()
             .all(|x| matches!(x, TableProviderFilterPushDown::Inexact))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_sql_defaults_filter_during_decode_and_allow_opt_out() -> TestResult {
+    let tmp = TempDir::new()?;
+    let rows = (0..32)
+        .map(|i| TestRow {
+            ts_millis: minutes_to_millis(i),
+            symbol: "A",
+            price: Some(i as f64),
+        })
+        .collect::<Vec<_>>();
+    let props = WriterProperties::builder()
+        .set_statistics_enabled(EnabledStatistics::None)
+        .build();
+    let table =
+        create_single_segment_table_with_props(&tmp, "data/pushdown.parquet", &rows, props).await?;
+    let ctx = SessionContext::new_with_config(default_session_config());
+    register_provider(&ctx, Arc::new(table))?;
+
+    for enabled in [true, false] {
+        if !enabled {
+            ctx.sql("SET datafusion.execution.parquet.pushdown_filters = false")
+                .await?
+                .collect()
+                .await?;
+        }
+        let plan = ctx
+            .sql("SELECT ts FROM t WHERE price = 16.0")
+            .await?
+            .create_physical_plan()
+            .await?;
+        let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await?;
+        assert_eq!(collect_i64_values(&batches)?, vec![minutes_to_millis(16)]);
+        let metrics = find_data_source_exec(plan.as_ref())
+            .ok_or("expected DataSourceExec")?
+            .metrics()
+            .ok_or("expected scan metrics")?;
+        let pruned = metrics
+            .sum_by_name("pushdown_rows_pruned")
+            .ok_or("expected pushdown_rows_pruned")?
+            .as_usize();
+        assert_eq!(pruned, if enabled { 31 } else { 0 });
+        assert_eq!(metrics.output_rows(), Some(if enabled { 1 } else { 32 }));
+    }
     Ok(())
 }
 
