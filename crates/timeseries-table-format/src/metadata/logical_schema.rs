@@ -2,7 +2,11 @@
 //!
 //! This module models logical fields and data types stored in the transaction
 //! log, along with validation and conversion to Arrow schemas.
-use std::{collections::HashSet, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, TimeUnit};
 
@@ -336,21 +340,26 @@ impl fmt::Display for LogicalDataType {
 pub struct LogicalSchema {
     /// All logical columns that compose the schema in their defined order.
     columns: Vec<LogicalField>,
+    /// Opaque schema annotations, stored in key order for stable JSON.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    metadata: BTreeMap<String, String>,
 }
 
 impl LogicalSchema {
     /// Convert an Arrow schema into this table's exact logical schema model.
     ///
-    /// Preserves field names, order, supported types, and nullability. Arrow schema
-    /// and field metadata are outside this model and are not retained; callers
-    /// that must reject metadata loss should validate it before conversion.
+    /// Preserves schema metadata, field names, order, supported types, and nullability.
+    /// Field metadata is not retained; callers that must reject field metadata loss
+    /// should validate it before conversion.
     pub fn try_from_arrow_schema(schema: &Schema) -> Result<Self, ArrowToLogicalSchemaError> {
         let fields = schema
             .fields()
             .iter()
             .map(|field| logical_field_from_arrow(field, field.name()))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(fields).context(InvalidArrowLogicalSchemaSnafu)
+        Self::new(fields)
+            .map(|logical| logical.with_metadata(schema.metadata().clone().into_iter().collect()))
+            .context(InvalidArrowLogicalSchemaSnafu)
     }
 
     /// Convert this logical schema to an owned Arrow [`Schema`].
@@ -364,7 +373,10 @@ impl LogicalSchema {
             fields.push(fref.as_ref().clone());
         }
 
-        Ok(Schema::new(fields))
+        Ok(Schema::new_with_metadata(
+            fields,
+            self.metadata.clone().into_iter().collect(),
+        ))
     }
 
     /// Convert this logical schema to a shared Arrow [`SchemaRef`].
@@ -478,12 +490,26 @@ impl LogicalSchema {
             validate_field(col, &col.name)?;
         }
 
-        Ok(Self { columns })
+        Ok(Self {
+            columns,
+            metadata: BTreeMap::new(),
+        })
     }
 
     /// Borrow the logical columns.
     pub fn columns(&self) -> &[LogicalField] {
         &self.columns
+    }
+
+    /// Borrow the schema's opaque UTF-8 key/value annotations.
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
+    }
+
+    /// Set schema annotations on this schema value. This does not alter a committed table.
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
     }
 }
 
@@ -880,13 +906,55 @@ mod tests {
             .collect::<Vec<_>>();
         let arrow = Schema::new_with_metadata(
             fields,
-            HashMap::from([("schema-metadata".to_string(), "ignored".to_string())]),
+            HashMap::from([("schema-metadata".to_string(), "retained".to_string())]),
         );
 
         assert_eq!(
             LogicalSchema::try_from_arrow_schema(&arrow).expect("logical schema"),
-            expected
+            expected.with_metadata(BTreeMap::from([(
+                "schema-metadata".into(),
+                "retained".into()
+            )]))
         );
+    }
+
+    #[test]
+    fn schema_metadata_round_trips_through_json_and_arrow() {
+        let legacy = sample_logical_schema_all_supported();
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_json.get("metadata").is_none());
+        assert!(
+            serde_json::from_value::<LogicalSchema>(legacy_json.clone())
+                .unwrap()
+                .metadata()
+                .is_empty()
+        );
+
+        let metadata = BTreeMap::from([
+            ("z".into(), "{\"opaque\":true}".into()),
+            ("a".into(), "\u{6e29}\u{5ea6}\0\n".into()),
+            ("".into(), "".into()),
+        ]);
+        let schema = legacy.with_metadata(metadata.clone());
+        let json = serde_json::to_string(&schema).unwrap();
+        let restored: LogicalSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.metadata(), &metadata);
+        assert_eq!(serde_json::to_string(&restored).unwrap(), json);
+        assert_eq!(
+            LogicalSchema::try_from_arrow_schema(&restored.to_arrow_schema().unwrap()).unwrap(),
+            schema
+        );
+        assert!(json.find("\"a\":").unwrap() < json.find("\"z\":").unwrap());
+
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!({"key": 1}),
+            serde_json::json!([]),
+        ] {
+            let mut value = legacy_json.clone();
+            value["metadata"] = invalid;
+            assert!(serde_json::from_value::<LogicalSchema>(value).is_err());
+        }
     }
 
     #[test]

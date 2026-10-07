@@ -38,7 +38,9 @@ use crate::batch_schema::{BatchSchemaAlignment, MissingColumnPolicy};
 use crate::metadata::{
     index::{IndexSpec, IndexValue, IndexValueError, validate_index_range},
     logical_schema::LogicalSchema,
-    schema_compat::{SchemaCompatibilityError, require_table_schema},
+    schema_compat::{
+        SchemaCompatibilityError, ensure_file_schema_metadata_matches, require_table_schema,
+    },
     segments::SegmentMeta,
 };
 use crate::storage::{self, TableLocation};
@@ -291,7 +293,7 @@ async fn build_segment_scan_stream<S, E>(
     index: &IndexSpec,
     start: S,
     end: E,
-    canonical_schema: Option<&LogicalSchema>,
+    canonical_schema: Option<(&LogicalSchema, MissingColumnPolicy)>,
 ) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
@@ -302,12 +304,20 @@ where
     let expected = start.kind_name();
     let index_column = index.column.as_str();
 
-    let reader = ParquetRecordBatchStreamBuilder::new(reader)
+    let builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .context(ParquetSnafu {
             path: &path,
             operation: "reading metadata",
-        })?
+        })?;
+    if let Some((table_schema, _)) = canonical_schema {
+        ensure_file_schema_metadata_matches(table_schema.metadata(), builder.schema().metadata())
+            .map_err(|source| ScanError::Schema {
+            path: Some(path.clone()),
+            source: Box::new(source),
+        })?;
+    }
+    let reader = builder
         .with_batch_size(SCAN_BATCH_SIZE)
         .build()
         .context(ParquetSnafu {
@@ -318,13 +328,25 @@ where
     // Parquet omits schema metadata from batches; use the built stream's schema.
     let schema = reader.schema();
     let alignment = canonical_schema
-        .map(|table_schema| {
-            BatchSchemaAlignment::for_historical_segment(Arc::clone(schema), table_schema, index)
-                .map(Arc::new)
-                .map_err(|source| ScanError::Schema {
-                    path: Some(path.clone()),
-                    source: Box::new(source),
-                })
+        .map(|(table_schema, policy)| {
+            let alignment = if policy == MissingColumnPolicy::Reject {
+                BatchSchemaAlignment::for_metadata_restoration(
+                    Arc::clone(schema),
+                    table_schema,
+                    index,
+                )
+            } else {
+                BatchSchemaAlignment::for_historical_segment(
+                    Arc::clone(schema),
+                    table_schema,
+                    index,
+                    policy,
+                )
+            };
+            alignment.map(Arc::new).map_err(|source| ScanError::Schema {
+                path: Some(path.clone()),
+                source: Box::new(source),
+            })
         })
         .transpose()?;
     let index_idx = schema
@@ -453,7 +475,7 @@ async fn open_segment_scan<S, E>(
     index: &IndexSpec,
     start: S,
     end: E,
-    canonical_schema: Option<&LogicalSchema>,
+    canonical_schema: Option<(&LogicalSchema, MissingColumnPolicy)>,
 ) -> Result<SegmentScanStream, ScanError>
 where
     S: Into<IndexValue>,
@@ -484,7 +506,7 @@ struct ScanState {
     index: IndexSpec,
     start: IndexValue,
     end: IndexValue,
-    canonical_schema: Option<LogicalSchema>,
+    canonical_schema: Option<(LogicalSchema, MissingColumnPolicy)>,
 }
 
 impl TimeSeriesTable {
@@ -502,6 +524,7 @@ impl TimeSeriesTable {
         let candidates =
             segments_for_range(&self.state, &start, &end).context(InvalidSegmentBoundsSnafu)?;
 
+        let policy = MissingColumnPolicy::from_table_requirements(&self.state.table_meta);
         let state = ScanState {
             candidates: candidates.into_iter(),
             current: None,
@@ -509,18 +532,22 @@ impl TimeSeriesTable {
             index: self.index.clone(),
             start,
             end,
-            canonical_schema: if MissingColumnPolicy::from_table_requirements(
-                &self.state.table_meta,
-            ) == MissingColumnPolicy::FillNullableWithNull
+            canonical_schema: if policy == MissingColumnPolicy::FillNullableWithNull
+                || self
+                    .state
+                    .table_meta
+                    .logical_schema()
+                    .is_some_and(|schema| !schema.metadata().is_empty())
             {
-                Some(
+                Some((
                     require_table_schema(&self.state.table_meta)
                         .map_err(|source| ScanError::Schema {
                             path: None,
                             source: Box::new(source),
                         })?
                         .clone(),
-                )
+                    policy,
+                ))
             } else {
                 None
             },
@@ -549,7 +576,10 @@ impl TimeSeriesTable {
                         &state.index,
                         state.start.clone(),
                         state.end.clone(),
-                        state.canonical_schema.as_ref(),
+                        state
+                            .canonical_schema
+                            .as_ref()
+                            .map(|(schema, policy)| (schema, *policy)),
                     )
                     .await?,
                 );
@@ -930,7 +960,7 @@ mod tests {
             &signed_scan_index(),
             0i64,
             2i64,
-            Some(&canonical),
+            Some((&canonical, MissingColumnPolicy::FillNullableWithNull)),
         )
         .await?;
         assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);
@@ -952,7 +982,7 @@ mod tests {
             &signed_scan_index(),
             0i64,
             2i64,
-            Some(&canonical),
+            Some((&canonical, MissingColumnPolicy::FillNullableWithNull)),
         )
         .await?;
         assert_eq!(stats.read_calls.load(Ordering::SeqCst), 0);

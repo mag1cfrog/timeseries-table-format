@@ -73,6 +73,72 @@ fn assert_cli_success(output: &Output) {
     );
 }
 
+#[tokio::test]
+async fn cli_append_preserves_file_metadata_and_rejects_conflicts()
+-> StdResult<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    let tmp = TempDir::new()?;
+    let root = tmp.path().join("table");
+    let index = timeseries_table_format::IndexSpec {
+        column: "idx".into(),
+        entity_columns: vec![],
+        kind: IndexKind::Int64 {
+            index_granularity: NonZeroU64::MIN,
+        },
+    };
+    let table = TimeSeriesTable::create(
+        TableLocation::local(&root),
+        timeseries_table_format::TableMeta::new_time_series(index),
+    )
+    .await?;
+    let path = tmp.path().join("source.parquet");
+    let write_source = |idx, metadata| -> StdResult<(), Box<dyn std::error::Error>> {
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![Field::new("idx", DataType::Int64, false)],
+            metadata,
+        ));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![idx]))])?;
+        let mut writer = ArrowWriter::try_new(std::fs::File::create(&path)?, schema, None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    };
+    let metadata = HashMap::from([("unit".to_string(), "ms".to_string())]);
+    write_source(0, metadata.clone())?;
+    let args = [
+        "append",
+        "--table",
+        root.to_str().unwrap(),
+        "--parquet",
+        path.to_str().unwrap(),
+    ];
+    assert_cli_success(&run_cli(&args)?);
+    let state = table.load_latest_state().await?;
+    assert_eq!(state.version, 2);
+    assert_eq!(state.table_meta.arrow_schema_ref()?.metadata(), &metadata);
+    assert!(
+        state
+            .table_meta
+            .required_reader_features()
+            .contains("schema_metadata")
+    );
+    let segment = state.segments.values().next().unwrap();
+    let stored =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(root.join(&segment.path))?)?;
+    assert_eq!(stored.schema().metadata(), &metadata);
+
+    write_source(1, HashMap::from([("unit".into(), "us".into())]))?;
+    let output = run_cli(&args)?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("schema metadata conflicts"));
+    assert_eq!(table.load_latest_state().await?, state);
+    write_source(1, HashMap::new())?;
+    assert_cli_success(&run_cli(&args)?);
+    assert_eq!(table.load_latest_state().await?.version, 3);
+    Ok(())
+}
+
 #[test]
 fn cli_diagnostics_default_to_warn_without_changing_stdout()
 -> StdResult<(), Box<dyn std::error::Error>> {

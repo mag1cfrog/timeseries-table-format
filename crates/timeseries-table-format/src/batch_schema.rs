@@ -17,7 +17,7 @@ use crate::metadata::{
     index::IndexSpec,
     logical_schema::LogicalSchema,
     protocol::SCHEMA_ADD_COLUMNS_FEATURE,
-    schema_compat::{SchemaCompatibilityError, SchemaResult},
+    schema_compat::{SchemaCompatibilityError, SchemaResult, ensure_schema_fields_match_by_name},
     table::TableMeta,
 };
 
@@ -72,6 +72,32 @@ impl BatchSchemaAlignment {
         }
     }
 
+    /// Restore only schema annotations on snapshots without column evolution.
+    /// Field annotations remain on the source fields until the logical model
+    /// supports persisting them, so this operation never changes array types.
+    pub(crate) fn for_metadata_restoration(
+        incoming_schema: SchemaRef,
+        registered_schema: &LogicalSchema,
+        index: &IndexSpec,
+    ) -> SchemaResult<Self> {
+        let source = LogicalSchema::try_from_arrow_schema(&incoming_schema).map_err(|source| {
+            SchemaCompatibilityError::SourceSchemaConversion {
+                source: Box::new(source),
+            }
+        })?;
+        ensure_schema_fields_match_by_name(registered_schema, &source, index)?;
+        let output_schema = Arc::new(
+            incoming_schema
+                .as_ref()
+                .clone()
+                .with_metadata(registered_schema.metadata().clone().into_iter().collect()),
+        );
+        Ok(Self {
+            output_schema,
+            ..Self::for_schema_adoption(incoming_schema)
+        })
+    }
+
     /// Validate and map an incoming schema into the registered table schema.
     pub(crate) fn for_ingestion(
         incoming_schema: SchemaRef,
@@ -79,23 +105,29 @@ impl BatchSchemaAlignment {
         index: &IndexSpec,
         policy: MissingColumnPolicy,
     ) -> SchemaResult<Self> {
+        // Metadata-free legacy schemas keep their existing ingestion behavior.
+        // Annotated tables own these values; input may omit but never override them.
+        if !registered_schema.metadata().is_empty() {
+            for (key, value) in incoming_schema.metadata() {
+                if registered_schema.metadata().get(key) != Some(value) {
+                    return Err(SchemaCompatibilityError::IncomingSchemaMetadataMismatch {
+                        key: key.clone(),
+                    });
+                }
+            }
+        }
         Self::build(incoming_schema, registered_schema, index, policy, true)
     }
 
-    /// Historical data is reordered and null-filled, never cast. Called only
-    /// for snapshots that select the nullable-column policy.
+    /// Restore the canonical schema on historical data without widening types.
+    /// Missing nullable columns still require the snapshot's evolution feature.
     pub(crate) fn for_historical_segment(
         incoming_schema: SchemaRef,
         registered_schema: &LogicalSchema,
         index: &IndexSpec,
+        policy: MissingColumnPolicy,
     ) -> SchemaResult<Self> {
-        Self::build(
-            incoming_schema,
-            registered_schema,
-            index,
-            MissingColumnPolicy::FillNullableWithNull,
-            false,
-        )
+        Self::build(incoming_schema, registered_schema, index, policy, false)
     }
 
     fn build(
@@ -257,6 +289,7 @@ mod tests {
             source_schema.clone(),
             &canonical,
             &test_index(),
+            MissingColumnPolicy::FillNullableWithNull,
         )
         .unwrap();
         let original = RecordBatch::try_new(
@@ -401,6 +434,7 @@ mod tests {
                     incoming.schema(),
                     &canonical,
                     &test_index(),
+                    MissingColumnPolicy::FillNullableWithNull,
                 )
             } else {
                 BatchSchemaAlignment::for_ingestion(
@@ -426,6 +460,15 @@ mod tests {
         }
         assert!(matches!(
             strict_alignment(&incoming.schema(), &canonical),
+            Err(SchemaCompatibilityError::MissingIncomingColumn { .. })
+        ));
+        assert!(matches!(
+            BatchSchemaAlignment::for_historical_segment(
+                incoming.schema(),
+                &canonical,
+                &test_index(),
+                MissingColumnPolicy::Reject
+            ),
             Err(SchemaCompatibilityError::MissingIncomingColumn { .. })
         ));
     }
@@ -454,6 +497,7 @@ mod tests {
                         Arc::new(incoming.clone()),
                         &canonical,
                         &test_index(),
+                        MissingColumnPolicy::FillNullableWithNull,
                     )
                 } else {
                     BatchSchemaAlignment::for_ingestion(
@@ -491,7 +535,8 @@ mod tests {
                 BatchSchemaAlignment::for_historical_segment(
                     Arc::new(incoming.clone()),
                     &canonical,
-                    &test_index()
+                    &test_index(),
+                    MissingColumnPolicy::FillNullableWithNull,
                 )
                 .is_err()
             );
@@ -529,7 +574,8 @@ mod tests {
             BatchSchemaAlignment::for_historical_segment(
                 incoming.schema(),
                 &canonical,
-                &test_index()
+                &test_index(),
+                MissingColumnPolicy::FillNullableWithNull,
             ),
             Err(SchemaCompatibilityError::IncomingTypeMismatch { .. })
         ));
@@ -571,6 +617,7 @@ mod tests {
             incoming.schema(),
             &canonical,
             &test_index(),
+            MissingColumnPolicy::FillNullableWithNull,
         )
         .unwrap()
         .align_batch(&incoming)

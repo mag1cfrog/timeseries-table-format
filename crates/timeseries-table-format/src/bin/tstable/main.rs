@@ -9,14 +9,16 @@ mod shell;
 use std::fs::File;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
+use arrow::{
+    error::ArrowError,
+    record_batch::{RecordBatch, RecordBatchIterator, RecordBatchReader},
+};
 use chrono::{DateTime, FixedOffset, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use parquet::{
-    arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
-    errors::ParquetError,
-};
+use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, errors::ParquetError};
 use snafu::ResultExt;
 use timeseries_table_format::{
     metadata::{
@@ -311,14 +313,31 @@ async fn open_table(location: TableLocation, table_root: &Path) -> CliResult<Tim
         })
 }
 
-fn open_parquet_batch_reader(parquet: &Path) -> CliResult<ParquetRecordBatchReader> {
+fn open_parquet_batch_reader(parquet: &Path) -> CliResult<impl RecordBatchReader> {
     let path = parquet.display().to_string();
     let file = File::open(parquet)
         .map_err(ParquetError::from)
         .context(ReadParquetSourceSnafu { path: path.clone() })?;
-    ParquetRecordBatchReaderBuilder::try_new(file)
-        .and_then(|builder| builder.build())
-        .context(ReadParquetSourceSnafu { path })
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context(ReadParquetSourceSnafu { path: path.clone() })?;
+    let file_schema = builder.schema().clone();
+    let reader = builder.build().context(ReadParquetSourceSnafu { path })?;
+    let decoded_schema = reader.schema();
+    let output_schema = Arc::clone(&file_schema);
+    // Preserve file annotations at the ingestion boundary, after validating the
+    // decoder's batch contract. Append then adopts or checks these annotations.
+    Ok(RecordBatchIterator::new(
+        reader.map(move |batch| {
+            let batch = batch?;
+            if batch.schema() != decoded_schema {
+                return Err(ArrowError::SchemaError(
+                    "Parquet batch schema differs from its reader schema".into(),
+                ));
+            }
+            RecordBatch::try_new(Arc::clone(&output_schema), batch.columns().to_vec())
+        }),
+        file_schema,
+    ))
 }
 
 async fn append_parquet_file(

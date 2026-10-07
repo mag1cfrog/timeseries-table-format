@@ -38,8 +38,8 @@ use crate::{
         index::{IndexSpec, IndexSpecError},
         logical_schema::LogicalSchema,
         schema_compat::{
-            SchemaCompatibilityError, ensure_index_spec_matches_schema,
-            ensure_schema_fields_match_by_name,
+            SchemaCompatibilityError, ensure_file_schema_metadata_matches,
+            ensure_index_spec_matches_schema, ensure_schema_fields_match_by_name,
         },
         segments::{FileFormat, SegmentEntityLayout, SegmentMeta, SegmentMetaError},
     },
@@ -296,6 +296,19 @@ async fn stage_identity_data(
                 source,
                 backtrace: Backtrace::capture(),
             })?;
+    if let Some(alignment) = alignment {
+        let registered_metadata = alignment
+            .output_schema()
+            .metadata()
+            .clone()
+            .into_iter()
+            .collect();
+        ensure_file_schema_metadata_matches(&registered_metadata, metadata.schema().metadata())
+            .map_err(|source| EntityRewriteError::SegmentSchemaValidation {
+                path: source_path.to_string(),
+                source: Box::new(source),
+            })?;
+    }
     let schema = alignment.map_or_else(
         || metadata.schema().clone(),
         |alignment| alignment.output_schema().clone(),
@@ -440,26 +453,48 @@ async fn prepare_rewrite_source(
         .ok_or_else(|| invalid_input("source has no committed entity-coverage sidecar"))?;
     validate_rewrite_path(coverage_path, "source coverage")?;
 
-    let alignment = if policy == MissingColumnPolicy::FillNullableWithNull {
+    let alignment = if policy == MissingColumnPolicy::FillNullableWithNull
+        || !table_schema.metadata().is_empty()
+    {
         let reader = open_parquet_reader(location.as_ref(), Path::new(&source.path))
             .await
             .map_err(|source| EntityRewriteError::Storage { source })?;
-        // Use the built stream's schema to match the batches aligned during staging.
-        let reader = ParquetRecordBatchStreamBuilder::new(reader)
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
             .await
-            .and_then(|builder| builder.build())
             .map_err(|error| EntityRewriteError::Parquet {
                 path: source.path.clone(),
                 source: error,
                 backtrace: Backtrace::capture(),
             })?;
-        Some(
-            BatchSchemaAlignment::for_historical_segment(
+        ensure_file_schema_metadata_matches(table_schema.metadata(), builder.schema().metadata())
+            .map_err(|error| EntityRewriteError::SegmentSchemaValidation {
+            path: source.path.clone(),
+            source: Box::new(error),
+        })?;
+        // The reader's schema describes decoded batches; the footer was checked above.
+        let reader = builder
+            .build()
+            .map_err(|error| EntityRewriteError::Parquet {
+                path: source.path.clone(),
+                source: error,
+                backtrace: Backtrace::capture(),
+            })?;
+        let alignment = if policy == MissingColumnPolicy::Reject {
+            BatchSchemaAlignment::for_metadata_restoration(
                 reader.schema().clone(),
                 table_schema,
                 index,
             )
-            .map_err(|error| EntityRewriteError::SegmentSchemaValidation {
+        } else {
+            BatchSchemaAlignment::for_historical_segment(
+                reader.schema().clone(),
+                table_schema,
+                index,
+                policy,
+            )
+        };
+        Some(
+            alignment.map_err(|error| EntityRewriteError::SegmentSchemaValidation {
                 path: source.path.clone(),
                 source: Box::new(error),
             })?,

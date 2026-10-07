@@ -4,7 +4,7 @@
 //! Every appended segment must have a [`LogicalSchema`] that matches the table's
 //! canonical schema exactly.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use arrow::datatypes::DataType;
 use snafu::prelude::*;
@@ -13,7 +13,10 @@ use crate::{
     coverage::{EntityIdentity, EntityValue},
     metadata::{
         index::{IndexKind, IndexSpec},
-        logical_schema::{LogicalDataType, LogicalField, LogicalSchema, LogicalToArrowSchemaError},
+        logical_schema::{
+            ArrowToLogicalSchemaError, LogicalDataType, LogicalField, LogicalSchema,
+            LogicalToArrowSchemaError,
+        },
         table::TableMeta,
     },
 };
@@ -22,6 +25,21 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum SchemaCompatibilityError {
+    /// A historical source has a type the table's logical model cannot represent.
+    #[snafu(display("Cannot validate source schema: {source}"))]
+    SourceSchemaConversion {
+        /// Original Arrow-to-logical conversion failure.
+        source: Box<ArrowToLogicalSchemaError>,
+    },
+    /// A committed file disagrees with the table's persisted schema annotations.
+    #[snafu(display("Parquet schema metadata does not match the table schema"))]
+    FileSchemaMetadataMismatch,
+    /// An explicit incoming annotation disagrees with the table's schema metadata.
+    #[snafu(display("Incoming schema metadata conflicts with the table for key {key:?}"))]
+    IncomingSchemaMetadataMismatch {
+        /// Conflicting or unregistered annotation key.
+        key: String,
+    },
     /// The table does not yet have a canonical logical schema.
     ///
     /// Many call sites (like append) may choose to *not* use this and
@@ -188,6 +206,23 @@ pub enum SchemaCompatibilityError {
         /// Logical type found in the schema.
         actual: LogicalDataType,
     },
+}
+
+/// Check committed file annotations before decoding discards schema metadata.
+/// Legacy tables without persisted annotations keep their existing behavior.
+pub(crate) fn ensure_file_schema_metadata_matches(
+    registered: &BTreeMap<String, String>,
+    file: &HashMap<String, String>,
+) -> SchemaResult<()> {
+    if !registered.is_empty()
+        && (registered.len() != file.len()
+            || registered
+                .iter()
+                .any(|(key, value)| file.get(key) != Some(value)))
+    {
+        return Err(SchemaCompatibilityError::FileSchemaMetadataMismatch);
+    }
+    Ok(())
 }
 
 /// A convenience type alias for results of schema compatibility operations.
@@ -385,6 +420,27 @@ mod tests {
         index::TimeIndexGranularity,
         logical_schema::{LogicalSchema, LogicalTimestampUnit},
     };
+
+    #[test]
+    fn committed_metadata_requires_exact_annotations_except_for_legacy_tables() {
+        let registered = BTreeMap::from([("unit".into(), "ms".into())]);
+        let matching = HashMap::from([("unit".into(), "ms".into())]);
+        assert!(ensure_file_schema_metadata_matches(&registered, &matching).is_ok());
+        assert!(ensure_file_schema_metadata_matches(&BTreeMap::new(), &matching).is_ok());
+        for invalid in [
+            HashMap::new(),
+            HashMap::from([("unit".into(), "us".into())]),
+            HashMap::from([
+                ("unit".into(), "ms".into()),
+                ("extra".into(), "value".into()),
+            ]),
+        ] {
+            assert!(matches!(
+                ensure_file_schema_metadata_matches(&registered, &invalid),
+                Err(SchemaCompatibilityError::FileSchemaMetadataMismatch)
+            ));
+        }
+    }
 
     fn schema(data_type: LogicalDataType) -> LogicalSchema {
         LogicalSchema::new(vec![LogicalField {

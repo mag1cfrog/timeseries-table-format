@@ -15,8 +15,9 @@ use crate::metadata::table::TableMeta;
 pub const TABLE_PROTOCOL_VERSION: u32 = 7;
 
 pub(crate) const SCHEMA_ADD_COLUMNS_FEATURE: &str = "schema_add_columns";
-const SUPPORTED_READER_FEATURES: &[&str] = &[SCHEMA_ADD_COLUMNS_FEATURE];
-const SUPPORTED_WRITER_FEATURES: &[&str] = &[];
+pub(crate) const SCHEMA_METADATA_FEATURE: &str = "schema_metadata";
+const SUPPORTED_READER_FEATURES: &[&str] = &[SCHEMA_ADD_COLUMNS_FEATURE, SCHEMA_METADATA_FEATURE];
+const SUPPORTED_WRITER_FEATURES: &[&str] = &[SCHEMA_METADATA_FEATURE];
 
 #[cfg(test)]
 tokio::task_local! {
@@ -79,6 +80,9 @@ fn is_valid_feature_name(feature: &str) -> bool {
 #[derive(Debug, Snafu, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TableProtocolError {
+    /// Persisted schema annotations require readers and writers that preserve them.
+    #[snafu(display("schema metadata requires reader and writer feature schema_metadata"))]
+    MissingSchemaMetadataFeatures,
     /// The table uses a core protocol version this client cannot decode.
     #[snafu(display("unsupported table protocol version: expected {expected}, found {found}"))]
     UnsupportedVersion {
@@ -127,6 +131,19 @@ pub enum TableProtocolError {
 }
 
 impl TableMeta {
+    pub(crate) fn require_schema_metadata_feature(&mut self) {
+        if self
+            .logical_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.metadata().is_empty())
+        {
+            self.required_reader_features
+                .insert(SCHEMA_METADATA_FEATURE.into());
+            self.required_writer_features
+                .insert(SCHEMA_METADATA_FEATURE.into());
+        }
+    }
+
     /// Returns the on-disk table protocol version.
     pub fn protocol_version(&self) -> u32 {
         self.protocol_version
@@ -154,6 +171,19 @@ impl TableMeta {
         &self,
         supported_reader_features: &[&str],
     ) -> Result<(), TableProtocolError> {
+        if self
+            .logical_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.metadata().is_empty())
+            && (!self
+                .required_reader_features
+                .contains(SCHEMA_METADATA_FEATURE)
+                || !self
+                    .required_writer_features
+                    .contains(SCHEMA_METADATA_FEATURE))
+        {
+            return Err(TableProtocolError::MissingSchemaMetadataFeatures);
+        }
         ensure_read_compatible(
             u64::from(self.protocol_version),
             &self.required_reader_features,
@@ -330,6 +360,56 @@ mod tests {
                 features: vec!["reader_a".to_string(), "reader_b".to_string()],
             })
         );
+    }
+
+    #[test]
+    fn schema_metadata_requires_capable_readers_and_writers() {
+        use crate::metadata::logical_schema::{LogicalDataType, LogicalField, LogicalSchema};
+        let schema = LogicalSchema::new(vec![LogicalField {
+            name: "ts".into(),
+            data_type: LogicalDataType::Int64,
+            nullable: false,
+        }])
+        .unwrap()
+        .with_metadata(std::collections::BTreeMap::from([(
+            "unit".into(),
+            "ns".into(),
+        )]));
+        let meta = TableMeta::new_time_series_with_schema(
+            IndexSpec {
+                column: "ts".into(),
+                entity_columns: vec![],
+                kind: IndexKind::Int64 {
+                    index_granularity: std::num::NonZeroU64::MIN,
+                },
+            },
+            schema,
+        );
+        assert!(meta.ensure_write_compatible().is_ok());
+        assert_eq!(
+            meta.ensure_read_compatible_with(&[]),
+            Err(TableProtocolError::UnsupportedReaderFeatures {
+                features: vec![SCHEMA_METADATA_FEATURE.into()],
+            })
+        );
+        assert_eq!(
+            meta.ensure_write_compatible_with(&[SCHEMA_METADATA_FEATURE], &[]),
+            Err(TableProtocolError::UnsupportedWriterFeatures {
+                features: vec![SCHEMA_METADATA_FEATURE.into()],
+            })
+        );
+        for reader in [false, true] {
+            let mut invalid = meta.clone();
+            if reader {
+                invalid.required_reader_features.clear();
+            } else {
+                invalid.required_writer_features.clear();
+            }
+            assert_eq!(
+                invalid.ensure_read_compatible(),
+                Err(TableProtocolError::MissingSchemaMetadataFeatures)
+            );
+        }
     }
 
     #[test]
