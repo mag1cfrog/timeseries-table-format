@@ -750,3 +750,182 @@ async fn writer_and_append_produce_equivalent_rows_coverage_and_log_actions() ->
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_sidecar_or_commit_creation_cleans_artifacts_and_closes_writer() -> TestResult {
+    for stage in [
+        PathBuf::from(SEGMENT_COVERAGE_DIR),
+        PathBuf::from(TABLE_SNAPSHOT_DIR),
+        layout::commit_rel_path(2),
+    ] {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+        let batch = timestamp_only_batch(1)?;
+        let mut writer = table.writer(batch.schema())?;
+        writer.write(&batch).await?;
+        let mut pause = crate::storage::pause_write_new_after_create(temp.path().join(&stage));
+        let mut commit = Box::pin(writer.commit());
+        tokio::select! {
+            () = pause.wait_until_paused() => {}
+            result = &mut commit => panic!("commit completed before cancellation at {stage:?}: {result:?}"),
+        }
+        drop(commit);
+        pause.release();
+        assert!(data_files(temp.path())?.is_empty(), "{stage:?}");
+        assert!(coverage_files(temp.path())?.is_empty(), "{stage:?}");
+        assert!(
+            !temp.path().join(layout::commit_rel_path(2)).exists(),
+            "{stage:?}"
+        );
+        assert!(matches!(
+            writer.write(&batch).await,
+            Err(TableError::Append {
+                source: AppendError::WriterClosed
+            })
+        ));
+        assert!(matches!(
+            writer.commit().await,
+            Err(TableError::Append {
+                source: AppendError::WriterClosed
+            })
+        ));
+        writer.abort().await?;
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1, "{stage:?}");
+        assert!(reopened.state().segments.is_empty(), "{stage:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn current_publication_and_rollback_failure_preserve_finished_segment() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+    let before = table.state().clone();
+    let batch = timestamp_only_batch(1)?;
+    let mut writer = table.writer(batch.schema())?;
+    writer.write(&batch).await?;
+    let current_tmp = temp
+        .path()
+        .join(layout::current_rel_path())
+        .with_extension("tmp");
+    std::fs::create_dir(&current_tmp)?;
+    let commit_path = temp.path().join(layout::commit_rel_path(2));
+    crate::storage::inject_cleanup_failure(commit_path.clone());
+    let error = writer
+        .commit()
+        .await
+        .expect_err("CURRENT publication and commit rollback fail");
+    let TableError::Append {
+        source:
+            AppendError::CommitAmbiguous {
+                segment_path,
+                source,
+            },
+    } = error
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert!(matches!(*source, CommitError::AmbiguousOutcome { .. }));
+    let batches =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(temp.path().join(&segment_path))?)?
+            .build()?
+            .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        arrow::compute::concat_batches(&batch.schema(), &batches)?,
+        batch
+    );
+    assert!(commit_path.is_file());
+    assert_eq!(coverage_files(temp.path())?.len(), 2);
+    assert!(matches!(
+        writer.commit().await,
+        Err(TableError::Append {
+            source: AppendError::WriterClosed
+        })
+    ));
+    assert!(matches!(
+        writer.write(&batch).await,
+        Err(TableError::Append {
+            source: AppendError::WriterClosed
+        })
+    ));
+    writer.abort().await?;
+    assert_eq!(table.state(), &before);
+    assert_eq!(TimeSeriesTable::open(location).await?.state(), &before);
+    std::fs::remove_dir(current_tmp)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn conflict_reports_all_failed_cleanup_paths_and_leaves_writer_reusable() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+    let mut other = TimeSeriesTable::open(location.clone()).await?;
+    other
+        .append(timestamp_only_batch_starting_at_minute_offset(1, 1)?)
+        .await?;
+    let winner_data = data_files(temp.path())?;
+    let winner_coverage = coverage_files(temp.path())?;
+    let batch = timestamp_only_batch(1)?;
+    let mut writer = table.writer(batch.schema())?;
+    writer.write(&batch).await?;
+    for dir in ["data", SEGMENT_COVERAGE_DIR, TABLE_SNAPSHOT_DIR] {
+        crate::storage::inject_cleanup_failure(temp.path().join(dir));
+    }
+    let error = writer
+        .commit()
+        .await
+        .expect_err("conflict and all cleanup attempts fail");
+    let TableError::Append {
+        source: AppendError::Rollback {
+            source,
+            cleanup_errors,
+        },
+    } = error
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert!(matches!(
+        *source,
+        AppendError::Commit {
+            source: CommitError::Conflict { .. }
+        }
+    ));
+    assert_eq!(cleanup_errors.len(), 3);
+    let paths = cleanup_errors
+        .iter()
+        .map(|error| match error {
+            StorageError::OtherIo { path, .. } => PathBuf::from(path),
+            other => panic!("unexpected cleanup error: {other:?}"),
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut expected_paths = data_files(temp.path())?
+        .into_iter()
+        .filter(|path| !winner_data.contains(path))
+        .collect::<std::collections::HashSet<_>>();
+    expected_paths.extend(
+        coverage_files(temp.path())?
+            .into_keys()
+            .filter(|path| !winner_coverage.contains_key(path))
+            .map(|path| temp.path().join(path)),
+    );
+    assert_eq!(paths.len(), 3);
+    assert_eq!(paths, expected_paths);
+    for path in winner_data {
+        assert!(path.is_file());
+    }
+    for (path, contents) in winner_coverage {
+        assert_eq!(std::fs::read(temp.path().join(path))?, contents);
+    }
+    assert_eq!(writer.pending_rows(), 0);
+    assert!(writer.commit().await?.is_none());
+    writer.write(&batch).await?;
+    assert_eq!(writer.pending_rows(), 1);
+    writer.abort().await?;
+    assert_eq!(table.state().version, 1);
+    assert_eq!(TimeSeriesTable::open(location).await?.state().version, 2);
+    Ok(())
+}

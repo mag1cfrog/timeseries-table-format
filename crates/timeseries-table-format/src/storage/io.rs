@@ -127,6 +127,10 @@ static ATOMIC_WRITE_RENAME_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePa
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(test)]
+static WRITE_NEW_CREATE_PAUSES: LazyLock<Mutex<HashMap<PathBuf, AtomicWritePausePoint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
 pub(crate) struct AtomicWritePause {
     entered: Option<oneshot::Receiver<()>>,
     release: Option<oneshot::Sender<()>>,
@@ -181,6 +185,11 @@ pub(crate) fn pause_atomic_write_before_open(path: PathBuf) -> AtomicWritePause 
 #[cfg(test)]
 pub(crate) fn pause_atomic_write_before_rename(path: PathBuf) -> AtomicWritePause {
     pause_atomic_write_at(&ATOMIC_WRITE_RENAME_PAUSES, path)
+}
+
+#[cfg(test)]
+pub(crate) fn pause_write_new_after_create(path_prefix: PathBuf) -> AtomicWritePause {
+    pause_atomic_write_at(&WRITE_NEW_CREATE_PAUSES, path_prefix)
 }
 
 #[cfg(test)]
@@ -294,6 +303,18 @@ async fn cleanup_created_file(
 
 async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) -> StorageResult<()> {
     let mut guard = FileCleanupGuard::new_armed(path.to_owned());
+    #[cfg(test)]
+    {
+        let prefix = WRITE_NEW_CREATE_PAUSES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .find(|prefix| path.starts_with(prefix))
+            .cloned();
+        if let Some(prefix) = prefix {
+            wait_at_atomic_write_pause(&WRITE_NEW_CREATE_PAUSES, &prefix).await;
+        }
+    }
     #[cfg(test)]
     let injected_write_failure = take_write_new_failure(path);
     let result = async {
