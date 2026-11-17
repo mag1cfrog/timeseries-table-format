@@ -24,6 +24,11 @@
 //! the local filesystem yet, but the API should be designed so that
 //! future adapters (for example, object storage) can be introduced
 //! without rewriting the log and table logic.
+//!
+//! `io` and `output` own backend dispatch, native handles and durability details.
+//! Higher layers use relative keys, storage errors and opaque guards. New
+//! backends must supply safe commit coordination and publication semantics;
+//! local filesystem locks and renames are not object-store implementations.
 mod error;
 pub use error::*;
 
@@ -66,6 +71,14 @@ pub enum StorageLocation {
     Local(PathBuf),
     // Future:
     // S3 { bucket: string, prefix: string },
+}
+
+impl std::fmt::Display for StorageLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(root) => root.display().fmt(formatter),
+        }
+    }
 }
 
 impl StorageLocation {
@@ -170,6 +183,7 @@ mod tests {
     #[test]
     fn parse_accepts_local_path() -> TestResult {
         let loc = StorageLocation::parse("/tmp/table")?;
+        assert_eq!(loc.to_string(), "/tmp/table");
         match loc {
             StorageLocation::Local(p) => {
                 assert_eq!(p, PathBuf::from("/tmp/table"));

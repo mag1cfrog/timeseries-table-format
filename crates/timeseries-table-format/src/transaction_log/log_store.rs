@@ -327,22 +327,23 @@ impl TransactionLogStore {
         };
 
         let lock_rel = storage::layout::commit_lock_rel_path();
-        let _commit_lock = match storage::try_lock_file(self.location.as_ref(), &lock_rel).await {
-            Ok(Some(lock)) => lock,
-            Ok(None) => {
-                span.record("failure_stage", "commit_lock");
-                span.record("outcome", "conflict");
-                return Err(CommitError::CommitInProgress {
-                    path: lock_rel.display().to_string(),
-                    backtrace: Backtrace::capture(),
-                });
-            }
-            Err(source) => {
-                span.record("failure_stage", "commit_lock");
-                span.record("outcome", "failed");
-                return Err(CommitError::Storage { source });
-            }
-        };
+        let _commit_lock =
+            match storage::try_acquire_commit_lock(self.location.as_ref(), &lock_rel).await {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    span.record("failure_stage", "commit_lock");
+                    span.record("outcome", "conflict");
+                    return Err(CommitError::CommitInProgress {
+                        path: lock_rel.display().to_string(),
+                        backtrace: Backtrace::capture(),
+                    });
+                }
+                Err(source) => {
+                    span.record("failure_stage", "commit_lock");
+                    span.record("outcome", "failed");
+                    return Err(CommitError::Storage { source });
+                }
+            };
         self.check_current_version(expected).await?;
 
         // No live cooperating writer can own this log while we hold the lock.

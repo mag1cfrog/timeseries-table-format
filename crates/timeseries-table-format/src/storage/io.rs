@@ -27,6 +27,14 @@ pub(crate) struct StorageFileMetadata {
     pub(crate) modified_at: SystemTime,
 }
 
+/// Backend-owned exclusion for commit publication and crash recovery.
+///
+/// Dropping the guard releases exclusion. Native handles stay inside storage.
+#[must_use = "hold the commit lock until publication and cleanup finish"]
+pub(crate) struct CommitLock {
+    _local_file: std::fs::File,
+}
+
 /// Guard that removes a file on drop unless disarmed.
 pub(crate) struct FileCleanupGuard {
     path: PathBuf,
@@ -393,33 +401,38 @@ pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File>
     }
 }
 
-/// Acquire a local advisory lock without waiting for another publisher.
+/// Acquire commit exclusion without waiting for another publisher.
 ///
-/// Never unlink this inode: a replacement path could permit two lock owners.
-/// Closing the file, including on process death, releases the lock.
-pub(crate) async fn try_lock_file(
+/// `None` means another publisher owns it. Each backend must provide exclusion
+/// valid for unpublished-log recovery, or return an error rather than a no-op guard.
+pub(crate) async fn try_acquire_commit_lock(
     location: &StorageLocation,
     rel_path: &Path,
-) -> StorageResult<Option<std::fs::File>> {
-    let path = join_local(location, rel_path)?;
-    create_parent_dir(&path).await?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(StorageBackendError::from)
-        .context(OtherIoSnafu {
-            path: path.display().to_string(),
-        })?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(error)) => {
-            Err(StorageBackendError::from(error)).context(OtherIoSnafu {
-                path: path.display().to_string(),
-            })
+) -> StorageResult<Option<CommitLock>> {
+    match location {
+        StorageLocation::Local(_) => {
+            let path = join_local(location, rel_path)?;
+            create_parent_dir(&path).await?;
+            // Keep this inode in place so all publishers lock the same object.
+            // Closing the handle, including on process death, releases its lock.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(StorageBackendError::from)
+                .context(OtherIoSnafu {
+                    path: path.display().to_string(),
+                })?;
+            match file.try_lock() {
+                Ok(()) => Ok(Some(CommitLock { _local_file: file })),
+                Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+                Err(std::fs::TryLockError::Error(error)) => Err(StorageBackendError::from(error))
+                    .context(OtherIoSnafu {
+                        path: path.display().to_string(),
+                    }),
+            }
         }
     }
 }
@@ -890,6 +903,39 @@ mod tests {
     use tempfile::TempDir;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[tokio::test]
+    async fn commit_lock_excludes_competitors_until_guard_is_dropped() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        let key = crate::storage::layout::commit_lock_rel_path();
+        let path = temp.path().join(&key);
+        create_parent_dir(&path).await?;
+        std::fs::write(&path, b"persistent lock inode")?;
+        let first = try_acquire_commit_lock(&location, &key)
+            .await?
+            .expect("first owner");
+        assert!(try_acquire_commit_lock(&location, &key).await?.is_none());
+        drop(first);
+        let second = try_acquire_commit_lock(&location, &key)
+            .await?
+            .expect("lock released on drop");
+        assert_eq!(std::fs::read(path)?, b"persistent lock inode");
+        drop(second);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_lock_rejects_invalid_keys_before_creating_files() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path().join("table"));
+        assert!(matches!(
+            try_acquire_commit_lock(&location, Path::new("../outside-lock")).await,
+            Err(StorageError::InvalidRelativePath { .. })
+        ));
+        assert_eq!(std::fs::read_dir(temp.path())?.count(), 0);
+        Ok(())
+    }
 
     // Hold Tokio's blocking worker so the first cleanup poll cannot race with
     // its completion. Then let unlink finish without polling its owner again.

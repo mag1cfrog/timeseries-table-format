@@ -14,10 +14,7 @@ use crate::{
         index::IndexValueError, protocol::TableProtocolError,
         schema_compat::SchemaCompatibilityError, segments::SegmentEntityLayout,
     },
-    storage::{
-        StorageError, StorageLocation, ensure_canonical_relative_storage_path,
-        remove_file_if_exists,
-    },
+    storage::{StorageError, ensure_canonical_relative_storage_path, remove_file_if_exists},
     table::{TableError, TimeSeriesTable},
     transaction_log::{CommitError, LogAction, SegmentMeta, TableState},
 };
@@ -433,9 +430,7 @@ impl TimeSeriesTable {
                 .map_err(OptimizeError::from)?;
 
             if self.index.entity_columns.is_empty() {
-                let table_root = match self.location().as_ref() {
-                    StorageLocation::Local(root) => root.display().to_string(),
-                };
+                let table_root = self.location().as_ref().to_string();
                 return Err(OptimizeError::NotApplicable { table_root });
             }
 
