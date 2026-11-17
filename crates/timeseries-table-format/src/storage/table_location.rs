@@ -30,6 +30,7 @@ impl AsRef<StorageLocation> for TableLocation {
 
 impl TableLocation {
     /// Creates a new `TableLocation` for a local filesystem path.
+    /// See [`StorageLocation::Local`] for the existing-root durability contract.
     pub fn local(root: impl Into<PathBuf>) -> Self {
         TableLocation(StorageLocation::Local(root.into()))
     }

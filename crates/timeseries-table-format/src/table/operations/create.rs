@@ -79,6 +79,8 @@ impl TimeSeriesTable {
     /// This validates the requested metadata, verifies that the target has no
     /// commits, publishes the initial metadata commit, and rebuilds the state
     /// returned to the caller.
+    /// Existing roots follow the namespace durability contract documented on
+    /// [`crate::storage::StorageLocation::Local`].
     #[tracing::instrument(
         name = "table.create",
         target = "timeseries_table_format::table",

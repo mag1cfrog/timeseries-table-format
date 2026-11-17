@@ -1,7 +1,7 @@
 //! Storage backend boundary for table artifacts.
 //!
-//! Production access to stored table data, coverage sidecars and transaction-log
-//! artifacts goes through this module. Table and transaction code decide what
+//! Route production access to stored table data, coverage sidecars and transaction-log
+//! artifacts through this module. Table and transaction code decide what
 //! to write; storage owns how each backend reads, writes and publishes it.
 //!
 //! # Conventions
@@ -76,6 +76,13 @@ pub type StorageResult<T> = Result<T, StorageError>;
 #[derive(Clone, Debug)]
 pub enum StorageLocation {
     /// A local filesystem root at the given path.
+    ///
+    /// An existing root is an established, caller-managed namespace: its own
+    /// directory entry and external ancestors must already be durable. On Unix,
+    /// storage syncs artifact and directory links within that root, and syncs
+    /// missing root directories before artifact creation.
+    /// Complete interrupted or concurrent initial root setup durably before
+    /// adopting an existing root; storage cannot infer its history from existence.
     Local(PathBuf),
     // Future:
     // S3 { bucket: string, prefix: string },

@@ -374,8 +374,11 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
     }
 }
 
-pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File> {
-    create_parent_dir(path).await?;
+pub(super) async fn create_new_file(
+    location: &StorageLocation,
+    path: &Path,
+) -> StorageResult<std::fs::File> {
+    create_parent_dir(location, path).await?;
 
     // Keep exclusive creation synchronous. Tokio filesystem opens run in a
     // non-cancellable blocking task that may create the path after its future
@@ -412,7 +415,7 @@ pub(crate) async fn try_acquire_commit_lock(
     match location {
         StorageLocation::Local(_) => {
             let path = join_local(location, rel_path)?;
-            create_parent_dir(&path).await?;
+            create_parent_dir(location, &path).await?;
             // Keep this inode in place so all publishers lock the same object.
             // Closing the handle, including on process death, releases its lock.
             let file = std::fs::OpenOptions::new()
@@ -466,17 +469,73 @@ pub(crate) async fn open_parquet_reader(
     }
 }
 
-pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
+pub(super) async fn create_parent_dir(location: &StorageLocation, abs: &Path) -> StorageResult<()> {
     if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent)
+        let StorageLocation::Local(root) = location;
+        let root = std::path::absolute(if root.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            root
+        })
+        .map_err(StorageBackendError::from)
+        .context(OtherIoSnafu {
+            path: root.display().to_string(),
+        })?;
+        let parent = std::path::absolute(if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        })
+        .map_err(StorageBackendError::from)
+        .context(OtherIoSnafu {
+            path: parent.display().to_string(),
+        })?;
+        if !parent.starts_with(&root) {
+            return Err(StorageError::InvalidRelativePath {
+                path: abs.display().to_string(),
+                reason: "file parent is outside the storage root".into(),
+                backtrace: Box::new(Backtrace::capture()),
+            });
+        }
+
+        let mut missing = Vec::new();
+        for ancestor in root.ancestors() {
+            if ancestor
+                .try_exists()
+                .map_err(StorageBackendError::from)
+                .context(OtherIoSnafu {
+                    path: ancestor.display().to_string(),
+                })?
+            {
+                break;
+            }
+            missing.push(ancestor);
+        }
+        // Root creation and its syncs share one poll so cancellation cannot
+        // leave a background creator with unpersisted external directory links.
+        if !missing.is_empty() {
+            std::fs::create_dir_all(&root)
+                .map_err(StorageBackendError::from)
+                .context(OtherIoSnafu {
+                    path: root.display().to_string(),
+                })?;
+            for directory in missing {
+                sync_parent_dir(directory)?;
+            }
+        }
+
+        fs::create_dir_all(&parent)
             .await
             .map_err(StorageBackendError::from)
             .context(OtherIoSnafu {
                 path: parent.display().to_string(),
             })?;
-        // Persist every directory link, including directories left by a
-        // cancelled creator, before any file can reference this hierarchy.
-        for directory in parent.ancestors() {
+        // Revisit existing child links too: a cancelled/crashed writer may
+        // have created them without syncing. The established root is the boundary.
+        for directory in parent
+            .ancestors()
+            .take_while(|directory| *directory != root)
+        {
             sync_parent_dir(directory)?;
         }
     }
@@ -557,7 +616,7 @@ pub(crate) async fn write_atomic_with_publication(
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
 
-            create_parent_dir(&abs).await?;
+            create_parent_dir(location, &abs).await?;
 
             let tmp_path = abs.with_extension("tmp");
             let mut guard = FileCleanupGuard::new_armed(tmp_path.clone());
@@ -697,7 +756,7 @@ pub(crate) async fn write_new(
     match location {
         StorageLocation::Local(_) => {
             let abs = join_local(location, rel_path)?;
-            let file = fs::File::from_std(create_new_file(&abs).await?);
+            let file = fs::File::from_std(create_new_file(location, &abs).await?);
             write_created_file(file, &abs, contents).await
         }
     }
@@ -904,13 +963,64 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_root_does_not_require_reading_external_ancestors() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new()?;
+        let ancestor = temp.path().join("search-only");
+        let root = ancestor.join("table");
+        std::fs::create_dir_all(&root)?;
+        // Establish the caller-owned namespace before removing read permission.
+        sync_parent_dir(&root)?;
+        sync_parent_dir(&ancestor)?;
+        let original = std::fs::metadata(&ancestor)?.permissions();
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o111))?;
+        let location = StorageLocation::local(&root);
+        let written = write_new(&location, Path::new("child/deep/segment"), b"payload").await;
+        std::fs::set_permissions(&ancestor, original)?;
+        written?;
+        assert_eq!(std::fs::read(root.join("child/deep/segment"))?, b"payload");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_child_directory_links_are_still_synced() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = StorageLocation::local(temp.path());
+        std::fs::create_dir_all(temp.path().join("child/deep"))?;
+        inject_parent_sync_failure(temp.path().join("child"));
+        let key = Path::new("child/deep/segment");
+        assert!(write_new(&location, key, b"payload").await.is_err());
+        assert!(!temp.path().join(key).exists());
+        write_new(&location, key, b"payload").await?;
+        assert_eq!(std::fs::read(temp.path().join(key))?, b"payload");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn newly_created_root_links_are_synced_before_artifacts() -> TestResult {
+        let temp = TempDir::new()?;
+        let root = temp.path().join("new/root");
+        let location = StorageLocation::local(&root);
+        inject_parent_sync_failure(root.clone());
+        assert!(
+            write_new(&location, Path::new("segment"), b"payload")
+                .await
+                .is_err()
+        );
+        assert!(!root.join("segment").exists());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn commit_lock_excludes_competitors_until_guard_is_dropped() -> TestResult {
         let temp = TempDir::new()?;
         let location = StorageLocation::local(temp.path());
         let key = crate::storage::layout::commit_lock_rel_path();
         let path = temp.path().join(&key);
-        create_parent_dir(&path).await?;
+        create_parent_dir(&location, &path).await?;
         std::fs::write(&path, b"persistent lock inode")?;
         let first = try_acquire_commit_lock(&location, &key)
             .await?

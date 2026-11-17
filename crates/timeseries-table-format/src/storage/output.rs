@@ -91,7 +91,7 @@ struct LocalSink {
 impl LocalSink {
     async fn open(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
         let final_path = join_local(location, rel_path)?;
-        create_parent_dir(&final_path).await?;
+        create_parent_dir(location, &final_path).await?;
 
         let tmp_path = final_path.with_extension("tmp");
 
@@ -115,7 +115,7 @@ impl LocalSink {
 
     async fn open_new(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
         let path = join_local(location, rel_path)?;
-        let file = create_new_file(&path).await?;
+        let file = create_new_file(location, &path).await?;
         let writer = io::BufWriter::new(file);
         let guard = FileCleanupGuard::new_armed(path.clone());
         Ok(Self {
