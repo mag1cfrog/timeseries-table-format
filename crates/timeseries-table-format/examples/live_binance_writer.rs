@@ -57,6 +57,23 @@ const STREAM: &str = "wss://data-stream.binance.vision:443/ws/btcusdt@aggTrade";
 const BATCH_ROWS: usize = 10;
 
 #[derive(Clone)]
+struct MarketSource {
+    rest: String,
+    stream: String,
+    timeout: Duration,
+}
+
+impl Default for MarketSource {
+    fn default() -> Self {
+        Self {
+            rest: REST.into(),
+            stream: STREAM.into(),
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Options {
     root: PathBuf,
     commits: usize,
@@ -193,22 +210,40 @@ fn tcp(socket: &mut Socket) -> Result<&mut TcpStream> {
     }
 }
 
-fn connect() -> Result<Socket> {
+fn connect(source: &MarketSource) -> Result<Socket> {
+    let uri: tungstenite::http::Uri = source.stream.parse()?;
+    let host = uri.host().ok_or("market stream URL has no host")?;
+    let port = uri
+        .port_u16()
+        .unwrap_or(if uri.scheme_str() == Some("wss") {
+            443
+        } else {
+            80
+        });
     let mut last_error = io::Error::other("market host resolved to no addresses");
-    for address in ("data-stream.binance.vision", 443).to_socket_addrs()? {
-        let stream = match TcpStream::connect_timeout(&address, Duration::from_secs(5)) {
+    for address in (host, port).to_socket_addrs()? {
+        let stream = match TcpStream::connect_timeout(
+            &address,
+            source.timeout.min(Duration::from_secs(5)),
+        ) {
             Ok(stream) => stream,
             Err(error) => {
                 last_error = error;
                 continue;
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(source.timeout))?;
+        stream.set_write_timeout(Some(source.timeout))?;
         let config = tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(64 * 1024))
             .max_frame_size(Some(64 * 1024));
-        return Ok(tungstenite::client_tls_with_config(STREAM, stream, Some(config), None)?.0);
+        return Ok(tungstenite::client_tls_with_config(
+            source.stream.as_str(),
+            stream,
+            Some(config),
+            None,
+        )?
+        .0);
     }
     Err(last_error.into())
 }
@@ -246,6 +281,7 @@ fn send_trade(sender: &SyncSender<Trade>, trade: Trade, stats: &mut SourceStats)
 }
 
 fn replay_until(
+    source: &MarketSource,
     agent: &ureq::Agent,
     next: &mut u64,
     end: u64,
@@ -257,7 +293,10 @@ fn replay_until(
     while *next < end && !stop.load(Ordering::Relaxed) {
         let limit = (end - *next).min(1000);
         let mut response = agent
-            .get(format!("{REST}?symbol=BTCUSDT&fromId={next}&limit={limit}"))
+            .get(format!(
+                "{}?symbol=BTCUSDT&fromId={next}&limit={limit}",
+                source.rest
+            ))
             .call()?;
         let trades: Vec<Trade> = response
             .body_mut()
@@ -293,12 +332,13 @@ fn replay_until(
 
 fn produce(
     options: &Options,
+    source: &MarketSource,
     mut next: Option<u64>,
     sender: SyncSender<Trade>,
     stop: Arc<AtomicBool>,
 ) -> Result<SourceStats> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(source.timeout))
         .build()
         .into();
     let mut stats = SourceStats::default();
@@ -307,7 +347,7 @@ fn produce(
     while !stop.load(Ordering::Relaxed) {
         let before = stats.live_rows + stats.replayed_rows;
         let session: Result<()> = (|| {
-            let mut socket = connect()?;
+            let mut socket = connect(source)?;
             emit(json!({"event":"connected", "resume_from":next}))?;
             while !stop.load(Ordering::Relaxed) {
                 let trade = read_trade(&mut socket)?;
@@ -315,7 +355,9 @@ fn produce(
                 if trade.id < *expected {
                     continue;
                 }
-                replay_until(&agent, expected, trade.id, &sender, &mut stats, &stop)?;
+                replay_until(
+                    source, &agent, expected, trade.id, &sender, &mut stats, &stop,
+                )?;
                 if stop.load(Ordering::Relaxed) {
                     return Ok(());
                 }
@@ -350,7 +392,7 @@ fn produce(
     Ok(stats)
 }
 
-async fn run(options: Options) -> Result<()> {
+async fn run(options: Options, source: MarketSource) -> Result<SourceStats> {
     let location = TableLocation::local(&options.root);
     let logical = LogicalSchema::try_from_arrow_schema(schema().as_ref())?;
     let index = IndexSpec {
@@ -388,7 +430,8 @@ async fn run(options: Options) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let producer_options = options.clone();
     let producer_stop = Arc::clone(&stop);
-    let producer = thread::spawn(move || produce(&producer_options, next, sender, producer_stop));
+    let producer =
+        thread::spawn(move || produce(&producer_options, &source, next, sender, producer_stop));
     let outcome: Result<()> = async {
         let mut committed = 0;
         while committed < options.commits {
@@ -421,7 +464,7 @@ async fn run(options: Options) -> Result<()> {
         "segments":reopened.state().segments.len(), "rows":reopened.state().segments.values().map(|s|s.row_count).sum::<u64>(),
         "source":stats}),
     )?;
-    Ok(())
+    Ok(stats)
 }
 
 fn main() -> Result<()> {
@@ -429,136 +472,10 @@ fn main() -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(run(options))
+        .block_on(run(options, MarketSource::default()))
+        .map(|_| ())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::TcpListener;
-    use tempfile::TempDir;
-
-    fn trade(id: u64) -> Trade {
-        Trade {
-            id,
-            time: 1_700_000_000_000,
-            price: "0.00000001".into(),
-            quantity: "123456789.12345678".into(),
-            buyer_is_maker: true,
-        }
-    }
-
-    async fn table(root: &TempDir) -> Result<TimeSeriesTable> {
-        Ok(TimeSeriesTable::create(
-            TableLocation::local(root.path()),
-            TableMeta::new_time_series_with_schema(
-                IndexSpec {
-                    column: "trade_id".into(),
-                    entity_columns: vec![],
-                    kind: IndexKind::UInt64 {
-                        index_granularity: NonZeroU64::MIN,
-                    },
-                },
-                LogicalSchema::try_from_arrow_schema(schema().as_ref())?,
-            ),
-        )
-        .await?)
-    }
-
-    #[test]
-    fn trade_payloads_and_arrow_batch_preserve_decimal_strings() -> Result<()> {
-        let rest =
-            r#"{"a":17,"T":1700000000000,"p":"0.00000001","q":"123456789.12345678","m":true}"#;
-        let event: Trade = serde_json::from_str(rest)?;
-        assert_eq!(event, trade(17));
-        let batch = batch(&[event])?;
-        let prices = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("expected strings")?;
-        let quantities = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("expected strings")?;
-        assert_eq!(prices.value(0), "0.00000001");
-        assert_eq!(quantities.value(0), "123456789.12345678");
-        assert!(
-            serde_json::from_str::<Trade>(r#"{"a":-1,"T":0,"p":"1","q":"1","m":true}"#).is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn websocket_answers_ping_and_validates_market() -> Result<()> {
-        for symbol in ["BTCUSDT", "ETHUSDT"] {
-            let listener = TcpListener::bind("127.0.0.1:0")?;
-            let address = listener.local_addr()?;
-            let server = thread::spawn(move || -> Result<()> {
-                let stream = listener.accept()?.0;
-                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-                let mut socket = tungstenite::accept(stream)?;
-                socket.send(Message::Ping(vec![1, 2, 3].into()))?;
-                let mut message = serde_json::to_value(trade(17))?;
-                message["e"] = "aggTrade".into();
-                message["s"] = symbol.into();
-                socket.send(Message::Text(message.to_string().into()))?;
-                assert_eq!(socket.read()?, Message::Pong(vec![1, 2, 3].into()));
-                Ok(())
-            });
-            let (mut socket, _) = tungstenite::connect(format!("ws://{address}"))?;
-            if symbol == "BTCUSDT" {
-                assert_eq!(read_trade(&mut socket)?, trade(17));
-            } else {
-                assert!(read_trade(&mut socket).is_err());
-            }
-            server
-                .join()
-                .map_err(|_| io::Error::other("test server panicked"))??;
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn recovery_checks_coverage_instead_of_only_the_maximum_id() -> Result<()> {
-        let root = TempDir::new()?;
-        let mut table = table(&root).await?;
-        assert_eq!(resume_from(&table).await?, None);
-        let mut writer = table.writer(schema())?;
-        for start in [20, 0] {
-            writer
-                .write(&batch(&(start..start + 10).map(trade).collect::<Vec<_>>())?)
-                .await?;
-            writer.commit().await?;
-        }
-        writer.abort().await?;
-        assert!(resume_from(&table).await.is_err());
-        let mut writer = table.writer(schema())?;
-        writer
-            .write(&batch(&(10..20).map(trade).collect::<Vec<_>>())?)
-            .await?;
-        writer.commit().await?;
-        writer.abort().await?;
-        assert_eq!(resume_from(&table).await?, Some(30));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn restart_cursor_ignores_the_uncommitted_tail() -> Result<()> {
-        let root = TempDir::new()?;
-        let mut table = table(&root).await?;
-        let mut writer = table.writer(schema())?;
-        writer
-            .write(&batch(&(10..20).map(trade).collect::<Vec<_>>())?)
-            .await?;
-        writer.commit().await?;
-        writer
-            .write(&batch(&(20..30).map(trade).collect::<Vec<_>>())?)
-            .await?;
-        drop(writer);
-        let reopened = TimeSeriesTable::open(TableLocation::local(root.path())).await?;
-        assert_eq!(resume_from(&reopened).await?, Some(20));
-        Ok(())
-    }
-}
+#[path = "live_binance_writer/tests.rs"]
+mod tests;
