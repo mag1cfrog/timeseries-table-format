@@ -226,7 +226,10 @@ pub(crate) fn table_error_to_py(
     // An ambiguous commit contains storage causes, but must retain its own
     // diagnostic rather than being presented as an ordinary storage failure.
     if find_error_in_source_chain::<CommitError>(root, |error| {
-        matches!(error, CommitError::AmbiguousOutcome { .. })
+        matches!(
+            error,
+            CommitError::AmbiguousOutcome { .. } | CommitError::PublicationUncertain { .. }
+        )
     })
     .is_some()
     {
@@ -376,6 +379,58 @@ mod tests {
 
     fn invalid_location_error() -> CoreStorageError {
         StorageLocation::parse("").expect_err("empty storage location must fail")
+    }
+
+    #[test]
+    fn publication_uncertainty_keeps_base_category_and_full_diagnostic() {
+        init_python();
+        let uncertain = || CommitError::PublicationUncertain {
+            commit_path: "_timeseries_log/0000000002.json".into(),
+            source: invalid_location_error(),
+        };
+        let errors = [
+            TableError::Append {
+                source: AppendError::CommitAmbiguous {
+                    segment_path: "data/preserved.parquet".into(),
+                    source: Box::new(uncertain()),
+                },
+            },
+            TableError::Optimize {
+                source: OptimizeError::Commit {
+                    source: uncertain(),
+                },
+            },
+            TableError::UpdateRows {
+                source: UpdateRowsError::Commit {
+                    source: uncertain(),
+                },
+            },
+            TableError::AddColumns {
+                source: timeseries_table_format::AddColumnsError::Commit {
+                    source: uncertain(),
+                },
+            },
+            TableError::Create {
+                source: CreateTableError::Commit {
+                    source: uncertain(),
+                },
+            },
+        ];
+        Python::attach(|py| {
+            for error in errors {
+                let original = error.to_string();
+                let mapped = table_error_to_py(py, error, &[]);
+                assert!(
+                    mapped
+                        .get_type(py)
+                        .is(py.get_type::<TimeseriesTableError>())
+                );
+                assert_eq!(
+                    mapped.value(py).str().unwrap().extract::<String>().unwrap(),
+                    original
+                );
+            }
+        });
     }
 
     #[test]

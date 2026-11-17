@@ -1,29 +1,42 @@
-//! Filesystem layout and path utilities.
+//! Storage backend boundary for table artifacts.
 //!
-//! This module centralizes all filesystem- and path-related logic for
-//! `timeseries-table-format`. It is responsible for mapping a table root
-//! directory to the locations of:
+//! Route production access to stored table data, coverage sidecars and transaction-log
+//! artifacts through this module. Table and transaction code decide what
+//! to write; storage owns how each backend reads, writes and publishes it.
 //!
-//! - The metadata log directory (for example, `<root>/_timeseries_log/`).
-//! - Individual commit files (for example, `<root>/_timeseries_log/0000000001.json`).
-//! - The `CURRENT` pointer that records the latest committed version.
-//! - Data segments (for example, Parquet files) and any directory
-//!   structure used to organize them.
+//! # Conventions
 //!
-//! Goals of this module include:
+//! - Call storage operations with a [`StorageLocation`] or [`TableLocation`] and
+//!   canonical relative keys. Use `layout` helpers for shared table paths.
+//! - Keep backend dispatch, native path and URI conversion, filesystem calls,
+//!   backend client calls, locking and sync operations inside `storage`.
+//! - Return storage errors, reader/writer interfaces and opaque guards. Native
+//!   handles such as `std::fs::File` stay private to backend implementations.
+//!   Table and transaction code must not match storage backend variants.
+//! - Keep schema and coverage validation, version planning and commit actions
+//!   in higher layers.
 //!
-//! - Keeping path conventions in one place so they can be evolved
-//!   without touching higher-level logic.
-//! - Providing small helpers for atomic file operations used by the
-//!   commit protocol (for example, write-then-rename semantics).
-//! - Ensuring that higher-level modules (`log`, `table`) work with
-//!   strongly-typed paths and simple helpers instead of hard-coded
-//!   string concatenation.
+//! For example, transaction code holds an opaque `CommitLock` through
+//! publication and cleanup. Only the local storage implementation opens and
+//! locks the underlying file.
 //!
-//! This module does not impose any particular storage backend beyond
-//! the local filesystem yet, but the API should be designed so that
-//! future adapters (for example, object storage) can be introduced
-//! without rewriting the log and table logic.
+//! # Responsibilities within storage
+//!
+//! `io` implements reads, writes, listing, metadata, cleanup, durability and
+//! commit exclusion. `output` implements streaming output sinks. `table_location`
+//! handles table locations, key validation and backend path conversion. `layout`
+//! defines shared relative path conventions. Backend details may span these
+//! internal modules while callers use the `storage` interface.
+//!
+//! # Adding a backend
+//!
+//! Only local storage is supported today. A new backend must preserve the
+//! contracts callers rely on: exclusive creation, commit/recovery coordination,
+//! publication outcome reporting, durability and cancellation-safe cleanup.
+//! Unsupported capabilities must fail explicitly, never return a no-op guard or
+//! silently weaken a guarantee. Local locks, renames and directory syncs do not
+//! supply those guarantees for an object store; adding S3 requires its own safe
+//! coordination and publication strategy behind this boundary.
 mod error;
 pub use error::*;
 
@@ -63,9 +76,24 @@ pub type StorageResult<T> = Result<T, StorageError>;
 #[derive(Clone, Debug)]
 pub enum StorageLocation {
     /// A local filesystem root at the given path.
+    ///
+    /// An existing root is an established, caller-managed namespace: its own
+    /// directory entry and external ancestors must already be durable. On Unix,
+    /// storage syncs artifact and directory links within that root, and syncs
+    /// missing root directories before artifact creation.
+    /// Complete interrupted or concurrent initial root setup durably before
+    /// adopting an existing root; storage cannot infer its history from existence.
     Local(PathBuf),
     // Future:
     // S3 { bucket: string, prefix: string },
+}
+
+impl std::fmt::Display for StorageLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(root) => root.display().fmt(formatter),
+        }
+    }
 }
 
 impl StorageLocation {
@@ -170,6 +198,7 @@ mod tests {
     #[test]
     fn parse_accepts_local_path() -> TestResult {
         let loc = StorageLocation::parse("/tmp/table")?;
+        assert_eq!(loc.to_string(), "/tmp/table");
         match loc {
             StorageLocation::Local(p) => {
                 assert_eq!(p, PathBuf::from("/tmp/table"));

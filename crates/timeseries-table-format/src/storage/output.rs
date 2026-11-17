@@ -9,11 +9,10 @@ use std::{
 };
 
 use snafu::{IntoError, ResultExt};
-use tokio::fs;
 
 use crate::storage::{
     FileCleanupGuard, OtherIoSnafu, StorageBackendError, StorageLocation, StorageResult,
-    create_new_file, create_parent_dir, join_local,
+    create_new_file, create_parent_dir, join_local, sync_parent_dir,
 };
 
 #[cfg(test)]
@@ -92,7 +91,7 @@ struct LocalSink {
 impl LocalSink {
     async fn open(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
         let final_path = join_local(location, rel_path)?;
-        create_parent_dir(&final_path).await?;
+        create_parent_dir(location, &final_path).await?;
 
         let tmp_path = final_path.with_extension("tmp");
 
@@ -116,7 +115,7 @@ impl LocalSink {
 
     async fn open_new(location: &StorageLocation, rel_path: &Path) -> StorageResult<Self> {
         let path = join_local(location, rel_path)?;
-        let file = create_new_file(&path).await?;
+        let file = create_new_file(location, &path).await?;
         let writer = io::BufWriter::new(file);
         let guard = FileCleanupGuard::new_armed(path.clone());
         Ok(Self {
@@ -166,12 +165,14 @@ impl LocalSink {
         }
 
         if let LocalFinish::Rename(final_path) = &self.finish {
-            fs::rename(&self.path, final_path)
-                .await
+            std::fs::rename(&self.path, final_path)
                 .map_err(StorageBackendError::from)
                 .context(OtherIoSnafu {
                     path: final_path.display().to_string(),
                 })?;
+            sync_parent_dir(final_path)?;
+        } else {
+            sync_parent_dir(&self.path)?;
         }
 
         self.guard.disarm();

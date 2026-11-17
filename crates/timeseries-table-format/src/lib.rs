@@ -62,11 +62,12 @@ pub use metadata::schema_evolution::SchemaEvolutionError;
 pub use metadata::table::TableMeta;
 pub use storage::TableLocation;
 pub use table::{
-    AddColumnsError, AppendError, AppendReport, CoverageQueryError, CreateTableError,
-    OpenTableError, OptimizeError, OptimizeReport, ScanError, TableError, TableStateAccessError,
-    TimeSeriesTable, UpdateKey, UpdateKeyValue, UpdateKeyViolation, UpdatePreparationError,
-    UpdateRewriteError, UpdateRowsError, UpdateRowsReport, VacuumArtifact,
-    VacuumArtifactDisposition, VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport,
+    AddColumnsError, AppendError, AppendReport, AppendWriter, AppendWriterOptions,
+    CoverageQueryError, CreateTableError, OpenTableError, OptimizeError, OptimizeReport, ScanError,
+    TableError, TableStateAccessError, TimeSeriesTable, UpdateKey, UpdateKeyValue,
+    UpdateKeyViolation, UpdatePreparationError, UpdateRewriteError, UpdateRowsError,
+    UpdateRowsReport, VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError,
+    VacuumMode, VacuumReport,
     append::{AppendRequest, IntoRecordBatchReader, ParquetCompression},
 };
 

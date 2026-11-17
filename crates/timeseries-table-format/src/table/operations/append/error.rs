@@ -58,6 +58,20 @@ pub enum AppendError {
     #[snafu(display("Cannot append an empty Arrow input"))]
     EmptyInput,
 
+    /// An ambiguous or cancelled commit closed this writer.
+    #[snafu(display("Append writer is closed; end it and refresh or reopen the table"))]
+    WriterClosed,
+
+    /// Explicit abort could not remove every pending artifact.
+    #[snafu(display(
+        "Append writer cleanup failed: [{}]",
+        cleanup_errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    ))]
+    Cleanup {
+        /// Typed cleanup failure for every artifact that could not be removed.
+        cleanup_errors: Vec<StorageError>,
+    },
+
     /// A configured Parquet row group cannot contain zero rows.
     #[snafu(display(
         "Invalid maximum rows per Parquet row group: {max_rows_per_row_group}; expected a positive value"

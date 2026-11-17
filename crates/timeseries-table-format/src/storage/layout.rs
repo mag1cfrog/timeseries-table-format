@@ -49,6 +49,11 @@ pub fn current_rel_path() -> PathBuf {
     log_rel_dir().join(CURRENT_FILE_NAME)
 }
 
+/// Persistent lock inode shared by local commit and recovery operations.
+pub(crate) fn commit_lock_rel_path() -> PathBuf {
+    log_rel_dir().join("WRITE_LOCK")
+}
+
 /// Relative path: `_timeseries_log/<zero-padded>.json`
 pub fn commit_rel_path(version: u64) -> PathBuf {
     let file_name = format!("{:0width$}.json", version, width = COMMIT_FILENAME_DIGITS);

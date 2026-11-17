@@ -118,6 +118,15 @@ pub enum CommitError {
         backtrace: Backtrace,
     },
 
+    /// Another local writer owns the commit and recovery critical section.
+    #[snafu(display("Another writer is publishing a commit at {path}"))]
+    CommitInProgress {
+        /// Table-relative path of the persistent commit lock.
+        path: String,
+        /// Backtrace captured while acquiring the commit lock.
+        backtrace: Backtrace,
+    },
+
     /// Underlying storage error while working with the log or CURRENT file.
     ///
     /// Backtraces are delegated to the inner StorageError.
@@ -322,6 +331,30 @@ pub enum CommitError {
         /// Failure encountered while removing the unpublished commit file.
         cleanup_error: Box<StorageError>,
     },
+
+    /// CURRENT was replaced, but synchronizing its directory failed.
+    ///
+    /// The commit may be visible. Its referenced files are preserved; reopen
+    /// and reconcile before retrying instead of assuming rollback.
+    #[snafu(display(
+        "Commit was published but durability is uncertain at {commit_path}: {source}"
+    ))]
+    PublicationUncertain {
+        /// Path of the commit whose CURRENT update may not survive power loss.
+        commit_path: String,
+        /// Directory synchronization failure after publication.
+        #[snafu(backtrace)]
+        source: StorageError,
+    },
+}
+
+impl CommitError {
+    pub(crate) fn may_have_committed(&self) -> bool {
+        matches!(
+            self,
+            Self::AmbiguousOutcome { .. } | Self::PublicationUncertain { .. }
+        )
+    }
 }
 
 pub(crate) fn checked_next_version(expected: u64) -> Result<u64, CommitError> {

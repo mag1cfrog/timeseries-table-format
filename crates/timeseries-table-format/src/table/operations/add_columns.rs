@@ -31,8 +31,8 @@ pub enum AddColumnsError {
     },
     /// Publishing the metadata commit failed or had an ambiguous outcome.
     ///
-    /// For [`CommitError::AmbiguousOutcome`], reopen and reconcile the log before
-    /// retrying. Neither success nor rollback can be assumed.
+    /// For [`CommitError::AmbiguousOutcome`] or [`CommitError::PublicationUncertain`],
+    /// reopen and reconcile the log before retrying. Do not assume rollback.
     #[snafu(context(false), display("Column addition commit error: {source}"))]
     Commit {
         /// Original encoding, conflict, storage, or ambiguous-outcome failure.
@@ -63,8 +63,9 @@ impl TimeSeriesTable {
     ///
     /// Returns [`TableError::AddColumns`] for incompatible protocols, invalid
     /// additions, version conflicts, or publication failures. Errors leave this
-    /// handle unchanged. On [`CommitError::AmbiguousOutcome`], reopen and reconcile
-    /// the log before retrying; do not assume the commit was rolled back.
+    /// handle unchanged. On [`CommitError::AmbiguousOutcome`] or
+    /// [`CommitError::PublicationUncertain`], reopen and reconcile the log before
+    /// retrying; do not assume the commit was rolled back.
     pub async fn add_columns(&mut self, columns: Vec<LogicalField>) -> Result<u64, TableError> {
         let result: Result<u64, AddColumnsError> = async {
             self.ensure_write_compatible()?;

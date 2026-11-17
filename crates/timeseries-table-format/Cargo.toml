@@ -75,6 +75,8 @@ predicates = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "registry"] }
+tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+ureq = { version = "3.2.0", default-features = false, features = ["rustls", "json"] }
 
 [[bin]]
 name = "tstable"
@@ -98,6 +100,9 @@ required-features = ["cli"]
 
 [[example]]
 name = "append_telemetry_bench"
+
+[[example]]
+name = "live_binance_writer"
 
 [[example]]
 name = "query_nvda_ma"
