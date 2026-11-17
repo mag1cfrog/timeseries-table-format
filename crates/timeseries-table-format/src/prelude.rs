@@ -5,13 +5,13 @@
 
 pub use crate::coverage;
 pub use crate::{
-    AddColumnsError, AppendError, AppendReport, AppendRequest, CoverageQueryError,
-    CreateTableError, IndexKind, IndexSpec, IndexSpecError, IndexValue, IndexValueError,
-    IntoRecordBatchReader, LogicalDataType, LogicalField, LogicalSchema, OpenTableError,
-    OptimizeError, OptimizeReport, ParquetCompression, ParseTimeIndexGranularityError, ScanError,
-    SchemaEvolutionError, TableError, TableLocation, TableMeta, TableProtocolError,
-    TableStateAccessError, TimeIndexGranularity, TimeSeriesTable, UpdateKey, UpdateKeyValue,
-    UpdateKeyViolation, UpdatePreparationError, UpdateRewriteError, UpdateRowsError,
-    UpdateRowsReport, VacuumArtifact, VacuumArtifactDisposition, VacuumArtifactReason, VacuumError,
-    VacuumMode, VacuumReport, validate_index_range,
+    AddColumnsError, AppendError, AppendReport, AppendRequest, AppendWriter, AppendWriterOptions,
+    CoverageQueryError, CreateTableError, IndexKind, IndexSpec, IndexSpecError, IndexValue,
+    IndexValueError, IntoRecordBatchReader, LogicalDataType, LogicalField, LogicalSchema,
+    OpenTableError, OptimizeError, OptimizeReport, ParquetCompression,
+    ParseTimeIndexGranularityError, ScanError, SchemaEvolutionError, TableError, TableLocation,
+    TableMeta, TableProtocolError, TableStateAccessError, TimeIndexGranularity, TimeSeriesTable,
+    UpdateKey, UpdateKeyValue, UpdateKeyViolation, UpdatePreparationError, UpdateRewriteError,
+    UpdateRowsError, UpdateRowsReport, VacuumArtifact, VacuumArtifactDisposition,
+    VacuumArtifactReason, VacuumError, VacuumMode, VacuumReport, validate_index_range,
 };

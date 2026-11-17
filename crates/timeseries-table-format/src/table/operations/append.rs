@@ -9,10 +9,13 @@
 //!   Keep new append-time invariants here so the flow remains centralized.
 
 pub(super) mod error;
+mod writer;
+
+pub use writer::AppendWriter;
 
 use error::AppendError;
 
-use std::{marker::PhantomData, path::Path, sync::Arc, time::Instant};
+use std::{marker::PhantomData, path::Path, time::Instant};
 
 use arrow::{
     array::{RecordBatch as ArrowRecordBatch, RecordBatchIterator, RecordBatchReader},
@@ -115,6 +118,25 @@ struct AppendTelemetry {
 }
 
 impl AppendTelemetry {
+    fn for_current_subscriber() -> Self {
+        let tracing_enabled = tracing::enabled!(
+            target: "timeseries_table_format::table::append",
+            tracing::Level::INFO
+        ) || tracing::enabled!(
+            target: "timeseries_table_format::table::append",
+            tracing::Level::DEBUG
+        );
+        // Python receives tracing's log fallback when no subscriber is installed.
+        let log_enabled = log::log_enabled!(
+            target: "timeseries_table_format::table::append",
+            log::Level::Info
+        ) || log::log_enabled!(
+            target: "timeseries_table_format::table::append",
+            log::Level::Debug
+        );
+        Self::new(tracing_enabled || log_enabled)
+    }
+
     fn new(track_input_counts: bool) -> Self {
         let now = Instant::now();
         Self {
@@ -221,6 +243,15 @@ impl AppendTelemetry {
             "Append phase failed"
         );
     }
+
+    fn record_result<T>(&self, result: &Result<T, AppendError>) {
+        let span = tracing::Span::current();
+        span.record("batches_consumed", self.batches_consumed);
+        span.record("rows_consumed", self.rows_consumed);
+        if let Err(error) = result {
+            self.record_failure(error);
+        }
+    }
 }
 
 /// Marker used to distinguish reader inputs from materialized batch inputs.
@@ -267,14 +298,22 @@ impl ParquetCompression {
 const DEFAULT_MAX_ROWS_PER_ROW_GROUP: usize = 1024 * 1024;
 const DEFAULT_MAX_BYTES_PER_ROW_GROUP: usize = 128 * 1024 * 1024;
 
+/// Physical settings fixed for the lifetime of an [`AppendWriter`].
+///
+/// Defaults match [`AppendRequest`]: Zstandard compression, 1,048,576 rows and
+/// 128 MiB estimated encoded bytes per row group. The byte limit is not a strict
+/// process-memory ceiling; a single oversized value may exceed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AppendWriterSettings {
-    compression: ParquetCompression,
-    max_rows_per_row_group: usize,
-    max_bytes_per_row_group: usize,
+pub struct AppendWriterOptions {
+    /// Compression used for every pending segment.
+    pub compression: ParquetCompression,
+    /// Maximum rows per row group. Zero is rejected before creating a writer.
+    pub max_rows_per_row_group: usize,
+    /// Maximum estimated encoded bytes per row group. Zero is rejected.
+    pub max_bytes_per_row_group: usize,
 }
 
-impl Default for AppendWriterSettings {
+impl Default for AppendWriterOptions {
     fn default() -> Self {
         Self {
             compression: ParquetCompression::default(),
@@ -284,7 +323,7 @@ impl Default for AppendWriterSettings {
     }
 }
 
-impl AppendWriterSettings {
+impl AppendWriterOptions {
     fn from_source<S, SourceKind>(source: &S) -> Self
     where
         S: IntoRecordBatchReader<SourceKind>,
@@ -327,14 +366,15 @@ struct PendingAppendSegment {
     relative_path: String,
     data_guard: storage::FileCleanupGuard,
     writer: ParquetArrowWriter<storage::OutputSink>,
-    settings: AppendWriterSettings,
+    settings: AppendWriterOptions,
+    rows_written: u64,
 }
 
 impl PendingAppendSegment {
     async fn new(
         table: &TimeSeriesTable,
         schema: SchemaRef,
-        settings: AppendWriterSettings,
+        settings: AppendWriterOptions,
         telemetry: &mut AppendTelemetry,
     ) -> Result<Self, AppendError> {
         let relative_path = format!(
@@ -368,11 +408,28 @@ impl PendingAppendSegment {
             data_guard,
             writer,
             settings,
+            rows_written: 0,
         })
     }
 
     fn write(&mut self, batch: &ArrowRecordBatch) -> Result<(), AppendError> {
-        self.writer.write(batch).context(ParquetWriteSnafu)
+        self.writer.write(batch).context(ParquetWriteSnafu)?;
+        self.rows_written = self.rows_written.saturating_add(batch.num_rows() as u64);
+        Ok(())
+    }
+
+    async fn abort(self, table: &TimeSeriesTable) -> Result<(), AppendError> {
+        let Self {
+            relative_path,
+            writer,
+            ..
+        } = self;
+        drop(writer);
+        storage::remove_file_if_exists(table.location().as_ref(), Path::new(&relative_path))
+            .await
+            .map_err(|error| AppendError::Cleanup {
+                cleanup_errors: vec![error],
+            })
     }
 
     async fn rollback(
@@ -404,6 +461,7 @@ impl PendingAppendSegment {
             mut data_guard,
             writer,
             settings,
+            ..
         } = self;
         let result = async {
             telemetry.start_phase("writer_finalize_and_sync");
@@ -699,7 +757,7 @@ impl TimeSeriesTable {
         next_version: u64,
         owned_data_guard: &mut storage::FileCleanupGuard,
         telemetry: &mut AppendTelemetry,
-        writer_settings: AppendWriterSettings,
+        writer_settings: AppendWriterOptions,
     ) -> Result<AppendReport, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -1045,6 +1103,56 @@ impl TimeSeriesTable {
             .context(crate::table::error::AppendSnafu)
     }
 
+    /// Start a caller-driven append writer with the default physical settings.
+    ///
+    /// Validates writer features, physical settings, version capacity, and the
+    /// declared schema before creating any artifacts. The writer mutably borrows
+    /// this handle; use a second handle to read while it is open.
+    ///
+    /// Pending rows are invisible and are not durable until commit succeeds.
+    /// After a process stops, reopen the table and query coverage to recover.
+    ///
+    /// ```
+    /// # use arrow::{array::RecordBatch, datatypes::SchemaRef};
+    /// # use timeseries_table_format::prelude::*;
+    /// # async fn write_segments(
+    /// #     table: &mut TimeSeriesTable, schema: SchemaRef, batches: &[RecordBatch],
+    /// # ) -> Result<(), TableError> {
+    /// let mut writer: AppendWriter<'_> = table.writer(schema)?;
+    /// for batch in batches {
+    ///     writer.write(batch).await?;
+    ///     if let Some(report) = writer.commit().await? {
+    ///         println!("Committed version {}", report.committed_version);
+    ///     }
+    /// }
+    /// writer.abort().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn writer(&mut self, schema: SchemaRef) -> Result<AppendWriter<'_>, TableError> {
+        self.writer_with(schema, AppendWriterOptions::default())
+    }
+
+    /// Start an append writer with physical settings fixed for its lifetime.
+    ///
+    /// Performs the same checks as [`Self::writer`] before creating artifacts.
+    /// Rows are neither visible nor durable until [`AppendWriter::commit`]
+    /// succeeds. Recovery after a process stops is by reopening and querying
+    /// coverage for missing intervals.
+    pub fn writer_with(
+        &mut self,
+        schema: SchemaRef,
+        options: AppendWriterOptions,
+    ) -> Result<AppendWriter<'_>, TableError> {
+        AppendWriter::new(
+            self,
+            schema,
+            options,
+            AppendTelemetry::for_current_subscriber(),
+        )
+        .context(crate::table::error::AppendSnafu)
+    }
+
     /// Append Arrow record batches into one table-managed Parquet segment.
     ///
     /// Rows need not be ordered by the table's ordered index. The source is
@@ -1088,26 +1196,11 @@ impl TimeSeriesTable {
     where
         S: IntoRecordBatchReader<SourceKind>,
     {
-        let tracing_enabled = tracing::enabled!(
-            target: "timeseries_table_format::table::append",
-            tracing::Level::INFO
-        ) || tracing::enabled!(
-            target: "timeseries_table_format::table::append",
-            tracing::Level::DEBUG
-        );
-        // Python receives tracing's log fallback when no subscriber is installed.
-        let log_enabled = log::log_enabled!(
-            target: "timeseries_table_format::table::append",
-            log::Level::Info
-        ) || log::log_enabled!(
-            target: "timeseries_table_format::table::append",
-            log::Level::Debug
-        );
-        let mut telemetry = AppendTelemetry::new(tracing_enabled || log_enabled);
-        let append_result: Result<AppendReport, AppendError> = async {
+        let telemetry = AppendTelemetry::for_current_subscriber();
+        let preparation = (|| {
             self.ensure_write_compatible().map_err(AppendError::from)?;
 
-            let writer_settings = AppendWriterSettings::from_source(&source).validate()?;
+            let writer_settings = AppendWriterOptions::from_source(&source).validate()?;
             let span = tracing::Span::current();
             span.record("compression", writer_settings.compression.as_str());
             span.record(
@@ -1118,71 +1211,42 @@ impl TimeSeriesTable {
                 "max_bytes_per_row_group",
                 writer_settings.max_bytes_per_row_group,
             );
-            let next_version =
-                checked_next_version(self.state.version).map_err(AppendError::from)?;
-            let mut reader = source.into_record_batch_reader()?;
-            let schema_alignment = self.build_append_schema_alignment(reader.schema())?;
-            let output_schema = Arc::clone(schema_alignment.output_schema());
-            telemetry.complete_phase();
-
-            telemetry.start_phase("source_consumption_and_parquet_write");
-            let first_batch = loop {
-                let Some(batch) = reader.next().transpose().context(ArrowInputSnafu)? else {
-                    return Err(AppendError::EmptyInput);
-                };
-                telemetry.record_batch(&batch);
-                let batch = schema_alignment
-                    .align_batch(&batch)
-                    .context(ArrowInputSnafu)?;
-                if batch.num_rows() != 0 {
-                    break batch;
-                }
-                tokio::task::yield_now().await;
-            };
-
-            let mut segment =
-                PendingAppendSegment::new(self, output_schema, writer_settings, &mut telemetry)
-                    .await?;
-            let write_result = async {
-                segment.write(&first_batch)?;
-                drop(first_batch);
-                tokio::task::yield_now().await;
-
-                for batch in reader {
-                    let batch = batch.context(ArrowInputSnafu)?;
-                    telemetry.record_batch(&batch);
-                    let batch = schema_alignment
-                        .align_batch(&batch)
-                        .context(ArrowInputSnafu)?;
-                    if batch.num_rows() != 0 {
-                        segment.write(&batch)?;
-                    }
-                    drop(batch);
-                    tokio::task::yield_now().await;
-                }
-
-                Ok(())
+            checked_next_version(self.state.version).map_err(AppendError::from)?;
+            Ok((source.into_record_batch_reader()?, writer_settings))
+        })();
+        let (reader, options) = match preparation {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                telemetry.record_failure(&error);
+                return Err(error).context(crate::table::error::AppendSnafu);
             }
-            .await;
-            if let Err(source) = write_result {
-                return Err(segment.rollback(self, source, &mut telemetry).await);
+        };
+        let mut writer = AppendWriter::new(self, reader.schema(), options, telemetry)
+            .context(crate::table::error::AppendSnafu)?;
+        let append_result: Result<AppendReport, AppendError> = async {
+            for batch in reader {
+                let batch = batch.context(ArrowInputSnafu)?;
+                writer.write_inner(&batch).await?;
+                drop(batch);
+                tokio::task::yield_now().await;
             }
-            telemetry.complete_phase();
-            segment.commit(self, next_version, &mut telemetry).await
+            writer.commit_inner().await?.ok_or(AppendError::EmptyInput)
         }
         .await;
-        let span = tracing::Span::current();
-        span.record("batches_consumed", telemetry.batches_consumed);
-        span.record("rows_consumed", telemetry.rows_consumed);
-        if let Err(error) = &append_result {
-            telemetry.record_failure(error);
-        }
+        let append_result = match append_result {
+            Ok(report) => Ok(report),
+            Err(error) => Err(writer.discard(error).await),
+        };
+        writer.telemetry.record_result(&append_result);
         append_result.context(crate::table::error::AppendSnafu)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod writer;
+
+    use super::AppendWriterOptions as AppendWriterSettings;
     use super::*;
     use snafu::IntoError;
 

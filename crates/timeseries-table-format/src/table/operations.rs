@@ -14,7 +14,7 @@ mod update_rows;
 mod vacuum;
 
 pub use add_columns::AddColumnsError;
-pub use append::{AppendReport, error::AppendError};
+pub use append::{AppendReport, AppendWriter, AppendWriterOptions, error::AppendError};
 pub use coverage::CoverageQueryError;
 pub use create::CreateTableError;
 pub use open::OpenTableError;
