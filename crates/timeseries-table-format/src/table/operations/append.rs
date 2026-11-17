@@ -370,6 +370,43 @@ struct PendingAppendSegment {
     rows_written: u64,
 }
 
+// Keep file ownership across definite publication failures.
+struct FinishedAppendSegment {
+    relative_path: String,
+    data_guard: storage::FileCleanupGuard,
+    settings: AppendWriterOptions,
+}
+
+impl FinishedAppendSegment {
+    async fn publish(
+        &mut self,
+        table: &mut TimeSeriesTable,
+        next_version: u64,
+        telemetry: &mut AppendTelemetry,
+    ) -> Result<AppendReport, AppendError> {
+        table
+            .publish_generated_parquet_segment(
+                &self.relative_path,
+                next_version,
+                &mut self.data_guard,
+                telemetry,
+                self.settings,
+            )
+            .await
+    }
+
+    async fn rollback(
+        mut self,
+        table: &TimeSeriesTable,
+        source: AppendError,
+        telemetry: &mut AppendTelemetry,
+    ) -> AppendError {
+        table
+            .rollback_append_output(&self.relative_path, &mut self.data_guard, source, telemetry)
+            .await
+    }
+}
+
 impl PendingAppendSegment {
     async fn new(
         table: &TimeSeriesTable,
@@ -450,12 +487,11 @@ impl PendingAppendSegment {
             .await
     }
 
-    async fn commit(
+    async fn finish(
         self,
-        table: &mut TimeSeriesTable,
-        next_version: u64,
+        table: &TimeSeriesTable,
         telemetry: &mut AppendTelemetry,
-    ) -> Result<AppendReport, AppendError> {
+    ) -> Result<FinishedAppendSegment, AppendError> {
         let Self {
             relative_path,
             mut data_guard,
@@ -468,25 +504,34 @@ impl PendingAppendSegment {
             let sink = writer.into_inner().context(ParquetWriteSnafu)?;
             sink.finish().await.map_err(AppendError::from)?;
             telemetry.complete_phase();
-            data_guard.arm();
-
-            table
-                .publish_generated_parquet_segment(
-                    &relative_path,
-                    next_version,
-                    &mut data_guard,
-                    telemetry,
-                    settings,
-                )
-                .await
+            Ok(())
         }
         .await;
+        if let Err(source) = result {
+            return Err(table
+                .rollback_append_output(&relative_path, &mut data_guard, source, telemetry)
+                .await);
+        }
+        data_guard.arm();
+        Ok(FinishedAppendSegment {
+            relative_path,
+            data_guard,
+            settings,
+        })
+    }
+
+    async fn commit(
+        self,
+        table: &mut TimeSeriesTable,
+        next_version: u64,
+        telemetry: &mut AppendTelemetry,
+    ) -> Result<AppendReport, AppendError> {
+        let mut finished = self.finish(table, telemetry).await?;
+        let result = finished.publish(table, next_version, telemetry).await;
         match result {
             Ok(report) => Ok(report),
             Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
-            Err(source) => Err(table
-                .rollback_append_output(&relative_path, &mut data_guard, source, telemetry)
-                .await),
+            Err(source) => Err(finished.rollback(table, source, telemetry).await),
         }
     }
 }
@@ -1249,6 +1294,7 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
+    mod finished_segment;
     mod writer;
 
     use super::AppendWriterOptions as AppendWriterSettings;
