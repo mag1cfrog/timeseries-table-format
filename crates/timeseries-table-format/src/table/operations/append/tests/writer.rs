@@ -799,6 +799,72 @@ async fn cancelling_sidecar_or_commit_creation_cleans_artifacts_and_closes_write
 }
 
 #[tokio::test]
+async fn directory_sync_failure_before_publication_discards_rows_and_allows_reuse() -> TestResult {
+    for sync_data in [true, false] {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+        let batch = timestamp_only_batch(1)?;
+        let mut writer = table.writer(batch.schema())?;
+        writer.write(&batch).await?;
+        let path = if sync_data {
+            data_files(temp.path())?.pop().expect("pending data")
+        } else {
+            temp.path().join(layout::commit_rel_path(2))
+        };
+        crate::storage::inject_parent_sync_failure(path);
+        assert!(writer.commit().await.is_err());
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        assert_eq!(TimeSeriesTable::open(location).await?.state().version, 1);
+        writer.write(&batch).await?;
+        assert_eq!(writer.commit().await?.expect("retry").committed_version, 2);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn directory_sync_failure_preserves_published_rows_and_closes_writer() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+    let before = table.state().clone();
+    let batch = timestamp_only_batch(2)?;
+    let mut writer = table.writer(batch.schema())?;
+    writer.write(&batch).await?;
+    crate::storage::inject_parent_sync_failure(temp.path().join(layout::current_rel_path()));
+    let error = writer
+        .commit()
+        .await
+        .expect_err("post-publication sync failure");
+    assert!(matches!(
+        error,
+        TableError::Append {
+            source: AppendError::CommitAmbiguous { ref source, .. }
+        } if matches!(source.as_ref(), CommitError::PublicationUncertain { .. })
+    ));
+    assert!(matches!(
+        writer.write(&batch).await,
+        Err(TableError::Append {
+            source: AppendError::WriterClosed
+        })
+    ));
+    writer.abort().await?;
+    assert_eq!(table.state(), &before);
+    let mut reopened = TimeSeriesTable::open(location).await?;
+    assert_eq!(reopened.state().version, 2);
+    assert_eq!(reopened.state().segments.len(), 1);
+    assert_eq!(data_files(temp.path())?.len(), 1);
+    assert_eq!(coverage_files(temp.path())?.len(), 2);
+    let start = Utc.timestamp_millis_opt(0).single().expect("start");
+    let end = Utc.timestamp_millis_opt(2 * 60_000).single().expect("end");
+    assert_eq!(reopened.max_gap_len_for_range(start, end).await?, 0);
+    let following = timestamp_only_batch_starting_at_minute_offset(2, 1)?;
+    assert_eq!(reopened.append(following).await?.committed_version, 3);
+    Ok(())
+}
+
+#[tokio::test]
 async fn current_publication_and_rollback_failure_preserve_finished_segment() -> TestResult {
     let temp = TempDir::new()?;
     let location = TableLocation::local(temp.path());

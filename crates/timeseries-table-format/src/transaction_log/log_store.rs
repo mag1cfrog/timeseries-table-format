@@ -40,6 +40,11 @@ fn is_unknown_action(action: &serde_json::Value) -> bool {
 ///   `<root>/_timeseries_log/0000000001.json`
 ///   `<root>/_timeseries_log/0000000002.json`
 ///   `<root>/_timeseries_log/CURRENT`
+///
+/// All concurrent writers must use this implementation's `WRITE_LOCK` protocol.
+/// Upgrade every writer together; versions without the lock cannot safely write
+/// concurrently with automatic recovery. The lock file is persistent and must
+/// not be removed while writers can be active. Readers do not acquire this lock.
 #[derive(Debug, Clone)]
 pub struct TransactionLogStore {
     location: TableLocation,
@@ -90,6 +95,25 @@ impl TransactionLogStore {
                 cleanup_error: Box::new(cleanup_error),
             },
         }
+    }
+
+    async fn check_current_version(&self, expected: u64) -> Result<(), CommitError> {
+        let span = tracing::Span::current();
+        let current = self.load_current_version().await.inspect_err(|_| {
+            span.record("failure_stage", "current_read");
+            span.record("outcome", "failed");
+        })?;
+        span.record("observed_version", current);
+        if current != expected {
+            span.record("failure_stage", "advisory_check");
+            span.record("outcome", "conflict");
+            return ConflictSnafu {
+                expected,
+                found: current,
+            }
+            .fail();
+        }
+        Ok(())
     }
 
     /// Load a single commit by version.
@@ -185,14 +209,15 @@ impl TransactionLogStore {
     ///
     /// ## Concurrency semantics
     ///
-    /// - The check on CURRENT is advisory/best-effort and subject to races.
-    ///   Two writers may both read the same CURRENT value and attempt to commit
-    ///   the same next version. The actual concurrency guard is the atomic
-    ///   creation of the commit file using "create only if not exists" semantics.
-    /// - If another writer wins the race and creates the commit file first,
-    ///   this operation will fail with `StorageError::AlreadyExists`.
-    /// - Callers must be prepared to handle `StorageError::AlreadyExists` and
-    ///   implement retry logic (e.g., reload CURRENT and retry the commit).
+    /// - All writers to a table must use the commit-lock implementation.
+    ///   Mixing writers from versions without this lock is unsupported.
+    /// - A nonblocking operating-system lock serializes recovery and publication.
+    ///   A competing publisher gets [`CommitError::CommitInProgress`]. Locks are
+    ///   released when the process exits, including after SIGKILL.
+    /// - Under that lock, a next-version log beyond CURRENT is unpublished and
+    ///   can be removed before the new commit is exclusively created.
+    /// - A stale expected version returns [`CommitError::Conflict`]. There is
+    ///   no automatic refresh, rebase or retry.
     ///
     /// If updating CURRENT fails, this method removes the commit file created
     /// by this invocation. A cleanup failure returns
@@ -200,12 +225,14 @@ impl TransactionLogStore {
     ///
     /// ## Steps
     ///
-    /// 1. Load CURRENT (advisory check).
+    /// 1. Check CURRENT, validate the payload, then acquire the commit lock and
+    ///    recheck CURRENT before changing files.
     /// 2. If CURRENT != expected, return `CommitError::Conflict`.
     /// 3. Compute version = expected + 1 (with overflow check).
     /// 4. Build a `Commit` struct.
     /// 5. Serialize to JSON and verify it fits the log reader's JSON limits.
-    /// 6. Create commit file `_timeseries_log/<zero-padded>.json` using
+    /// 6. Remove an unpublished next-version log left by a crashed writer, then
+    ///    create `_timeseries_log/<zero-padded>.json` using
     ///    "create only if not exists" semantics (atomic guard).
     /// 7. Update `_timeseries_log/CURRENT` with the new version (e.g. `"1\n"`).
     pub(crate) async fn commit_with_expected_version(
@@ -259,25 +286,8 @@ impl TransactionLogStore {
     {
         let span = tracing::Span::current();
 
-        // 1) Guard on CURRENT
-        let current = match self.load_current_version().await {
-            Ok(current) => current,
-            Err(error) => {
-                span.record("failure_stage", "current_read");
-                span.record("outcome", "failed");
-                return Err(error);
-            }
-        };
-        span.record("observed_version", current);
-        if current != expected {
-            span.record("failure_stage", "advisory_check");
-            span.record("outcome", "conflict");
-            return ConflictSnafu {
-                expected,
-                found: current,
-            }
-            .fail();
-        }
+        // Reject invalid input and stale handles before creating lock artifacts.
+        self.check_current_version(expected).await?;
 
         // 2) Compute next version with overflow guard
         let version = match checked_next_version(expected) {
@@ -316,12 +326,39 @@ impl TransactionLogStore {
             }
         };
 
-        // 4) Attempt to create the commit file *only if it does not already exist*.
-        //    If the file already exists (AlreadyExists error), we propagate it as-is
-        //    rather than converting to Conflict. This allows higher-level code to
-        //    implement automatic conflict resolution (e.g., retrying with rebased
-        //    changes if the operations don't actually conflict, like Delta Lake).
+        let lock_rel = storage::layout::commit_lock_rel_path();
+        let _commit_lock = match storage::try_lock_file(self.location.as_ref(), &lock_rel).await {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                span.record("failure_stage", "commit_lock");
+                span.record("outcome", "conflict");
+                return Err(CommitError::CommitInProgress {
+                    path: lock_rel.display().to_string(),
+                    backtrace: Backtrace::capture(),
+                });
+            }
+            Err(source) => {
+                span.record("failure_stage", "commit_lock");
+                span.record("outcome", "failed");
+                return Err(CommitError::Storage { source });
+            }
+        };
+        self.check_current_version(expected).await?;
+
+        // No live cooperating writer can own this log while we hold the lock.
+        // Do not adopt its contents: CURRENT alone determines committed state.
         let commit_rel = Self::commit_rel_path(version);
+        let cleanup =
+            match storage::regular_file_metadata(self.location.as_ref(), &commit_rel).await {
+                Ok(_) => storage::remove_file(self.location.as_ref(), &commit_rel).await,
+                Err(StorageError::NotFound { .. }) => Ok(()),
+                Err(error) => Err(error),
+            };
+        if let Err(source) = cleanup {
+            span.record("failure_stage", "unpublished_log_cleanup");
+            span.record("outcome", "failed");
+            return Err(CommitError::Storage { source });
+        }
         let mut commit_guard =
             storage::FileCleanupGuard::new_disarmed(self.location.as_ref(), &commit_rel)
                 .map_err(|source| CommitError::Storage { source })?;
@@ -356,20 +393,37 @@ impl TransactionLogStore {
         // 5) Update CURRENT via atomic write (temp + rename).
         let current_rel = storage::layout::current_rel_path();
         let current_contents = format!("{version}\n");
-        if let Err(publish_error) = storage::write_atomic(
+        let mut published = false;
+        let mut preserve_paths = Some(on_commit_may_exist);
+        if let Err(publish_error) = storage::write_atomic_with_publication(
             self.location.as_ref(),
             &current_rel,
             current_contents.as_bytes(),
+            || {
+                published = true;
+                commit_guard.disarm();
+                if let Some(preserve) = preserve_paths.take() {
+                    preserve();
+                }
+            },
         )
         .await
         {
+            if published {
+                span.record("failure_stage", "current_directory_sync");
+                span.record("outcome", "ambiguous");
+                return Err(CommitError::PublicationUncertain {
+                    commit_path: commit_rel.display().to_string(),
+                    source: publish_error,
+                });
+            }
             let error = self
                 .rollback_unpublished_commit(&commit_rel, publish_error)
                 .await;
             commit_guard.disarm();
             let ambiguous = matches!(&error, CommitError::AmbiguousOutcome { .. });
-            if ambiguous {
-                on_commit_may_exist();
+            if ambiguous && let Some(preserve) = preserve_paths.take() {
+                preserve();
             }
             span.record("failure_stage", "current_publication");
             if ambiguous {
@@ -381,9 +435,6 @@ impl TransactionLogStore {
             }
             return Err(error);
         }
-
-        commit_guard.disarm();
-        on_commit_may_exist();
 
         span.record("committed_version", version);
         span.record("outcome", "succeeded");
@@ -790,10 +841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_returns_already_exists_when_commit_file_already_exists() -> TestResult {
-        // Simulates a race condition where another writer created the commit file first.
-        // We expect AlreadyExists (not Conflict) so higher-level code can implement
-        // automatic conflict resolution (retry with rebased changes if non-conflicting).
+    async fn commit_replaces_unpublished_log_after_acquiring_lock() -> TestResult {
         let (tmp, store) = create_test_log_store();
 
         // Manually create the commit file that version 1 would use
@@ -802,33 +850,133 @@ mod tests {
         let commit_file = tmp.path().join(layout::commit_rel_path(1));
         tokio::fs::write(&commit_file, b"{}").await?;
 
-        // Now try to commit at version 1 - should fail with Storage(AlreadyExists)
         let capture = TraceCapture::default();
         let result = capture
             .run(store.commit_with_expected_version(0, vec![]))
             .await;
 
-        assert!(
-            matches!(
-                result,
-                Err(CommitError::Storage {
-                    source: StorageError::AlreadyExists { .. }
-                })
-            ),
-            "expected Storage(AlreadyExists) error, got: {result:?}",
-        );
+        assert_eq!(result?, 1);
+        assert_eq!(store.load_commit(1).await?.version, 1);
         assert_commit_span(
             &capture,
             &[
                 ("observed_version", Some("0")),
                 ("proposed_version", Some("1")),
-                ("committed_version", None),
-                ("failure_stage", Some("atomic_create")),
+                ("committed_version", Some("1")),
+                ("failure_stage", None),
                 ("rollback_outcome", None),
-                ("outcome", Some("conflict")),
+                ("outcome", Some("succeeded")),
             ],
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_discards_empty_partial_and_complete_unpublished_logs() -> TestResult {
+        let complete = serde_json::to_vec(&Commit {
+            version: 1,
+            base_version: 0,
+            timestamp: Utc::now(),
+            actions: vec![LogAction::RemoveSegment {
+                path: "never-published.parquet".into(),
+            }],
+        })?;
+        for contents in [Vec::new(), b"{\"version\":".to_vec(), complete] {
+            let (tmp, store) = create_test_log_store();
+            let path = tmp.path().join(layout::commit_rel_path(1));
+            std::fs::create_dir_all(path.parent().expect("log directory"))?;
+            std::fs::write(&path, &contents)?;
+            assert_eq!(store.commit_with_expected_version(0, vec![]).await?, 1);
+            assert!(store.load_commit(1).await?.actions.is_empty());
+            assert_eq!(store.load_current_version().await?, 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_cleanup_failure_preserves_log_and_releases_lock() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let path = tmp.path().join(layout::commit_rel_path(1));
+        std::fs::create_dir_all(path.parent().expect("log directory"))?;
+        std::fs::write(&path, b"unpublished")?;
+        storage::inject_cleanup_failure(path.clone());
+        assert!(matches!(
+            store.commit_with_expected_version(0, vec![]).await,
+            Err(CommitError::Storage { .. })
+        ));
+        assert_eq!(std::fs::read(&path)?, b"unpublished");
+        assert_eq!(store.load_current_version().await?, 0);
+        assert_eq!(store.commit_with_expected_version(0, vec![]).await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_handle_does_not_remove_any_log() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        store.commit_with_expected_version(0, vec![]).await?;
+        let committed = std::fs::read(tmp.path().join(layout::commit_rel_path(1)))?;
+        let unpublished = tmp.path().join(layout::commit_rel_path(2));
+        std::fs::write(&unpublished, b"partial")?;
+        assert!(matches!(
+            store.commit_with_expected_version(0, vec![]).await,
+            Err(CommitError::Conflict { .. })
+        ));
+        assert_eq!(std::fs::read(&unpublished)?, b"partial");
+        assert_eq!(
+            std::fs::read(tmp.path().join(layout::commit_rel_path(1)))?,
+            committed
+        );
+        assert_eq!(store.commit_with_expected_version(1, vec![]).await?, 2);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_publisher_is_not_recovered_by_another_handle() -> TestResult {
+        for after_create in [true, false] {
+            let (tmp, store) = create_test_log_store();
+            store.commit_with_expected_version(0, vec![]).await?;
+            let next = tmp.path().join(layout::commit_rel_path(2));
+            let mut pause = if after_create {
+                storage::pause_write_new_after_create(next.clone())
+            } else {
+                storage::pause_atomic_write_before_rename(
+                    tmp.path().join(layout::current_rel_path()),
+                )
+            };
+            let mut winner = Box::pin(store.commit_with_expected_version(1, vec![]));
+            tokio::select! {
+                () = pause.wait_until_paused() => {},
+                result = &mut winner => panic!("commit completed before pause: {result:?}"),
+            }
+            let before = std::fs::read(&next)?;
+            assert!(matches!(
+                store.clone().commit_with_expected_version(1, vec![]).await,
+                Err(CommitError::CommitInProgress { .. })
+            ));
+            assert_eq!(std::fs::read(&next)?, before);
+            assert_eq!(store.load_current_version().await?, 1);
+            pause.release();
+            assert_eq!(winner.await?, 2);
+            assert_eq!(store.load_commit(2).await?.version, 2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_releases_commit_lock_after_cleaning_owned_log() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        let path = tmp.path().join(layout::commit_rel_path(1));
+        let mut pause = storage::pause_write_new_after_create(path.clone());
+        let mut commit = Box::pin(store.commit_with_expected_version(0, vec![]));
+        tokio::select! {
+            () = pause.wait_until_paused() => {},
+            result = &mut commit => panic!("commit completed before pause: {result:?}"),
+        }
+        drop(commit);
+        pause.release();
+        assert!(!path.exists());
+        assert_eq!(store.commit_with_expected_version(0, vec![]).await?, 1);
         Ok(())
     }
 
@@ -857,6 +1005,24 @@ mod tests {
                 ("outcome", Some("failed")),
             ],
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn directory_sync_failure_after_publication_preserves_commit() -> TestResult {
+        let (tmp, store) = create_test_log_store();
+        storage::inject_parent_sync_failure(tmp.path().join(layout::current_rel_path()));
+        let preserved = std::cell::Cell::new(false);
+        let error = store
+            .commit_with_path_preservation(0, vec![], || preserved.set(true))
+            .await
+            .expect_err("directory sync must fail after CURRENT is visible");
+        assert!(matches!(error, CommitError::PublicationUncertain { .. }));
+        assert!(error.may_have_committed());
+        assert!(preserved.get());
+        assert_eq!(store.load_current_version().await?, 1);
+        assert_eq!(store.load_commit(1).await?.version, 1);
+        assert!(snafu::ErrorCompat::backtrace(&error).is_some());
         Ok(())
     }
 

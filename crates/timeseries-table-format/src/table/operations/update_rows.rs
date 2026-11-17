@@ -71,8 +71,9 @@ pub enum UpdateRowsError {
     },
     /// Version checking or publication failed.
     ///
-    /// On [`CommitError::AmbiguousOutcome`], files are preserved and the handle
-    /// remains unchanged. Reopen and reconcile before retrying.
+    /// On [`CommitError::AmbiguousOutcome`] or [`CommitError::PublicationUncertain`],
+    /// files are preserved and the handle remains unchanged. Reopen and reconcile
+    /// before retrying.
     #[snafu(context(false), display("Update commit failed: {source}"))]
     Commit {
         /// Original conflict, storage, encoding, or ambiguous-outcome failure.

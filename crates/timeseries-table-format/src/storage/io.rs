@@ -105,6 +105,18 @@ static WRITE_NEW_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
+static PARENT_SYNC_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_parent_sync_failure(path: PathBuf) {
+    PARENT_SYNC_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
 static CLEANUP_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -337,6 +349,7 @@ async fn write_created_file(mut file: fs::File, path: &Path, contents: &[u8]) ->
                 path: path.display().to_string(),
             })?;
 
+        sync_parent_dir(path)?;
         Ok(())
     }
     .await;
@@ -380,6 +393,37 @@ pub(super) async fn create_new_file(path: &Path) -> StorageResult<std::fs::File>
     }
 }
 
+/// Acquire a local advisory lock without waiting for another publisher.
+///
+/// Never unlink this inode: a replacement path could permit two lock owners.
+/// Closing the file, including on process death, releases the lock.
+pub(crate) async fn try_lock_file(
+    location: &StorageLocation,
+    rel_path: &Path,
+) -> StorageResult<Option<std::fs::File>> {
+    let path = join_local(location, rel_path)?;
+    create_parent_dir(&path).await?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(StorageBackendError::from)
+        .context(OtherIoSnafu {
+            path: path.display().to_string(),
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(StorageBackendError::from(error)).context(OtherIoSnafu {
+                path: path.display().to_string(),
+            })
+        }
+    }
+}
+
 /// Validate a backend-relative storage key and resolve it under a local root.
 ///
 /// v0.1: only Local is supported.
@@ -417,7 +461,46 @@ pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
             .context(OtherIoSnafu {
                 path: parent.display().to_string(),
             })?;
+        // Persist every directory link, including directories left by a
+        // cancelled creator, before any file can reference this hierarchy.
+        for directory in parent.ancestors() {
+            sync_parent_dir(directory)?;
+        }
     }
+    Ok(())
+}
+
+/// Persist the directory entry naming a file or newly created directory.
+pub(super) fn sync_parent_dir(path: &Path) -> StorageResult<()> {
+    #[cfg(test)]
+    if PARENT_SYNC_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+    {
+        return Err(write_failure(path));
+    }
+    #[cfg(unix)]
+    {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(StorageBackendError::from)
+            .context(OtherIoSnafu {
+                path: parent.display().to_string(),
+            })?;
+    }
+    // Directory fsync is a Unix operation. Other targets retain their existing
+    // file-sync and atomic-rename behavior; power-loss durability is not verified.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -438,10 +521,24 @@ pub(super) async fn create_parent_dir(abs: &Path) -> StorageResult<()> {
 ///
 /// Returns `StorageError::OtherIo` when filesystem I/O fails; other internal
 /// helpers may add context to the returned error.
+#[cfg(test)]
 pub(crate) async fn write_atomic(
     location: &StorageLocation,
     rel_path: &Path,
     contents: &[u8],
+) -> StorageResult<()> {
+    write_atomic_with_publication(location, rel_path, contents, || {}).await
+}
+
+/// Replace a file and notify its owner before syncing the directory on Unix.
+///
+/// `on_published` must preserve referenced files even if the subsequent sync
+/// fails. Rename, the callback and directory sync run without an await boundary.
+pub(crate) async fn write_atomic_with_publication(
+    location: &StorageLocation,
+    rel_path: &Path,
+    contents: &[u8],
+    on_published: impl FnOnce(),
 ) -> StorageResult<()> {
     match location {
         StorageLocation::Local(_) => {
@@ -494,6 +591,8 @@ pub(crate) async fn write_atomic(
 
             // Success - don't remove the temp file (it's been renamed)
             guard.disarm();
+            on_published();
+            sync_parent_dir(&abs)?;
 
             Ok(())
         }

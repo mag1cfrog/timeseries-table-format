@@ -523,7 +523,7 @@ impl TimeSeriesTable {
                 .await
             {
                 Ok(version) => version,
-                Err(source @ CommitError::AmbiguousOutcome { .. }) => {
+                Err(source) if source.may_have_committed() => {
                     return Err(OptimizeError::from(source));
                 }
                 Err(source) => {
@@ -600,9 +600,7 @@ impl TimeSeriesTable {
                     );
                 }
             }
-            Err(OptimizeError::Commit {
-                source: CommitError::AmbiguousOutcome { .. },
-            }) => {
+            Err(OptimizeError::Commit { source }) if source.may_have_committed() => {
                 span.record("outcome", "ambiguous");
             }
             Err(OptimizeError::Rollback { .. }) => {
@@ -1408,6 +1406,54 @@ mod tests {
                 .len(),
             2
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn published_directory_sync_failure_keeps_optimization_outputs() -> Result<(), TableError>
+    {
+        let temp = TempDir::new().expect("temp directory");
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(
+            location.clone(),
+            make_table_meta_with_unit(LogicalTimestampUnit::Millis),
+        )
+        .await?;
+        append_mixed_source(&mut table, temp.path(), "data/candidate.parquet", 0).await?;
+        let before = table.state().clone();
+        crate::storage::inject_parent_sync_failure(temp.path().join(layout::current_rel_path()));
+        assert!(matches!(
+            table.optimize().await,
+            Err(TableError::Optimize {
+                source: OptimizeError::Commit {
+                    source: CommitError::PublicationUncertain { .. }
+                }
+            })
+        ));
+        assert_eq!(table.state(), &before);
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, before.version + 1);
+        assert_eq!(
+            reopened
+                .state()
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>(),
+            before
+                .segments
+                .values()
+                .map(|segment| segment.row_count)
+                .sum::<u64>()
+        );
+        for segment in reopened.state().segments.values() {
+            assert!(temp.path().join(&segment.path).is_file());
+            assert!(
+                temp.path()
+                    .join(segment.coverage_path.as_ref().expect("coverage sidecar"))
+                    .is_file()
+            );
+        }
         Ok(())
     }
 

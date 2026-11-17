@@ -1002,7 +1002,7 @@ impl TimeSeriesTable {
             .await
         {
             Ok(version) => version,
-            Err(source @ crate::transaction_log::CommitError::AmbiguousOutcome { .. }) => {
+            Err(source) if source.may_have_committed() => {
                 return Err(AppendError::CommitAmbiguous {
                     segment_path: relative_path.to_string(),
                     source: Box::new(source),
@@ -1168,6 +1168,11 @@ impl TimeSeriesTable {
     /// append. The returned [`AppendReport`] describes the committed segment
     /// and effective settings. Call `.committed_version` on the report when
     /// only the new table version is needed.
+    ///
+    /// Upgrade all concurrent writers together: crash recovery uses the shared
+    /// `_timeseries_log/WRITE_LOCK` file, which must remain in place. An active
+    /// publisher returns [`crate::transaction_log::CommitError::CommitInProgress`]
+    /// to competitors. Stale handles still conflict without automatic rebase.
     #[tracing::instrument(
         name = "table.append",
         target = "timeseries_table_format::table::append",
@@ -3348,9 +3353,7 @@ mod tests {
             loser_error,
             TableError::Append {
                 source: AppendError::Commit {
-                    source: CommitError::Storage {
-                        source: StorageError::AlreadyExists { .. },
-                    },
+                    source: CommitError::CommitInProgress { .. },
                 }
             }
         ));

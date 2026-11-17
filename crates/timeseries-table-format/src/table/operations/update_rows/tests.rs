@@ -559,7 +559,35 @@ async fn commit_failures_clean_replacements_but_ambiguity_preserves_them() -> Te
 }
 
 #[tokio::test]
-async fn create_only_commit_race_remains_storage_and_cleans_loser() -> TestResult {
+async fn published_directory_sync_failure_keeps_replacements_readable() -> TestResult {
+    let (dir, mut table) = populated().await?;
+    let state = table.state.clone();
+    let mut expected = values(&table, "value").await?;
+    expected.insert((0, "A".into()), Some(90));
+    storage::inject_parent_sync_failure(dir.path().join(layout::current_rel_path()));
+    assert!(matches!(
+        table
+            .update_rows(
+                reader(batch(&[(0, "A", Some(90))])),
+                vec!["value".into()],
+                state.version
+            )
+            .await,
+        Err(TableError::UpdateRows {
+            source: UpdateRowsError::Commit {
+                source: CommitError::PublicationUncertain { .. }
+            }
+        })
+    ));
+    assert_eq!(table.state, state);
+    let reopened = TimeSeriesTable::open(table.location().clone()).await?;
+    assert_eq!(reopened.state().version, state.version + 1);
+    assert_eq!(values(&reopened, "value").await?, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_lock_race_reports_busy_and_cleans_loser() -> TestResult {
     let (dir, mut winner) = populated().await?;
     let mut loser = winner.clone();
     let state = loser.state.clone();
@@ -584,9 +612,7 @@ async fn create_only_commit_race_remains_storage_and_cleans_loser() -> TestResul
         error,
         TableError::UpdateRows {
             source: UpdateRowsError::Commit {
-                source: CommitError::Storage {
-                    source: storage::StorageError::AlreadyExists { .. }
-                }
+                source: CommitError::CommitInProgress { .. }
             }
         }
     ));

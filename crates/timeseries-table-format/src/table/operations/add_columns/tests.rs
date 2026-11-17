@@ -804,7 +804,7 @@ async fn stale_add_add_append_and_optimize_conflict_without_lost_updates() -> Te
 }
 
 #[tokio::test]
-async fn create_only_races_preserve_the_winning_commit() -> TestResult {
+async fn commit_lock_races_preserve_the_winning_commit() -> TestResult {
     for (winner, loser) in [
         ("add", "add"),
         ("add", "append"),
@@ -859,12 +859,7 @@ async fn create_only_races_preserve_the_winning_commit() -> TestResult {
             } => source,
             other => panic!("unexpected failure: {other:?}"),
         };
-        assert!(matches!(
-            commit,
-            CommitError::Storage {
-                source: storage::StorageError::AlreadyExists { .. }
-            }
-        ));
+        assert!(matches!(commit, CommitError::CommitInProgress { .. }));
         assert_eq!(concurrent.state(), &before);
         assert_eq!(files(temp.path())?, objects);
         pause.release();
@@ -929,6 +924,41 @@ async fn commit_failures_and_ambiguity_preserve_handle_and_existing_objects() ->
             &before
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn published_directory_sync_failure_keeps_new_schema_readable() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut table = TimeSeriesTable::create(location.clone(), table_meta()).await?;
+    table.append(batch(0, None)).await?;
+    let before = table.state().clone();
+    storage::inject_parent_sync_failure(temp.path().join(layout::current_rel_path()));
+    assert!(matches!(
+        table
+            .add_columns(vec![field("score", LogicalDataType::Int64)])
+            .await,
+        Err(TableError::AddColumns {
+            source: AddColumnsError::Commit {
+                source: CommitError::PublicationUncertain { .. }
+            }
+        })
+    ));
+    assert_eq!(table.state(), &before);
+    let reopened = TimeSeriesTable::open(location).await?;
+    assert_eq!(reopened.state().version, before.version + 1);
+    assert!(
+        reopened
+            .state()
+            .table_meta
+            .logical_schema()
+            .expect("schema")
+            .columns()
+            .iter()
+            .any(|column| column.name == "score")
+    );
+    assert_eq!(reopened.state().segments, before.segments);
     Ok(())
 }
 

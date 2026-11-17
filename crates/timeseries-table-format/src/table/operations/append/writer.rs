@@ -16,6 +16,9 @@ use std::sync::Arc;
 /// Pending rows are neither visible to other handles nor durable until commit
 /// succeeds. A process that stops before commit loses its pending rows. To
 /// recover, reopen the table and query coverage to find missing intervals.
+/// Crash recovery requires every concurrent writer to use the commit-lock
+/// implementation; upgrade all writers together. Keep `_timeseries_log/WRITE_LOCK`
+/// in place. The lock covers publication, not the lifetime of this writer.
 ///
 /// Dropping the writer closes its output and attempts synchronous cleanup.
 /// Files that cannot be removed remain unreferenced and are reported by

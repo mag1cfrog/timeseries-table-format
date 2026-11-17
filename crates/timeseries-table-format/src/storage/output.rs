@@ -9,11 +9,10 @@ use std::{
 };
 
 use snafu::{IntoError, ResultExt};
-use tokio::fs;
 
 use crate::storage::{
     FileCleanupGuard, OtherIoSnafu, StorageBackendError, StorageLocation, StorageResult,
-    create_new_file, create_parent_dir, join_local,
+    create_new_file, create_parent_dir, join_local, sync_parent_dir,
 };
 
 #[cfg(test)]
@@ -166,12 +165,14 @@ impl LocalSink {
         }
 
         if let LocalFinish::Rename(final_path) = &self.finish {
-            fs::rename(&self.path, final_path)
-                .await
+            std::fs::rename(&self.path, final_path)
                 .map_err(StorageBackendError::from)
                 .context(OtherIoSnafu {
                     path: final_path.display().to_string(),
                 })?;
+            sync_parent_dir(final_path)?;
+        } else {
+            sync_parent_dir(&self.path)?;
         }
 
         self.guard.disarm();
