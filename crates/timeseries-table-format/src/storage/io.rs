@@ -113,6 +113,18 @@ static WRITE_NEW_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
+static PARQUET_READ_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_parquet_read_failure(path: PathBuf) {
+    PARQUET_READ_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path);
+}
+
+#[cfg(test)]
 static PARENT_SYNC_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -457,6 +469,18 @@ pub(crate) async fn open_parquet_reader(
 ) -> StorageResult<Box<dyn AsyncFileReader>> {
     let path = rel_path.display().to_string();
     let absolute_path = join_local(location, rel_path)?;
+
+    #[cfg(test)]
+    if PARQUET_READ_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&absolute_path)
+    {
+        return Err(StorageBackendError::from(io::Error::other(
+            "injected Parquet reader failure",
+        )))
+        .context(OtherIoSnafu { path });
+    }
 
     match location {
         StorageLocation::Local(_) => match fs::File::open(absolute_path).await {

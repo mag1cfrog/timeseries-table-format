@@ -150,18 +150,49 @@ impl<'a> AppendWriter<'a> {
     ///
     /// A definite failure discards the pending rows and leaves the writer idle.
     /// After a conflict, end this writer, refresh the handle, and start a new
-    /// one; there is no automatic refresh or retry. An ambiguous outcome
+    /// one. Call [`Self::commit_with_retry`] instead to enable retries for a commit.
+    /// An ambiguous outcome
     /// preserves the finished file and reports its path, then closes the writer.
     /// Cancelling this method while a segment is pending also closes the writer;
     /// end it and refresh or reopen before writing again.
     pub async fn commit(&mut self) -> Result<Option<AppendReport>, TableError> {
-        let result = self.commit_inner().await;
+        self.commit_with_retry(0).await
+    }
+
+    /// Publish pending rows, retrying confirmed conflicts across concurrent appends.
+    ///
+    /// `max_retries` limits additional publication attempts after the first.
+    /// Zero has the same behavior as [`Self::commit`]. Each retry waits between
+    /// 10 and 250 milliseconds, with jitter, using the current Tokio runtime's
+    /// timer. Empty writers still return `None`.
+    ///
+    /// Retries require a canonical schema in this handle's initial snapshot.
+    /// Every intervening commit must only add segments and update coverage.
+    /// Metadata or protocol changes, rewrites, overlapping index intervals,
+    /// lock contention and uncertain publication stop retrying. The finished
+    /// Parquet file and its derived metadata and coverage are reused.
+    ///
+    /// Success updates this handle to include concurrent appends and this
+    /// writer's segment. [`AppendReport::starting_version`] is the base of the
+    /// successful attempt. Failure leaves the handle's original snapshot intact;
+    /// end a stale writer and refresh before starting another. Definite failure
+    /// discards pending rows. Uncertain publication preserves files and closes
+    /// the writer. Cancelling an in-flight commit closes the writer and attempts
+    /// cleanup of unpublished owned files. Possibly committed files are preserved.
+    pub async fn commit_with_retry(
+        &mut self,
+        max_retries: u32,
+    ) -> Result<Option<AppendReport>, TableError> {
+        let result = self.commit_inner(max_retries).await;
         self.telemetry.record_result(&result);
         self.reset_telemetry();
         result.context(crate::table::error::AppendSnafu)
     }
 
-    pub(super) async fn commit_inner(&mut self) -> Result<Option<AppendReport>, AppendError> {
+    pub(super) async fn commit_inner(
+        &mut self,
+        max_retries: u32,
+    ) -> Result<Option<AppendReport>, AppendError> {
         self.ensure_open()?;
         let Some(segment) = self.pending.take() else {
             return Ok(None);
@@ -173,7 +204,7 @@ impl<'a> AppendWriter<'a> {
         let result = match checked_next_version(self.table.state.version) {
             Ok(next_version) => {
                 segment
-                    .commit(self.table, next_version, &mut self.telemetry)
+                    .commit_with_retry(self.table, next_version, max_retries, &mut self.telemetry)
                     .await
             }
             Err(error) => Err(segment

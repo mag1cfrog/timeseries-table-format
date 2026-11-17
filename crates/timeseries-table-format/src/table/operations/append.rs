@@ -9,6 +9,7 @@
 //!   Keep new append-time invariants here so the flow remains centralized.
 
 pub(super) mod error;
+mod retry;
 mod writer;
 
 pub use writer::AppendWriter;
@@ -31,7 +32,7 @@ use uuid::Uuid;
 use crate::{
     coverage::serde::{coverage_to_bytes, entity_coverage_to_bytes},
     coverage::{
-        EntityCoverage,
+        Coverage, EntityCoverage,
         index_interval::index_interval_for_id,
         io::{CoverageSidecarError, write_coverage_sidecar_new_bytes},
         layout::{
@@ -41,8 +42,10 @@ use crate::{
         },
     },
     formats::parquet::{
-        compute_segment_entity_coverage, coverage::compute_segment_coverage,
-        logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
+        compute_segment_entity_coverage,
+        coverage::compute_segment_coverage,
+        logical_schema_from_parquet,
+        segment_meta::{SegmentMetaReport, segment_meta_from_parquet},
     },
     metadata::{
         logical_schema::LogicalSchema,
@@ -52,7 +55,7 @@ use crate::{
     storage,
     table::{TableError, TimeSeriesTable},
     transaction_log::{
-        LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
+        LogAction, SegmentMeta, TableState, checked_next_version, table_state::TableCoveragePointer,
     },
 };
 
@@ -375,6 +378,15 @@ struct FinishedAppendSegment {
     relative_path: String,
     data_guard: storage::FileCleanupGuard,
     settings: AppendWriterOptions,
+    prepared: Option<PreparedAppendSegment>,
+}
+
+struct PreparedAppendSegment {
+    meta: SegmentMeta,
+    report: SegmentMetaReport,
+    schema: LogicalSchema,
+    global_coverage: Option<Coverage>,
+    entity_coverage: Option<EntityCoverage>,
 }
 
 impl FinishedAppendSegment {
@@ -391,6 +403,7 @@ impl FinishedAppendSegment {
                 &mut self.data_guard,
                 telemetry,
                 self.settings,
+                &mut self.prepared,
             )
             .await
     }
@@ -517,22 +530,8 @@ impl PendingAppendSegment {
             relative_path,
             data_guard,
             settings,
+            prepared: None,
         })
-    }
-
-    async fn commit(
-        self,
-        table: &mut TimeSeriesTable,
-        next_version: u64,
-        telemetry: &mut AppendTelemetry,
-    ) -> Result<AppendReport, AppendError> {
-        let mut finished = self.finish(table, telemetry).await?;
-        let result = finished.publish(table, next_version, telemetry).await;
-        match result {
-            Ok(report) => Ok(report),
-            Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
-            Err(source) => Err(finished.rollback(table, source, telemetry).await),
-        }
     }
 }
 
@@ -803,6 +802,7 @@ impl TimeSeriesTable {
         owned_data_guard: &mut storage::FileCleanupGuard,
         telemetry: &mut AppendTelemetry,
         writer_settings: AppendWriterOptions,
+        prepared: &mut Option<PreparedAppendSegment>,
     ) -> Result<AppendReport, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -812,20 +812,35 @@ impl TimeSeriesTable {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         // 1) Segment meta + schema.
-        let (mut segment_meta, meta_report) =
-            segment_meta_from_parquet(self.location(), rel_path, &self.index)
-                .await
-                .map_err(AppendError::from)?;
+        let prepared = match prepared {
+            Some(prepared) => prepared,
+            slot => {
+                let (meta, report) =
+                    segment_meta_from_parquet(self.location(), rel_path, &self.index)
+                        .await
+                        .map_err(AppendError::from)?;
+                let schema = logical_schema_from_parquet(self.location(), rel_path)
+                    .await
+                    .map_err(AppendError::from)?;
+                slot.insert(PreparedAppendSegment {
+                    meta,
+                    report,
+                    schema,
+                    global_coverage: None,
+                    entity_coverage: None,
+                })
+            }
+        };
+        let mut segment_meta = prepared.meta.clone();
+        let meta_report = &prepared.report;
         let row_count = meta_report.row_count;
         let file_size_bytes = meta_report.file_size_bytes;
         let span = tracing::Span::current();
         span.record("row_count", row_count);
         span.record("file_size_bytes", file_size_bytes);
 
-        let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
-            .await
-            .map_err(AppendError::from)?;
-        ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
+        let segment_schema = &prepared.schema;
+        ensure_index_spec_matches_schema(segment_schema, &self.index).context(
             GeneratedSegmentSchemaCompatibilitySnafu {
                 segment_path: relative_path.to_string(),
             },
@@ -853,7 +868,7 @@ impl TimeSeriesTable {
                 });
             }
             Some(table_schema) => {
-                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
+                ensure_schema_fields_match_by_name(table_schema, segment_schema, &self.index)
                     .context(GeneratedSegmentSchemaCompatibilitySnafu {
                         segment_path: relative_path.to_string(),
                     })?;
@@ -871,11 +886,15 @@ impl TimeSeriesTable {
                 .load_entity_coverage_with_recovery::<AppendError>()
                 .await?;
 
-            let segment_cov =
-                compute_segment_entity_coverage(self.location(), rel_path, &self.index)
-                    .await
-                    .map_err(AppendError::from)?;
-            let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
+            let segment_cov = match &mut prepared.entity_coverage {
+                Some(coverage) => coverage,
+                slot => slot.insert(
+                    compute_segment_entity_coverage(self.location(), rel_path, &self.index)
+                        .await
+                        .map_err(AppendError::from)?,
+                ),
+            };
+            let entity_layout = classify_entity_layout(relative_path, segment_cov)?;
 
             if let Some((identity, index_interval_id)) =
                 segment_cov.first_overlapping_identity_and_interval_id(&table_cov)
@@ -892,10 +911,10 @@ impl TimeSeriesTable {
                 });
             }
 
-            let seg_bytes = entity_coverage_to_bytes(&segment_cov)
+            let seg_bytes = entity_coverage_to_bytes(segment_cov)
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
-            let snapshot_bytes = entity_coverage_to_bytes(&table_cov.union(&segment_cov))
+            let snapshot_bytes = entity_coverage_to_bytes(&table_cov.union(segment_cov))
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
             (seg_bytes, snapshot_bytes, entity_layout)
@@ -904,9 +923,14 @@ impl TimeSeriesTable {
                 .load_global_coverage_with_recovery::<AppendError>()
                 .await?;
 
-            let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
-                .await
-                .map_err(AppendError::from)?;
+            let segment_cov = match &mut prepared.global_coverage {
+                Some(coverage) => coverage,
+                slot => slot.insert(
+                    compute_segment_coverage(self.location(), rel_path, &self.index)
+                        .await
+                        .map_err(AppendError::from)?,
+                ),
+            };
 
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
@@ -923,10 +947,10 @@ impl TimeSeriesTable {
                 });
             }
 
-            let seg_bytes = coverage_to_bytes(&segment_cov)
+            let seg_bytes = coverage_to_bytes(segment_cov)
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
-            let snapshot_bytes = coverage_to_bytes(&table_cov.union(&segment_cov))
+            let snapshot_bytes = coverage_to_bytes(&table_cov.union(segment_cov))
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
             (
@@ -1280,7 +1304,7 @@ impl TimeSeriesTable {
                 drop(batch);
                 tokio::task::yield_now().await;
             }
-            writer.commit_inner().await?.ok_or(AppendError::EmptyInput)
+            writer.commit_inner(0).await?.ok_or(AppendError::EmptyInput)
         }
         .await;
         let append_result = match append_result {
@@ -1295,6 +1319,7 @@ impl TimeSeriesTable {
 #[cfg(test)]
 mod tests {
     mod finished_segment;
+    mod retry;
     mod writer;
 
     use super::AppendWriterOptions as AppendWriterSettings;
@@ -1383,7 +1408,9 @@ mod tests {
         assert!(before_commit.state().segments.is_empty());
 
         segment.write(&second)?;
-        let report = segment.commit(&mut table, 2, &mut telemetry).await?;
+        let report = segment
+            .commit_with_retry(&mut table, 2, 0, &mut telemetry)
+            .await?;
         assert_eq!(report.starting_version, 1);
         assert_eq!(report.committed_version, 2);
         assert_eq!(report.row_count, 2);
@@ -5796,6 +5823,7 @@ mod tests {
                 &mut data_guard,
                 &mut telemetry,
                 AppendWriterSettings::default(),
+                &mut None,
             )
             .await
             .expect_err("corrupt generated Parquet must fail metadata loading");
