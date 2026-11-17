@@ -323,6 +323,116 @@ impl AppendWriterSettings {
     }
 }
 
+struct PendingAppendSegment {
+    relative_path: String,
+    data_guard: storage::FileCleanupGuard,
+    writer: ParquetArrowWriter<storage::OutputSink>,
+    settings: AppendWriterSettings,
+}
+
+impl PendingAppendSegment {
+    async fn new(
+        table: &TimeSeriesTable,
+        schema: SchemaRef,
+        settings: AppendWriterSettings,
+        telemetry: &mut AppendTelemetry,
+    ) -> Result<Self, AppendError> {
+        let relative_path = format!(
+            "{}/{}.parquet",
+            storage::layout::APPEND_DATA_DIR,
+            Uuid::new_v4()
+        );
+        tracing::Span::current().record("segment_path", relative_path.as_str());
+        let mut data_guard = storage::FileCleanupGuard::new_disarmed(
+            table.location().as_ref(),
+            Path::new(&relative_path),
+        )
+        .map_err(AppendError::from)?;
+        let sink =
+            storage::open_new_output_sink(table.location().as_ref(), Path::new(&relative_path))
+                .await
+                .map_err(AppendError::from)?;
+        let writer =
+            match ParquetArrowWriter::try_new(sink, schema, Some(settings.writer_properties()))
+                .context(ParquetWriteSnafu)
+            {
+                Ok(writer) => writer,
+                Err(source) => {
+                    return Err(table
+                        .rollback_append_output(&relative_path, &mut data_guard, source, telemetry)
+                        .await);
+                }
+            };
+        Ok(Self {
+            relative_path,
+            data_guard,
+            writer,
+            settings,
+        })
+    }
+
+    fn write(&mut self, batch: &ArrowRecordBatch) -> Result<(), AppendError> {
+        self.writer.write(batch).context(ParquetWriteSnafu)
+    }
+
+    async fn rollback(
+        self,
+        table: &TimeSeriesTable,
+        source: AppendError,
+        telemetry: &mut AppendTelemetry,
+    ) -> AppendError {
+        let Self {
+            relative_path,
+            mut data_guard,
+            writer,
+            ..
+        } = self;
+        drop(writer);
+        table
+            .rollback_append_output(&relative_path, &mut data_guard, source, telemetry)
+            .await
+    }
+
+    async fn commit(
+        self,
+        table: &mut TimeSeriesTable,
+        next_version: u64,
+        telemetry: &mut AppendTelemetry,
+    ) -> Result<AppendReport, AppendError> {
+        let Self {
+            relative_path,
+            mut data_guard,
+            writer,
+            settings,
+        } = self;
+        let result = async {
+            telemetry.start_phase("writer_finalize_and_sync");
+            let sink = writer.into_inner().context(ParquetWriteSnafu)?;
+            sink.finish().await.map_err(AppendError::from)?;
+            telemetry.complete_phase();
+            data_guard.arm();
+
+            table
+                .publish_generated_parquet_segment(
+                    &relative_path,
+                    next_version,
+                    &mut data_guard,
+                    telemetry,
+                    settings,
+                )
+                .await
+        }
+        .await;
+        match result {
+            Ok(report) => Ok(report),
+            Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
+            Err(source) => Err(table
+                .rollback_append_output(&relative_path, &mut data_guard, source, telemetry)
+                .await),
+        }
+    }
+}
+
 /// Result of one successfully committed append operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -532,6 +642,22 @@ impl TimeSeriesTable {
                 cleanup_errors,
             }
         }
+    }
+
+    async fn rollback_append_output(
+        &self,
+        relative_path: &String,
+        data_guard: &mut storage::FileCleanupGuard,
+        source: AppendError,
+        telemetry: &mut AppendTelemetry,
+    ) -> AppendError {
+        let cleanup_started = Instant::now();
+        let error = self
+            .rollback_created_artifacts(std::slice::from_ref(relative_path), source)
+            .await;
+        telemetry.record_cleanup(cleanup_started, &error);
+        data_guard.disarm();
+        error
     }
 
     fn build_append_schema_alignment(
@@ -1014,27 +1140,11 @@ impl TimeSeriesTable {
                 tokio::task::yield_now().await;
             };
 
-            let relative_path = format!(
-                "{}/{}.parquet",
-                storage::layout::APPEND_DATA_DIR,
-                Uuid::new_v4()
-            );
-            tracing::Span::current().record("segment_path", relative_path.as_str());
-            let mut data_guard = storage::FileCleanupGuard::new_disarmed(
-                self.location().as_ref(),
-                Path::new(&relative_path),
-            )
-            .map_err(AppendError::from)?;
-            let sink =
-                storage::open_new_output_sink(self.location().as_ref(), Path::new(&relative_path))
-                    .await
-                    .map_err(AppendError::from)?;
+            let mut segment =
+                PendingAppendSegment::new(self, output_schema, writer_settings, &mut telemetry)
+                    .await?;
             let write_result = async {
-                let writer_properties = writer_settings.writer_properties();
-                let mut writer =
-                    ParquetArrowWriter::try_new(sink, output_schema, Some(writer_properties))
-                        .context(ParquetWriteSnafu)?;
-                writer.write(&first_batch).context(ParquetWriteSnafu)?;
+                segment.write(&first_batch)?;
                 drop(first_batch);
                 tokio::task::yield_now().await;
 
@@ -1045,53 +1155,20 @@ impl TimeSeriesTable {
                         .align_batch(&batch)
                         .context(ArrowInputSnafu)?;
                     if batch.num_rows() != 0 {
-                        writer.write(&batch).context(ParquetWriteSnafu)?;
+                        segment.write(&batch)?;
                     }
                     drop(batch);
                     tokio::task::yield_now().await;
                 }
 
-                telemetry.complete_phase();
-                telemetry.start_phase("writer_finalize_and_sync");
-                let sink = writer.into_inner().context(ParquetWriteSnafu)?;
-                sink.finish().await.map_err(AppendError::from)?;
-                telemetry.complete_phase();
                 Ok(())
             }
             .await;
             if let Err(source) = write_result {
-                let cleanup_started = Instant::now();
-                let error = self
-                    .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
-                    .await;
-                telemetry.record_cleanup(cleanup_started, &error);
-                data_guard.disarm();
-                return Err(error);
+                return Err(segment.rollback(self, source, &mut telemetry).await);
             }
-            data_guard.arm();
-
-            match self
-                .publish_generated_parquet_segment(
-                    &relative_path,
-                    next_version,
-                    &mut data_guard,
-                    &mut telemetry,
-                    writer_settings,
-                )
-                .await
-            {
-                Ok(report) => Ok(report),
-                Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
-                Err(source) => {
-                    let cleanup_started = Instant::now();
-                    let error = self
-                        .rollback_created_artifacts(std::slice::from_ref(&relative_path), source)
-                        .await;
-                    telemetry.record_cleanup(cleanup_started, &error);
-                    data_guard.disarm();
-                    Err(error)
-                }
-            }
+            telemetry.complete_phase();
+            segment.commit(self, next_version, &mut telemetry).await
         }
         .await;
         let span = tracing::Span::current();
@@ -1165,6 +1242,75 @@ mod tests {
         for field in ROW_GROUP_STATISTIC_FIELDS {
             assert!(!fields.contains_key(field), "unexpected {field}");
         }
+    }
+
+    #[tokio::test]
+    async fn pending_segment_stays_invisible_until_explicit_commit() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+        let first = timestamp_only_batch_starting_at_minute_offset(0, 1)?;
+        let second = timestamp_only_batch_starting_at_minute_offset(1, 1)?;
+        let mut telemetry = AppendTelemetry::new(false);
+        let mut segment = PendingAppendSegment::new(
+            &table,
+            first.schema(),
+            AppendWriterSettings::default(),
+            &mut telemetry,
+        )
+        .await?;
+        segment.write(&first)?;
+
+        assert_eq!(data_files(temp.path())?.len(), 1);
+        assert!(coverage_files(temp.path())?.is_empty());
+        let before_commit = TimeSeriesTable::open(location.clone()).await?;
+        assert_eq!(before_commit.state().version, 1);
+        assert!(before_commit.state().segments.is_empty());
+
+        segment.write(&second)?;
+        let report = segment.commit(&mut table, 2, &mut telemetry).await?;
+        assert_eq!(report.starting_version, 1);
+        assert_eq!(report.committed_version, 2);
+        assert_eq!(report.row_count, 2);
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 2);
+        assert_eq!(reopened.state().segments.len(), 1);
+        assert_eq!(reopened.state().segments[&report.segment_path].row_count, 2);
+        let batches = ParquetRecordBatchReaderBuilder::try_new(File::open(
+            temp.path().join(report.segment_path),
+        )?)?
+        .build()?
+        .collect::<Result<Vec<_>, _>>()?;
+        let actual = arrow::compute::concat_batches(&first.schema(), &batches)?;
+        let expected = arrow::compute::concat_batches(&first.schema(), &[first, second])?;
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_segment_removes_uncommitted_output() -> TestResult {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let table = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+        let batch = timestamp_only_batch(1)?;
+        let mut segment = PendingAppendSegment::new(
+            &table,
+            batch.schema(),
+            AppendWriterSettings::default(),
+            &mut AppendTelemetry::new(false),
+        )
+        .await?;
+        segment.write(&batch)?;
+        assert_eq!(data_files(temp.path())?.len(), 1);
+
+        drop(segment);
+
+        assert!(data_files(temp.path())?.is_empty());
+        assert!(coverage_files(temp.path())?.is_empty());
+        let reopened = TimeSeriesTable::open(location).await?;
+        assert_eq!(reopened.state().version, 1);
+        assert!(reopened.state().segments.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
