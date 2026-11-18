@@ -48,7 +48,9 @@ See the [DataFusion integration guide](DATAFUSION.md) for setup and examples.
   1. Read current version `N`.
   2. Build a commit with `expected_version = N`.
   3. Write version `N+1` only if `CURRENT` is still `N`.
-- On conflict, the caller reloads and recomputes snapshot-dependent input before retrying.
+- The log rejects stale versions. The append API can retry compatible concurrent appends
+  as described below. Snapshot-dependent input requires strict version checking and must
+  be recomputed after a conflict.
 
 Log actions:
 - `AddSegment`: adds a new segment descriptor (and `coverage_path` if enabled).
@@ -74,6 +76,20 @@ Log actions:
 4. Inspect the finished segment and verify its exact registered `LogicalSchema`.
 5. Compute coverage, reject overlaps, and write attempt-owned coverage sidecars.
 6. Commit `AddSegment` + optional `UpdateTableMeta` + `UpdateTableCoverage`.
+
+`append` and `AppendWriter::commit` retry confirmed version conflicts up to three times
+by default, with bounded backoff using Tokio's timer. Retries reuse the completed Parquet
+file, metadata, and segment coverage. They require an established canonical schema,
+unchanged metadata and protocol, and intervening commits that only append segments and
+update coverage. Actual overlap, active publishers, cleanup failures, and uncertain
+publication outcomes stop retrying. Success updates the handle to include intervening
+appends; `AppendReport::starting_version` identifies the successful commit base.
+
+Use `table.append(AppendRequest::new(source).commit_retries(0))` or
+`writer.commit_with_retry(0)` to disable retries and require the handle's original version.
+Use zero when input was computed from a snapshot: retrying preserves those input values
+and cannot recompute them against newer data. Other positive budgets replace the default.
+Failed or cancelled commits do not expose a partially refreshed handle.
 
 ## Coverage and gaps
 - **Index interval IDs**: ordered-index values are mapped to discrete interval IDs using the

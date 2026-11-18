@@ -18,7 +18,7 @@ impl PendingAppendSegment {
         let canonical_schema = table.state.table_meta.logical_schema.is_some();
         let mut finished = self.finish(table, telemetry).await?;
         // Refreshed snapshots stay private until this writer publishes successfully.
-        let mut candidate = (max_retries > 0).then(|| table.clone());
+        let mut candidate: Option<TimeSeriesTable> = None;
         let mut retry_count = 0;
         loop {
             let target = candidate.as_mut().unwrap_or(&mut *table);

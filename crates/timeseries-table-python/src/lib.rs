@@ -2089,7 +2089,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
         /// `source` must be a `pyarrow.RecordBatch`, `pyarrow.Table`,
         /// `pyarrow.RecordBatchReader`, or another object implementing `__arrow_c_stream__`.
         /// The stream is consumed lazily while the GIL is released.
-        #[pyo3(signature = (source, *, compression=None, max_rows_per_row_group=None, max_bytes_per_row_group=None))]
+        /// Compatible concurrent appends are retried up to three times by default.
+        /// Set `commit_retries=0` for strict version checking against this handle.
+        #[pyo3(signature = (source, *, compression=None, max_rows_per_row_group=None, max_bytes_per_row_group=None, commit_retries=None))]
         fn append(
             &mut self,
             py: Python<'_>,
@@ -2097,6 +2099,7 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             compression: Option<&str>,
             max_rows_per_row_group: Option<isize>,
             max_bytes_per_row_group: Option<isize>,
+            commit_retries: Option<u32>,
         ) -> PyResult<AppendReport> {
             let table_root_for_err = self.table_root.clone();
             let entity_columns_for_err = self.inner.index_spec().entity_columns.clone();
@@ -2132,6 +2135,9 @@ Cast unsupported columns to supported Arrow types, or use Session.sql(...) to ma
             }
             if let Some(max_bytes_per_row_group) = max_bytes_per_row_group {
                 request = request.max_bytes_per_row_group(max_bytes_per_row_group);
+            }
+            if let Some(commit_retries) = commit_retries {
+                request = request.commit_retries(commit_retries);
             }
             let rt = tokio_runner::global_runtime()?;
             let table = &mut self.inner;

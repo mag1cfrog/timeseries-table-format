@@ -250,7 +250,7 @@ async fn out_of_order_commits_fill_all_gaps() -> TestResult {
 }
 
 #[tokio::test]
-async fn conflict_preserves_stale_handle_until_caller_refreshes() -> TestResult {
+async fn disabled_retry_preserves_stale_handle_until_caller_refreshes() -> TestResult {
     let temp = TempDir::new()?;
     let location = TableLocation::local(temp.path());
     let mut stale = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
@@ -265,7 +265,7 @@ async fn conflict_preserves_stale_handle_until_caller_refreshes() -> TestResult 
     let coverage_before = coverage_files(temp.path())?;
     writer.write(&batch).await?;
     assert!(matches!(
-        writer.commit().await,
+        writer.commit_with_retry(0).await,
         Err(TableError::Append {
             source: AppendError::Commit {
                 source: CommitError::Conflict {

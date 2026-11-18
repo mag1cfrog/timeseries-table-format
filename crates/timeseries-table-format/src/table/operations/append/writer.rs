@@ -1,7 +1,7 @@
 use super::{
     AppendError, AppendReport, AppendTelemetry, AppendWriterOptions, ArrowInputSnafu,
-    ArrowRecordBatch, BatchSchemaAlignment, PendingAppendSegment, SchemaRef, TableError,
-    TimeSeriesTable, checked_next_version,
+    ArrowRecordBatch, BatchSchemaAlignment, DEFAULT_COMMIT_RETRIES, PendingAppendSegment,
+    SchemaRef, TableError, TimeSeriesTable, checked_next_version,
 };
 use snafu::ResultExt;
 use std::sync::Arc;
@@ -144,25 +144,31 @@ impl<'a> AppendWriter<'a> {
     ///
     /// Returns `None` without creating artifacts when no rows are pending.
     /// Otherwise finalizes and syncs Parquet, validates coverage and duplicates,
-    /// writes sidecars, and commits against the handle's current version.
+    /// writes sidecars, and tries publication against the handle's current version.
+    /// Confirmed conflicts across compatible, non-overlapping appends are retried
+    /// up to three times. Success includes those concurrent appends in this handle.
+    /// Retry backoff requires the current Tokio runtime's timer to be enabled.
     /// Rows become visible and durable only when this method succeeds. Recovery
     /// after a process stops is by reopening the table and querying coverage.
     ///
     /// A definite failure discards the pending rows and leaves the writer idle.
-    /// After a conflict, end this writer, refresh the handle, and start a new
-    /// one. Call [`Self::commit_with_retry`] instead to enable retries for a commit.
-    /// An ambiguous outcome
+    /// After a terminal conflict, end this writer, refresh the handle, and start
+    /// a new one. Call [`Self::commit_with_retry`] with zero to disable retries,
+    /// or with another budget to replace the default. Use zero if pending rows
+    /// were computed from values read from this snapshot and require strict
+    /// version checking; retrying does not recompute input. An ambiguous outcome
     /// preserves the finished file and reports its path, then closes the writer.
     /// Cancelling this method while a segment is pending also closes the writer;
     /// end it and refresh or reopen before writing again.
     pub async fn commit(&mut self) -> Result<Option<AppendReport>, TableError> {
-        self.commit_with_retry(0).await
+        self.commit_with_retry(DEFAULT_COMMIT_RETRIES).await
     }
 
     /// Publish pending rows, retrying confirmed conflicts across concurrent appends.
     ///
     /// `max_retries` limits additional publication attempts after the first.
-    /// Zero has the same behavior as [`Self::commit`]. Each retry waits between
+    /// Zero disables retries and preserves strict version checking. Three is
+    /// the default used by [`Self::commit`]. Each retry waits between
     /// 10 and 250 milliseconds, with jitter, using the current Tokio runtime's
     /// timer. Empty writers still return `None`.
     ///

@@ -407,6 +407,7 @@ class TimeSeriesTable:
         compression: Literal["uncompressed", "snappy", "zstd"] | None = None,
         max_rows_per_row_group: int | None = None,
         max_bytes_per_row_group: int | None = None,
+        commit_retries: int | None = None,
     ) -> AppendReport:
         """Append Arrow data and return its commit report.
 
@@ -422,6 +423,10 @@ class TimeSeriesTable:
             Maximum rows per output Parquet row group. `None` uses 1,048,576 rows.
         max_bytes_per_row_group:
             Maximum estimated encoded bytes per output Parquet row group. `None` uses 128 MiB.
+        commit_retries:
+            Maximum additional commit attempts across compatible, non-overlapping concurrent
+            appends. `None` uses three retries. Zero requires the version held by this handle.
+            The value must be between zero and 2**32 - 1.
 
         Returns
         -------
@@ -435,6 +440,10 @@ class TimeSeriesTable:
         single-use streams are consumed. After importing the stream, append releases the GIL.
         The byte limit is not a strict process-memory ceiling, and a single oversized value may
         exceed it. Settings apply only to this append and are not persisted in table metadata.
+        Successful retries include intervening appends in this handle and report the successful
+        base in `starting_version`. Metadata/schema changes, rewrites, overlaps, active publishers
+        and uncertain outcomes stop retrying. Input is consumed once and is not recomputed;
+        use `commit_retries=0` when it depends on values read from this snapshot.
 
         Raises
         ------
@@ -442,6 +451,8 @@ class TimeSeriesTable:
             If `source` is not one of the supported Arrow forms.
         ValueError
             If a writer setting, Arrow C Stream exporter, or capsule is invalid.
+        OverflowError
+            If `commit_retries` is negative or exceeds 2**32 - 1.
         IndexIntervalOverlapError
             If incoming coverage overlaps committed coverage for the same entity.
         DuplicateIndexIntervalError

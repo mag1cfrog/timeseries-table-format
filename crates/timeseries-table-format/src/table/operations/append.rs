@@ -300,6 +300,7 @@ impl ParquetCompression {
 
 const DEFAULT_MAX_ROWS_PER_ROW_GROUP: usize = 1024 * 1024;
 const DEFAULT_MAX_BYTES_PER_ROW_GROUP: usize = 128 * 1024 * 1024;
+const DEFAULT_COMMIT_RETRIES: u32 = 3;
 
 /// Physical settings fixed for the lifetime of an [`AppendWriter`].
 ///
@@ -586,17 +587,25 @@ pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
         None
     }
 
+    /// Return a per-append retry budget, including zero to disable retries.
+    #[doc(hidden)]
+    fn effective_commit_retries(&self) -> Option<u32> {
+        None
+    }
+
     /// Convert this source without collecting its batches.
     fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError>;
 }
 
-/// One Arrow source plus physical settings for a single append.
+/// One Arrow source plus writer and commit settings for a single append.
 ///
 /// Pass the source directly to [`TimeSeriesTable::append`] to use Zstandard
 /// compression and row groups bounded by 1,048,576 rows and 128 MiB estimated
 /// encoded bytes. Wrap it in `AppendRequest` only when one append needs an
-/// explicit physical override. A nested request inherits each setting from its
-/// source unless the outer request replaces it.
+/// explicit override. Compatible concurrent appends are retried up to three
+/// times by default; use [`Self::commit_retries`] with zero for strict version
+/// checking. A nested request inherits each setting from its source unless
+/// the outer request replaces it.
 #[derive(Debug)]
 #[must_use = "an append request has no effect until passed to TimeSeriesTable::append"]
 pub struct AppendRequest<S> {
@@ -604,10 +613,11 @@ pub struct AppendRequest<S> {
     compression: Option<ParquetCompression>,
     max_rows_per_row_group: Option<usize>,
     max_bytes_per_row_group: Option<usize>,
+    commit_retries: Option<u32>,
 }
 
 impl<S> AppendRequest<S> {
-    /// Create a request without adding physical writer overrides.
+    /// Create a request without adding writer or commit overrides.
     ///
     /// If `source` already carries overrides, this request inherits each one
     /// until the corresponding builder method replaces it.
@@ -617,6 +627,7 @@ impl<S> AppendRequest<S> {
             compression: None,
             max_rows_per_row_group: None,
             max_bytes_per_row_group: None,
+            commit_retries: None,
         }
     }
 
@@ -646,6 +657,18 @@ impl<S> AppendRequest<S> {
         self.max_bytes_per_row_group = Some(max_bytes_per_row_group);
         self
     }
+
+    /// Limit additional commit attempts after a confirmed version conflict.
+    ///
+    /// The default is three retries across compatible, non-overlapping appends.
+    /// Zero disables retries and requires publication against this handle's
+    /// current version. Use zero when the input depends on values read from
+    /// that snapshot: retrying does not recompute the input.
+    /// See [`AppendWriter::commit_with_retry`] for eligibility and cleanup rules.
+    pub fn commit_retries(mut self, max_retries: u32) -> Self {
+        self.commit_retries = Some(max_retries);
+        self
+    }
 }
 
 // Wrapping `SourceKind` in `PhantomData` keeps this impl disjoint from direct source
@@ -670,6 +693,11 @@ where
     fn effective_max_bytes_per_row_group(&self) -> Option<usize> {
         self.max_bytes_per_row_group
             .or_else(|| self.source.effective_max_bytes_per_row_group())
+    }
+
+    fn effective_commit_retries(&self) -> Option<u32> {
+        self.commit_retries
+            .or_else(|| self.source.effective_commit_retries())
     }
 
     fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
@@ -1241,7 +1269,13 @@ impl TimeSeriesTable {
     /// Upgrade all concurrent writers together: crash recovery uses the shared
     /// `_timeseries_log/WRITE_LOCK` file, which must remain in place. An active
     /// publisher returns [`crate::transaction_log::CommitError::CommitInProgress`]
-    /// to competitors. Stale handles still conflict without automatic rebase.
+    /// to competitors. Confirmed version conflicts across compatible,
+    /// non-overlapping appends are retried up to three times. Success updates
+    /// this handle to include intervening appends. To require the original
+    /// snapshot version, wrap the source in [`AppendRequest`] and set
+    /// [`AppendRequest::commit_retries`] to zero. Retrying preserves the input;
+    /// use zero if it was computed from values read from this snapshot.
+    /// Retry backoff requires the current Tokio runtime's timer to be enabled.
     #[tracing::instrument(
         name = "table.append",
         target = "timeseries_table_format::table::append",
@@ -1286,9 +1320,16 @@ impl TimeSeriesTable {
                 writer_settings.max_bytes_per_row_group,
             );
             checked_next_version(self.state.version).map_err(AppendError::from)?;
-            Ok((source.into_record_batch_reader()?, writer_settings))
+            let commit_retries = source
+                .effective_commit_retries()
+                .unwrap_or(DEFAULT_COMMIT_RETRIES);
+            Ok((
+                source.into_record_batch_reader()?,
+                writer_settings,
+                commit_retries,
+            ))
         })();
-        let (reader, options) = match preparation {
+        let (reader, options, commit_retries) = match preparation {
             Ok(prepared) => prepared,
             Err(error) => {
                 telemetry.record_failure(&error);
@@ -1304,7 +1345,10 @@ impl TimeSeriesTable {
                 drop(batch);
                 tokio::task::yield_now().await;
             }
-            writer.commit_inner(0).await?.ok_or(AppendError::EmptyInput)
+            writer
+                .commit_inner(commit_retries)
+                .await?
+                .ok_or(AppendError::EmptyInput)
         }
         .await;
         let append_result = match append_result {
@@ -3626,7 +3670,8 @@ mod tests {
                     vec![Some(2.0)],
                     vec!["loser"],
                 )?)
-                .max_rows_per_row_group(1),
+                .max_rows_per_row_group(1)
+                .commit_retries(0),
             )
             .await
             .expect_err("stale streaming append must conflict");
@@ -5483,7 +5528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entity_aware_stale_append_cleans_sidecars_without_state_mutation() -> TestResult {
+    async fn entity_aware_strict_append_cleans_sidecars_without_state_mutation() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -5517,7 +5562,11 @@ mod tests {
         assert_eq!(append_parquet_fixture(&mut winner, winner_path).await?, 2);
         let coverage_before = coverage_files(tmp.path())?;
 
-        let err = append_parquet_fixture(&mut loser, loser_path)
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(tmp.path().join(loser_path))?)?
+                .build()?;
+        let err = loser
+            .append(AppendRequest::new(reader).commit_retries(0))
             .await
             .expect_err("expected conflict due to stale version");
 

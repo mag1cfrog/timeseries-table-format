@@ -2,7 +2,11 @@ use super::*;
 use chrono::{TimeZone, Utc};
 use std::{future::Future, pin::Pin, task::Poll};
 
-async fn wait_for_retry<F: Future>(mut operation: Pin<&mut F>, capture: &TraceCapture) {
+async fn wait_for_retry<F: Future>(
+    mut operation: Pin<&mut F>,
+    capture: &TraceCapture,
+    count: usize,
+) {
     std::future::poll_fn(|cx| {
         assert!(
             operation.as_mut().poll(cx).is_pending(),
@@ -11,7 +15,9 @@ async fn wait_for_retry<F: Future>(mut operation: Pin<&mut F>, capture: &TraceCa
         if capture
             .events()
             .iter()
-            .any(|event| event.name == "table.append.retry")
+            .filter(|event| event.name == "table.append.retry")
+            .count()
+            >= count
         {
             Poll::Ready(())
         } else {
@@ -61,7 +67,7 @@ fn stored_timestamps(
 }
 
 #[tokio::test]
-async fn retry_keeps_all_intervening_appends_and_reuses_the_finished_file() -> TestResult {
+async fn default_retry_keeps_all_intervening_appends_and_reuses_the_finished_file() -> TestResult {
     let temp = TempDir::new()?;
     let location = TableLocation::local(temp.path());
     let mut stale = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
@@ -76,11 +82,7 @@ async fn retry_keeps_all_intervening_appends_and_reuses_the_finished_file() -> T
     let mut pause = storage::pause_write_new_after_create(temp.path().join(TABLE_SNAPSHOT_DIR));
     let capture = TraceCapture::default();
     let _callsite = capture.dispatch();
-    let mut publication = Box::pin(
-        writer
-            .commit_with_retry(2)
-            .with_subscriber(capture.dispatch()),
-    );
+    let mut publication = Box::pin(writer.commit().with_subscriber(capture.dispatch()));
     tokio::select! {
         () = pause.wait_until_paused() => {}
         result = &mut publication => panic!("publication ended before pause: {result:?}"),
@@ -193,7 +195,7 @@ async fn retry_distinguishes_every_component_of_a_composite_identity() -> TestRe
             .commit_with_retry(1)
             .with_subscriber(capture.dispatch()),
     );
-    wait_for_retry(publication.as_mut(), &capture).await;
+    wait_for_retry(publication.as_mut(), &capture, 1).await;
     storage::inject_parquet_read_failure(pending_path.clone());
     let report = publication.await?.ok_or("report")?;
     assert_eq!((report.starting_version, report.committed_version), (2, 3));
@@ -461,7 +463,7 @@ async fn a_second_winner_during_retry_respects_the_remaining_budget() -> TestRes
                 .commit_with_retry(budget)
                 .with_subscriber(capture.dispatch()),
         );
-        wait_for_retry(publication.as_mut(), &capture).await;
+        wait_for_retry(publication.as_mut(), &capture, 1).await;
         let bytes = std::fs::read(&path)?;
         storage::inject_parquet_read_failure(path.clone());
         winner
@@ -541,7 +543,7 @@ async fn cancellation_during_backoff_closes_writer_and_preserves_original_snapsh
             .commit_with_retry(3)
             .with_subscriber(capture.dispatch()),
     );
-    wait_for_retry(publication.as_mut(), &capture).await;
+    wait_for_retry(publication.as_mut(), &capture, 1).await;
     drop(publication);
     assert!(!path.exists());
     assert!(matches!(
@@ -584,7 +586,7 @@ async fn uncertain_publication_is_preserved_and_never_retried() -> TestResult {
                 .with_subscriber(capture.dispatch()),
         );
         if after_retry {
-            wait_for_retry(publication.as_mut(), &capture).await;
+            wait_for_retry(publication.as_mut(), &capture, 1).await;
         }
         storage::inject_parent_sync_failure(temp.path().join(layout::current_rel_path()));
         let result = publication.await;
@@ -794,7 +796,7 @@ async fn cancelling_a_retried_publication_keeps_the_original_handle_and_winner()
             .commit_with_retry(3)
             .with_subscriber(capture.dispatch()),
     );
-    wait_for_retry(publication.as_mut(), &capture).await;
+    wait_for_retry(publication.as_mut(), &capture, 1).await;
     let mut pause =
         storage::pause_atomic_write_before_rename(temp.path().join(layout::current_rel_path()));
     tokio::select! {
@@ -893,6 +895,138 @@ async fn failure_while_loading_the_retry_snapshot_leaves_the_handle_and_winner_u
     assert_eq!(
         TimeSeriesTable::open(location).await?.state(),
         winner.state()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_append_retries_without_consuming_its_source_again() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut stale = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+    let mut winner = TimeSeriesTable::open(location.clone()).await?;
+    winner
+        .append(timestamp_only_batch_starting_at_minute_offset(10, 1)?)
+        .await?;
+    let batch = timestamp_only_batch(1)?;
+    let (source, observations) = InstrumentedReader::new(batch.schema(), vec![Ok(batch)]);
+    let report = stale.append(source).await?;
+    assert_eq!((report.starting_version, report.committed_version), (2, 3));
+    assert_eq!(observations.next_calls.get(), 2);
+    assert_eq!(stored_timestamps(&stale, temp.path())?, [0, 600_000]);
+    assert_eq!(
+        TimeSeriesTable::open(location).await?.state(),
+        stale.state()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn append_request_retry_overrides_are_inherited_and_can_disable_rebase() -> TestResult {
+    for (inner, outer) in [
+        (None, None),
+        (Some(0), None),
+        (Some(2), None),
+        (Some(2), Some(0)),
+        (Some(0), Some(2)),
+    ] {
+        let temp = TempDir::new()?;
+        let location = TableLocation::local(temp.path());
+        let mut stale = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+        let before = stale.state().clone();
+        let mut winner = TimeSeriesTable::open(location.clone()).await?;
+        winner
+            .append(timestamp_only_batch_starting_at_minute_offset(10, 1)?)
+            .await?;
+        let files = data_files(temp.path())?;
+        let sidecars = coverage_files(temp.path())?;
+        let mut source = AppendRequest::new(timestamp_only_batch(1)?);
+        if let Some(retries) = inner {
+            source = source.commit_retries(retries);
+        }
+        let mut request = AppendRequest::new(source);
+        if let Some(retries) = outer {
+            request = request.commit_retries(retries);
+        }
+        let result = stale.append(request).await;
+        if outer.or(inner) == Some(0) {
+            assert!(matches!(
+                result,
+                Err(TableError::Append {
+                    source: AppendError::Commit {
+                        source: CommitError::Conflict {
+                            expected: 1,
+                            found: 2,
+                            ..
+                        }
+                    }
+                })
+            ));
+            assert_eq!(stale.state(), &before);
+            assert_eq!(data_files(temp.path())?, files);
+            assert_eq!(coverage_files(temp.path())?, sidecars);
+        } else {
+            let report = result?;
+            assert_eq!((report.starting_version, report.committed_version), (2, 3));
+            assert_eq!(stored_timestamps(&stale, temp.path())?, [0, 600_000]);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_commit_stops_after_three_retries_without_refreshing_the_handle() -> TestResult {
+    let temp = TempDir::new()?;
+    let location = TableLocation::local(temp.path());
+    let mut stale = TimeSeriesTable::create(location.clone(), timestamp_only_meta()).await?;
+    let before = stale.state().clone();
+    let batch = timestamp_only_batch(1)?;
+    let mut writer = stale.writer(batch.schema())?;
+    writer.write(&batch).await?;
+    let mut winner = TimeSeriesTable::open(location.clone()).await?;
+    winner
+        .append(timestamp_only_batch_starting_at_minute_offset(10, 1)?)
+        .await?;
+    let capture = TraceCapture::default();
+    let _callsite = capture.dispatch();
+    let mut publication = Box::pin(writer.commit().with_subscriber(capture.dispatch()));
+    for retry in 1..=3 {
+        wait_for_retry(publication.as_mut(), &capture, retry).await;
+        winner
+            .append(timestamp_only_batch_starting_at_minute_offset(
+                (retry + 1) * 10,
+                1,
+            )?)
+            .await?;
+    }
+    let sidecars = coverage_files(temp.path())?;
+    assert!(matches!(
+        publication.await,
+        Err(TableError::Append {
+            source: AppendError::Commit {
+                source: CommitError::Conflict {
+                    expected: 4,
+                    found: 5,
+                    ..
+                }
+            }
+        })
+    ));
+    writer.abort().await?;
+    assert_eq!(stale.state(), &before);
+    assert_eq!(data_files(temp.path())?.len(), 4);
+    assert_eq!(coverage_files(temp.path())?, sidecars);
+    assert_eq!(
+        TimeSeriesTable::open(location).await?.state(),
+        winner.state()
+    );
+    assert_eq!(
+        capture
+            .events()
+            .iter()
+            .filter(|event| event.name == "table.append.retry")
+            .count(),
+        3
     );
     Ok(())
 }

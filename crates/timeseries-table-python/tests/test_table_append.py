@@ -76,11 +76,13 @@ def test_append_runtime_signature_exposes_keyword_only_writer_settings():
         "compression",
         "max_rows_per_row_group",
         "max_bytes_per_row_group",
+        "commit_retries",
     ]
     for name in [
         "compression",
         "max_rows_per_row_group",
         "max_bytes_per_row_group",
+        "commit_retries",
     ]:
         assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters[name].default is None
@@ -246,6 +248,9 @@ def test_append_byte_limit_splits_binary_batches_and_round_trips(tmp_path):
         ({"max_bytes_per_row_group": 0}, ValueError),
         ({"max_rows_per_row_group": -1}, ValueError),
         ({"max_bytes_per_row_group": -1}, ValueError),
+        ({"commit_retries": -1}, OverflowError),
+        ({"commit_retries": 2**32}, OverflowError),
+        ({"commit_retries": 1.5}, TypeError),
     ],
 )
 def test_append_rejects_invalid_writer_settings_before_exporting_source(
@@ -558,7 +563,7 @@ def test_interval_conflicts_without_entity_columns_have_no_example_identity(tmp_
     assert overlap_error.value.conflict_count == 1
 
 
-def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
+def test_append_first_schema_conflict_rolls_back_and_preserves_winner(tmp_path):
     winner, root = _create_table(tmp_path)
     stale = ttf.TimeSeriesTable.open(root)
     winner_report = winner.append(_batch())
@@ -575,6 +580,50 @@ def test_append_stale_writer_conflict_rolls_back_and_preserves_winner(tmp_path):
     assert ttf.TimeSeriesTable.open(root).version() == 2
     assert _data_and_coverage_files(root) == files_before
     _assert_default_rows(root)
+
+
+def test_append_retries_compatible_concurrent_appends_by_default(tmp_path):
+    winner, root = _create_table(tmp_path)
+    winner.append(_batch())
+    stale = ttf.TimeSeriesTable.open(root)
+    winner.append(_batch(20))
+    consumed = []
+
+    def batches():
+        consumed.append(40)
+        yield _batch(40)
+
+    source = pa.RecordBatchReader.from_batches(_batch().schema, batches())
+    report = stale.append(source)
+
+    assert report.starting_version == 3
+    assert report.committed_version == 4
+    assert consumed == [40]
+    assert stale.version() == 4
+    assert ttf.TimeSeriesTable.open(root).version() == 4
+    session = ttf.Session()
+    session.register_tstable("series", root)
+    assert session.sql("SELECT ts, value FROM series ORDER BY ts").to_pydict() == {
+        "ts": [0, 10, 20, 30, 40, 50],
+        "value": [1.0, 2.0, 1.0, 2.0, 1.0, 2.0],
+    }
+
+
+def test_append_zero_retries_preserves_strict_version_checking(tmp_path):
+    winner, root = _create_table(tmp_path)
+    winner.append(_batch())
+    stale = ttf.TimeSeriesTable.open(root)
+    winner.append(_batch(20))
+    files_before = _data_and_coverage_files(root)
+
+    with pytest.raises(ttf.ConflictError) as excinfo:
+        stale.append(_batch(40), commit_retries=0)
+
+    assert getattr(excinfo.value, "expected", None) == 2
+    assert getattr(excinfo.value, "found", None) == 3
+    assert stale.version() == 2
+    assert ttf.TimeSeriesTable.open(root).version() == 3
+    assert _data_and_coverage_files(root) == files_before
 
 
 @pytest.mark.parametrize("fail_after_first", [False, True])
