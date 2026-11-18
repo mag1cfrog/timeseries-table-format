@@ -4,6 +4,21 @@ All notable changes to timeseries-table-format are documented here beginning
 with the unified 0.3.0 release. This is the only changelog updated for current
 Rust library, CLI, and Python releases.
 
+## 0.10.0
+
+
+### Bug Fixes
+
+- Ignore implicit enum ordinals in semver checks ([#457](https://github.com/mag1cfrog/timeseries-table-format/pull/457)) ([738747f](https://github.com/mag1cfrog/timeseries-table-format/commit/738747fa5e8719a04c454d46b1e8ef7f9e413984))
+
+
+### Features
+
+- Add caller-driven append writer ([#453](https://github.com/mag1cfrog/timeseries-table-format/pull/453)) ([05d5eb5](https://github.com/mag1cfrog/timeseries-table-format/commit/05d5eb59000cfd39a2a9eb1483e2854d363ee792))
+
+- Retry compatible append conflicts by default ([#456](https://github.com/mag1cfrog/timeseries-table-format/pull/456)) ([c1a7cf4](https://github.com/mag1cfrog/timeseries-table-format/commit/c1a7cf4eb66eaee4936872c6dc2cbc9f362862ca)) - **Breaking:** append may now succeed across compatible concurrent appends and update its handle. Set the retry budget to zero with commit_with_retry(0), AppendRequest::commit_retries(0), or Python commit_retries=0 to retain strict version checks for snapshot-dependent input.
+
+
 ## 0.9.0
 
 
