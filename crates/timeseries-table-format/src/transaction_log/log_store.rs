@@ -121,6 +121,16 @@ impl TransactionLogStore {
     /// - On storage-layer failures, returns `CommitError::Storage`.
     /// - On JSON parse failures, returns [`CommitError::CommitDeserialization`].
     pub async fn load_commit(&self, version: u64) -> Result<Commit, CommitError> {
+        self.load_commit_with_unknown_action_flag(version)
+            .await
+            .map(|(commit, _)| commit)
+    }
+
+    /// Return the commit and a flag indicating whether unknown actions were skipped.
+    pub(crate) async fn load_commit_with_unknown_action_flag(
+        &self,
+        version: u64,
+    ) -> Result<(Commit, bool), CommitError> {
         let rel = Self::commit_rel_path(version);
         let json = self.read_to_string_rel(&rel).await?;
 
@@ -155,11 +165,16 @@ impl TransactionLogStore {
                 .map_err(CommitError::from)?;
         }
 
+        let mut unknown_actions = false;
         if let Some(actions) = value
             .get_mut("actions")
             .and_then(serde_json::Value::as_array_mut)
         {
-            actions.retain(|action| !is_unknown_action(action));
+            actions.retain(|action| {
+                let unknown = is_unknown_action(action);
+                unknown_actions |= unknown;
+                !unknown
+            });
         }
 
         let commit =
@@ -169,7 +184,7 @@ impl TransactionLogStore {
                 backtrace: Backtrace::capture(),
             })?;
 
-        Ok(commit)
+        Ok((commit, unknown_actions))
     }
 
     /// Load the CURRENT version pointer.

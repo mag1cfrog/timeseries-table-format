@@ -1,7 +1,7 @@
 use super::{
     AppendError, AppendReport, AppendTelemetry, AppendWriterOptions, ArrowInputSnafu,
-    ArrowRecordBatch, BatchSchemaAlignment, PendingAppendSegment, SchemaRef, TableError,
-    TimeSeriesTable, checked_next_version,
+    ArrowRecordBatch, BatchSchemaAlignment, DEFAULT_COMMIT_RETRIES, PendingAppendSegment,
+    SchemaRef, TableError, TimeSeriesTable, checked_next_version,
 };
 use snafu::ResultExt;
 use std::sync::Arc;
@@ -144,24 +144,61 @@ impl<'a> AppendWriter<'a> {
     ///
     /// Returns `None` without creating artifacts when no rows are pending.
     /// Otherwise finalizes and syncs Parquet, validates coverage and duplicates,
-    /// writes sidecars, and commits against the handle's current version.
+    /// writes sidecars, and tries publication against the handle's current version.
+    /// Confirmed conflicts across compatible, non-overlapping appends are retried
+    /// up to three times. Success includes those concurrent appends in this handle.
+    /// Retry backoff requires the current Tokio runtime's timer to be enabled.
     /// Rows become visible and durable only when this method succeeds. Recovery
     /// after a process stops is by reopening the table and querying coverage.
     ///
     /// A definite failure discards the pending rows and leaves the writer idle.
-    /// After a conflict, end this writer, refresh the handle, and start a new
-    /// one; there is no automatic refresh or retry. An ambiguous outcome
+    /// After a terminal conflict, end this writer, refresh the handle, and start
+    /// a new one. Call [`Self::commit_with_retry`] with zero to disable retries,
+    /// or with another budget to replace the default. Use zero if pending rows
+    /// were computed from values read from this snapshot and require strict
+    /// version checking; retrying does not recompute input. An ambiguous outcome
     /// preserves the finished file and reports its path, then closes the writer.
     /// Cancelling this method while a segment is pending also closes the writer;
     /// end it and refresh or reopen before writing again.
     pub async fn commit(&mut self) -> Result<Option<AppendReport>, TableError> {
-        let result = self.commit_inner().await;
+        self.commit_with_retry(DEFAULT_COMMIT_RETRIES).await
+    }
+
+    /// Publish pending rows, retrying confirmed conflicts across concurrent appends.
+    ///
+    /// `max_retries` limits additional publication attempts after the first.
+    /// Zero disables retries and preserves strict version checking. Three is
+    /// the default used by [`Self::commit`]. Each retry waits between
+    /// 10 and 250 milliseconds, with jitter, using the current Tokio runtime's
+    /// timer. Empty writers still return `None`.
+    ///
+    /// Retries require a canonical schema in this handle's initial snapshot.
+    /// Every intervening commit must only add segments and update coverage.
+    /// Metadata or protocol changes, rewrites, overlapping index intervals,
+    /// lock contention and uncertain publication stop retrying. The finished
+    /// Parquet file and its derived metadata and coverage are reused.
+    ///
+    /// Success updates this handle to include concurrent appends and this
+    /// writer's segment. [`AppendReport::starting_version`] is the base of the
+    /// successful attempt. Failure leaves the handle's original snapshot intact;
+    /// end a stale writer and refresh before starting another. Definite failure
+    /// discards pending rows. Uncertain publication preserves files and closes
+    /// the writer. Cancelling an in-flight commit closes the writer and attempts
+    /// cleanup of unpublished owned files. Possibly committed files are preserved.
+    pub async fn commit_with_retry(
+        &mut self,
+        max_retries: u32,
+    ) -> Result<Option<AppendReport>, TableError> {
+        let result = self.commit_inner(max_retries).await;
         self.telemetry.record_result(&result);
         self.reset_telemetry();
         result.context(crate::table::error::AppendSnafu)
     }
 
-    pub(super) async fn commit_inner(&mut self) -> Result<Option<AppendReport>, AppendError> {
+    pub(super) async fn commit_inner(
+        &mut self,
+        max_retries: u32,
+    ) -> Result<Option<AppendReport>, AppendError> {
         self.ensure_open()?;
         let Some(segment) = self.pending.take() else {
             return Ok(None);
@@ -173,7 +210,7 @@ impl<'a> AppendWriter<'a> {
         let result = match checked_next_version(self.table.state.version) {
             Ok(next_version) => {
                 segment
-                    .commit(self.table, next_version, &mut self.telemetry)
+                    .commit_with_retry(self.table, next_version, max_retries, &mut self.telemetry)
                     .await
             }
             Err(error) => Err(segment

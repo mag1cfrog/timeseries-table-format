@@ -9,6 +9,7 @@
 //!   Keep new append-time invariants here so the flow remains centralized.
 
 pub(super) mod error;
+mod retry;
 mod writer;
 
 pub use writer::AppendWriter;
@@ -31,7 +32,7 @@ use uuid::Uuid;
 use crate::{
     coverage::serde::{coverage_to_bytes, entity_coverage_to_bytes},
     coverage::{
-        EntityCoverage,
+        Coverage, EntityCoverage,
         index_interval::index_interval_for_id,
         io::{CoverageSidecarError, write_coverage_sidecar_new_bytes},
         layout::{
@@ -41,8 +42,10 @@ use crate::{
         },
     },
     formats::parquet::{
-        compute_segment_entity_coverage, coverage::compute_segment_coverage,
-        logical_schema_from_parquet, segment_meta::segment_meta_from_parquet,
+        compute_segment_entity_coverage,
+        coverage::compute_segment_coverage,
+        logical_schema_from_parquet,
+        segment_meta::{SegmentMetaReport, segment_meta_from_parquet},
     },
     metadata::{
         logical_schema::LogicalSchema,
@@ -52,7 +55,7 @@ use crate::{
     storage,
     table::{TableError, TimeSeriesTable},
     transaction_log::{
-        LogAction, TableState, checked_next_version, table_state::TableCoveragePointer,
+        LogAction, SegmentMeta, TableState, checked_next_version, table_state::TableCoveragePointer,
     },
 };
 
@@ -297,6 +300,7 @@ impl ParquetCompression {
 
 const DEFAULT_MAX_ROWS_PER_ROW_GROUP: usize = 1024 * 1024;
 const DEFAULT_MAX_BYTES_PER_ROW_GROUP: usize = 128 * 1024 * 1024;
+const DEFAULT_COMMIT_RETRIES: u32 = 3;
 
 /// Physical settings fixed for the lifetime of an [`AppendWriter`].
 ///
@@ -368,6 +372,53 @@ struct PendingAppendSegment {
     writer: ParquetArrowWriter<storage::OutputSink>,
     settings: AppendWriterOptions,
     rows_written: u64,
+}
+
+// Keep file ownership across definite publication failures.
+struct FinishedAppendSegment {
+    relative_path: String,
+    data_guard: storage::FileCleanupGuard,
+    settings: AppendWriterOptions,
+    prepared: Option<PreparedAppendSegment>,
+}
+
+struct PreparedAppendSegment {
+    meta: SegmentMeta,
+    report: SegmentMetaReport,
+    schema: LogicalSchema,
+    global_coverage: Option<Coverage>,
+    entity_coverage: Option<EntityCoverage>,
+}
+
+impl FinishedAppendSegment {
+    async fn publish(
+        &mut self,
+        table: &mut TimeSeriesTable,
+        next_version: u64,
+        telemetry: &mut AppendTelemetry,
+    ) -> Result<AppendReport, AppendError> {
+        table
+            .publish_generated_parquet_segment(
+                &self.relative_path,
+                next_version,
+                &mut self.data_guard,
+                telemetry,
+                self.settings,
+                &mut self.prepared,
+            )
+            .await
+    }
+
+    async fn rollback(
+        mut self,
+        table: &TimeSeriesTable,
+        source: AppendError,
+        telemetry: &mut AppendTelemetry,
+    ) -> AppendError {
+        table
+            .rollback_append_output(&self.relative_path, &mut self.data_guard, source, telemetry)
+            .await
+    }
 }
 
 impl PendingAppendSegment {
@@ -450,12 +501,11 @@ impl PendingAppendSegment {
             .await
     }
 
-    async fn commit(
+    async fn finish(
         self,
-        table: &mut TimeSeriesTable,
-        next_version: u64,
+        table: &TimeSeriesTable,
         telemetry: &mut AppendTelemetry,
-    ) -> Result<AppendReport, AppendError> {
+    ) -> Result<FinishedAppendSegment, AppendError> {
         let Self {
             relative_path,
             mut data_guard,
@@ -468,26 +518,21 @@ impl PendingAppendSegment {
             let sink = writer.into_inner().context(ParquetWriteSnafu)?;
             sink.finish().await.map_err(AppendError::from)?;
             telemetry.complete_phase();
-            data_guard.arm();
-
-            table
-                .publish_generated_parquet_segment(
-                    &relative_path,
-                    next_version,
-                    &mut data_guard,
-                    telemetry,
-                    settings,
-                )
-                .await
+            Ok(())
         }
         .await;
-        match result {
-            Ok(report) => Ok(report),
-            Err(source @ AppendError::CommitAmbiguous { .. }) => Err(source),
-            Err(source) => Err(table
+        if let Err(source) = result {
+            return Err(table
                 .rollback_append_output(&relative_path, &mut data_guard, source, telemetry)
-                .await),
+                .await);
         }
+        data_guard.arm();
+        Ok(FinishedAppendSegment {
+            relative_path,
+            data_guard,
+            settings,
+            prepared: None,
+        })
     }
 }
 
@@ -542,17 +587,25 @@ pub trait IntoRecordBatchReader<SourceKind = RecordBatchReaderSourceKind> {
         None
     }
 
+    /// Return a per-append retry budget, including zero to disable retries.
+    #[doc(hidden)]
+    fn effective_commit_retries(&self) -> Option<u32> {
+        None
+    }
+
     /// Convert this source without collecting its batches.
     fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError>;
 }
 
-/// One Arrow source plus physical settings for a single append.
+/// One Arrow source plus writer and commit settings for a single append.
 ///
 /// Pass the source directly to [`TimeSeriesTable::append`] to use Zstandard
 /// compression and row groups bounded by 1,048,576 rows and 128 MiB estimated
 /// encoded bytes. Wrap it in `AppendRequest` only when one append needs an
-/// explicit physical override. A nested request inherits each setting from its
-/// source unless the outer request replaces it.
+/// explicit override. Compatible concurrent appends are retried up to three
+/// times by default; use [`Self::commit_retries`] with zero for strict version
+/// checking. A nested request inherits each setting from its source unless
+/// the outer request replaces it.
 #[derive(Debug)]
 #[must_use = "an append request has no effect until passed to TimeSeriesTable::append"]
 pub struct AppendRequest<S> {
@@ -560,10 +613,11 @@ pub struct AppendRequest<S> {
     compression: Option<ParquetCompression>,
     max_rows_per_row_group: Option<usize>,
     max_bytes_per_row_group: Option<usize>,
+    commit_retries: Option<u32>,
 }
 
 impl<S> AppendRequest<S> {
-    /// Create a request without adding physical writer overrides.
+    /// Create a request without adding writer or commit overrides.
     ///
     /// If `source` already carries overrides, this request inherits each one
     /// until the corresponding builder method replaces it.
@@ -573,6 +627,7 @@ impl<S> AppendRequest<S> {
             compression: None,
             max_rows_per_row_group: None,
             max_bytes_per_row_group: None,
+            commit_retries: None,
         }
     }
 
@@ -602,6 +657,18 @@ impl<S> AppendRequest<S> {
         self.max_bytes_per_row_group = Some(max_bytes_per_row_group);
         self
     }
+
+    /// Limit additional commit attempts after a confirmed version conflict.
+    ///
+    /// The default is three retries across compatible, non-overlapping appends.
+    /// Zero disables retries and requires publication against this handle's
+    /// current version. Use zero when the input depends on values read from
+    /// that snapshot: retrying does not recompute the input.
+    /// See [`AppendWriter::commit_with_retry`] for eligibility and cleanup rules.
+    pub fn commit_retries(mut self, max_retries: u32) -> Self {
+        self.commit_retries = Some(max_retries);
+        self
+    }
 }
 
 // Wrapping `SourceKind` in `PhantomData` keeps this impl disjoint from direct source
@@ -626,6 +693,11 @@ where
     fn effective_max_bytes_per_row_group(&self) -> Option<usize> {
         self.max_bytes_per_row_group
             .or_else(|| self.source.effective_max_bytes_per_row_group())
+    }
+
+    fn effective_commit_retries(&self) -> Option<u32> {
+        self.commit_retries
+            .or_else(|| self.source.effective_commit_retries())
     }
 
     fn into_record_batch_reader(self) -> Result<Self::Reader, AppendError> {
@@ -758,6 +830,7 @@ impl TimeSeriesTable {
         owned_data_guard: &mut storage::FileCleanupGuard,
         telemetry: &mut AppendTelemetry,
         writer_settings: AppendWriterOptions,
+        prepared: &mut Option<PreparedAppendSegment>,
     ) -> Result<AppendReport, AppendError> {
         let rel_path = Path::new(relative_path);
         let expected_version = self.state.version;
@@ -767,20 +840,35 @@ impl TimeSeriesTable {
         ensure_existing_segments_have_coverage(&self.state)?;
 
         // 1) Segment meta + schema.
-        let (mut segment_meta, meta_report) =
-            segment_meta_from_parquet(self.location(), rel_path, &self.index)
-                .await
-                .map_err(AppendError::from)?;
+        let prepared = match prepared {
+            Some(prepared) => prepared,
+            slot => {
+                let (meta, report) =
+                    segment_meta_from_parquet(self.location(), rel_path, &self.index)
+                        .await
+                        .map_err(AppendError::from)?;
+                let schema = logical_schema_from_parquet(self.location(), rel_path)
+                    .await
+                    .map_err(AppendError::from)?;
+                slot.insert(PreparedAppendSegment {
+                    meta,
+                    report,
+                    schema,
+                    global_coverage: None,
+                    entity_coverage: None,
+                })
+            }
+        };
+        let mut segment_meta = prepared.meta.clone();
+        let meta_report = &prepared.report;
         let row_count = meta_report.row_count;
         let file_size_bytes = meta_report.file_size_bytes;
         let span = tracing::Span::current();
         span.record("row_count", row_count);
         span.record("file_size_bytes", file_size_bytes);
 
-        let segment_schema = logical_schema_from_parquet(self.location(), rel_path)
-            .await
-            .map_err(AppendError::from)?;
-        ensure_index_spec_matches_schema(&segment_schema, &self.index).context(
+        let segment_schema = &prepared.schema;
+        ensure_index_spec_matches_schema(segment_schema, &self.index).context(
             GeneratedSegmentSchemaCompatibilitySnafu {
                 segment_path: relative_path.to_string(),
             },
@@ -808,7 +896,7 @@ impl TimeSeriesTable {
                 });
             }
             Some(table_schema) => {
-                ensure_schema_fields_match_by_name(table_schema, &segment_schema, &self.index)
+                ensure_schema_fields_match_by_name(table_schema, segment_schema, &self.index)
                     .context(GeneratedSegmentSchemaCompatibilitySnafu {
                         segment_path: relative_path.to_string(),
                     })?;
@@ -826,11 +914,15 @@ impl TimeSeriesTable {
                 .load_entity_coverage_with_recovery::<AppendError>()
                 .await?;
 
-            let segment_cov =
-                compute_segment_entity_coverage(self.location(), rel_path, &self.index)
-                    .await
-                    .map_err(AppendError::from)?;
-            let entity_layout = classify_entity_layout(relative_path, &segment_cov)?;
+            let segment_cov = match &mut prepared.entity_coverage {
+                Some(coverage) => coverage,
+                slot => slot.insert(
+                    compute_segment_entity_coverage(self.location(), rel_path, &self.index)
+                        .await
+                        .map_err(AppendError::from)?,
+                ),
+            };
+            let entity_layout = classify_entity_layout(relative_path, segment_cov)?;
 
             if let Some((identity, index_interval_id)) =
                 segment_cov.first_overlapping_identity_and_interval_id(&table_cov)
@@ -847,10 +939,10 @@ impl TimeSeriesTable {
                 });
             }
 
-            let seg_bytes = entity_coverage_to_bytes(&segment_cov)
+            let seg_bytes = entity_coverage_to_bytes(segment_cov)
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
-            let snapshot_bytes = entity_coverage_to_bytes(&table_cov.union(&segment_cov))
+            let snapshot_bytes = entity_coverage_to_bytes(&table_cov.union(segment_cov))
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
             (seg_bytes, snapshot_bytes, entity_layout)
@@ -859,9 +951,14 @@ impl TimeSeriesTable {
                 .load_global_coverage_with_recovery::<AppendError>()
                 .await?;
 
-            let segment_cov = compute_segment_coverage(self.location(), rel_path, &self.index)
-                .await
-                .map_err(AppendError::from)?;
+            let segment_cov = match &mut prepared.global_coverage {
+                Some(coverage) => coverage,
+                slot => slot.insert(
+                    compute_segment_coverage(self.location(), rel_path, &self.index)
+                        .await
+                        .map_err(AppendError::from)?,
+                ),
+            };
 
             let overlap = segment_cov.intersect(&table_cov);
             let overlap_count = overlap.cardinality();
@@ -878,10 +975,10 @@ impl TimeSeriesTable {
                 });
             }
 
-            let seg_bytes = coverage_to_bytes(&segment_cov)
+            let seg_bytes = coverage_to_bytes(segment_cov)
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
-            let snapshot_bytes = coverage_to_bytes(&table_cov.union(&segment_cov))
+            let snapshot_bytes = coverage_to_bytes(&table_cov.union(segment_cov))
                 .map_err(CoverageSidecarError::from)
                 .map_err(AppendError::from)?;
             (
@@ -1172,7 +1269,13 @@ impl TimeSeriesTable {
     /// Upgrade all concurrent writers together: crash recovery uses the shared
     /// `_timeseries_log/WRITE_LOCK` file, which must remain in place. An active
     /// publisher returns [`crate::transaction_log::CommitError::CommitInProgress`]
-    /// to competitors. Stale handles still conflict without automatic rebase.
+    /// to competitors. Confirmed version conflicts across compatible,
+    /// non-overlapping appends are retried up to three times. Success updates
+    /// this handle to include intervening appends. To require the original
+    /// snapshot version, wrap the source in [`AppendRequest`] and set
+    /// [`AppendRequest::commit_retries`] to zero. Retrying preserves the input;
+    /// use zero if it was computed from values read from this snapshot.
+    /// Retry backoff requires the current Tokio runtime's timer to be enabled.
     #[tracing::instrument(
         name = "table.append",
         target = "timeseries_table_format::table::append",
@@ -1217,9 +1320,16 @@ impl TimeSeriesTable {
                 writer_settings.max_bytes_per_row_group,
             );
             checked_next_version(self.state.version).map_err(AppendError::from)?;
-            Ok((source.into_record_batch_reader()?, writer_settings))
+            let commit_retries = source
+                .effective_commit_retries()
+                .unwrap_or(DEFAULT_COMMIT_RETRIES);
+            Ok((
+                source.into_record_batch_reader()?,
+                writer_settings,
+                commit_retries,
+            ))
         })();
-        let (reader, options) = match preparation {
+        let (reader, options, commit_retries) = match preparation {
             Ok(prepared) => prepared,
             Err(error) => {
                 telemetry.record_failure(&error);
@@ -1235,7 +1345,10 @@ impl TimeSeriesTable {
                 drop(batch);
                 tokio::task::yield_now().await;
             }
-            writer.commit_inner().await?.ok_or(AppendError::EmptyInput)
+            writer
+                .commit_inner(commit_retries)
+                .await?
+                .ok_or(AppendError::EmptyInput)
         }
         .await;
         let append_result = match append_result {
@@ -1249,6 +1362,8 @@ impl TimeSeriesTable {
 
 #[cfg(test)]
 mod tests {
+    mod finished_segment;
+    mod retry;
     mod writer;
 
     use super::AppendWriterOptions as AppendWriterSettings;
@@ -1337,7 +1452,9 @@ mod tests {
         assert!(before_commit.state().segments.is_empty());
 
         segment.write(&second)?;
-        let report = segment.commit(&mut table, 2, &mut telemetry).await?;
+        let report = segment
+            .commit_with_retry(&mut table, 2, 0, &mut telemetry)
+            .await?;
         assert_eq!(report.starting_version, 1);
         assert_eq!(report.committed_version, 2);
         assert_eq!(report.row_count, 2);
@@ -3553,7 +3670,8 @@ mod tests {
                     vec![Some(2.0)],
                     vec!["loser"],
                 )?)
-                .max_rows_per_row_group(1),
+                .max_rows_per_row_group(1)
+                .commit_retries(0),
             )
             .await
             .expect_err("stale streaming append must conflict");
@@ -5410,7 +5528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entity_aware_stale_append_cleans_sidecars_without_state_mutation() -> TestResult {
+    async fn entity_aware_strict_append_cleans_sidecars_without_state_mutation() -> TestResult {
         let tmp = TempDir::new()?;
         let location = TableLocation::local(tmp.path());
         let meta = make_basic_table_meta();
@@ -5444,7 +5562,11 @@ mod tests {
         assert_eq!(append_parquet_fixture(&mut winner, winner_path).await?, 2);
         let coverage_before = coverage_files(tmp.path())?;
 
-        let err = append_parquet_fixture(&mut loser, loser_path)
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(tmp.path().join(loser_path))?)?
+                .build()?;
+        let err = loser
+            .append(AppendRequest::new(reader).commit_retries(0))
             .await
             .expect_err("expected conflict due to stale version");
 
@@ -5750,6 +5872,7 @@ mod tests {
                 &mut data_guard,
                 &mut telemetry,
                 AppendWriterSettings::default(),
+                &mut None,
             )
             .await
             .expect_err("corrupt generated Parquet must fail metadata loading");

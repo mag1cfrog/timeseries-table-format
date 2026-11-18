@@ -15,8 +15,9 @@
 //! Finite runs leave queued read-ahead for REST replay on the next run.
 //!
 //! This example owns one contiguous BTCUSDT history range. Startup rejects
-//! internal coverage gaps instead of skipping them. A commit error ends the run;
-//! it does not automatically refresh, merge or retry the table transaction.
+//! internal coverage gaps instead of skipping them. Commits retry compatible,
+//! non-overlapping concurrent appends up to three times. A terminal commit error
+//! ends the run.
 //! Uncommitted data is replayed after restart, subject to source availability.
 //! These unauthenticated endpoints expose public market data only:
 //! <https://github.com/binance/binance-spot-api-docs/blob/master/faqs/market_data_only.md>.

@@ -40,6 +40,12 @@ remain unchanged. Newly planned SQL queries see value changes without re-registr
 See the [update guide and runnable example](https://mag1cfrog.github.io/timeseries-table-format/guides/update_rows/)
 for error handling, report semantics, and scratch/rewrite costs.
 
+Append retries confirmed conflicts with compatible, non-overlapping concurrent appends
+up to three times by default. Successful retries include those appends in the handle's
+snapshot. Set `table.append(source, commit_retries=0)` to require the handle's original
+version. Use zero when the input was computed from data read from that snapshot: retrying
+does not recompute the input. A positive `commit_retries` value replaces the default budget.
+
 ## Install
 
 ```bash
