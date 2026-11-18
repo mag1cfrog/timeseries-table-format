@@ -3406,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "timeseries-table-format"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3446,7 +3446,7 @@ dependencies = [
 
 [[package]]
 name = "timeseries-table-python"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
