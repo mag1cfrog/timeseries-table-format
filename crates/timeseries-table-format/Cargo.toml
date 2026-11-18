@@ -127,5 +127,9 @@ required-features = ["cli"]
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.cargo-semver-checks.lints]
+# Implicit enum ordinals are not stable error codes or part of the table format.
+enum_no_repr_variant_discriminant_changed = "allow"
+
 [lints]
 workspace = true
